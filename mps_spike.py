@@ -145,6 +145,11 @@ def _tiny_source(c, max_len):
     return tiny_model(), real, padded, 64, {}
 
 
+def _identity(c):
+    """The config fields every attempt carries, whatever its status (ok, oom, error, crashed)."""
+    return {k: c[k] for k in ("purpose", "micro_batch", "max_len", "grad_accum", "rung", "fallback", "device")}
+
+
 def _measure(c):
     import psutil
     import torch
@@ -230,28 +235,43 @@ def _measure(c):
             sample()
         return dt
 
-    regimes = {}
+    regimes, oom = {}, None
     for name, maker in (("padded", padded_maker), ("real", real_maker)):
-        for _ in range(c["warmup_steps"]):
-            step(maker, False)
-        # swap brackets the measured steps only, never warm-up or the model load (Pitfall 8)
-        s0, o0 = spike.swap_used(), spike.swapouts()
-        times = [step(maker, True) for _ in range(c["measured_steps"])]
-        s1, o1 = spike.swap_used(), spike.swapouts()
+        times, s0, o0, s1, o1 = [], None, None, None, None
+        stage, idx = "warmup", 0
+        try:
+            for idx in range(c["warmup_steps"]):
+                step(maker, False)
+            stage, idx = "measured", 0
+            # swap brackets the measured steps only, never warm-up or the model load (Pitfall 8)
+            s0, o0 = spike.swap_used(), spike.swapouts()
+            for idx in range(c["measured_steps"]):
+                times.append(step(maker, True))
+        except RuntimeError as e:
+            # the MPS allocator raises a plain RuntimeError on OOM; anything else is a bug and propagates
+            if not spike.is_mps_oom(str(e)):
+                raise
+            oom = {"regime": name, "stage": stage, "step": idx, "message": spike.scrub(str(e))}
+        if s0 is not None:
+            s1, o1 = spike.swap_used(), spike.swapouts()
         regimes[name] = {"warmup_steps": c["warmup_steps"], "times": spike.summarize(times),
                          "batch_shape": last["shape"], "swap_used_before": s0, "swap_used_after": s1,
-                         "swap_delta_bytes": s1 - s0,
+                         "swap_delta_bytes": None if s0 is None else s1 - s0,
                          "swapouts_delta": None if o0 is None or o1 is None else o1 - o0}
-    return {"status": "ok", "purpose": c["purpose"], "micro_batch": mb, "max_len": max_len, "grad_accum": accum,
-            "rung": c["rung"], "fallback": c["fallback"], "device": device.type,
-            "param_device": ",".join(sorted({p.device.type for p in model.parameters()})),
-            "ddp_wrapped": hasattr(model, "module"), "world_size": 1, "trainable_params": trainable,
-            "total_params": sum(p.numel() for p in model.parameters()), "n_neg8_items": n_items,
-            "items_skipped": skipped, "env_seen": env_seen, "torch_threads": torch.get_num_threads(),
-            "regimes": regimes, "peak_memory_bytes": peak["total"], "peak_driver_allocated_bytes": peak["driver"],
-            "peak_rss_bytes": peak["rss"],
-            "recommended_max_memory_bytes": torch.mps.recommended_max_memory() if is_mps else None,
-            "final_loss": None if last["loss"] is None else float(last["loss"])}
+        if oom:
+            break                                           # post-OOM allocator state is never measured again
+    payload = dict(_identity(c), status="oom" if oom else "ok", device=device.type,
+                   param_device=",".join(sorted({p.device.type for p in model.parameters()})),
+                   ddp_wrapped=hasattr(model, "module"), world_size=1, trainable_params=trainable,
+                   total_params=sum(p.numel() for p in model.parameters()), n_neg8_items=n_items,
+                   items_skipped=skipped, env_seen=env_seen, torch_threads=torch.get_num_threads(), regimes=regimes,
+                   peak_memory_bytes=peak["total"], peak_driver_allocated_bytes=peak["driver"],
+                   peak_rss_bytes=peak["rss"],
+                   recommended_max_memory_bytes=torch.mps.recommended_max_memory() if is_mps else None,
+                   final_loss=None if last["loss"] is None else float(last["loss"]))
+    if oom:
+        payload["oom"] = oom
+    return payload
 
 
 def spike_worker(c):
@@ -260,6 +280,9 @@ def spike_worker(c):
         payload = _measure(c)
     except SystemExit as e:
         payload = {"status": "refused", "reason": spike.scrub(str(e))}
+    except Exception as e:
+        # an unexpected failure stays a visible attempt (counted as untrusted by the verdict), never a lost run
+        payload = dict(_identity(c), status="error", error=spike.scrub("%s: %s" % (type(e).__name__, e)))
     payload["transport"] = c["transport"]
     if c["transport"] != "checkpoint":
         return payload
@@ -344,6 +367,8 @@ def main():
     ap.add_argument("--cpus", type=int, default=4,
                     help="OMP_NUM_THREADS, the worker's CPU resource and torch threads (the M4's performance cores)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--tie-tolerance", type=float, default=spike.TIE_TOLERANCE,
+                    help="FITS configs within this fraction of the fastest projected epoch count as tied (D-03)")
     ap.add_argument("--storage", default=os.path.abspath("ray_results"), help="Ray run storage (local dir)")
     ap.add_argument("--child", nargs=2, metavar=("MODE", "CONFIG"), help=argparse.SUPPRESS)
     a = ap.parse_args()
@@ -365,6 +390,8 @@ def main():
         ap.error("--warmup-steps must not be negative")
     if a.cpus < 1:
         ap.error("--cpus must be at least 1")
+    if not a.tie_tolerance >= 0:
+        ap.error("--tie-tolerance must not be negative")
 
     # D-05: the main checkout's locked venv, the hash-verified split and the pinned weights, before any child runs
     entry = verify_split_file(SPLIT, roles=("train",))
@@ -381,11 +408,15 @@ def main():
                "run_name": "mps-spike-%dx%d-%s-f%s-%s" % (mb, max_len, rung, fallback, time.strftime("%Y%m%d-%H%M%S")),
                "expect_env": expect_env, "hparams": HPARAMS}
         print("spike run: micro-batch %d, max_len %d, grad-accum %d" % (mb, max_len, cfg["grad_accum"]), flush=True)
-        result = launch(cfg, "ray")
+        # a crashed child returns no payload, so the attempt takes its identity from the config
+        result = dict(_identity(cfg), **launch(cfg, "ray"))
         configs.append({"micro_batch": mb, "max_len": max_len, "grad_accum": cfg["grad_accum"], "attempts": [result],
                         "standing": 0})
 
     import psutil
+    protocol = {"grid": ",".join("%dx%d" % g for g in grid), "warmup_steps": a.warmup_steps,
+                "measured_steps": a.measured_steps, "effective_batch": a.effective_batch, "seed": a.seed,
+                "cpus": a.cpus}
     meta = {"generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "split": {"path": entry["path"], "sha256": entry["sha256"], "n_messages": entry["n_messages"]},
             "manifest": {"path": repo_relpath(DEFAULT_MANIFEST), "sha256": sha256_file(DEFAULT_MANIFEST)},
@@ -397,12 +428,18 @@ def main():
                              python=platform.python_version()),
             "platform": {"macos": platform.mac_ver()[0], "machine": platform.machine(),
                          "total_memory_bytes": psutil.virtual_memory().total},
-            "protocol": {"grid": ",".join("%dx%d" % g for g in grid), "warmup_steps": a.warmup_steps,
-                         "measured_steps": a.measured_steps, "effective_batch": a.effective_batch, "seed": a.seed,
-                         "cpus": a.cpus},
+            "protocol": protocol,
+            "policy": {"tie_tolerance": a.tie_tolerance},
+            "projection_basis": "real neg8 median optimizer step x optimizer steps per epoch over all 1,450 "
+                                "selection_train messages at effective batch 32; conservative: ray_train holds out "
+                                "up to 40 messages for calibration and Phase 5 calibrates on val (LAYA-05)",
             "hparams": HPARAMS, "laya_internals": LAYA_INTERNALS}
-    md = spike.write_report(a.out, spike.build_report(meta, configs))
+    report = spike.build_report(meta, configs)
+    # plan 02-04 passes real token stats, plan 02-03 the blocking fallback ops
+    report["verdict"] = spike.verdict(configs, protocol, token_stats=None, tie_tolerance=a.tie_tolerance)
+    md = spike.write_report(a.out, report)
     print("report -> %s" % md)
+    print(spike.verdict_line(report["verdict"]), flush=True)
 
 
 if __name__ == "__main__":

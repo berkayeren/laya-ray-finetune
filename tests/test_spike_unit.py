@@ -154,7 +154,8 @@ def test_projection_time_gate_boundary():
     assert steps == 8 and spike.project_epoch_s(900.0, steps) == 7200.0
     ok = spike.verdict([config(attempt(4, 128, real_median=900.0, n_items=64), grad_accum=2)],
                        FULL)["per_config"][0]
-    assert ok["steps_per_epoch"] == 8 and ok["projected_epoch_s"] == 7200.0 and ok["time_ok"] is True and ok["fits"] is True
+    assert ok["steps_per_epoch"] == 8 and ok["projected_epoch_s"] == 7200.0
+    assert ok["time_ok"] is True and ok["fits"] is True
     late = spike.verdict([config(attempt(4, 128, real_median=900.01, n_items=64), grad_accum=2)],
                          FULL)["per_config"][0]
     assert late["time_ok"] is False and late["fits"] is False
@@ -310,3 +311,69 @@ def test_summarize_median_p90():
     s = spike.summarize([float(i) for i in range(10, 0, -1)])
     assert s["n"] == 10 and s["median_s"] == 5.5 and s["p90_s"] == 9.0 and s["min_s"] == 1.0 and s["max_s"] == 10.0
     assert spike.summarize([]) == {"n": 0}
+
+
+# ---- verdict wiring (plan 02-02 task 2): OOM / error capture in the worker, markdown verdict line ----
+
+def test_worker_records_mps_oom_as_an_attempt(monkeypatch):
+    from laya import train as lt
+    calls, real = [], lt._forward
+
+    def oom_on_fourth(*args):
+        calls.append(1)
+        if len(calls) == 4:                     # warm-up = calls 1-2, measured padded step 0 = calls 3-4
+            raise RuntimeError(OOM_TEXT)
+        return real(*args)
+
+    monkeypatch.setattr(lt, "_forward", oom_on_fourth)
+    payload = mps_spike.spike_worker(worker_cfg())
+    assert payload["status"] == "oom", payload
+    assert payload["oom"]["regime"] == "padded" and payload["oom"]["stage"] == "measured"
+    assert payload["oom"]["step"] == 0 and payload["oom"]["message"].startswith("MPS backend out of memory")
+    assert "real" not in payload["regimes"] and len(calls) == 4      # nothing runs after an OOM
+    assert payload["regimes"]["padded"]["swap_delta_bytes"] is not None
+    ident = (payload["micro_batch"], payload["max_len"], payload["rung"], payload["purpose"])
+    assert ident == (2, 32, "none", "initial")
+    assert spike.memory_ok(payload, 2) == (False, "oom in padded measured step 0")
+
+
+def test_worker_records_unexpected_error_and_reraises_nothing(monkeypatch):
+    from laya import train as lt
+
+    def boom(*args):
+        raise RuntimeError("something else broke")
+
+    monkeypatch.setattr(lt, "_forward", boom)
+    payload = mps_spike.spike_worker(worker_cfg())
+    assert payload["status"] == "error" and payload["error"] == "RuntimeError: something else broke", payload
+    assert payload["micro_batch"] == 2 and payload["transport"] == "return"
+
+
+def _report(protocol, cfgs):
+    meta = {"split": {"path": "data/splits/selection_train.jsonl", "sha256": "0" * 64, "n_messages": 1450},
+            "model": {"repo": "r", "subfolder": "s", "revision": "v"}, "versions": {"torch": "x"},
+            "platform": {"macos": "26", "machine": "arm64", "total_memory_bytes": 16 * 2**30},
+            "protocol": dict(protocol, grid=",".join("%dx%d" % tuple(g) for g in protocol["grid"]), seed=0, cpus=4)}
+    report = spike.build_report(meta, cfgs)
+    report["verdict"] = spike.verdict(cfgs, meta["protocol"])
+    return report
+
+
+def test_markdown_ends_with_verdict_line():
+    md = spike.render_markdown(_report(FULL, [config(at_epoch(4, 128, 3000.0))]))
+    last = md.strip().splitlines()[-1]
+    assert last.startswith("**Verdict: FITS** — Phase 4 starts from micro-batch 4, max_len 128, grad-accum 8, "
+                           "rung none, PYTORCH_ENABLE_MPS_FALLBACK=0 (projected neg8 epoch 50.0 min)"), last
+    assert "## Verdict" in md and "Kaggle plan required" not in md
+    err = {"status": "error", "error": "x", "micro_batch": 4, "max_len": 128, "rung": "none"}
+    bad = spike.render_markdown(_report(FULL, [config(err)]))
+    assert bad.strip().splitlines()[-1].startswith("**Verdict: DOES NOT FIT**")
+    assert "Kaggle plan required" in bad and "1 attempts ended in an unexpected error or crash" in bad
+
+
+def test_markdown_smoke_run_is_labelled():
+    smoke = dict(FULL, grid=[[4, 128]], warmup_steps=1, measured_steps=2, effective_batch=8)
+    md = spike.render_markdown(_report(smoke, [config(attempt(4, 128, swap=1))]))
+    last = md.strip().splitlines()[-1]
+    assert last.startswith("SMOKE RUN (not the Phase 2 verdict): **Verdict: DOES NOT FIT**"), last
+    assert "Kaggle plan required" not in md

@@ -270,6 +270,46 @@ def verdict(configs, protocol, token_stats=None, tie_tolerance=TIE_TOLERANCE, bl
             "truncation_rule": truncation, "untrusted_attempts": untrusted, "per_config": per, "rules": dict(RULES)}
 
 
+def verdict_line(v):
+    """The last line of mps_spike.md (and of the spike's stdout); a smoke run can never pass for the Phase 2 verdict."""
+    c = v["chosen"]
+    if c:
+        line = ("**Verdict: FITS** — Phase 4 starts from micro-batch %d, max_len %d, grad-accum %d, rung %s, "
+                "PYTORCH_ENABLE_MPS_FALLBACK=%s (projected neg8 epoch %.1f min)"
+                % (c["micro_batch"], c["max_len"], c["grad_accum"], c["rung"], c["fallback"],
+                   c["projected_epoch_s"] / 60))
+    else:
+        line = "**Verdict: DOES NOT FIT** — no grid config passed the D-01 memory and D-02 time gates"
+    return line if v["protocol_complete"] else "SMOKE RUN (not the Phase 2 verdict): " + line
+
+
+def _yn(ok):
+    return "yes" if ok else "no"
+
+
+def _verdict_lines(v):
+    lines = ["", "## Verdict", "",
+             "| micro-batch | max_len | rung | memory ok | projected epoch min | time ok | device ok | FITS |",
+             "|---|---|---|---|---|---|---|---|"]
+    for p in v["per_config"]:
+        lines.append("| %d | %d | %s | %s (%s) | %s | %s | %s | %s |" % (
+            p["micro_batch"], p["max_len"], p["rung"] or "-", _yn(p["memory_ok"]), p["memory_reason"].replace("|", "/"),
+            _fmt(p["projected_epoch_s"], 60, 1), _yn(p["time_ok"]), _yn(p["device_ok"]),
+            "yes" if p["fits"] else "no: " + p["reason"].replace("|", "/")))
+    lines += ["",
+              "- Tie-break: FITS configs within %.0f%% of the fastest projected epoch resolve to the smaller max_len, "
+              "then the larger micro-batch" % (v["tie_tolerance"] * 100),
+              "- Truncation rule (D-03): %s" % v["truncation_rule"]]
+    lines += ["- %s: %s" % (k, v["rules"][k]) for k in sorted(v["rules"])]
+    if v["untrusted_attempts"]:
+        lines += ["", "%d attempts ended in an unexpected error or crash; investigate before trusting this verdict"
+                  % v["untrusted_attempts"]]
+    if v["kaggle_plan_required"]:
+        lines += ["", "Kaggle plan required: kaggle_plan.md next to this report, plus the user's explicit "
+                      "self-hosting exception before Phase 3 (D-12)"]
+    return lines + ["", verdict_line(v)]
+
+
 def build_report(meta, configs):
     return {"schema": "mps_spike/1", "meta": meta, "configs": configs}
 
@@ -279,7 +319,7 @@ def _fmt(v, scale=1.0, digits=3):
 
 
 def render_markdown(report):
-    """Human-readable mps_spike.md: provenance lines, then one table row per attempt."""
+    """Human-readable mps_spike.md: provenance lines, one table row per attempt, then the verdict section."""
     m = report["meta"]
     split, model, versions, plat, proto = m["split"], m["model"], m["versions"], m["platform"], m["protocol"]
     lines = ["# MPS feasibility spike (Phase 2, LAYA-09)", "",
@@ -306,6 +346,8 @@ def render_markdown(report):
                 a.get("status", "-"), _fmt(pt.get("median_s")), _fmt(pt.get("p90_s")), _fmt(rt.get("median_s")),
                 _fmt(rt.get("p90_s")), _fmt(a.get("peak_memory_bytes"), 2**30, 2),
                 _fmt(max(swap) if swap else None, 2**20, 1), max(outs) if outs else "-"))
+    if report.get("verdict"):
+        lines += _verdict_lines(report["verdict"])
     return "\n".join(lines) + "\n"
 
 
