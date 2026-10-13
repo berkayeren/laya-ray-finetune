@@ -288,12 +288,32 @@ def blocks(stage, fallback_median_s, mps_median_s, time_ok):
 def followup(chain, policy):
     """The next attempt a config's chain needs, as {"rung", "fallback", "purpose"}, or None when the chain is done.
 
-    D-10: a strict (fallback 0) attempt that raised NotImplementedError is rerun once with fallback 1, in a fresh
-    process, to inventory every op that falls back. (Plan 02-05 adds the swap-rerun and embeddings-frozen rules.)
+    Rules, in order, on the last attempt (policy: {"measured_steps", "swap_rerun"}):
+    1. D-10: a strict (fallback 0) attempt that raised NotImplementedError is rerun once with fallback 1, in a fresh
+       process, to inventory every op that falls back.
+    2. Swap-only rerun (RESEARCH Open Question 2): an ok attempt that completed every measured padded step but grew
+       system swap is rerun once at the same rung and fallback when policy["swap_rerun"] is on, so one burst of
+       background swapping does not decide the verdict. At most one per (rung, fallback).
+    3. D-08: an attempt at rung none that failed the D-01 memory gate (OOM, crash, swap growth, short run) is retried
+       with only encoder.embeddings.tok_embeddings frozen, keeping its fallback setting.
+    4. Otherwise the chain is done; an error status always ends it.
+
+    The last attempt stands whatever it shows (standing), and every attempt stays in the report, so a rerun can never
+    cherry-pick a measurement. A frozen encoder is never scheduled (D-04). LAYA-03's smaller-batch rung is covered by
+    the grid's micro-batch 4 configs, not by this chain.
     """
     last = chain[-1]
-    if last.get("status") == "not_implemented" and last.get("fallback") == "0":
-        return {"rung": last.get("rung"), "fallback": "1", "purpose": "op_inventory"}
+    status, rung, fallback = last.get("status"), last.get("rung"), last.get("fallback")
+    if status == "not_implemented" and fallback == "0":
+        return {"rung": rung, "fallback": "1", "purpose": "op_inventory"}
+    pad = (last.get("regimes") or {}).get("padded") or {}
+    if (status == "ok" and (pad.get("times") or {}).get("n", 0) >= policy["measured_steps"]
+            and (pad.get("swap_delta_bytes") or 0) > 0 and policy["swap_rerun"]
+            and not any(a.get("purpose") == "swap_rerun" and a.get("rung") == rung and a.get("fallback") == fallback
+                        for a in chain)):
+        return {"rung": rung, "fallback": fallback, "purpose": "swap_rerun"}
+    if rung == "none" and status in ("ok", "oom", "crashed") and not memory_ok(last, policy["measured_steps"])[0]:
+        return {"rung": "embeddings_frozen", "fallback": fallback, "purpose": "rung_embeddings_frozen"}
     return None
 
 
@@ -313,6 +333,34 @@ def _projected(a, micro_batch, grad_accum):
     if median is None or not n_items:
         return None
     return project_epoch_s(median, optimizer_steps(n_items, micro_batch, grad_accum))
+
+
+def _median(a, regime):
+    t = ((a.get("regimes") or {}).get(regime) or {}).get("times") or {}
+    return t.get("median_s") if t.get("n") else None
+
+
+def _delta_pct(ray_s, inprocess_s):
+    return None if ray_s is None or not inprocess_s else round((ray_s - inprocess_s) / inprocess_s * 100, 1)
+
+
+def ray_overhead(ray_attempt, inprocess_attempt, basis):
+    """D-09a: Ray vs in-process median optimizer-step times of one config, per regime, and their % delta.
+
+    basis: "chosen" (the verdict's config) or "reference" (4x128 when nothing FITS). delta = (ray - inprocess) /
+    inprocess x 100, None when either side has no timing. Informational only: it never feeds the verdict.
+    """
+    r, i = ray_attempt or {}, inprocess_attempt or {}
+    out = {"basis": basis, "micro_batch": r.get("micro_batch"), "max_len": r.get("max_len"), "rung": r.get("rung"),
+           "fallback": r.get("fallback"),
+           "ray": {"padded_median_s": _median(r, "padded"), "real_median_s": _median(r, "real"),
+                   "torch_threads": r.get("torch_threads")},
+           "inprocess": {"status": i.get("status"), "padded_median_s": _median(i, "padded"),
+                         "real_median_s": _median(i, "real"), "torch_threads": i.get("torch_threads")}}
+    for regime in ("padded", "real"):
+        key = "%s_median_s" % regime
+        out["delta_%s_pct" % regime] = _delta_pct(out["ray"][key], out["inprocess"][key])
+    return out
 
 
 def op_inventory(configs):
