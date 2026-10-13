@@ -185,9 +185,14 @@ def build(root, raw_sha256, include_no_intent=True, ood_tags=None):
     probe rows are never dropped. The banking-only tags (INTENTS minus every HOTELS tag) are re-derived from the
     data; if ood_tags is given (pins.OOD_SCORING_TAGS) and differs, prep hard-fails before anything is written.
     """
+    keys = sorted({(s["domain"], fold) for s in SPLITS for fold in s["folds"]})
+    want = {"turkish/%s/fold%d.json" % key for key in keys}
+    if set(raw_sha256) != want:                             # every fold read below must be a pinned, verified one
+        raise SystemExit("raw_sha256 does not pin exactly the %d folds the splits read: missing %s, extra %s"
+                         % (len(want), sorted(want - set(raw_sha256)), sorted(set(raw_sha256) - want)))
     verify_raw(root, raw_sha256)
     cache = {}
-    for key in sorted({(s["domain"], fold) for s in SPLITS for fold in s["folds"]}):
+    for key in keys:
         cache[key] = load_fold(root, *key)                   # validate every raw row before rendering anything
     uid_check = assert_unique_uids([r for key in sorted(cache) for r in cache[key]])
     hotel_tags = {t for (domain, _), rows in cache.items() if domain == "hotels" for r in rows for t in r["gold"]}

@@ -198,6 +198,17 @@ def test_prepare_refuses_raw_hash_mismatch(tmp_path, synthetic_raw):
     assert not os.path.exists(str(tmp_path / "data"))
 
 
+@pytest.mark.parametrize("edit", [lambda h: h.pop("turkish/banking/fold19.json"),
+                                  lambda h: h.update({"turkish/banking/fold20.json": "0" * 64})],
+                         ids=["missing_fold", "extra_fold"])
+def test_prepare_refuses_raw_pins_that_do_not_cover_the_read_folds(tmp_path, synthetic_raw, edit):
+    root, raw_sha256 = synthetic_raw()
+    edit(raw_sha256)
+    with pytest.raises(SystemExit, match="does not pin exactly the 40 folds"):
+        pilot.data.prepare(root, str(tmp_path / "data"), raw_sha256)
+    assert not os.path.exists(str(tmp_path / "data"))
+
+
 def test_interrupted_write_leaves_no_partial_file(tmp_path, synthetic_raw, monkeypatch):
     root, raw_sha256 = synthetic_raw()
     files, manifest = pilot.data.build(root, raw_sha256)
