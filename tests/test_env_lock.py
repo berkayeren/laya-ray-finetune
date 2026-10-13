@@ -2,7 +2,8 @@
 
 make test runs in whatever interpreter is active, so an unpinned conda env would silently produce numbers the lock
 cannot reproduce (Pitfall 8). These tests compare every requirements.txt pin that applies to this platform against
-the installed distributions, and check the lock itself: hashes on every entry, pyproject pins equal to the lock, and
+the installed distributions, refuse installed distributions the lock does not list (installed == lock, apart from the
+installer itself), and check the lock itself: hashes on every entry, pyproject pins equal to the lock, and
 no package-index override lines (D-04, D-05). The drift detector is tested against a synthetic wrong pin.
 """
 import importlib.metadata as md
@@ -20,6 +21,7 @@ pytestmark = pytest.mark.unit
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOCK = os.path.join(REPO_ROOT, "requirements.txt")
 PYPROJECT = os.path.join(REPO_ROOT, "pyproject.toml")
+INSTALLER = {"pip", "setuptools", "wheel"}               # venv bootstrap, never imported by the pilot
 INDEX_OVERRIDES = ("--index-url", "--extra-index-url", "--find-links", "-i ", "-i=", "-f ", "-f=")
 
 
@@ -69,6 +71,13 @@ def mismatches(lock_path=LOCK):
             if not _same_version(version, installed.get(name))}
 
 
+def unlocked(lock_path=LOCK):
+    """Installed distributions that no lock entry names (on any platform), apart from the installer."""
+    names = {canonicalize_name(Requirement(e.split(" --hash")[0].strip()).name) for e in requirement_entries(lock_path)}
+    installed = {canonicalize_name(d.metadata["Name"]): d.version for d in md.distributions()}
+    return {n: v for n, v in sorted(installed.items()) if n not in names and n not in INSTALLER}
+
+
 def test_python_is_312():
     assert sys.version_info[:2] == (3, 12), \
         "interpreter %s is Python %d.%d, the lock is for 3.12; run `make env` and use .venv/bin/python" \
@@ -80,6 +89,12 @@ def test_installed_matches_lock():
     assert not bad, "installed packages differ from requirements.txt in %s (run `make env`):\n%s" % (
         sys.executable,
         "\n".join("  %s: locked %s, installed %s" % (n, v, i or "MISSING") for n, (v, i) in bad.items()))
+
+
+def test_nothing_installed_beyond_the_lock():
+    extra = unlocked(LOCK)
+    assert not extra, "installed packages not in requirements.txt in %s (recreate with `make env`):\n%s" % (
+        sys.executable, "\n".join("  %s %s" % kv for kv in extra.items()))
 
 
 def test_every_lock_entry_is_hashed():
@@ -121,3 +136,11 @@ def test_drift_detector_reports_wrong_pin(tmp_path):
         % (dummy, md.version("packaging"), dummy, dummy), encoding="utf-8")
     bad = mismatches(str(lock))
     assert bad == {"laya": ("0.0.1", md.version("laya"))}, bad
+
+
+def test_unlocked_detector_reports_an_extra_distribution(tmp_path):
+    lock = tmp_path / "requirements.txt"
+    lock.write_text("laya==0.0.1 \\\n    --hash=sha256:%s\n" % ("0" * 64), encoding="utf-8")
+    extra = unlocked(str(lock))
+    assert "laya" not in extra and "pip" not in extra
+    assert extra.get("torch") == md.version("torch")
