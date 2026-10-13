@@ -2,7 +2,8 @@
 
 The pinned snapshot must verify against all 40 raw fold hashes, give the research split counts with and without
 no-intent rows, produce the 1,009-message HOTELS probe with the 22 banking-only scoring tags and 3,080 unique raw uids,
-and a fresh prepare into a tmp dir must reproduce the committed data/splits.json byte for byte.
+report the research duplicate audit numbers and flag lists (DATA-04), and a fresh prepare into a tmp dir must
+reproduce the committed data/splits.json byte for byte.
 """
 import json
 import os
@@ -89,3 +90,37 @@ def test_real_hotels_probe(default_run):
         with open(os.path.join(out_dir, "splits", "%s.jsonl" % name), encoding="utf-8") as f:
             banking |= {json.loads(l)["uid"] for l in f}
     assert len(banking) == 2071 and not banking & {r["uid"] for r in rows}
+
+
+NORMALIZED_TEST_FLAGS = ["bank_16_85", "bank_16_88", "bank_17_80", "bank_17_85", "bank_18_85", "bank_19_25",
+                         "bank_19_68", "bank_19_79", "bank_19_83", "bank_19_94", "bank_19_97"]
+NORMALIZED_VAL_FLAGS = ["bank_14_16", "bank_14_75", "bank_14_81", "bank_14_85"]
+
+
+def test_real_audit_numbers_and_flags(default_run):
+    out_dir, m = default_run
+    manifest_path = os.path.join(out_dir, "splits.json")
+    for e in m["audit"].values():
+        pilot.data.verify_audit_file(os.path.join(out_dir, e["path"]), manifest_path=manifest_path)
+
+    def load(rel):
+        with open(os.path.join(out_dir, rel), encoding="utf-8") as f:
+            return json.load(f)
+
+    a, flags = load("audit/audit.json"), load("audit/dup_flags.json")
+    e, n = a["exact"], a["normalized"]
+    assert (e["n_groups"], e["n_rows"], e["n_cross_split_groups"], e["n_conflicting_groups"]) == (29, 63, 7, 2)
+    assert (n["n_groups"], n["n_rows"], n["n_cross_split_groups"], n["n_conflicting_groups"]) == (47, 107, 14, 3)
+    assert a["uids"] == {"n_rows": 3080, "n_unique": 3080, "duplicates": []}
+    assert a["hotels_in_banking"]["n"] == 9 and len(a["hotels_in_banking"]["uids"]) == 9
+    assert flags["normalized"] == {"test_in_final_train": NORMALIZED_TEST_FLAGS,
+                                   "val_in_selection_train": NORMALIZED_VAL_FLAGS}
+    assert (len(flags["exact"]["test_in_final_train"]), len(flags["exact"]["val_in_selection_train"])) == (5, 2)
+    conflicts = {g["text"]: g["label_sets"] for g in n["groups"] if len(g["label_sets"]) > 1}
+    assert sorted(conflicts) == ["cari hesap", "evet dün ödedim", "evet mevduat hesabı"]
+    assert conflicts["cari hesap"] == [{"labels": ["account", "current"], "uids": ["bank_0_78"]},
+                                       {"labels": ["current"], "uids": ["bank_5_77", "bank_6_78", "bank_9_78"]}]
+    assert {u for s in conflicts["evet mevduat hesabı"] for u in s["uids"]} == {"bank_2_76", "bank_14_75"}
+    assert {u for s in conflicts["evet dün ödedim"] for u in s["uids"]} == {"bank_6_90", "bank_10_88"}
+    with open(pilot.data.DEFAULT_MANIFEST, encoding="utf-8") as f:
+        assert m["audit"] == json.load(f)["audit"]
