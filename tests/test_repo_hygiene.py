@@ -16,7 +16,10 @@ pytestmark = pytest.mark.unit
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MESSAGE_TEXT_KEYS = ("state", "text")
-MAX_MANIFEST_STRING = 200     # longest legitimate value is a 64-char sha256; message text is longer
+# Coarse backstop only: the longest legitimate manifest value is a 64-char sha256, but message text is often far
+# shorter ("Evet.", "cari hesap"), so length cannot detect it. The key-name check and, when the split files exist
+# locally, the exact-text check below are the real guards.
+MAX_MANIFEST_STRING = 200
 REQUIRED_TRACKED = ("requirements.txt", "pyproject.toml", "Makefile", "pilot/pins.py", "data/splits.json")
 
 
@@ -58,6 +61,22 @@ def test_manifest_has_no_message_text():
     assert bad_keys == [], "data/splits.json has message-text keys: %s" % bad_keys
     assert long_values == [], "data/splits.json has string values longer than %d chars: %s" % (
         MAX_MANIFEST_STRING, long_values)
+
+
+def test_manifest_holds_no_split_message_text():
+    split_dir = os.path.join(REPO_ROOT, "data", "splits")
+    names = sorted(n for n in os.listdir(split_dir) if n.endswith(".jsonl")) if os.path.isdir(split_dir) else []
+    if not names:
+        pytest.skip("no local data/splits/*.jsonl to compare against (run `make data`)")
+    texts = set()
+    for name in names:
+        with open(os.path.join(split_dir, name), encoding="utf-8") as f:
+            texts |= {json.loads(l)["state"] for l in f.read().split("\n") if l.strip()}
+    with open(os.path.join(REPO_ROOT, "data", "splits.json"), encoding="utf-8") as f:
+        manifest = json.load(f)
+    hits = sorted("%s.%s" % (p, k) for p, k, v in walk(manifest) if isinstance(v, str) and v in texts)
+    hits += sorted("%s (key)" % k for _, k, _ in walk(manifest) if k in texts)
+    assert hits == [], "data/splits.json holds message text at: %s" % hits
 
 
 def test_no_local_home_path_in_tracked_files():
