@@ -377,3 +377,124 @@ def test_markdown_smoke_run_is_labelled():
     last = md.strip().splitlines()[-1]
     assert last.startswith("SMOKE RUN (not the Phase 2 verdict): **Verdict: DOES NOT FIT**"), last
     assert "Kaggle plan required" not in md
+
+
+# ---- fallback-op inventory (plan 02-03): op names, stage tags, the D-11 blocks rule, the attempt chain ----
+
+STRICT_TEXT = ("The operator 'aten::linalg_eig' is not currently implemented for the MPS device. If you want this op "
+               "to be added in priority during the prototype phase of this feature, please comment on "
+               "https://github.com/pytorch/pytorch/issues/77764.")
+FALLBACK_TEXT = ("The operator 'aten::linalg_eig' is not currently supported on the MPS backend and will fall back to "
+                 "run on the CPU. This may have performance implications.")
+
+
+def fallback_warning(op):
+    return FALLBACK_TEXT.replace("aten::linalg_eig", op)
+
+
+def strict_raised(mb, max_len, op="aten::x", stage="step", rung="none"):
+    """A strict (fallback 0) attempt that hit NotImplementedError, shaped like mps_spike's worker payload."""
+    return {"status": "not_implemented", "purpose": "initial", "micro_batch": mb, "max_len": max_len,
+            "grad_accum": 32 // mb, "rung": rung, "fallback": "0", "device": "mps", "param_device": "mps",
+            "error_op": {"op": op, "stage": stage, "message": "The operator '%s' is not ..." % op},
+            "fallback_ops": [], "regimes": {}}
+
+
+def fallback_rerun(mb, max_len, ops, real_median=10.0, rung="none"):
+    a = attempt(mb, max_len, rung=rung, real_median=real_median, fallback="1")
+    return dict(a, purpose="op_inventory", fallback_ops=ops)
+
+
+def test_op_name_parses_strict_and_fallback_texts():
+    assert spike.op_name(STRICT_TEXT) == "aten::linalg_eig"
+    assert spike.op_name(FALLBACK_TEXT) == "aten::linalg_eig"
+    assert spike.op_name("something else") is None
+    assert spike.OP_RE.search(STRICT_TEXT).group(1) == "aten::linalg_eig"
+
+
+def test_is_fallback_warning():
+    assert spike.is_fallback_warning(FALLBACK_TEXT) is True
+    assert spike.is_fallback_warning(STRICT_TEXT) is False
+    assert spike.is_fallback_warning("torch.utils.checkpoint: use_reentrant is deprecated") is False
+
+
+def test_tag_fallback_ops_assigns_stage_and_dedups():
+    msgs = [fallback_warning("aten::a"), "an unrelated warning", fallback_warning("aten::b"),
+            fallback_warning("aten::a")]
+    assert spike.tag_fallback_ops(msgs, [(0, "setup"), (2, "step")]) == [
+        {"op": "aten::a", "stage": "setup"}, {"op": "aten::b", "stage": "step"}, {"op": "aten::a", "stage": "step"}]
+    assert spike.tag_fallback_ops(["unrelated"], [(0, "setup")]) == []
+    assert spike.tag_fallback_ops([fallback_warning("aten::a")] * 3, [(0, "step")]) == [
+        {"op": "aten::a", "stage": "step"}]
+
+
+def test_blocks_table():
+    for stage in ("setup", "tokenize"):
+        b, reason = spike.blocks(stage, 5.0, 1.0, False)
+        assert b is False and "only in %s" % stage in reason and "D-11" in reason
+    b, reason = spike.blocks("step", 1.11, 1.00, True)
+    assert b is True and "all-MPS" in reason
+    b, reason = spike.blocks("step", 1.10, 1.00, False)
+    assert b is False, reason                         # "more than 10%" is strict
+    b, reason = spike.blocks("step", 2.0, None, False)
+    assert b is True and "no all-MPS baseline" in reason and "fails" in reason
+    b, reason = spike.blocks("step", 2.0, None, True)
+    assert b is False and "passes" in reason
+
+
+def test_followup_reruns_only_not_implemented_strict_attempts():
+    raised = strict_raised(4, 128)
+    assert spike.followup([raised], {"measured_steps": 20}) == {"rung": "none", "fallback": "1",
+                                                                "purpose": "op_inventory"}
+    frozen = strict_raised(4, 128, rung="embeddings_frozen")
+    assert spike.followup([frozen], {"measured_steps": 20})["rung"] == "embeddings_frozen"
+    assert spike.followup([attempt(4, 128)], {"measured_steps": 20}) is None
+    chain = [raised, fallback_rerun(4, 128, [{"op": "aten::x", "stage": "step"}])]
+    assert spike.followup(chain, {"measured_steps": 20}) is None
+    assert spike.standing(chain) == 1 and spike.standing([raised]) == 0
+
+
+def test_op_inventory_and_blocking_map():
+    # the fallback rerun projects 465 x 20 s = 9300 s > 7200 s, and there is no all-MPS baseline: the op blocks
+    slow = config(strict_raised(4, 128), fallback_rerun(4, 128, [{"op": "aten::x", "stage": "step"}],
+                                                        real_median=20.0), standing=1)
+    clean = config(attempt(8, 128))
+    inv = spike.op_inventory([slow, clean])
+    assert len(inv["entries"]) == 1, inv
+    e = inv["entries"][0]
+    assert (e["op"], e["stage"], e["micro_batch"], e["max_len"], e["rung"]) == ("aten::x", "step", 4, 128, "none")
+    assert e["blocks"] is True and "no all-MPS baseline" in e["reason"]
+    assert "1 config(s) raised" in inv["note"]
+    assert spike.blocking_ops(inv) == {(4, 128, "none"): ["aten::x"]}
+    # a setup-only op never blocks, and a fast fallback rerun keeps a step op non-blocking
+    ok = config(strict_raised(4, 128, op="aten::s", stage="setup"),
+                fallback_rerun(4, 128, [{"op": "aten::s", "stage": "setup"}, {"op": "aten::y", "stage": "step"}],
+                               real_median=1.0), standing=1)
+    inv = spike.op_inventory([ok])
+    assert [(e["op"], e["stage"], e["blocks"]) for e in inv["entries"]] == [("aten::s", "setup", False),
+                                                                             ("aten::y", "step", False)]
+    assert spike.blocking_ops(inv) == {}
+    # a strict failure whose fallback rerun never ran blocks its config
+    lone = spike.op_inventory([config(strict_raised(8, 256, op="aten::z"))])
+    assert lone["entries"][0]["blocks"] is True and lone["entries"][0]["reason"] == "no fallback attempt ran"
+    nowhere = spike.op_inventory([clean, config(attempt(4, 256))])
+    assert nowhere["entries"] == [] and "raised nowhere" in nowhere["note"]
+
+
+def test_op_inventory_blocks_against_all_mps_baseline():
+    # an all-MPS (strict, ok) attempt of the same config and rung is the D-11 baseline: 11% slower blocks
+    base = attempt(4, 128, real_median=1.0)
+    chain = [strict_raised(4, 128), base, fallback_rerun(4, 128, [{"op": "aten::x", "stage": "step"}],
+                                                         real_median=1.11)]
+    e = spike.op_inventory([config(*chain, standing=2)])["entries"][0]
+    assert e["blocks"] is True and "all-MPS" in e["reason"]
+    chain[2] = fallback_rerun(4, 128, [{"op": "aten::x", "stage": "step"}], real_median=1.05)
+    assert spike.op_inventory([config(*chain, standing=2)])["entries"][0]["blocks"] is False
+
+
+def test_verdict_reads_last_attempt_as_standing():
+    chain = [strict_raised(4, 128), fallback_rerun(4, 128, [{"op": "aten::s", "stage": "setup"}], real_median=1.0)]
+    v = spike.verdict([config(*chain, standing=spike.standing(chain))], FULL)
+    p = v["per_config"][0]
+    assert p["fallback"] == "1" and p["status"] == "ok" and p["fits"] is True
+    assert v["chosen"]["fallback"] == "1"
