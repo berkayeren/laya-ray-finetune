@@ -63,6 +63,26 @@ def test_one_byte_tamper_is_refused(tmp_path, synthetic_raw):
         pilot.data.verify_split_file(_split(out_dir, "test"), manifest_path=manifest_path)
 
 
+@pytest.mark.parametrize("field,edit", [
+    ("questions_sha256", lambda m: m.update(questions_sha256="0" * 64)),
+    ("intents_order", lambda m: m.update(intents_order=m["intents_order"][::-1])),
+    ("schema_version", lambda m: m.update(schema_version=m["schema_version"] + 1)),
+    ("dataset.revision", lambda m: m["dataset"].update(revision="0" * 40)),
+])
+def test_manifest_from_other_code_or_pins_is_refused(tmp_path, synthetic_raw, field, edit):
+    out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
+    _rewrite_manifest(manifest_path, edit)
+    with pytest.raises(SystemExit, match="different code/pins.*%s" % field.replace(".", r"\.")):
+        pilot.data.verify_split_file(_split(out_dir, "test"), manifest_path=manifest_path)
+    with pytest.raises(SystemExit, match="different code/pins"):
+        pilot.data.verify_audit_file(os.path.join(out_dir, "audit", "audit.json"), manifest_path=manifest_path)
+
+
+def test_committed_manifest_passes_the_current_code_check():
+    with open(pilot.data.DEFAULT_MANIFEST, encoding="utf-8") as f:
+        pilot.data.check_manifest_current(json.load(f), pilot.data.DEFAULT_MANIFEST)
+
+
 def test_unregistered_identical_copy_is_refused(tmp_path, synthetic_raw):
     out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
     copy = os.path.join(out_dir, "splits", "test_copy.jsonl")

@@ -6,7 +6,8 @@ across banking + HOTELS (D-14) or on drift of the banking-only OOD tag set, buil
 under audit/, refuses to overwrite a differing data/splits.json (unless rewrite_manifest), then writes each file
 atomically with splits.json last.
 Consumer: `verify_split_file()` is the only split verifier; evaluate.py and ray_train.py call it right after argument
-parsing and hard-fail (SystemExit) on any mismatch; there is no override flag or environment variable.
+parsing and hard-fail (SystemExit) on any mismatch, including a manifest built from other question text, tag order,
+schema or dataset pin (check_manifest_current); there is no override flag or environment variable.
 `verify_audit_file()` applies the same rules to the audit outputs (a later dedup sensitivity row reads dup_flags.json).
 
 Stdlib only at import time (huggingface_hub is imported lazily in fetch_raw), so data tests never load torch.
@@ -236,12 +237,30 @@ def _unsafe(rel):
     return os.path.isabs(rel) or rel.startswith(("/", "\\")) or ".." in rel.replace("\\", "/").split("/")
 
 
+def check_manifest_current(m, manifest_path):
+    """Hard-fail unless manifest `m` was built from the current schema, question text, tag order and dataset pin.
+
+    File hashes alone are not enough: a manifest built from other question text would let train (question text
+    from the JSONL rows) and eval (intents.QUESTIONS) silently see different model inputs.
+    """
+    stale = [k for k, have, want in (("schema_version", m.get("schema_version"), SCHEMA_VERSION),
+                                     ("questions_sha256", m.get("questions_sha256"), questions_sha256()),
+                                     ("intents_order", m.get("intents_order"), list(INTENTS)),
+                                     ("dataset.revision", (m.get("dataset") or {}).get("revision"),
+                                      pins.DATASET_REVISION))
+             if have != want]
+    if stale:
+        raise SystemExit("%s was built from different code/pins (%s); regenerate with `make data`"
+                         % (manifest_path, ", ".join(stale)))
+
+
 def _registered(path, manifest_path, section, what):
     """Shared lookup: `path` must be registered under manifest[section] (safe relative paths) with a matching sha256."""
     if not os.path.isfile(manifest_path):
         raise SystemExit("manifest %s not found; run `make data`" % manifest_path)
     with open(manifest_path, encoding="utf-8") as f:
         m = json.load(f)
+    check_manifest_current(m, manifest_path)
     entries = m.get(section)
     if not isinstance(entries, dict):
         raise SystemExit("%s has no %s section; run `make data`" % (manifest_path, section))
