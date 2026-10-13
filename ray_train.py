@@ -83,6 +83,13 @@ def provenance(entry, manifest_path, base, base_dir):
             "base": identity("multilingual" if base == "multilingual" else base_dir)}
 
 
+def epoch_config(cfg, max_len, head_max_len, ray_cfg, epoch):
+    """Config of an intermediate epoch checkpoint: marked fine-tuned and uncalibrated, and traceable to its data
+    (provenance, calibration holdout) like the final one, so a best-epoch pick from ray_results stays auditable."""
+    return dict(cfg, max_len=max_len, head_max_len=head_max_len, fine_tuned=True,
+                training=dict(cfg.get("training") or {}, ray_train=ray_cfg, epoch=epoch, calibrated=False))
+
+
 def run_name(entry, seed, now=None):
     """A fresh Ray experiment dir per run (split, seed, start time): Ray Train restores any checkpoint-manager
     snapshot it finds under storage/<name>/, so a shared name would mix separate runs' provenance."""
@@ -126,6 +133,8 @@ def train_loop_per_worker(c):
     calib_uids = "\n".join(r.get("uid", "") for r in calib_rows).encode("utf-8")
     holdout = {"unit": "message", "n_messages": len(calib_rows), "n_items": len(calib_items),
                "uids_sha256": hashlib.sha256(calib_uids).hexdigest()}
+    # driver-local absolute paths (data, base_dir) stay out of every checkpoint; provenance identifies both
+    ray_cfg = dict({k: v for k, v in c.items() if k not in ("data", "base_dir")}, calibration_holdout=holdout)
     per_rank = len(train_items) // world                    # equal shards keep DDP collectives in step
     if per_rank == 0:                                       # same on every rank: never publish an untrained "fine-tune"
         raise SystemExit("no training items per rank (%d items, %d workers); use more messages or fewer workers"
@@ -199,7 +208,7 @@ def train_loop_per_worker(c):
         # every rank reports; only rank 0 attaches a checkpoint
         if rank == 0 and epoch < c["epochs"] - 1:
             with tempfile.TemporaryDirectory() as d:
-                lt.save_checkpoint(inner, tok, dict(cfg, max_len=max_len, head_max_len=head_max_len), d)
+                lt.save_checkpoint(inner, tok, epoch_config(cfg, max_len, head_max_len, ray_cfg, epoch + 1), d)
                 ray.train.report(metrics, checkpoint=Checkpoint.from_directory(d))
         elif epoch < c["epochs"] - 1:
             ray.train.report(metrics)
@@ -219,10 +228,8 @@ def train_loop_per_worker(c):
         out_cfg.pop("temperature_by_options", None)       # inherited buckets would mask the new fit
         if fitted["temperature_by_options"]:
             out_cfg["temperature_by_options"] = fitted["temperature_by_options"]
-        # driver-local absolute paths (data, base_dir) stay out of the checkpoint; provenance identifies both
-        ray_cfg = dict({k: v for k, v in c.items() if k not in ("data", "base_dir")}, calibration_holdout=holdout)
-        out_cfg["training"] = dict(out_cfg.get("training") or {}, ray_train=ray_cfg,
-                                   laya_train_calibration=calibration)
+        out_cfg["training"] = dict(out_cfg.get("training") or {}, ray_train=ray_cfg, epoch=c["epochs"],
+                                   calibrated=True, laya_train_calibration=calibration)
         with tempfile.TemporaryDirectory() as d:
             lt.save_checkpoint(inner, tok, out_cfg, d)
             ray.train.report(dict(last, temperature=fitted["temperature"]), checkpoint=Checkpoint.from_directory(d))

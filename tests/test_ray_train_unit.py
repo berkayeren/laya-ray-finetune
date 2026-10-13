@@ -63,3 +63,12 @@ def test_run_name_is_per_split_seed_and_start_time():
     name = ray_train.run_name(entry, 3, now=0)
     assert name.startswith("laya-final_train-s3-") and name != ray_train.run_name(entry, 3, now=3600)
     assert ray_train.run_name({"path": "splits/selection_train.jsonl"}, 3, now=0) != name
+
+
+def test_intermediate_checkpoint_config_is_marked_and_traceable():
+    base = {"encoder": "x", "temperature": 1.3, "training": {"base_run": 1}}
+    ray_cfg = {"provenance": {"data": "splits/selection_train.jsonl"}, "calibration_holdout": {"n_messages": 4}}
+    out = ray_train.epoch_config(base, 128, 64, ray_cfg, 2)
+    assert out["fine_tuned"] is True and out["max_len"] == 128 and out["head_max_len"] == 64
+    assert out["training"] == {"base_run": 1, "ray_train": ray_cfg, "epoch": 2, "calibrated": False}
+    assert base["training"] == {"base_run": 1}                                   # the base config is not mutated
