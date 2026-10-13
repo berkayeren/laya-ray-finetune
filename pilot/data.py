@@ -100,8 +100,12 @@ def to_case(row):
             "expected": {k: k in gold for k in INTENTS}}
 
 
-def build(root, raw_sha256):
-    """Verify raw folds, then render every split in memory. Returns ({relpath: bytes}, manifest)."""
+def build(root, raw_sha256, include_no_intent=True):
+    """Verify raw folds, then render every split in memory. Returns ({relpath: bytes}, manifest).
+
+    include_no_intent=False leaves banking rows with no gold tags out of every banking split (D-10); the default
+    keeps them as all-negative rows. The choice is recorded as manifest["options"]["include_no_intent"].
+    """
     verify_raw(root, raw_sha256)
     cache = {}
     files, entries = {}, {}
@@ -111,7 +115,7 @@ def build(root, raw_sha256):
             key = (s["domain"], fold)
             if key not in cache:
                 cache[key] = load_fold(root, s["domain"], fold)
-            rows += cache[key]
+            rows += [r for r in cache[key] if include_no_intent or r["gold"] or s["domain"] != "banking"]
         data = "".join(json.dumps(to_case(r), ensure_ascii=False) + "\n" for r in rows).encode("utf-8")
         rel = "splits/%s.jsonl" % s["name"]
         files[rel] = data
@@ -127,7 +131,7 @@ def build(root, raw_sha256):
                     "raw_sha256": dict(raw_sha256)},
         "intents_order": list(INTENTS),
         "questions_sha256": questions_sha256(),
-        "options": {"include_no_intent": True},
+        "options": {"include_no_intent": bool(include_no_intent)},
         "seeds": {"data_prep": None},                       # prep draws no random numbers; neg sampling is per run (Phase 4)
         "splits": entries,
     }
@@ -148,8 +152,8 @@ def write_atomic(path, data):
     os.replace(tmp, path)
 
 
-def prepare(raw_root, out_dir, raw_sha256, rewrite_manifest=False):
-    files, manifest = build(raw_root, raw_sha256)
+def prepare(raw_root, out_dir, raw_sha256, rewrite_manifest=False, include_no_intent=True):
+    files, manifest = build(raw_root, raw_sha256, include_no_intent=include_no_intent)
     manifest_bytes = serialize_manifest(manifest)
     manifest_path = os.path.join(out_dir, MANIFEST_NAME)
     if os.path.exists(manifest_path) and not rewrite_manifest:
