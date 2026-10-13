@@ -3,7 +3,9 @@
 Inference is distributed with Ray Data: each worker actor loads the checkpoint
 once and scores batches of messages; with --workers 0 it runs in-process.
 
-usage: python evaluate.py TEST_JSONL [--checkpoint multilingual|DIR] [--n N]
+The input must be a split registered in data/splits.json with a matching sha256 (refused otherwise).
+
+usage: python evaluate.py data/splits/test.jsonl [--checkpoint multilingual|DIR] [--n N]
                           [--workers W] [--gpus-per-worker G] [--out report.json]
 """
 import argparse
@@ -11,9 +13,8 @@ import json
 import random
 import time
 
-from intents import INTENTS
-
-QUESTIONS = {k: {"type": "noul", "instructions": v} for k, v in INTENTS.items()}
+from intents import INTENTS, QUESTIONS
+from pilot.data import verify_split_file
 
 
 def load_agent(checkpoint, device):
@@ -84,8 +85,10 @@ def main():
     ap.add_argument("--gpus-per-worker", type=float, default=0)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
+    verify_split_file(a.test_jsonl)                         # hard-fail on a tampered/unregistered split (D-03)
 
-    cases = [json.loads(l) for l in open(a.test_jsonl, encoding="utf-8")]
+    with open(a.test_jsonl, encoding="utf-8") as f:
+        cases = [json.loads(l) for l in f]
     random.Random(0).shuffle(cases)
     cases = cases[:a.n] if a.n else cases
     items = [{"uid": c["uid"], "text": c["state"]} for c in cases]
@@ -117,7 +120,8 @@ def main():
               **metrics([gold[u] for u in uids], [by_uid[u] for u in uids])}
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if a.out:
-        json.dump(report, open(a.out, "w"), ensure_ascii=False, indent=2)
+        with open(a.out, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":

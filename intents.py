@@ -1,4 +1,8 @@
-"""Multi3NLU++ banking intent tags, each phrased as a yes/no question."""
+"""Multi3NLU++ banking intent tags, each phrased as a yes/no question.
+
+QUESTIONS is defined only here; data prep (pilot/data.py) and evaluate.py import it. The question text is the
+model input, so changing any wording means regenerating the data (refreezing data/splits.json) and the baselines.
+"""
 
 INTENTS = {
     "transfer_payment_deposit": "Is the message about a money transfer, payment or deposit?",
@@ -50,3 +54,5 @@ INTENTS = {
     "how_long": "Is the user asking how long something takes?",
     "repeat": "Is the user asking to repeat something?",
 }
+
+QUESTIONS = {k: {"type": "noul", "instructions": v} for k, v in INTENTS.items()}
