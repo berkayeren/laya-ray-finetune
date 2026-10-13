@@ -118,37 +118,65 @@ def test_laya_digests_skip_tokenizer_config():
     assert not [k for k in pins.LAYA["sha256"] if k.endswith("tokenizer_config.json")]
 
 
-def _unpinned_calls(path):
+LOADERS = ("load", "load_checkpoint", "resolve_checkpoint_dir")
+HUB_DOWNLOADS = ("snapshot_download", "hf_hub_download")
+
+
+def _unpinned_calls(path, in_pilot=False):
+    """Weight loads that could bypass pilot.weights.fetch. Outside pilot/: any from-import of a loader or hub download,
+    any bare-name load/load_checkpoint call (an aliased from-import), any hub download call. Everywhere: a loader
+    called on a string literal (a hub id), resolve_checkpoint_dir, and a hub download without revision=."""
     with open(path, encoding="utf-8") as f:
         tree = ast.parse(f.read(), filename=path)
     bad = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and not in_pilot \
+                and (node.module or "").split(".")[0] in ("laya", "huggingface_hub"):
+            names = [a.name for a in node.names if a.name in LOADERS + HUB_DOWNLOADS or a.name == "*"]
+            if names:
+                bad.append("%s:%d from %s import %s" % (path, node.lineno, node.module, ", ".join(names)))
         if not isinstance(node, ast.Call):
             continue
         fn = node.func
         name = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else None
         if name == "resolve_checkpoint_dir":
             bad.append("%s:%d resolve_checkpoint_dir(...)" % (path, node.lineno))
-        if (isinstance(fn, ast.Attribute) and fn.attr == "load" and isinstance(fn.value, ast.Name)
-                and fn.value.id == "laya" and node.args and isinstance(node.args[0], ast.Constant)
+        elif name in HUB_DOWNLOADS:
+            if not in_pilot:
+                bad.append("%s:%d %s(...) outside pilot/ (use pilot.weights.fetch)" % (path, node.lineno, name))
+            elif not any(k.arg == "revision" for k in node.keywords):
+                bad.append("%s:%d %s(...) without revision=" % (path, node.lineno, name))
+        elif isinstance(fn, ast.Name) and name in ("load", "load_checkpoint") and not in_pilot:
+            bad.append("%s:%d bare %s(...)" % (path, node.lineno, name))
+        elif (name in ("load", "load_checkpoint") and node.args and isinstance(node.args[0], ast.Constant)
                 and isinstance(node.args[0].value, str)):
-            bad.append("%s:%d laya.load(%r)" % (path, node.lineno, node.args[0].value))
+            bad.append("%s:%d %s(%r)" % (path, node.lineno, name, node.args[0].value))
     return bad
 
 
 def test_no_unpinned_load_call_in_repo():
     out = subprocess.run(["git", "ls-files", "*.py"], cwd=REPO, capture_output=True, text=True, check=True).stdout
     files = [f for f in out.split() if not f.startswith("tests/")]
-    assert "evaluate.py" in files and "ray_train.py" in files
-    bad = [b for f in files for b in _unpinned_calls(os.path.join(REPO, f))]
+    assert "evaluate.py" in files and "ray_train.py" in files and "pilot/weights.py" in files
+    bad = [b for f in files for b in _unpinned_calls(os.path.join(REPO, f), in_pilot=f.startswith("pilot/"))]
     assert not bad, "unpinned weight loads:\n" + "\n".join(bad)
 
 
 def test_ast_guard_catches_unpinned_calls(tmp_path):
     p = tmp_path / "x.py"
     p.write_text('import laya\nfrom laya import train as lt\nlaya.load("convaiinnovations/laya")\n'
-                 'lt.resolve_checkpoint_dir("multilingual")\n', encoding="utf-8")
-    assert len(_unpinned_calls(str(p))) == 2
+                 'lt.resolve_checkpoint_dir("multilingual")\n'
+                 'from laya import load\nload(path)\n'                                  # 2: from-import + bare call
+                 'from laya.train import load_checkpoint as lc\n'                         # 1
+                 'lt.load_checkpoint("convaiinnovations/laya-multilingual")\n'           # 1
+                 'import huggingface_hub as hh\nhh.snapshot_download("x/y", revision="0" * 40)\n'   # 1: outside pilot/
+                 'hh.hf_hub_download("x/y", "f")\n'                                       # 1
+                 'json.load(f)\nlt.load_checkpoint(base_dir)\nlaya.load(fetch(pin))\n', encoding="utf-8")
+    assert len(_unpinned_calls(str(p))) == 8, _unpinned_calls(str(p))
+    q = tmp_path / "y.py"                                    # inside pilot/: hub downloads must pin a revision
+    q.write_text('from huggingface_hub import snapshot_download\n'
+                 'snapshot_download("x/y", revision=pin)\nsnapshot_download("x/y")\n', encoding="utf-8")
+    assert len(_unpinned_calls(str(q), in_pilot=True)) == 1
 
 
 def test_load_agent_refuses_non_dir_without_importing_laya():
