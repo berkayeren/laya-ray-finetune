@@ -4,12 +4,15 @@ Inference is distributed with Ray Data: each worker actor loads the checkpoint
 once and scores batches of messages; with --workers 0 it runs in-process.
 
 The input must be a split registered in data/splits.json with a matching sha256 (refused otherwise).
+--checkpoint multilingual loads the pinned, sha256-verified hub weights (pilot.weights); any other value must be
+a local Laya checkpoint dir, so nothing downloads an unpinned revision.
 
 usage: python evaluate.py data/splits/test.jsonl [--checkpoint multilingual|DIR] [--n N]
                           [--workers W] [--gpus-per-worker G] [--out report.json]
 """
 import argparse
 import json
+import os
 import random
 import time
 
@@ -18,11 +21,16 @@ from pilot.data import verify_split_file
 
 
 def load_agent(checkpoint, device):
+    """'multilingual' = pinned, digest-verified hub weights (ENV-02); anything else must be a local checkpoint dir."""
+    if checkpoint == "multilingual":
+        import laya
+        from pilot import pins
+        from pilot.weights import fetch
+        return laya.load(fetch(pins.LAYA), device=device, expected_sha256=pins.LAYA["sha256"])
+    if not os.path.isfile(os.path.join(checkpoint, "rl_agent_config.json")):
+        raise SystemExit("--checkpoint must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % checkpoint)
     import laya
-    if checkpoint in ("multilingual", "english", "typed-decisions"):
-        sub = None if checkpoint == "english" else checkpoint
-        return laya.load("convaiinnovations/laya", subfolder=sub, device=device)
-    return laya.load(checkpoint, device=device)
+    return laya.load(os.path.abspath(checkpoint), device=device)   # abspath: laya treats args with "/" as local
 
 
 class Predictor:
@@ -79,7 +87,8 @@ def metrics(golds, probs):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("test_jsonl")
-    ap.add_argument("--checkpoint", default="multilingual")
+    ap.add_argument("--checkpoint", default="multilingual",
+                    help="multilingual (pinned hub weights) or DIR (local Laya checkpoint)")
     ap.add_argument("--n", type=int, default=None, help="evaluate a fixed random subset of N messages")
     ap.add_argument("--workers", type=int, default=1, help="Ray Data actors; 0 = no Ray")
     ap.add_argument("--gpus-per-worker", type=float, default=0)
