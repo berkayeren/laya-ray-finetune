@@ -117,3 +117,9 @@ def test_ray_train_refuses_non_empty_out_before_ray(tmp_repo):
     assert r.returncode != 0
     assert "not empty" in r.stderr, r.stderr
     assert not (tmp_repo / "ray_results").exists()
+
+
+@pytest.mark.parametrize("n", ["0", "-5"])
+def test_evaluate_refuses_non_positive_n(tmp_repo, n):
+    r = _run(tmp_repo, "evaluate.py", "data/splits/test.jsonl", "--workers", "0", "--n", n)
+    assert r.returncode == 2 and "--n must be a positive" in r.stderr, r.stderr

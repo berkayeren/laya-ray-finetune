@@ -148,6 +148,8 @@ def main():
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST,
                     help="splits.json to verify against (default: the committed data/splits.json)")
     a = ap.parse_args()
+    if a.n is not None and a.n <= 0:
+        ap.error("--n must be a positive number of messages (omit it to evaluate the whole split)")
     # hard-fail on a tampered/unregistered split (D-03); train splits and the OOD probe (scored only on
     # ood_scoring_tags, a Phase 3 scorer) are refused
     with open(a.test_jsonl, "rb") as f:
@@ -157,13 +159,14 @@ def main():
 
     cases = parse_jsonl(raw)
     random.Random(SUBSET_SEED).shuffle(cases)
-    cases = cases[:a.n] if a.n else cases
+    cases = cases[:a.n] if a.n is not None else cases
     if not cases:
         raise SystemExit("%s: no messages to evaluate (--n %r)" % (a.test_jsonl, a.n))
     items = [{"uid": c["uid"], "text": c["state"]} for c in cases]
     gold = {c["uid"]: {k for k, v in c["expected"].items() if v} for c in cases}
     device = "cuda" if a.gpus_per_worker else "cpu"
-    header = provenance(a.checkpoint, a.manifest, entry, a.n, majority_source)
+    # n_subset: messages actually scored when --n was given (--n above the split size scores the whole split)
+    header = provenance(a.checkpoint, a.manifest, entry, None if a.n is None else len(cases), majority_source)
 
     load_secs = None                                        # Ray path: actors load inside the timed region
     if a.workers == 0:
