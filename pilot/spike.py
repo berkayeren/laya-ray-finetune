@@ -322,9 +322,13 @@ def standing(chain):
     return len(chain) - 1
 
 
-def _real_median(a):
-    t = ((a.get("regimes") or {}).get("real") or {}).get("times") or {}
+def _median(a, regime):
+    t = ((a.get("regimes") or {}).get(regime) or {}).get("times") or {}
     return t.get("median_s") if t.get("n") else None
+
+
+def _real_median(a):
+    return _median(a, "real")
 
 
 def _projected(a, micro_batch, grad_accum):
@@ -333,11 +337,6 @@ def _projected(a, micro_batch, grad_accum):
     if median is None or not n_items:
         return None
     return project_epoch_s(median, optimizer_steps(n_items, micro_batch, grad_accum))
-
-
-def _median(a, regime):
-    t = ((a.get("regimes") or {}).get(regime) or {}).get("times") or {}
-    return t.get("median_s") if t.get("n") else None
 
 
 def _delta_pct(ray_s, inprocess_s):
