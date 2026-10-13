@@ -1,0 +1,52 @@
+{
+  "checkpoint": "multilingual",
+  "workers": 1,
+  "seconds": 881.4,
+  "sec_per_msg": 8.81,
+  "n": 100,
+  "top1_hit": 0.21,
+  "majority_top1_hit": 0.26,
+  "by_threshold": {
+    "0.3": {
+      "precision": 0.128,
+      "recall": 0.367,
+      "micro_f1": 0.19,
+      "exact_match": 0.01
+    },
+    "0.5": {
+      "precision": 0.138,
+      "recall": 0.284,
+      "micro_f1": 0.186,
+      "exact_match": 0.01
+    },
+    "0.7": {
+      "precision": 0.163,
+      "recall": 0.21,
+      "micro_f1": 0.184,
+      "exact_match": 0.02
+    },
+    "0.9": {
+      "precision": 0.144,
+      "recall": 0.083,
+      "micro_f1": 0.105,
+      "exact_match": 0.02
+    }
+  },
+  "macro_f1@0.5": 0.187,
+  "best_tags@0.5": {
+    "when": 0.714,
+    "repeat": 0.667,
+    "dont_know": 0.571,
+    "how_long": 0.5,
+    "standing_order": 0.5
+  },
+  "worst_tags@0.5": {
+    "card": 0.0,
+    "affirm": 0.0,
+    "more_higher_after": 0.0,
+    "fees_interests": 0.0,
+    "international": 0.0
+  },
+  "mean_tags_predicted@0.5": 4.7,
+  "mean_gold_tags": 2.29
+}

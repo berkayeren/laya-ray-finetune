@@ -1,0 +1,52 @@
+{
+  "checkpoint": "./ckpt_smoke",
+  "workers": 1,
+  "seconds": 904.5,
+  "sec_per_msg": 9.05,
+  "n": 100,
+  "top1_hit": 0.24,
+  "majority_top1_hit": 0.26,
+  "by_threshold": {
+    "0.3": {
+      "precision": 0.095,
+      "recall": 0.498,
+      "micro_f1": 0.16,
+      "exact_match": 0.0
+    },
+    "0.5": {
+      "precision": 0.158,
+      "recall": 0.249,
+      "micro_f1": 0.194,
+      "exact_match": 0.01
+    },
+    "0.7": {
+      "precision": 0.343,
+      "recall": 0.052,
+      "micro_f1": 0.091,
+      "exact_match": 0.02
+    },
+    "0.9": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "micro_f1": 0.0,
+      "exact_match": 0.0
+    }
+  },
+  "macro_f1@0.5": 0.168,
+  "best_tags@0.5": {
+    "when": 0.714,
+    "repeat": 0.667,
+    "dont_know": 0.571,
+    "cancel_close_leave_freeze": 0.571,
+    "handoff": 0.545
+  },
+  "worst_tags@0.5": {
+    "card": 0.0,
+    "account": 0.0,
+    "affirm": 0.0,
+    "more_higher_after": 0.0,
+    "fees_interests": 0.0
+  },
+  "mean_tags_predicted@0.5": 3.6,
+  "mean_gold_tags": 2.29
+}
