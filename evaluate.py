@@ -128,6 +128,8 @@ def metrics(golds, probs, majority):
         if counts[k]:
             per[k] = round(f1(tp, fp, fn)[2], 3)
     out["macro_f1@0.5"] = round(sum(per.values()) / len(per), 3) if per else None   # None: no gold tag in these rows
+    # macro-F1 averages only tags with a gold positive in the scored rows, so the set can change with --n
+    out["n_tags_in_macro"] = len(per)
     ranked = sorted(per, key=per.get)
     out["best_tags@0.5"] = {k: per[k] for k in ranked[::-1][:5]}
     out["worst_tags@0.5"] = {k: per[k] for k in ranked[:5]}
