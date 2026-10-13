@@ -3,7 +3,8 @@
 Inference is distributed with Ray Data: each worker actor loads the checkpoint
 once and scores batches of messages; with --workers 0 it runs in-process.
 
-The input must be a split registered in data/splits.json with a matching sha256 (refused otherwise).
+The input must be a split registered in data/splits.json with a matching sha256 and role test or val (refused
+otherwise; the hotels_probe is scored only on ood_scoring_tags, which this script does not implement yet).
 --checkpoint multilingual loads the pinned, sha256-verified hub weights (pilot.weights); any other value must be
 a local Laya checkpoint dir, so nothing downloads an unpinned revision.
 
@@ -52,6 +53,8 @@ def f1(tp, fp, fn):
 
 
 def metrics(golds, probs):
+    if not golds:
+        raise SystemExit("no messages to score")
     out = {"n": len(golds)}
     out["top1_hit"] = round(sum(max(p, key=p.get) in g for g, p in zip(golds, probs)) / len(golds), 3)
     counts = {k: sum(k in g for g in golds) for k in INTENTS}
@@ -75,7 +78,7 @@ def metrics(golds, probs):
         fn = sum(k in g and p[k] < 0.5 for g, p in zip(golds, probs))
         if counts[k]:
             per[k] = round(f1(tp, fp, fn)[2], 3)
-    out["macro_f1@0.5"] = round(sum(per.values()) / len(per), 3)
+    out["macro_f1@0.5"] = round(sum(per.values()) / len(per), 3) if per else None   # None: no gold tag in these rows
     ranked = sorted(per, key=per.get)
     out["best_tags@0.5"] = {k: per[k] for k in ranked[::-1][:5]}
     out["worst_tags@0.5"] = {k: per[k] for k in ranked[:5]}
@@ -94,12 +97,16 @@ def main():
     ap.add_argument("--gpus-per-worker", type=float, default=0)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    verify_split_file(a.test_jsonl)                         # hard-fail on a tampered/unregistered split (D-03)
+    # hard-fail on a tampered/unregistered split (D-03); train splits and the OOD probe (scored only on
+    # ood_scoring_tags, a Phase 3 scorer) are refused
+    verify_split_file(a.test_jsonl, roles=("test", "val"))
 
     with open(a.test_jsonl, encoding="utf-8") as f:
         cases = [json.loads(l) for l in f]
     random.Random(0).shuffle(cases)
     cases = cases[:a.n] if a.n else cases
+    if not cases:
+        raise SystemExit("%s: no messages to evaluate (--n %r)" % (a.test_jsonl, a.n))
     items = [{"uid": c["uid"], "text": c["state"]} for c in cases]
     gold = {c["uid"]: {k for k, v in c["expected"].items() if v} for c in cases}
     device = "cuda" if a.gpus_per_worker else "cpu"

@@ -56,6 +56,13 @@ def test_evaluate_refuses_unregistered_copy(tmp_repo):
     assert "not a split registered" in r.stderr, r.stderr
 
 
+@pytest.mark.parametrize("name", ["hotels_probe", "selection_train", "final_train"])
+def test_evaluate_refuses_non_eval_role(tmp_repo, name):
+    r = _run(tmp_repo, "evaluate.py", "data/splits/%s.jsonl" % name, "--workers", "0")
+    assert r.returncode != 0
+    assert "role" in r.stderr, r.stderr
+
+
 def test_ray_train_refuses_tampered_split_before_ray(tmp_repo):
     _tamper(str(tmp_repo / "data" / "splits" / "selection_train.jsonl"))
     # an absolute, missing --base guarantees no hub download even if the guard ever regresses
