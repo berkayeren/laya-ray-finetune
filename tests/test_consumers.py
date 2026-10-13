@@ -130,3 +130,9 @@ def test_ray_train_refuses_zero_epochs_before_ray(tmp_repo):
              "--base", str(tmp_repo / "no_such_base"), "--workers", "1", "--epochs", "0")
     assert r.returncode == 2 and "--epochs must be at least 1" in r.stderr, r.stderr
     assert not (tmp_repo / "ray_results").exists()
+
+
+def test_evaluate_missing_split_gets_a_make_data_hint(tmp_repo):
+    r = _run(tmp_repo, "evaluate.py", "data/splits/tset.jsonl", "--workers", "0")
+    assert r.returncode != 0 and "not found" in r.stderr and "make data" in r.stderr, r.stderr
+    assert "Traceback" not in r.stderr, r.stderr

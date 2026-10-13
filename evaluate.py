@@ -152,6 +152,9 @@ def main():
         ap.error("--n must be a positive number of messages (omit it to evaluate the whole split)")
     # hard-fail on a tampered/unregistered split (D-03); train splits and the OOD probe (scored only on
     # ood_scoring_tags, a Phase 3 scorer) are refused
+    if not os.path.isfile(a.test_jsonl):
+        raise SystemExit("%s not found; check the path, or run `make data` to write the registered splits"
+                         % a.test_jsonl)
     with open(a.test_jsonl, "rb") as f:
         raw = f.read()                                       # hash and parse the same bytes (no reread window)
     entry = verify_split_file(a.test_jsonl, manifest_path=a.manifest, roles=("test", "val"), data=raw)

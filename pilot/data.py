@@ -318,6 +318,8 @@ def _registered(path, manifest_path, section, what, data=None):
             raise SystemExit("%s: %s entry %s has unsafe path %r (absolute or '..')"
                              % (manifest_path, section, name, e["path"]))
     check_manifest_current(m, manifest_path)
+    if data is None and not os.path.isfile(path):
+        raise SystemExit("%s not found; check the path, or run `make data` to write the registered files" % path)
     base = os.path.dirname(os.path.realpath(manifest_path))
     rel = os.path.relpath(os.path.realpath(path), base).replace(os.sep, "/")
     entry = next((e for _, e in sorted(entries.items()) if e["path"] == rel), None)

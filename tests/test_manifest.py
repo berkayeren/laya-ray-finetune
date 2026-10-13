@@ -121,6 +121,13 @@ def test_verify_hashes_the_bytes_the_caller_parses(tmp_path, synthetic_raw):
         pilot.data.verify_split_file(path, manifest_path=manifest_path, data=raw + b"x")
 
 
+def test_missing_split_file_gets_a_make_data_hint(tmp_path, synthetic_raw):
+    out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
+    os.remove(_split(out_dir, "selection_train"))
+    with pytest.raises(SystemExit, match="not found.*make data"):
+        pilot.data.verify_split_file(_split(out_dir, "selection_train"), manifest_path=manifest_path)
+
+
 def test_unregistered_identical_copy_is_refused(tmp_path, synthetic_raw):
     out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
     copy = os.path.join(out_dir, "splits", "test_copy.jsonl")
