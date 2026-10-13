@@ -179,9 +179,9 @@ def test_ast_guard_catches_unpinned_calls(tmp_path):
     assert len(_unpinned_calls(str(q), in_pilot=True)) == 1
 
 
-def test_load_agent_refuses_non_dir_without_importing_laya():
+def test_resolve_checkpoint_refuses_non_dir_without_importing_laya():
     code = ("import sys, evaluate\n"
-            "try:\n    evaluate.load_agent('not-a-dir', 'cpu')\n"
+            "try:\n    evaluate.resolve_checkpoint('not-a-dir')\n"
             "except SystemExit as e:\n    print('REFUSED', e)\n"
             "print('LAYA_IMPORTED' if 'laya' in sys.modules else 'LAYA_NOT_IMPORTED')\n")
     r = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=120)
@@ -247,3 +247,17 @@ def test_ray_train_checkpoint_provenance_carries_no_local_path(tmp_path):
     prov = ray_train.provenance(entry, str(manifest), str(base), str(base))
     _assert_no_local_path(prov, tmp_path)
     assert prov["manifest"] == "<outside-repo>/splits.json" and prov["base"]["local"] is True
+
+
+def test_resolve_checkpoint_runs_the_pinned_fetch_on_the_driver(tmp_path, monkeypatch):
+    import evaluate
+    root, pin = fake_snapshot(tmp_path, pins.LAYA)
+    patch_download(monkeypatch, root)
+    monkeypatch.setattr(pins, "LAYA", pin)
+    model_dir, expected = evaluate.resolve_checkpoint("multilingual")
+    assert model_dir == os.path.join(root, "multilingual") and expected == pin["sha256"]
+    root, pin = fake_snapshot(tmp_path / "bad", pins.LAYA, corrupt="model.safetensors")
+    patch_download(monkeypatch, root)
+    monkeypatch.setattr(pins, "LAYA", pin)
+    with pytest.raises(SystemExit, match="sha256"):                     # the digest message, not an actor death
+        evaluate.resolve_checkpoint("multilingual")

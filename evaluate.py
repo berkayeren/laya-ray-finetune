@@ -6,7 +6,8 @@ once and scores batches of messages; with --workers 0 it runs in-process.
 The input must be a split registered in data/splits.json with a matching sha256 and role test or val (refused
 otherwise; the hotels_probe is scored only on ood_scoring_tags, which this script does not implement yet).
 --checkpoint multilingual loads the pinned, sha256-verified hub weights (pilot.weights); any other value must be
-a local Laya checkpoint dir, so nothing downloads an unpinned revision.
+a local Laya checkpoint dir, so nothing downloads an unpinned revision. The driver resolves and checks the checkpoint
+before Ray starts; each actor's laya.load re-verifies the digests before parsing any weight.
 
 --manifest selects the prepare-written splits.json to verify against (default: the committed data/splits.json; use
 OTHER_DIR/splits.json for a `prepare_data.py --out OTHER_DIR` variant). Verification itself cannot be skipped, a
@@ -31,24 +32,32 @@ SUBSET_SEED = 0                                             # fixed shuffle befo
 MAJORITY_SOURCE = TRAINED_ON
 
 
-def load_agent(checkpoint, device):
-    """'multilingual' = pinned, digest-verified hub weights (ENV-02); anything else must be a local checkpoint dir."""
+def resolve_checkpoint(checkpoint):
+    """On the driver, before Ray starts: (local checkpoint dir, {file: sha256} that laya.load must verify).
+
+    'multilingual' = the pinned hub weights, fetched and digest-checked here (ENV-02); anything else must be a local
+    checkpoint dir. Refusals and digest mismatches surface here as the real message, not as a Ray actor death.
+    """
     if checkpoint == "multilingual":
-        import laya
         from pilot import pins
         from pilot.weights import fetch
-        return laya.load(fetch(pins.LAYA), device=device, expected_sha256=pins.LAYA["sha256"])
+        return fetch(pins.LAYA), dict(pins.LAYA["sha256"])
     if not os.path.isfile(os.path.join(checkpoint, "rl_agent_config.json")):
         raise SystemExit("--checkpoint must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % checkpoint)
+    return os.path.abspath(checkpoint), None                 # abspath: laya treats args with "/" as local
+
+
+def load_agent(model_dir, device, expected_sha256):
+    """laya.load of a dir resolved by resolve_checkpoint; laya re-checks expected_sha256 before parsing any weight."""
     import laya
-    return laya.load(os.path.abspath(checkpoint), device=device)   # abspath: laya treats args with "/" as local
+    return laya.load(model_dir, device=device, expected_sha256=expected_sha256)
 
 
 class Predictor:
     """Ray Data actor: one checkpoint load per worker, then batched forward passes."""
 
-    def __init__(self, checkpoint, device):
-        self.agent = load_agent(checkpoint, device)
+    def __init__(self, model_dir, device, expected_sha256):
+        self.agent = load_agent(model_dir, device, expected_sha256)
 
     def __call__(self, batch):
         t = time.perf_counter()                             # scoring only: load/digest time is not per-message cost
@@ -172,12 +181,15 @@ def main():
     device = "cuda" if a.gpus_per_worker else "cpu"
     # n_subset: messages actually scored when --n was given (--n above the split size scores the whole split)
     header = provenance(a.checkpoint, a.manifest, entry, None if a.n is None else len(cases), majority_source)
+    t0 = time.time()
+    model_dir, expected = resolve_checkpoint(a.checkpoint)  # driver-side fetch/refusal, before any Ray actor exists
+    resolve_secs = time.time() - t0
 
     load_secs = None                                        # Ray path: actors load inside the timed region
     if a.workers == 0:
         t0 = time.time()
-        p = Predictor(a.checkpoint, device)                 # fetch + digest + model build, timed separately
-        load_secs = time.time() - t0
+        p = Predictor(model_dir, device, expected)          # digest + model build
+        load_secs = resolve_secs + time.time() - t0         # fetch + digest + model build, timed separately
     t0 = time.time()
     if a.workers == 0:
         rows = []
@@ -189,7 +201,7 @@ def main():
         import ray
         ray.init(ignore_reinit_error=True, log_to_driver=False)
         ds = ray.data.from_items(items).map_batches(
-            Predictor, fn_constructor_args=(a.checkpoint, device), batch_size=16,
+            Predictor, fn_constructor_args=(model_dir, device, expected), batch_size=16,
             concurrency=a.workers, num_gpus=a.gpus_per_worker, memory=3 * 1024**3,
             batch_format="numpy")
         rows = ds.take_all()
