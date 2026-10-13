@@ -2,9 +2,10 @@
 
 Producer: `prepare()` verifies the 40 raw fold hashes, validates every raw row, hard-fails on any duplicate uid
 across banking + HOTELS (D-14) or on drift of the banking-only OOD tag set, builds every split in memory
-(four banking splits plus the HOTELS out-of-domain probe), refuses to overwrite a
-differing data/splits.json (unless rewrite_manifest), then writes each file atomically with splits.json last.
-Consumer: `verify_split_file()` is the only verifier. evaluate.py and ray_train.py call it right after argument
+(four banking splits plus the HOTELS out-of-domain probe) and the report-only duplicate audit (pilot.audit, DATA-04)
+under audit/, refuses to overwrite a differing data/splits.json (unless rewrite_manifest), then writes each file
+atomically with splits.json last.
+Consumer: `verify_split_file()` is the only split verifier; `verify_audit_file()` checks the audit outputs. evaluate.py and ray_train.py call it right after argument
 parsing and hard-fail (SystemExit) on any mismatch; there is no override flag or environment variable.
 
 Stdlib only at import time (huggingface_hub is imported lazily in fetch_raw), so data tests never load torch.
@@ -15,6 +16,7 @@ import os
 
 from intents import INTENTS, QUESTIONS
 from pilot import pins
+from pilot.audit import build_audit, render_markdown
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_MANIFEST = os.path.join(REPO_ROOT, "data", "splits.json")
@@ -31,6 +33,13 @@ SPLITS = [
     {"name": "test", "domain": "banking", "folds": [16, 17, 18, 19], "role": "test"},
     {"name": "hotels_probe", "domain": "hotels", "folds": list(range(20)), "role": "ood_probe"},
 ]
+
+
+AUDIT_FILES = {"audit_json": "audit/audit.json", "audit_md": "audit/audit.md", "dup_flags_json": "audit/dup_flags.json"}
+
+
+def _json_bytes(obj):
+    return (json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def sha256_file(path):
@@ -143,6 +152,14 @@ def build(root, raw_sha256, include_no_intent=True, ood_tags=None):
     if ood_tags is not None and sorted(ood_tags) != derived:
         raise SystemExit("banking-only tag set drifted: derived %s, pinned %s" % (derived, sorted(ood_tags)))
     files, entries = {}, {}
+    # D-12/D-13: the audit reads the raw rows and only reports; split membership below never depends on it
+    audit, flags = build_audit([r for key in sorted(cache) if key[0] == "banking" for r in cache[key]],
+                               [r for key in sorted(cache) if key[0] == "hotels" for r in cache[key]])
+    files["audit/audit.json"] = _json_bytes(audit)
+    files["audit/audit.md"] = render_markdown(audit, flags).encode("utf-8")
+    files["audit/dup_flags.json"] = _json_bytes(flags)
+    audit_entries = {name: {"path": rel, "sha256": sha256_bytes(files[rel])}
+                     for name, rel in AUDIT_FILES.items()}
     for s in SPLITS:
         rows = []
         for fold in s["folds"]:                              # ascending folds, original in-fold order
@@ -171,13 +188,14 @@ def build(root, raw_sha256, include_no_intent=True, ood_tags=None):
         "seeds": {"data_prep": None},                       # prep draws no random numbers; neg sampling is per run (Phase 4)
         "ood_scoring_tags": derived,                        # the only valid gold tags on hotels_probe (Pitfall 3)
         "uid_check": uid_check,
+        "audit": audit_entries,
         "splits": entries,
     }
     return files, manifest
 
 
 def serialize_manifest(manifest):
-    return (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    return _json_bytes(manifest)
 
 
 def write_atomic(path, data):
@@ -209,6 +227,7 @@ def prepare(raw_root, out_dir, raw_sha256, rewrite_manifest=False, include_no_in
         e = manifest["splits"][s["name"]]
         print("%s: %d messages (%d no-intent) -> %s" % (s["name"], e["n_messages"], e["n_no_intent"],
                                                          os.path.join(out_dir, e["path"])))
+    print("audit (report only) -> %s" % os.path.join(out_dir, "audit"))
     return manifest
 
 
@@ -216,24 +235,38 @@ def _unsafe(rel):
     return os.path.isabs(rel) or rel.startswith(("/", "\\")) or ".." in rel.replace("\\", "/").split("/")
 
 
-def verify_split_file(path, manifest_path=DEFAULT_MANIFEST, roles=None):
-    """Hard-fail unless `path` is a split registered in the manifest with a matching sha256 (and allowed role)."""
+def _registered(path, manifest_path, section, what):
+    """Shared lookup: `path` must be registered under manifest[section] (safe relative paths) with a matching sha256."""
     if not os.path.isfile(manifest_path):
         raise SystemExit("manifest %s not found; run `make data`" % manifest_path)
     with open(manifest_path, encoding="utf-8") as f:
         m = json.load(f)
-    for name, e in sorted(m["splits"].items()):
+    entries = m.get(section)
+    if not isinstance(entries, dict):
+        raise SystemExit("%s has no %s section; run `make data`" % (manifest_path, section))
+    for name, e in sorted(entries.items()):
         if _unsafe(e["path"]):
-            raise SystemExit("%s: split %s has unsafe path %r (absolute or '..')" % (manifest_path, name, e["path"]))
+            raise SystemExit("%s: %s %s has unsafe path %r (absolute or '..')" % (manifest_path, what, name, e["path"]))
     base = os.path.dirname(os.path.realpath(manifest_path))
     rel = os.path.relpath(os.path.realpath(path), base).replace(os.sep, "/")
-    entry = next((e for _, e in sorted(m["splits"].items()) if e["path"] == rel), None)
+    entry = next((e for _, e in sorted(entries.items()) if e["path"] == rel), None)
     if entry is None:
-        raise SystemExit("%s is not a split registered in %s; run `make data`" % (path, manifest_path))
+        raise SystemExit("%s is not a %s registered in %s; run `make data`" % (path, what, manifest_path))
     have = sha256_file(path)
     if have != entry["sha256"]:
         raise SystemExit("%s sha256 %s != %s registered in %s; regenerate with `make data`"
                          % (path, have, entry["sha256"], manifest_path))
+    return entry
+
+
+def verify_audit_file(path, manifest_path=DEFAULT_MANIFEST):
+    """Hard-fail unless `path` is an audit output (audit.json, audit.md, dup_flags.json) with its registered sha256."""
+    return _registered(path, manifest_path, "audit", "audit file")
+
+
+def verify_split_file(path, manifest_path=DEFAULT_MANIFEST, roles=None):
+    """Hard-fail unless `path` is a split registered in the manifest with a matching sha256 (and allowed role)."""
+    entry = _registered(path, manifest_path, "splits", "split")
     if roles is not None and entry["role"] not in roles:
         raise SystemExit("%s has role %s; expected one of %s" % (path, entry["role"], ", ".join(roles)))
     return entry

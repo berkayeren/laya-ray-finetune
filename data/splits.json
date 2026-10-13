@@ -1,4 +1,18 @@
 {
+  "audit": {
+    "audit_json": {
+      "path": "audit/audit.json",
+      "sha256": "e7c54f0986c86c6637f94cdf5a85eae5dcf08cf658d52e36c884f94e7cae428f"
+    },
+    "audit_md": {
+      "path": "audit/audit.md",
+      "sha256": "cb7dc7a70fb3405f09a17c864120f8bddbd355752c1b34fb803cdbc2adfa813c"
+    },
+    "dup_flags_json": {
+      "path": "audit/dup_flags.json",
+      "sha256": "d0470533f4601cbeb9b8d8ad077a0b7e11c792a12e8f8a681097f311a3e518af"
+    }
+  },
   "dataset": {
     "license": "cc-by-4.0",
     "raw_sha256": {
