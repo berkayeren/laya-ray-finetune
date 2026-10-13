@@ -78,6 +78,35 @@ def test_manifest_from_other_code_or_pins_is_refused(tmp_path, synthetic_raw, fi
         pilot.data.verify_audit_file(os.path.join(out_dir, "audit", "audit.json"), manifest_path=manifest_path)
 
 
+@pytest.mark.parametrize("edit", [
+    lambda m: (m["splits"]["test"].update(role="train"), m["splits"]["hotels_probe"].update(role="test")),
+    lambda m: m["splits"]["val"].update(folds=[16, 17, 18, 19]),
+    lambda m: m["splits"]["hotels_probe"].update(domain="banking"),
+    lambda m: m["splits"].update(extra=dict(m["splits"]["test"], path="splits/extra.jsonl", role="train")),
+    lambda m: m["splits"].pop("val"),
+], ids=["role_relabel", "folds", "domain", "extra_split", "missing_split"])
+def test_manifest_cannot_relabel_splits(tmp_path, synthetic_raw, edit):
+    # a manifest may differ only in what prepare() varies; it can never turn test into train or the probe into test
+    out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
+    _rewrite_manifest(manifest_path, edit)
+    for name, roles in (("test", ("train",)), ("hotels_probe", ("test", "val")), ("selection_train", None)):
+        with pytest.raises(SystemExit, match="SPLITS|registers splits"):
+            pilot.data.verify_split_file(_split(out_dir, name), manifest_path=manifest_path, roles=roles)
+
+
+def test_manifest_cannot_move_audit_entries(tmp_path, synthetic_raw):
+    out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
+    _rewrite_manifest(manifest_path, lambda m: m["audit"].update(extra={"path": "audit/x.json", "sha256": "0" * 64}))
+    with pytest.raises(SystemExit, match="AUDIT_FILES"):
+        pilot.data.verify_split_file(_split(out_dir, "test"), manifest_path=manifest_path)
+
+
+def test_manifest_is_committed_flags_other_manifests(tmp_path, synthetic_raw):
+    _, manifest_path = prepared(tmp_path, synthetic_raw)
+    assert pilot.data.manifest_is_committed(pilot.data.DEFAULT_MANIFEST) is True
+    assert pilot.data.manifest_is_committed(manifest_path) is False
+
+
 def test_committed_manifest_passes_the_current_code_check():
     with open(pilot.data.DEFAULT_MANIFEST, encoding="utf-8") as f:
         pilot.data.check_manifest_current(json.load(f), pilot.data.DEFAULT_MANIFEST)

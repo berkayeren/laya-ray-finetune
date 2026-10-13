@@ -9,7 +9,8 @@ otherwise; the hotels_probe is scored only on ood_scoring_tags, which this scrip
 a local Laya checkpoint dir, so nothing downloads an unpinned revision.
 
 --manifest selects the prepare-written splits.json to verify against (default: the committed data/splits.json; use
-OTHER_DIR/splits.json for a `prepare_data.py --out OTHER_DIR` variant). Verification itself cannot be skipped.
+OTHER_DIR/splits.json for a `prepare_data.py --out OTHER_DIR` variant). Verification itself cannot be skipped, a
+manifest cannot change any split's role, path or folds, and the report records manifest_is_committed.
 
 usage: python evaluate.py data/splits/test.jsonl [--checkpoint multilingual|DIR] [--n N]
                           [--workers W] [--gpus-per-worker G] [--out report.json] [--manifest splits.json]
@@ -21,7 +22,7 @@ import random
 import time
 
 from intents import INTENTS, QUESTIONS
-from pilot.data import DEFAULT_MANIFEST, repo_relpath, sha256_file, verify_split_file
+from pilot.data import DEFAULT_MANIFEST, manifest_is_committed, repo_relpath, sha256_file, verify_split_file
 
 SUBSET_SEED = 0                                             # fixed shuffle before --n, so subsets are comparable
 # the majority baseline's tag comes from the training split the evaluated role's models are trained on, never from
@@ -154,6 +155,7 @@ def main():
     provenance = {"checkpoint_identity": identity(a.checkpoint),
                   "split": {"path": entry["path"], "sha256": entry["sha256"], "role": entry["role"]},
                   "manifest": {"path": repo_relpath(a.manifest), "sha256": sha256_file(a.manifest)},
+                  "manifest_is_committed": manifest_is_committed(a.manifest),
                   "n_subset": a.n, "subset_seed": SUBSET_SEED, "majority_source": majority_source}
 
     load_secs = None                                        # Ray path: actors load inside the timed region

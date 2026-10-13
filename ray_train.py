@@ -18,7 +18,8 @@ Rank 0:      fit calibration temperatures on whole messages held out before trai
 per-seed negative sampling arrives with the Phase 4 training harness. --base multilingual fetches the pinned,
 sha256-verified Laya weights (pilot.weights) before Ray starts; any other value must be a local checkpoint dir.
 --manifest selects the prepare-written splits.json to verify against (default: the committed data/splits.json; use
-OTHER_DIR/splits.json for a `prepare_data.py --out OTHER_DIR` variant). Verification itself cannot be skipped.
+OTHER_DIR/splits.json for a `prepare_data.py --out OTHER_DIR` variant). Verification itself cannot be skipped, a
+manifest cannot change any split's role, path or folds, and the checkpoint provenance records manifest_is_committed.
 
 usage:
   python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
@@ -46,7 +47,7 @@ from laya.calibrate import fit_temperature_map
 from laya.common import collate_items, uses_parallel_layout
 
 from pilot import pins
-from pilot.data import DEFAULT_MANIFEST, repo_relpath, sha256_file, verify_split_file
+from pilot.data import DEFAULT_MANIFEST, manifest_is_committed, repo_relpath, sha256_file, verify_split_file
 from pilot.weights import fetch, identity
 
 
@@ -264,6 +265,7 @@ def main():
            "seed": a.seed,
            "provenance": {"data": entry["path"], "data_role": entry["role"], "data_sha256": entry["sha256"],
                           "manifest": repo_relpath(a.manifest), "manifest_sha256": sha256_file(a.manifest),
+                          "manifest_is_committed": manifest_is_committed(a.manifest),
                           "base": identity("multilingual" if a.base == "multilingual" else base_dir)}}
     trainer = TorchTrainer(
         train_loop_per_worker, train_loop_config=cfg,

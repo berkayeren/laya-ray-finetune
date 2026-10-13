@@ -7,7 +7,9 @@ under audit/, refuses to overwrite a differing data/splits.json (unless rewrite_
 atomically with splits.json last.
 Consumer: `verify_split_file()` is the only split verifier; evaluate.py and ray_train.py call it right after argument
 parsing and hard-fail (SystemExit) on any mismatch, including a manifest built from other question text, tag order,
-schema or dataset pin (check_manifest_current); there is no override flag or environment variable.
+schema or dataset pin, or one whose split names, roles, paths, folds or domains differ from SPLITS
+(check_manifest_current); there is no override flag or environment variable. --manifest only selects another
+prepare-written manifest (e.g. the --no-include-no-intent variant), and reports record whether it is the committed one.
 `verify_audit_file()` applies the same rules to the audit outputs (a later dedup sensitivity row reads dup_flags.json).
 
 Stdlib only at import time (huggingface_hub is imported lazily in fetch_raw), so data tests never load torch.
@@ -244,7 +246,8 @@ def _unsafe(rel):
 
 
 def check_manifest_current(m, manifest_path):
-    """Hard-fail unless manifest `m` was built from the current schema, question text, tag order and dataset pin.
+    """Hard-fail unless manifest `m` was built from the current schema, question text, tag order and dataset pin,
+    and registers exactly the SPLITS (role, path, folds, domain) and AUDIT_FILES this code writes.
 
     File hashes alone are not enough: a manifest built from other question text would let train (question text
     from the JSONL rows) and eval (intents.QUESTIONS) silently see different model inputs.
@@ -258,6 +261,28 @@ def check_manifest_current(m, manifest_path):
     if stale:
         raise SystemExit("%s was built from different code/pins (%s); regenerate with `make data`"
                          % (manifest_path, ", ".join(stale)))
+    # a manifest may differ only in what prepare() varies (options, counts, hashes): never in which file has which
+    # role, so no manifest can relabel test as train or the OOD probe as test
+    want = {s["name"]: s for s in SPLITS}
+    splits = m.get("splits")
+    if not isinstance(splits, dict) or set(splits) != set(want):
+        raise SystemExit("%s registers splits %s, expected %s; regenerate with `make data`"
+                         % (manifest_path, sorted(splits) if isinstance(splits, dict) else splits, sorted(want)))
+    for name in sorted(splits):
+        e, s = splits[name], want[name]
+        if (e.get("role"), e.get("path"), e.get("folds"), e.get("domain")) != \
+                (s["role"], "splits/%s.jsonl" % name, list(s["folds"]), s["domain"]):
+            raise SystemExit("%s: split %s does not match pilot.data.SPLITS (role/path/folds/domain); "
+                             "regenerate with `make data`" % (manifest_path, name))
+    audit = m.get("audit")
+    if not isinstance(audit, dict) or {k: (e or {}).get("path") for k, e in audit.items()} != AUDIT_FILES:
+        raise SystemExit("%s: audit entries do not match pilot.data.AUDIT_FILES; regenerate with `make data`"
+                         % manifest_path)
+
+
+def manifest_is_committed(manifest_path):
+    """True when `manifest_path` has the bytes of the repo's data/splits.json (reports flag any other manifest)."""
+    return os.path.isfile(DEFAULT_MANIFEST) and sha256_file(manifest_path) == sha256_file(DEFAULT_MANIFEST)
 
 
 def _registered(path, manifest_path, section, what, data=None):
@@ -270,7 +295,6 @@ def _registered(path, manifest_path, section, what, data=None):
         raise SystemExit("manifest %s not found; run `make data`" % manifest_path)
     with open(manifest_path, encoding="utf-8") as f:
         m = json.load(f)
-    check_manifest_current(m, manifest_path)
     entries = m.get(section)
     if not isinstance(entries, dict):
         raise SystemExit("%s has no %s section; run `make data`" % (manifest_path, section))
@@ -278,6 +302,7 @@ def _registered(path, manifest_path, section, what, data=None):
         if _unsafe(e["path"]):
             raise SystemExit("%s: %s entry %s has unsafe path %r (absolute or '..')"
                              % (manifest_path, section, name, e["path"]))
+    check_manifest_current(m, manifest_path)
     base = os.path.dirname(os.path.realpath(manifest_path))
     rel = os.path.relpath(os.path.realpath(path), base).replace(os.sep, "/")
     entry = next((e for _, e in sorted(entries.items()) if e["path"] == rel), None)

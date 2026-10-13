@@ -57,7 +57,9 @@ default. `python prepare_data.py --no-include-no-intent --out OTHER_DIR` builds 
 them (1,384 / 201 / 1,585 / 398 messages). Write it to a different `--out` dir, because prepare
 refuses to overwrite the committed manifest with a differing one. Consume it with
 `--manifest OTHER_DIR/splits.json` on `evaluate.py` and `ray_train.py`; the files are still
-hash-verified against that manifest, and the manifest must match the current code and pins.
+hash-verified against that manifest, and the manifest must match the current code and pins. It
+cannot change which file is train, val, test or probe: every split's role, path and folds must equal
+`pilot.data.SPLITS`. Reports and checkpoints record `manifest_is_committed`.
 
 **Every row labels all 48 tags.** `final_train` is 1,658 × 48 = 79,584 Laya items. There is no
 prepare-time negative sampling. Sampling negatives per run seed arrives with the Phase 4 training
