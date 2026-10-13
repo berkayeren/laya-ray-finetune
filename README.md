@@ -134,7 +134,8 @@ weights in the Hugging Face cache, and a few MB for the data.
 blocks (`items_from_rows`, `encode_item`, `soft_ce_loss` / `rlcd_loss`, `calibration_records`,
 `fit_temperature_map`, `save_checkpoint`) and adds: rank sharding, DDP via
 `ray.train.torch.prepare_model`, `no_sync` on gradient-accumulation steps, per-epoch checkpoints
-reported to Ray, and temperature calibration on a slice held out before training (rank 0).
+reported to Ray, and temperature calibration on whole messages held out before training (rank 0;
+`--calib-max-messages`, default 40, capped at `--calib-frac` of the messages).
 The output loads with `laya.load(path)`. It does not reproduce `laya-train`'s before/after report
 or abstention-threshold fitting — use `evaluate.py` for held-out metrics.
 

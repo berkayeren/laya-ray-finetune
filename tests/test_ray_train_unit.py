@@ -32,3 +32,14 @@ def test_require_single_node_refuses_a_multi_node_cluster():
     ray_train.require_single_node([{"Alive": True}, {"Alive": False}])          # one alive node: fine
     with pytest.raises(SystemExit, match="single-node"):
         ray_train.require_single_node([{"Alive": True}, {"Alive": True}])
+
+
+def test_holdout_messages_is_message_level_deterministic_and_disjoint():
+    rows = [{"uid": "m%d" % i, "state": "t%d" % i} for i in range(100)]
+    train, calib = ray_train.holdout_messages(rows, 40, 0.1, 0)
+    assert len(calib) == 10                                  # min(40 messages, 10% of 100)
+    assert {r["uid"] for r in train}.isdisjoint(r["uid"] for r in calib)
+    assert len(train) + len(calib) == len(rows)
+    again = ray_train.holdout_messages([dict(r) for r in rows], 40, 0.1, 0)   # what another rank computes
+    assert again == (train, calib)
+    assert len(ray_train.holdout_messages(rows, 3, 0.1, 0)[1]) == 3          # --calib-max-messages caps it

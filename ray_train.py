@@ -9,7 +9,8 @@ base weights and the split from driver-local paths, so it refuses a multi-node
 Ray cluster.
 
 Per worker:  load base -> build items -> shard by rank -> DDP train
-Rank 0:      fit calibration temperatures on a slice held out before training,
+Rank 0:      fit calibration temperatures on whole messages held out before training
+             (every question of a held-out message; none of their text is trained on),
              save the final checkpoint and report it to Ray.
 
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
@@ -73,6 +74,16 @@ def require_single_node(nodes):
                          "but the Ray cluster has %d alive nodes" % len(alive))
 
 
+def holdout_messages(rows, calib_max_messages, calib_frac, seed):
+    """(train_rows, calib_rows): whole messages held out for temperature calibration.
+
+    Holding out (message, question) items instead would leave a calibration message's other 47 questions in
+    training, so the encoder would have trained on the exact text it is calibrated on. laya's split_calibration is
+    generic over a sequence and depends only on the seed and the length, so every rank holds out the same messages.
+    """
+    return lt.split_calibration(rows, calib_max_messages, calib_frac, seed)
+
+
 def train_loop_per_worker(c):
     ctx = ray.train.get_context()
     rank, world = ctx.get_world_rank(), ctx.get_world_size()
@@ -84,19 +95,27 @@ def train_loop_per_worker(c):
     head_max_len = c["head_max_len"] or cfg.get("head_max_len", 192)
     parallel = uses_parallel_layout(cfg)
 
-    # Every rank builds the same items and the same calibration split (fixed seed),
+    # Every rank builds the same items and the same message-level calibration split (fixed seed),
     # then takes its own shard of the training items.
     rows = read_verified_rows(c["data"], c["data_sha256"])
     if c["max_messages"]:
         random.Random(c["seed"]).shuffle(rows)
         rows = rows[:c["max_messages"]]
-    items, skipped = lt.items_from_rows(tok, rows, max_len, head_max_len)
-    train_items, calib_items = lt.split_calibration(items, c["calib_max"], c["calib_frac"], c["seed"])
+    train_rows, calib_rows = holdout_messages(rows, c["calib_max_messages"], c["calib_frac"], c["seed"])
+    train_items, skipped = lt.items_from_rows(tok, train_rows, max_len, head_max_len)
+    calib_items, calib_skipped = lt.items_from_rows(tok, calib_rows, max_len, head_max_len)
+    if not calib_items:                                     # same rows on every rank, so every rank stops here
+        raise SystemExit("no calibration items from %d messages (--calib-frac %s); use more messages"
+                         % (len(rows), c["calib_frac"]))
+    calib_uids = "\n".join(r.get("uid", "") for r in calib_rows).encode("utf-8")
+    holdout = {"unit": "message", "n_messages": len(calib_rows), "n_items": len(calib_items),
+               "uids_sha256": hashlib.sha256(calib_uids).hexdigest()}
     per_rank = len(train_items) // world                    # equal shards keep DDP collectives in step
     shard = train_items[rank * per_rank:(rank + 1) * per_rank]
     if rank == 0:
-        print("items %d (skipped %r) -> train %d (%d per rank x %d), calibration %d"
-              % (len(items), skipped, len(train_items), per_rank, world, len(calib_items)), flush=True)
+        print("messages %d -> train %d, calibration %d | items train %d (skipped %r, %d per rank x %d), "
+              "calibration %d (skipped %r)" % (len(rows), len(train_rows), len(calib_rows), len(train_items), skipped,
+                                               per_rank, world, len(calib_items), calib_skipped), flush=True)
 
     amp = device.type == "cuda"
     if c["freeze_encoder"]:
@@ -167,7 +186,7 @@ def train_loop_per_worker(c):
             ray.train.report(metrics)
         last = metrics
 
-    # Calibrate on the held-out slice and publish the final checkpoint from rank 0.
+    # Calibrate on the held-out messages and publish the final checkpoint from rank 0.
     del opt, sched, scaler, params, groups                 # free optimizer state before the eval pass
     import gc; gc.collect()
     if rank == 0:
@@ -182,7 +201,7 @@ def train_loop_per_worker(c):
         if fitted["temperature_by_options"]:
             out_cfg["temperature_by_options"] = fitted["temperature_by_options"]
         # driver-local absolute paths (data, base_dir) stay out of the checkpoint; provenance identifies both
-        ray_cfg = {k: v for k, v in c.items() if k not in ("data", "base_dir")}
+        ray_cfg = dict({k: v for k, v in c.items() if k not in ("data", "base_dir")}, calibration_holdout=holdout)
         out_cfg["training"] = dict(out_cfg.get("training") or {}, ray_train=ray_cfg,
                                    laya_train_calibration=calibration)
         with tempfile.TemporaryDirectory() as d:
@@ -211,8 +230,9 @@ def main():
     ap.add_argument("--max-len", type=int, default=None)
     ap.add_argument("--head-max-len", type=int, default=None)
     ap.add_argument("--max-messages", type=int, default=None, help="subsample messages (smoke tests)")
-    ap.add_argument("--calib-max", type=int, default=400)
-    ap.add_argument("--calib-frac", type=float, default=0.1)
+    ap.add_argument("--calib-max-messages", type=int, default=40,
+                    help="messages held out (all their questions) for temperature calibration")
+    ap.add_argument("--calib-frac", type=float, default=0.1, help="cap on the held-out share of messages")
     ap.add_argument("--calib-batch", type=int, default=16)
     ap.add_argument("--object-store-gb", type=float, default=None)
     ap.add_argument("--seed", type=int, default=0)
@@ -239,7 +259,8 @@ def main():
            "micro_batch": a.micro_batch, "grad_accum": a.grad_accum, "encoder_lr": a.encoder_lr,
            "head_lr": a.head_lr, "loss": a.loss, "freeze_encoder": a.freeze_encoder,
            "shuffle_options": a.shuffle_options, "max_len": a.max_len, "head_max_len": a.head_max_len,
-           "max_messages": a.max_messages, "calib_max": a.calib_max, "calib_frac": a.calib_frac, "calib_batch": a.calib_batch,
+           "max_messages": a.max_messages, "calib_max_messages": a.calib_max_messages,
+           "calib_frac": a.calib_frac, "calib_batch": a.calib_batch,
            "seed": a.seed,
            "provenance": {"data": entry["path"], "data_role": entry["role"], "data_sha256": entry["sha256"],
                           "manifest": repo_relpath(a.manifest), "manifest_sha256": sha256_file(a.manifest),
