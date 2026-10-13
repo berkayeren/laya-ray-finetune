@@ -21,6 +21,7 @@ usage:
   python ray_train.py ... --workers 2 --freeze-encoder --max-messages 100   # CPU smoke test
 """
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -44,6 +45,22 @@ from pilot.data import verify_split_file
 from pilot.weights import fetch
 
 
+def read_verified_rows(path, sha256):
+    """Rows of a JSONL split whose bytes must hash to `sha256` (the driver-verified digest); parses those same bytes.
+
+    Workers re-check because they read the file minutes after the driver verified it (fetch, ray.init).
+    Line handling matches laya.train.read_jsonl (strip; skip blank and '#' lines).
+    """
+    with open(path, "rb") as f:
+        raw = f.read()
+    have = hashlib.sha256(raw).hexdigest()
+    if have != sha256:
+        raise SystemExit("%s sha256 %s != %s verified on the driver; regenerate with `make data`"
+                         % (path, have, sha256))
+    lines = (l.strip() for l in raw.decode("utf-8").splitlines())
+    return [json.loads(l) for l in lines if l and not l.startswith("#")]
+
+
 def train_loop_per_worker(c):
     ctx = ray.train.get_context()
     rank, world = ctx.get_world_rank(), ctx.get_world_size()
@@ -57,7 +74,7 @@ def train_loop_per_worker(c):
 
     # Every rank builds the same items and the same calibration split (fixed seed),
     # then takes its own shard of the training items.
-    rows = lt.read_jsonl(c["data"])
+    rows = read_verified_rows(c["data"], c["data_sha256"])
     if c["max_messages"]:
         random.Random(c["seed"]).shuffle(rows)
         rows = rows[:c["max_messages"]]
@@ -188,7 +205,7 @@ def main():
     ap.add_argument("--storage", default=os.path.abspath("ray_results"),
                     help="Ray run storage; use a shared path (NFS/S3) on a multi-node cluster")
     a = ap.parse_args()
-    verify_split_file(a.data, roles=("train",))          # hard-fail before ray.init (D-03)
+    entry = verify_split_file(a.data, roles=("train",))  # hard-fail before ray.init (D-03)
     if a.base == "multilingual":                            # download once on the driver, pinned + verified (ENV-02)
         base_dir = fetch(pins.LAYA)
     elif os.path.isfile(os.path.join(a.base, "rl_agent_config.json")):
@@ -198,7 +215,7 @@ def main():
 
     ray.init(ignore_reinit_error=True, include_dashboard=False,
              object_store_memory=int(a.object_store_gb * 1024**3) if a.object_store_gb else None)
-    cfg = {"data": os.path.abspath(a.data), "base_dir": base_dir, "epochs": a.epochs,
+    cfg = {"data": os.path.abspath(a.data), "data_sha256": entry["sha256"], "base_dir": base_dir, "epochs": a.epochs,
            "micro_batch": a.micro_batch, "grad_accum": a.grad_accum, "encoder_lr": a.encoder_lr,
            "head_lr": a.head_lr, "loss": a.loss, "freeze_encoder": a.freeze_encoder,
            "shuffle_options": a.shuffle_options, "max_len": a.max_len, "head_max_len": a.head_max_len,

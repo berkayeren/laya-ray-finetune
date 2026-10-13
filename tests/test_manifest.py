@@ -83,6 +83,15 @@ def test_committed_manifest_passes_the_current_code_check():
         pilot.data.check_manifest_current(json.load(f), pilot.data.DEFAULT_MANIFEST)
 
 
+def test_verify_hashes_the_bytes_the_caller_parses(tmp_path, synthetic_raw):
+    out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
+    path = _split(out_dir, "test")
+    raw = _read(path)
+    assert pilot.data.verify_split_file(path, manifest_path=manifest_path, data=raw)["role"] == "test"
+    with pytest.raises(SystemExit, match="sha256"):                # file on disk is intact, the parsed bytes are not
+        pilot.data.verify_split_file(path, manifest_path=manifest_path, data=raw + b"x")
+
+
 def test_unregistered_identical_copy_is_refused(tmp_path, synthetic_raw):
     out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
     copy = os.path.join(out_dir, "splits", "test_copy.jsonl")

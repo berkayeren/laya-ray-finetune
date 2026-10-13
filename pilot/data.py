@@ -254,8 +254,12 @@ def check_manifest_current(m, manifest_path):
                          % (manifest_path, ", ".join(stale)))
 
 
-def _registered(path, manifest_path, section, what):
-    """Shared lookup: `path` must be registered under manifest[section] (safe relative paths) with a matching sha256."""
+def _registered(path, manifest_path, section, what, data=None):
+    """Shared lookup: `path` must be registered under manifest[section] (safe relative paths) with a matching sha256.
+
+    data: the bytes the caller already read from `path` and will parse; they are hashed instead of re-reading the
+    file, so what is verified is exactly what is consumed (no verify-then-reread window).
+    """
     if not os.path.isfile(manifest_path):
         raise SystemExit("manifest %s not found; run `make data`" % manifest_path)
     with open(manifest_path, encoding="utf-8") as f:
@@ -273,7 +277,7 @@ def _registered(path, manifest_path, section, what):
     entry = next((e for _, e in sorted(entries.items()) if e["path"] == rel), None)
     if entry is None:
         raise SystemExit("%s is not %s registered in %s; run `make data`" % (path, what, manifest_path))
-    have = sha256_file(path)
+    have = sha256_file(path) if data is None else sha256_bytes(data)
     if have != entry["sha256"]:
         raise SystemExit("%s sha256 %s != %s registered in %s; regenerate with `make data`"
                          % (path, have, entry["sha256"], manifest_path))
@@ -285,9 +289,12 @@ def verify_audit_file(path, manifest_path=DEFAULT_MANIFEST):
     return _registered(path, manifest_path, "audit", "an audit file")
 
 
-def verify_split_file(path, manifest_path=DEFAULT_MANIFEST, roles=None):
-    """Hard-fail unless `path` is a split registered in the manifest with a matching sha256 (and allowed role)."""
-    entry = _registered(path, manifest_path, "splits", "a split")
+def verify_split_file(path, manifest_path=DEFAULT_MANIFEST, roles=None, data=None):
+    """Hard-fail unless `path` is a split registered in the manifest with a matching sha256 (and allowed role).
+
+    Pass data=<bytes read from path> to verify the exact bytes you are about to parse (see _registered).
+    """
+    entry = _registered(path, manifest_path, "splits", "a split", data=data)
     if roles is not None and entry["role"] not in roles:
         raise SystemExit("%s has role %s; expected one of %s" % (path, entry["role"], ", ".join(roles)))
     return entry

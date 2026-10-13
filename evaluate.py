@@ -99,10 +99,11 @@ def main():
     a = ap.parse_args()
     # hard-fail on a tampered/unregistered split (D-03); train splits and the OOD probe (scored only on
     # ood_scoring_tags, a Phase 3 scorer) are refused
-    verify_split_file(a.test_jsonl, roles=("test", "val"))
+    with open(a.test_jsonl, "rb") as f:
+        raw = f.read()                                       # hash and parse the same bytes (no reread window)
+    verify_split_file(a.test_jsonl, roles=("test", "val"), data=raw)
 
-    with open(a.test_jsonl, encoding="utf-8") as f:
-        cases = [json.loads(l) for l in f]
+    cases = [json.loads(l) for l in raw.decode("utf-8").splitlines()]
     random.Random(0).shuffle(cases)
     cases = cases[:a.n] if a.n else cases
     if not cases:
