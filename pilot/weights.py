@@ -33,6 +33,19 @@ def fetch(pin):
     return d
 
 
+def identity(checkpoint):
+    """Provenance of a model for reports: the Laya pin for 'multilingual', else the sha256 of a local checkpoint dir's
+    weights and config (None for a file the dir lacks). Hashes only; never downloads or loads anything."""
+    if checkpoint == "multilingual":
+        return {"repo": pins.LAYA["repo"], "subfolder": pins.LAYA["subfolder"], "revision": pins.LAYA["revision"],
+                "model_sha256": pins.LAYA["sha256"]["model.safetensors"]}
+    out = {"local": True}
+    for key, rel in (("model_sha256", "model.safetensors"), ("config_sha256", "rl_agent_config.json")):
+        path = os.path.join(checkpoint, rel)
+        out[key] = sha256_file(path) if os.path.isfile(path) else None
+    return out
+
+
 def check_revision(pin):
     infos = snapshot_download(pin["repo"], revision=pin["revision"], allow_patterns=pin["allow_patterns"],
                               dry_run=True)

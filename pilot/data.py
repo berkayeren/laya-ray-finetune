@@ -56,6 +56,12 @@ def sha256_bytes(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def repo_relpath(path):
+    """`path` relative to the repo root when inside the repo (reports then carry no local home dir), else as given."""
+    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(REPO_ROOT))
+    return path if rel == ".." or rel.startswith(".." + os.sep) else rel.replace(os.sep, "/")
+
+
 def questions_sha256():
     return sha256_bytes(json.dumps(QUESTIONS, ensure_ascii=False, sort_keys=True).encode("utf-8"))
 

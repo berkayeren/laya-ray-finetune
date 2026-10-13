@@ -45,8 +45,8 @@ from laya.calibrate import fit_temperature_map
 from laya.common import collate_items, uses_parallel_layout
 
 from pilot import pins
-from pilot.data import DEFAULT_MANIFEST, verify_split_file
-from pilot.weights import fetch
+from pilot.data import DEFAULT_MANIFEST, repo_relpath, sha256_file, verify_split_file
+from pilot.weights import fetch, identity
 
 
 def read_verified_rows(path, sha256):
@@ -181,7 +181,9 @@ def train_loop_per_worker(c):
         out_cfg.pop("temperature_by_options", None)       # inherited buckets would mask the new fit
         if fitted["temperature_by_options"]:
             out_cfg["temperature_by_options"] = fitted["temperature_by_options"]
-        out_cfg["training"] = dict(out_cfg.get("training") or {}, ray_train=dict(c, base_dir=None),
+        # driver-local absolute paths (data, base_dir) stay out of the checkpoint; provenance identifies both
+        ray_cfg = {k: v for k, v in c.items() if k not in ("data", "base_dir")}
+        out_cfg["training"] = dict(out_cfg.get("training") or {}, ray_train=ray_cfg,
                                    laya_train_calibration=calibration)
         with tempfile.TemporaryDirectory() as d:
             lt.save_checkpoint(inner, tok, out_cfg, d)
@@ -235,7 +237,10 @@ def main():
            "head_lr": a.head_lr, "loss": a.loss, "freeze_encoder": a.freeze_encoder,
            "shuffle_options": a.shuffle_options, "max_len": a.max_len, "head_max_len": a.head_max_len,
            "max_messages": a.max_messages, "calib_max": a.calib_max, "calib_frac": a.calib_frac, "calib_batch": a.calib_batch,
-           "seed": a.seed}
+           "seed": a.seed,
+           "provenance": {"data": entry["path"], "data_role": entry["role"], "data_sha256": entry["sha256"],
+                          "manifest": repo_relpath(a.manifest), "manifest_sha256": sha256_file(a.manifest),
+                          "base": identity("multilingual" if a.base == "multilingual" else base_dir)}}
     trainer = TorchTrainer(
         train_loop_per_worker, train_loop_config=cfg,
         scaling_config=ScalingConfig(num_workers=a.workers, use_gpu=a.gpu,

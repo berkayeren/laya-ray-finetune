@@ -21,7 +21,9 @@ import random
 import time
 
 from intents import INTENTS, QUESTIONS
-from pilot.data import DEFAULT_MANIFEST, verify_split_file
+from pilot.data import DEFAULT_MANIFEST, repo_relpath, sha256_file, verify_split_file
+
+SUBSET_SEED = 0                                             # fixed shuffle before --n, so subsets are comparable
 
 
 def load_agent(checkpoint, device):
@@ -106,16 +108,21 @@ def main():
     # ood_scoring_tags, a Phase 3 scorer) are refused
     with open(a.test_jsonl, "rb") as f:
         raw = f.read()                                       # hash and parse the same bytes (no reread window)
-    verify_split_file(a.test_jsonl, manifest_path=a.manifest, roles=("test", "val"), data=raw)
+    entry = verify_split_file(a.test_jsonl, manifest_path=a.manifest, roles=("test", "val"), data=raw)
 
     cases = [json.loads(l) for l in raw.decode("utf-8").splitlines()]
-    random.Random(0).shuffle(cases)
+    random.Random(SUBSET_SEED).shuffle(cases)
     cases = cases[:a.n] if a.n else cases
     if not cases:
         raise SystemExit("%s: no messages to evaluate (--n %r)" % (a.test_jsonl, a.n))
     items = [{"uid": c["uid"], "text": c["state"]} for c in cases]
     gold = {c["uid"]: {k for k, v in c["expected"].items() if v} for c in cases}
     device = "cuda" if a.gpus_per_worker else "cpu"
+    from pilot.weights import identity
+    provenance = {"checkpoint_identity": identity(a.checkpoint),
+                  "split": {"path": entry["path"], "sha256": entry["sha256"], "role": entry["role"]},
+                  "manifest": {"path": repo_relpath(a.manifest), "sha256": sha256_file(a.manifest)},
+                  "n_subset": a.n, "subset_seed": SUBSET_SEED}
 
     t0 = time.time()
     if a.workers == 0:
@@ -137,7 +144,7 @@ def main():
 
     by_uid = {r["uid"]: json.loads(r["probs"]) for r in rows}
     uids = [c["uid"] for c in cases]
-    report = {"checkpoint": a.checkpoint, "workers": a.workers, "seconds": round(secs, 1),
+    report = {"checkpoint": a.checkpoint, **provenance, "workers": a.workers, "seconds": round(secs, 1),
               "sec_per_msg": round(secs / len(cases), 2),
               **metrics([gold[u] for u in uids], [by_uid[u] for u in uids])}
     print(json.dumps(report, ensure_ascii=False, indent=2))

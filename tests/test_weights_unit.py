@@ -159,3 +159,19 @@ def test_load_agent_refuses_non_dir_without_importing_laya():
     assert r.returncode == 0, r.stderr
     assert "REFUSED" in r.stdout and "local Laya checkpoint dir" in r.stdout, r.stdout
     assert "LAYA_NOT_IMPORTED" in r.stdout, r.stdout
+
+
+def test_identity_of_the_pinned_checkpoint_is_the_pin():
+    got = pilot.weights.identity("multilingual")
+    assert got["revision"] == pins.LAYA["revision"] and got["model_sha256"] == pins.LAYA["sha256"]["model.safetensors"]
+
+
+def test_identity_of_a_local_checkpoint_hashes_its_files(tmp_path):
+    (tmp_path / "model.safetensors").write_bytes(b"weights")
+    got = pilot.weights.identity(str(tmp_path))
+    assert got == {"local": True, "model_sha256": hashlib.sha256(b"weights").hexdigest(), "config_sha256": None}
+
+
+def test_repo_relpath_hides_the_local_checkout_path(tmp_path):
+    assert pilot.data.repo_relpath(pilot.data.DEFAULT_MANIFEST) == "data/splits.json"
+    assert pilot.data.repo_relpath(str(tmp_path / "x.json")) == str(tmp_path / "x.json")
