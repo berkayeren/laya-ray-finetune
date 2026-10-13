@@ -19,13 +19,16 @@ Everything installs from one hash-locked `requirements.txt` (Python 3.12, binary
 make env                    # python3.12 venv in .venv + pip install --require-hashes --only-binary :all:
 source .venv/bin/activate
 make data                   # download the pinned dataset, verify it, write data/splits/ and data/audit/
-make test                   # pytest -m "not mps" in the ACTIVE interpreter (fails if it is not the locked env)
+make test                   # offline pytest in the ACTIVE interpreter (fails if it is not the locked env)
+make test-all               # also the network tests: pinned dataset + ~1.1 GB pinned weights on first run
 make weights                # optional: prefetch and verify the pinned Laya + BERTurk weights (~1.1 GB)
 ```
 
 `make test` runs in whatever interpreter is active and prints `sys.executable` first. A test
 fails, listing every mismatched package, if that interpreter does not match the lock. Use
-`make test PYTHON=.venv/bin/python` to run without activating the venv.
+`make test PYTHON=.venv/bin/python` to run without activating the venv. `make test` is offline
+(`pytest -m "not mps and not data and not weights"`); `make test-all` (`pytest -m "not mps"`) adds
+the `data` and `weights` tests, which download the pinned dataset and weights on first run.
 
 Maintainer commands: `make lock` regenerates `requirements.txt` from `pyproject.toml` (universal,
 hashed, resolved as of a frozen date), and `make lock-check` proves the lock still resolves

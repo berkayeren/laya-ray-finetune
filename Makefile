@@ -2,14 +2,15 @@
 #   make env         create a python3.12 venv ($(VENV)) and install the hash lock binary-only
 #   make lock        regenerate requirements.txt from pyproject.toml (universal, hashed, frozen date)
 #   make lock-check  prove the lock resolves binary-only with hashes on Linux x86_64/aarch64 and mac arm64
-#   make test        run pytest in the ACTIVE interpreter (no venv management)
+#   make test        offline pytest in the ACTIVE interpreter (no venv management, no downloads)
+#   make test-all    also the network tests: pinned dataset (data) and ~1.1 GB pinned weights (weights)
 PYTHON ?= python
 UV ?= uv
 PY312 ?= python3.12
 VENV ?= .venv
 LOCK_DATE := 2026-10-13T00:00:00Z
 
-.PHONY: env lock lock-check data weights test test-unit clean-data
+.PHONY: env lock lock-check data weights test test-all test-unit clean-data
 
 env:
 	$(PY312) -m venv $(VENV)
@@ -31,6 +32,10 @@ weights:
 	$(PYTHON) -m pilot.weights
 
 test:
+	$(PYTHON) -c "import sys; print('pytest in', sys.executable)"
+	$(PYTHON) -m pytest -m "not mps and not data and not weights"
+
+test-all:
 	$(PYTHON) -c "import sys; print('pytest in', sys.executable)"
 	$(PYTHON) -m pytest -m "not mps"
 
