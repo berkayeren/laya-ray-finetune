@@ -68,8 +68,12 @@ def _flags(rows, key):
                                              if r["fold"] in (14, 15) and key(r["text"]) in selection_train)}
 
 
-def build_audit(banking_rows, hotel_rows):
-    """Raw rows ({"uid", "text", "gold", "fold", ...}) -> (audit dict, dup_flags dict). Pure; nothing is dropped."""
+def build_audit(banking_rows, hotel_rows, flag_rows=None):
+    """Raw rows ({"uid", "text", "gold", "fold", ...}) -> (audit dict, dup_flags dict). Pure; nothing is dropped.
+
+    The audit describes every raw row. The dup flags are computed over flag_rows (default: banking_rows), the banking
+    rows actually written to the splits, so a later dedup row never names a uid that is not in any split.
+    """
     seen = {}
     for r in list(banking_rows) + list(hotel_rows):
         seen[r["uid"]] = seen.get(r["uid"], 0) + 1
@@ -83,7 +87,8 @@ def build_audit(banking_rows, hotel_rows):
         "hotels_in_banking": {"uids": sorted(r["uid"] for r in hotel_rows if normalize_tr(r["text"]) in banking_norm)},
     }
     audit["hotels_in_banking"]["n"] = len(audit["hotels_in_banking"]["uids"])
-    flags = {"normalized": _flags(banking_rows, normalize_tr), "exact": _flags(banking_rows, _exact)}
+    flag_rows = banking_rows if flag_rows is None else flag_rows
+    flags = {"normalized": _flags(flag_rows, normalize_tr), "exact": _flags(flag_rows, _exact)}
     return audit, flags
 
 

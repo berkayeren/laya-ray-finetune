@@ -9,7 +9,7 @@ import pytest
 
 import pilot.data
 from pilot.audit import build_audit, normalize_tr, render_markdown
-from conftest import prepared
+from conftest import add_raw_row, prepared
 
 pytestmark = pytest.mark.unit
 
@@ -166,3 +166,21 @@ def test_verify_audit_file_refuses_unsafe_manifest_path(tmp_path, synthetic_raw)
         json.dump(m, f)
     with pytest.raises(SystemExit, match="unsafe path"):
         pilot.data.verify_audit_file(os.path.join(out_dir, "audit", "audit.json"), manifest_path=manifest_path)
+
+
+@pytest.mark.parametrize("include_no_intent", [True, False], ids=["default", "no_intent_off"])
+def test_dup_flags_name_only_uids_that_are_in_the_splits(tmp_path, synthetic_raw, include_no_intent):
+    root, raw_sha256 = synthetic_raw()
+    # a no-intent test row whose text is in final_train: flagged by default, absent from every split when off
+    add_raw_row(root, raw_sha256, "banking", 19, {"uid": "bank_19_9", "text": "Kartım kayboldu 0"})
+    out_dir = str(tmp_path / "data")
+    pilot.data.prepare(root, out_dir, raw_sha256, include_no_intent=include_no_intent)
+    in_splits = set()
+    for name in ("selection_train", "val", "final_train", "test"):
+        with open(os.path.join(out_dir, "splits", "%s.jsonl" % name), encoding="utf-8") as f:
+            in_splits |= {json.loads(l)["uid"] for l in f}
+    flags = _load(out_dir, "audit/dup_flags.json")
+    flagged = {u for kind in flags.values() for uids in kind.values() for u in uids}
+    assert flagged <= in_splits, flagged - in_splits
+    assert ("bank_19_9" in flags["exact"]["test_in_final_train"]) is include_no_intent
+    assert "bank_19_9" in json.dumps(_load(out_dir, "audit/audit.json"))   # the audit still reports every raw row

@@ -177,9 +177,11 @@ def build(root, raw_sha256, include_no_intent=True, ood_tags=None):
     if ood_tags is not None and sorted(ood_tags) != derived:
         raise SystemExit("banking-only tag set drifted: derived %s, pinned %s" % (derived, sorted(ood_tags)))
     files, entries = {}, {}
-    # D-12/D-13: the audit reads the raw rows and only reports; split membership below never depends on it
-    audit, flags = build_audit([r for key in sorted(cache) if key[0] == "banking" for r in cache[key]],
-                               [r for key in sorted(cache) if key[0] == "hotels" for r in cache[key]])
+    # D-12/D-13: the audit reads the raw rows and only reports; split membership below never depends on it.
+    # The dup flags cover only the banking rows the splits keep (no-intent rows drop out with include_no_intent off).
+    banking = [r for key in sorted(cache) if key[0] == "banking" for r in cache[key]]
+    audit, flags = build_audit(banking, [r for key in sorted(cache) if key[0] == "hotels" for r in cache[key]],
+                               flag_rows=[r for r in banking if include_no_intent or r["gold"]])
     files["audit/audit.json"] = _json_bytes(audit)
     files["audit/audit.md"] = render_markdown(audit, flags).encode("utf-8")
     files["audit/dup_flags.json"] = _json_bytes(flags)
