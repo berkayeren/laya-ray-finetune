@@ -60,3 +60,16 @@ def test_majority_tag_refuses_a_tampered_train_split(tmp_path, synthetic_raw):
         f.write(b"\n")
     with pytest.raises(SystemExit, match="sha256"):
         evaluate.majority_tag(manifest_path, "test")
+
+
+class _FakeAgent:
+    def predict_batch(self, texts, questions, batch_size, sort_by_length):
+        return [{"answers": {k: {"noul": 0.5} for k in questions}} for _ in texts]
+
+
+def test_predictor_times_only_scoring_per_row():
+    p = evaluate.Predictor.__new__(evaluate.Predictor)        # skip the checkpoint load
+    p.agent = _FakeAgent()
+    b = p({"uid": ["a", "b"], "text": ["x", "y"]})
+    assert len(b["probs"]) == 2 and len(b["infer_secs"]) == 2
+    assert all(t >= 0 for t in b["infer_secs"]) and b["infer_secs"][0] == b["infer_secs"][1]

@@ -49,8 +49,11 @@ class Predictor:
         self.agent = load_agent(checkpoint, device)
 
     def __call__(self, batch):
+        t = time.perf_counter()                             # scoring only: load/digest time is not per-message cost
         results = self.agent.predict_batch(list(batch["text"]), QUESTIONS, batch_size=8, sort_by_length=True)
         batch["probs"] = [json.dumps({k: a["noul"] for k, a in r["answers"].items()}) for r in results]
+        dt = time.perf_counter() - t
+        batch["infer_secs"] = [dt / len(results)] * len(results)   # each row's share of its batch
         return batch
 
 
@@ -153,14 +156,18 @@ def main():
                   "manifest": {"path": repo_relpath(a.manifest), "sha256": sha256_file(a.manifest)},
                   "n_subset": a.n, "subset_seed": SUBSET_SEED, "majority_source": majority_source}
 
+    load_secs = None                                        # Ray path: actors load inside the timed region
+    if a.workers == 0:
+        t0 = time.time()
+        p = Predictor(a.checkpoint, device)                 # fetch + digest + model build, timed separately
+        load_secs = time.time() - t0
     t0 = time.time()
     if a.workers == 0:
-        p = Predictor(a.checkpoint, device)
         rows = []
         for i in range(0, len(items), 16):
             chunk = items[i:i + 16]
             b = p({"uid": [x["uid"] for x in chunk], "text": [x["text"] for x in chunk]})
-            rows += [{"uid": u, "probs": s} for u, s in zip(b["uid"], b["probs"])]
+            rows += [{"uid": u, "probs": s, "infer_secs": t} for u, s, t in zip(b["uid"], b["probs"], b["infer_secs"])]
     else:
         import ray
         ray.init(ignore_reinit_error=True, log_to_driver=False)
@@ -170,11 +177,15 @@ def main():
             batch_format="numpy")
         rows = ds.take_all()
     secs = time.time() - t0
+    infer_secs = sum(float(r["infer_secs"]) for r in rows)   # summed over actors: compute time, not wall time
 
     by_uid = {r["uid"]: json.loads(r["probs"]) for r in rows}
     uids = [c["uid"] for c in cases]
+    # seconds = wall time of the scoring pass (includes actor start-up and model loads on the Ray path);
+    # sec_per_msg = model scoring time per message, excluding checkpoint fetch, digest checks and model build
     report = {"checkpoint": a.checkpoint, **provenance, "workers": a.workers, "seconds": round(secs, 1),
-              "sec_per_msg": round(secs / len(cases), 2),
+              "load_seconds": None if load_secs is None else round(load_secs, 1),
+              "inference_seconds": round(infer_secs, 1), "sec_per_msg": round(infer_secs / len(cases), 3),
               **metrics([gold[u] for u in uids], [by_uid[u] for u in uids], majority)}
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if a.out:
