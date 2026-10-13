@@ -96,6 +96,30 @@
     "how_long",
     "repeat"
   ],
+  "ood_scoring_tags": [
+    "account",
+    "appointment",
+    "arrival",
+    "balance",
+    "business",
+    "card",
+    "cheque",
+    "contactless",
+    "credit",
+    "current",
+    "debit",
+    "direct_debit",
+    "fees_interests",
+    "international",
+    "loan",
+    "mortgage",
+    "overdraft",
+    "pin",
+    "savings",
+    "standing_order",
+    "transfer_payment_deposit",
+    "withdrawal"
+  ],
   "options": {
     "include_no_intent": true
   },
@@ -131,6 +155,38 @@
       "role": "train",
       "sha256": "01c7274d7c9b0368191e7b2f42972b4025e08ef43e1fae14625777f09873024c",
       "uids_sha256": "12d3ef8a9767f35b737a43fcb9ac56bf058edbda06a3fe090606abf673f2d5ae"
+    },
+    "hotels_probe": {
+      "domain": "hotels",
+      "folds": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19
+      ],
+      "gold_valid_tags": "ood_scoring_tags",
+      "n_messages": 1009,
+      "n_no_intent": 274,
+      "path": "splits/hotels_probe.jsonl",
+      "role": "ood_probe",
+      "sha256": "6120dadef8443e5a3ea5688cc470b816e840fbc0f0a1b28c3931c2e18a09eea7",
+      "uids_sha256": "78172fd5dbd5666c2d722ab8174f7d8fe625412e1a2e662a9c47682af0c8e647"
     },
     "selection_train": {
       "domain": "banking",
@@ -185,5 +241,9 @@
       "sha256": "95f5cfe5ae5921a5d9a28c285efbcbce5d6bf63c081e7f05bf8d4d2df36ad5bc",
       "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89"
     }
+  },
+  "uid_check": {
+    "n_rows": 3080,
+    "n_unique": 3080
   }
 }
