@@ -1,0 +1,563 @@
+{
+  "schema": "mps_spike/1",
+  "meta": {
+    "generated_utc": "2026-10-13T21:53:48Z",
+    "split": {
+      "path": "splits/selection_train.jsonl",
+      "sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+      "n_messages": 1450
+    },
+    "manifest": {
+      "path": "data/splits.json",
+      "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103"
+    },
+    "model": {
+      "repo": "convaiinnovations/laya",
+      "subfolder": "multilingual",
+      "revision": "7b928d828b7b0e022f929d9bd2e44165aa270148",
+      "model_sha256": "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204"
+    },
+    "versions": {
+      "torch": "2.14.1",
+      "ray": "2.59.0",
+      "laya": "0.4.6",
+      "transformers": "5.19.0",
+      "psutil": "7.2.2",
+      "python": "3.12.7"
+    },
+    "platform": {
+      "macos": "26.6.2",
+      "machine": "arm64",
+      "total_memory_bytes": 17179869184
+    },
+    "protocol": {
+      "grid": "4x128,4x256,8x128,8x256",
+      "warmup_steps": 5,
+      "measured_steps": 20,
+      "effective_batch": 32,
+      "seed": 0,
+      "cpus": 4
+    },
+    "policy": {
+      "min_available_gib": 7.0,
+      "swap_rerun": true,
+      "tie_tolerance": 0.05
+    },
+    "projection_basis": "real neg8 median optimizer step x optimizer steps per epoch over all 1,450 selection_train messages at effective batch 32; conservative: ray_train holds out up to 40 messages for calibration and Phase 5 calibrates on val (LAYA-05)",
+    "hparams": {
+      "encoder_lr": 2.5e-05,
+      "head_lr": 0.0001,
+      "weight_decay": 0.01,
+      "clip_grad_norm": 1.0,
+      "loss": "rlcd",
+      "sigma": 0.4,
+      "adamw_foreach": false,
+      "adamw_fused": false
+    },
+    "laya_internals": [
+      "lt.load_checkpoint",
+      "lt.items_from_rows",
+      "lt.encode_item",
+      "lt._forward",
+      "lt.rlcd_loss",
+      "laya.common.collate_items",
+      "laya.common.uses_parallel_layout",
+      "laya.common.DecisionModel",
+      "DecisionModel.head_checkpointing",
+      "encoder.gradient_checkpointing_enable",
+      "encoder.embeddings.tok_embeddings"
+    ]
+  },
+  "configs": [
+    {
+      "micro_batch": 4,
+      "max_len": 128,
+      "grad_accum": 8,
+      "attempts": [
+        {
+          "purpose": "initial",
+          "micro_batch": 4,
+          "max_len": 128,
+          "grad_accum": 8,
+          "rung": "none",
+          "fallback": "0",
+          "device": "mps",
+          "status": "ok",
+          "param_device": "mps",
+          "ddp_wrapped": false,
+          "world_size": 1,
+          "trainable_params": 321908995,
+          "total_params": 321908995,
+          "n_neg8_items": 14854,
+          "items_skipped": {},
+          "torch_threads": 4,
+          "regimes": {
+            "padded": {
+              "warmup_steps": 5,
+              "times": {
+                "n": 20,
+                "median_s": 3.1274,
+                "p90_s": 3.1544,
+                "min_s": 3.1192,
+                "max_s": 3.1933
+              },
+              "batch_shape": [
+                4,
+                128
+              ],
+              "swap_used_before": 846200832,
+              "swap_used_after": 846200832,
+              "swap_delta_bytes": 0,
+              "swapouts_delta": 0
+            },
+            "real": {
+              "warmup_steps": 5,
+              "times": {
+                "n": 20,
+                "median_s": 2.0382,
+                "p90_s": 2.094,
+                "min_s": 1.9614,
+                "max_s": 2.4007
+              },
+              "batch_shape": [
+                4,
+                48
+              ],
+              "swap_used_before": 846200832,
+              "swap_used_after": 846200832,
+              "swap_delta_bytes": 0,
+              "swapouts_delta": 0
+            }
+          },
+          "peak_memory_bytes": 9444884480,
+          "peak_driver_allocated_bytes": 8423161856,
+          "peak_rss_bytes": 1021722624,
+          "recommended_max_memory_bytes": 12713115648,
+          "final_loss": 0.1590575873851776,
+          "fallback_ops": [],
+          "other_warnings": 0,
+          "env_seen": {
+            "PYTORCH_ENABLE_MPS_FALLBACK": "0",
+            "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "1.0",
+            "PYTORCH_MPS_LOW_WATERMARK_RATIO": "1.0",
+            "OMP_NUM_THREADS": "4",
+            "TOKENIZERS_PARALLELISM": "false",
+            "HF_HUB_OFFLINE": "1"
+          },
+          "transport": "checkpoint"
+        }
+      ],
+      "standing": 0
+    },
+    {
+      "micro_batch": 4,
+      "max_len": 256,
+      "grad_accum": 8,
+      "attempts": [
+        {
+          "purpose": "initial",
+          "micro_batch": 4,
+          "max_len": 256,
+          "grad_accum": 8,
+          "rung": "none",
+          "fallback": "0",
+          "device": "mps",
+          "status": "ok",
+          "param_device": "mps",
+          "ddp_wrapped": false,
+          "world_size": 1,
+          "trainable_params": 321908995,
+          "total_params": 321908995,
+          "n_neg8_items": 14854,
+          "items_skipped": {},
+          "torch_threads": 4,
+          "regimes": {
+            "padded": {
+              "warmup_steps": 5,
+              "times": {
+                "n": 20,
+                "median_s": 5.7602,
+                "p90_s": 5.785,
+                "min_s": 5.5521,
+                "max_s": 5.863
+              },
+              "batch_shape": [
+                4,
+                256
+              ],
+              "swap_used_before": 846200832,
+              "swap_used_after": 846200832,
+              "swap_delta_bytes": 0,
+              "swapouts_delta": 0
+            },
+            "real": {
+              "warmup_steps": 5,
+              "times": {
+                "n": 20,
+                "median_s": 2.0341,
+                "p90_s": 2.0964,
+                "min_s": 1.9528,
+                "max_s": 2.1375
+              },
+              "batch_shape": [
+                4,
+                48
+              ],
+              "swap_used_before": 846200832,
+              "swap_used_after": 846200832,
+              "swap_delta_bytes": 0,
+              "swapouts_delta": 0
+            }
+          },
+          "peak_memory_bytes": 9494396928,
+          "peak_driver_allocated_bytes": 8467202048,
+          "peak_rss_bytes": 1027194880,
+          "recommended_max_memory_bytes": 12713115648,
+          "final_loss": 0.2415233701467514,
+          "fallback_ops": [],
+          "other_warnings": 0,
+          "env_seen": {
+            "PYTORCH_ENABLE_MPS_FALLBACK": "0",
+            "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "1.0",
+            "PYTORCH_MPS_LOW_WATERMARK_RATIO": "1.0",
+            "OMP_NUM_THREADS": "4",
+            "TOKENIZERS_PARALLELISM": "false",
+            "HF_HUB_OFFLINE": "1"
+          },
+          "transport": "checkpoint"
+        }
+      ],
+      "standing": 0
+    },
+    {
+      "micro_batch": 8,
+      "max_len": 128,
+      "grad_accum": 4,
+      "attempts": [
+        {
+          "purpose": "initial",
+          "micro_batch": 8,
+          "max_len": 128,
+          "grad_accum": 4,
+          "rung": "none",
+          "fallback": "0",
+          "device": "mps",
+          "status": "ok",
+          "param_device": "mps",
+          "ddp_wrapped": false,
+          "world_size": 1,
+          "trainable_params": 321908995,
+          "total_params": 321908995,
+          "n_neg8_items": 14854,
+          "items_skipped": {},
+          "torch_threads": 4,
+          "regimes": {
+            "padded": {
+              "warmup_steps": 5,
+              "times": {
+                "n": 20,
+                "median_s": 3.0431,
+                "p90_s": 3.1041,
+                "min_s": 2.9295,
+                "max_s": 3.1142
+              },
+              "batch_shape": [
+                8,
+                128
+              ],
+              "swap_used_before": 846200832,
+              "swap_used_after": 846200832,
+              "swap_delta_bytes": 0,
+              "swapouts_delta": 0
+            },
+            "real": {
+              "warmup_steps": 5,
+              "times": {
+                "n": 20,
+                "median_s": 1.8491,
+                "p90_s": 1.8835,
+                "min_s": 1.7869,
+                "max_s": 1.9049
+              },
+              "batch_shape": [
+                8,
+                52
+              ],
+              "swap_used_before": 846200832,
+              "swap_used_after": 846200832,
+              "swap_delta_bytes": 0,
+              "swapouts_delta": 0
+            }
+          },
+          "peak_memory_bytes": 9401008128,
+          "peak_driver_allocated_bytes": 8390983680,
+          "peak_rss_bytes": 1010024448,
+          "recommended_max_memory_bytes": 12713115648,
+          "final_loss": 0.14470326900482178,
+          "fallback_ops": [],
+          "other_warnings": 0,
+          "env_seen": {
+            "PYTORCH_ENABLE_MPS_FALLBACK": "0",
+            "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "1.0",
+            "PYTORCH_MPS_LOW_WATERMARK_RATIO": "1.0",
+            "OMP_NUM_THREADS": "4",
+            "TOKENIZERS_PARALLELISM": "false",
+            "HF_HUB_OFFLINE": "1"
+          },
+          "transport": "checkpoint"
+        }
+      ],
+      "standing": 0
+    },
+    {
+      "micro_batch": 8,
+      "max_len": 256,
+      "grad_accum": 4,
+      "attempts": [
+        {
+          "purpose": "initial",
+          "micro_batch": 8,
+          "max_len": 256,
+          "grad_accum": 4,
+          "rung": "none",
+          "fallback": "0",
+          "device": "mps",
+          "status": "ok",
+          "param_device": "mps",
+          "ddp_wrapped": false,
+          "world_size": 1,
+          "trainable_params": 321908995,
+          "total_params": 321908995,
+          "n_neg8_items": 14854,
+          "items_skipped": {},
+          "torch_threads": 4,
+          "regimes": {
+            "padded": {
+              "warmup_steps": 5,
+              "times": {
+                "n": 20,
+                "median_s": 5.6026,
+                "p90_s": 5.6351,
+                "min_s": 5.5756,
+                "max_s": 5.6853
+              },
+              "batch_shape": [
+                8,
+                256
+              ],
+              "swap_used_before": 846200832,
+              "swap_used_after": 846200832,
+              "swap_delta_bytes": 0,
+              "swapouts_delta": 0
+            },
+            "real": {
+              "warmup_steps": 5,
+              "times": {
+                "n": 20,
+                "median_s": 1.8423,
+                "p90_s": 1.8792,
+                "min_s": 1.7585,
+                "max_s": 1.9136
+              },
+              "batch_shape": [
+                8,
+                52
+              ],
+              "swap_used_before": 846200832,
+              "swap_used_after": 846200832,
+              "swap_delta_bytes": 0,
+              "swapouts_delta": 0
+            }
+          },
+          "peak_memory_bytes": 9321365504,
+          "peak_driver_allocated_bytes": 7839432704,
+          "peak_rss_bytes": 1488535552,
+          "recommended_max_memory_bytes": 12713115648,
+          "final_loss": 0.019874881953001022,
+          "fallback_ops": [],
+          "other_warnings": 0,
+          "env_seen": {
+            "PYTORCH_ENABLE_MPS_FALLBACK": "0",
+            "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "1.0",
+            "PYTORCH_MPS_LOW_WATERMARK_RATIO": "1.0",
+            "OMP_NUM_THREADS": "4",
+            "TOKENIZERS_PARALLELISM": "false",
+            "HF_HUB_OFFLINE": "1"
+          },
+          "transport": "checkpoint"
+        }
+      ],
+      "standing": 0
+    }
+  ],
+  "preflight": {
+    "available_gib": 7.77,
+    "min_available_gib": 7.0,
+    "swap_used_bytes": [
+      846200832,
+      846200832
+    ],
+    "swap_grew_while_idle": false,
+    "swapouts": [
+      3168236,
+      3168236
+    ],
+    "swapouts_grew_while_idle": false,
+    "passed": true,
+    "override": false
+  },
+  "token_stats": {
+    "n_messages": 1450,
+    "n_items": 69600,
+    "pct_messages_over_128": 0.0,
+    "n_items_over_128": 0,
+    "pct_messages_over_256": 0.0,
+    "n_items_over_256": 0,
+    "seq_len": {
+      "min": 32,
+      "median": 47,
+      "p90": 57,
+      "p99": 67,
+      "max": 89
+    },
+    "state_len": {
+      "min": 1,
+      "median": 11,
+      "p90": 22,
+      "p99": 30,
+      "max": 45
+    }
+  },
+  "neg8": {
+    "n_items": 14854,
+    "n_positives": 3254,
+    "n_messages": 1450,
+    "seed": 0
+  },
+  "op_inventory": {
+    "entries": [],
+    "note": "strict PYTORCH_ENABLE_MPS_FALLBACK=0 pass raised nowhere: no op falls back from MPS"
+  },
+  "verdict": {
+    "result": "FITS",
+    "protocol_complete": true,
+    "chosen": {
+      "micro_batch": 8,
+      "max_len": 128,
+      "grad_accum": 4,
+      "rung": "none",
+      "fallback": "0",
+      "projected_epoch_s": 859.8,
+      "peak_memory_bytes": 9401008128
+    },
+    "kaggle_plan_required": false,
+    "tie_tolerance": 0.05,
+    "truncation_rule": "applied: 0.0% of messages over 128 tokens (<= 1%, max_len 128 is allowed)",
+    "untrusted_attempts": 0,
+    "per_config": [
+      {
+        "micro_batch": 4,
+        "max_len": 128,
+        "grad_accum": 8,
+        "rung": "none",
+        "fallback": "0",
+        "status": "ok",
+        "memory_ok": true,
+        "memory_reason": "completed 20 measured padded steps without OOM or swap growth",
+        "steps_per_epoch": 465,
+        "projected_epoch_s": 947.8,
+        "time_ok": true,
+        "device_ok": true,
+        "rung_ok": true,
+        "blocking_ops": [],
+        "peak_memory_bytes": 9444884480,
+        "fits": true,
+        "reason": "FITS: all gates passed"
+      },
+      {
+        "micro_batch": 4,
+        "max_len": 256,
+        "grad_accum": 8,
+        "rung": "none",
+        "fallback": "0",
+        "status": "ok",
+        "memory_ok": true,
+        "memory_reason": "completed 20 measured padded steps without OOM or swap growth",
+        "steps_per_epoch": 465,
+        "projected_epoch_s": 945.9,
+        "time_ok": true,
+        "device_ok": true,
+        "rung_ok": true,
+        "blocking_ops": [],
+        "peak_memory_bytes": 9494396928,
+        "fits": true,
+        "reason": "FITS: all gates passed"
+      },
+      {
+        "micro_batch": 8,
+        "max_len": 128,
+        "grad_accum": 4,
+        "rung": "none",
+        "fallback": "0",
+        "status": "ok",
+        "memory_ok": true,
+        "memory_reason": "completed 20 measured padded steps without OOM or swap growth",
+        "steps_per_epoch": 465,
+        "projected_epoch_s": 859.8,
+        "time_ok": true,
+        "device_ok": true,
+        "rung_ok": true,
+        "blocking_ops": [],
+        "peak_memory_bytes": 9401008128,
+        "fits": true,
+        "reason": "FITS: all gates passed"
+      },
+      {
+        "micro_batch": 8,
+        "max_len": 256,
+        "grad_accum": 4,
+        "rung": "none",
+        "fallback": "0",
+        "status": "ok",
+        "memory_ok": true,
+        "memory_reason": "completed 20 measured padded steps without OOM or swap growth",
+        "steps_per_epoch": 465,
+        "projected_epoch_s": 856.7,
+        "time_ok": true,
+        "device_ok": true,
+        "rung_ok": true,
+        "blocking_ops": [],
+        "peak_memory_bytes": 9321365504,
+        "fits": true,
+        "reason": "FITS: all gates passed"
+      }
+    ],
+    "rules": {
+      "D-01": "memory: every measured padded step completes on MPS with no OOM and no system swap growth",
+      "D-02": "time: real-batch median optimizer step x optimizer steps per neg8 epoch <= 7200 s",
+      "D-03": "choice: fastest projected epoch among FITS configs with max_len >= 128; configs within the tie tolerance resolve to the smaller max_len, then the larger micro-batch; > 1% of messages over 128 tokens prefers a passing max_len 256",
+      "D-04": "rung: only a full-encoder or embeddings-frozen run on MPS counts; a frozen encoder never FITS",
+      "D-08": "preference: rung none configs win over embeddings_frozen ones (embedding freeze is a fallback rung only)"
+    }
+  },
+  "ray_overhead": {
+    "basis": "chosen",
+    "micro_batch": 8,
+    "max_len": 128,
+    "rung": "none",
+    "fallback": "0",
+    "ray": {
+      "padded_median_s": 3.0431,
+      "real_median_s": 1.8491,
+      "torch_threads": 4
+    },
+    "inprocess": {
+      "status": "ok",
+      "padded_median_s": 2.9866,
+      "real_median_s": 1.8319,
+      "torch_threads": 4
+    },
+    "delta_padded_pct": 1.9,
+    "delta_real_pct": 0.9
+  }
+}
