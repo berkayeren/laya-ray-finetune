@@ -120,6 +120,9 @@ def train_loop_per_worker(c):
     holdout = {"unit": "message", "n_messages": len(calib_rows), "n_items": len(calib_items),
                "uids_sha256": hashlib.sha256(calib_uids).hexdigest()}
     per_rank = len(train_items) // world                    # equal shards keep DDP collectives in step
+    if per_rank == 0:                                       # same on every rank: never publish an untrained "fine-tune"
+        raise SystemExit("no training items per rank (%d items, %d workers); use more messages or fewer workers"
+                         % (len(train_items), world))
     shard = train_items[rank * per_rank:(rank + 1) * per_rank]
     if rank == 0:
         print("messages %d -> train %d, calibration %d | items train %d (skipped %r, %d per rank x %d), "
@@ -250,6 +253,8 @@ def main():
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST,
                     help="splits.json to verify --data against (default: the committed data/splits.json)")
     a = ap.parse_args()
+    if a.epochs < 1:
+        ap.error("--epochs must be at least 1")
     entry = verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))   # before ray.init (D-03)
     if os.path.exists(a.out) and (not os.path.isdir(a.out) or os.listdir(a.out)):
         # copying over old files could leave a mixed checkpoint that laya.load still accepts

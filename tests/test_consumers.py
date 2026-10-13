@@ -123,3 +123,10 @@ def test_ray_train_refuses_non_empty_out_before_ray(tmp_repo):
 def test_evaluate_refuses_non_positive_n(tmp_repo, n):
     r = _run(tmp_repo, "evaluate.py", "data/splits/test.jsonl", "--workers", "0", "--n", n)
     assert r.returncode == 2 and "--n must be a positive" in r.stderr, r.stderr
+
+
+def test_ray_train_refuses_zero_epochs_before_ray(tmp_repo):
+    r = _run(tmp_repo, "ray_train.py", "--data", "data/splits/selection_train.jsonl", "--out", "ckpt",
+             "--base", str(tmp_repo / "no_such_base"), "--workers", "1", "--epochs", "0")
+    assert r.returncode == 2 and "--epochs must be at least 1" in r.stderr, r.stderr
+    assert not (tmp_repo / "ray_results").exists()
