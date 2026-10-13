@@ -150,11 +150,13 @@ or abstention-threshold fitting — use `evaluate.py` for held-out metrics.
 
 **Legacy protocol:** these numbers predate the frozen splits. They used the old test split
 without no-intent rows and only 100 test messages, so they are not comparable to results on
-`data/splits/test.jsonl`. The reports are in `results/`.
+`data/splits/test.jsonl`. The metric definitions changed too: the majority row used a
+test-derived tag and the old top-1 denominator; current reports take the tag from the matching
+training split and compute top-1 over messages with gold tags. The reports are in `results/`.
 
 | run (100 test messages) | micro-F1 @0.5 | macro-F1 @0.5 | top-1 hit | tags predicted / gold |
 |---|---|---|---|---|
-| always predict the most common tag | — | — | 0.26 | — |
+| always predict the most common tag (legacy: test-derived tag) | — | — | 0.26 | — |
 | zero-shot `laya-multilingual` | 0.186 | 0.187 | 0.21 | 4.7 / 2.29 |
 | Ray smoke fine-tune (120 msgs, head only, 2 epochs, CPU) | 0.194 | 0.168 | 0.24 | 3.6 / 2.29 |
 
