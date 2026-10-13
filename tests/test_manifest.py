@@ -220,6 +220,8 @@ def test_interrupted_write_leaves_no_partial_file(tmp_path, synthetic_raw, monke
         if os.path.exists(dest):
             assert _read(dest) == data, "%s is not a complete file" % rel
     assert sum(os.path.exists(os.path.join(out_dir, rel)) for rel in files) == 1
+    leftovers = [os.path.join(d, n) for d, _, names in os.walk(out_dir) for n in names if n.endswith(".tmp")]
+    assert leftovers == [], leftovers
 
 
 def test_manifest_hygiene(tmp_path, synthetic_raw):

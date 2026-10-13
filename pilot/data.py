@@ -226,11 +226,21 @@ def serialize_manifest(manifest):
 def write_atomic(path, data):
     # per-process temp name: a concurrent run never truncates the temp file another run is about to rename
     tmp = "%s.%d.tmp" % (path, os.getpid())
-    with open(tmp, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):                             # never leave a stray temp file next to the outputs
+            os.unlink(tmp)
+        raise
+    fd = os.open(os.path.dirname(os.path.abspath(path)), os.O_RDONLY)
+    try:
+        os.fsync(fd)                                        # make the rename itself durable
+    finally:
+        os.close(fd)
 
 
 def prepare(raw_root, out_dir, raw_sha256, rewrite_manifest=False, include_no_intent=True, ood_tags=None):
