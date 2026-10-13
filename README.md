@@ -72,7 +72,9 @@ harness.
 `false` on it, but hotel messages genuinely carry the 26 generic tags banking shares (`affirm`,
 `thank`, …). So only the 22 banking-only tags, recorded as `ood_scoring_tags` in the manifest,
 are valid gold when scoring it. `prepare_data.py` re-derives that set from the data and fails if it
-drifts from `pilot/pins.py`.
+drifts from `pilot/pins.py`. Its manifest `n_no_intent` (274) counts messages with no *hotel* intent
+in the raw data; every probe row has all 48 banking tags `false`, so it is not a banking no-intent
+count like the other splits' `n_no_intent`.
 
 **The duplicate audit is report-only.** `data/audit/audit.md` (with `audit.json` and
 `dup_flags.json`) lists exact and Turkish-normalized duplicate messages, conflicting labels, and

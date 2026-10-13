@@ -217,6 +217,8 @@ def build(root, raw_sha256, include_no_intent=True, ood_tags=None):
         files[rel] = data
         entries[s["name"]] = {
             "path": rel, "domain": s["domain"], "folds": list(s["folds"]), "role": s["role"],
+            # hotels_probe: n_no_intent counts rows with no raw HOTELS intent (every probe row is banking-negative),
+            # not banking no-intent rows; kept under this key so the frozen manifest bytes do not change
             "n_messages": len(rows), "n_no_intent": sum(not r["gold"] for r in rows),
             "sha256": sha256_bytes(data),
             "uids_sha256": sha256_bytes("\n".join(r["uid"] for r in rows).encode("utf-8")),
