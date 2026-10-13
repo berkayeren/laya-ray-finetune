@@ -11,13 +11,14 @@ dup_flags.json let a later phase report a dedup sensitivity row. Identical norma
 is listed with both label sets and never fails (D-13). Duplicate uids hard-fail prep in pilot.data before this runs
 (D-14); the audit repeats the uid count as evidence.
 
-Partitions for the cross-split measure are the disjoint fold ranges selection_train 0-13, val 14-15, test 16-19.
-Every group and uid list is sorted so the output bytes are deterministic. Stdlib only.
+Partitions for the cross-split measure (the disjoint banking splits selection_train, val, test) and the dup-flag
+pairs (val vs selection_train, test vs final_train) are passed in by pilot.data.audit_layout(), derived from
+pilot.data.SPLITS, so fold boundaries live in one place. Every group and uid list is sorted so the output bytes are
+deterministic. Stdlib only.
 """
 import unicodedata
 
 NORMALIZATION = "D-11: NFC, I->ı and İ->i, lowercase, punctuation->space, collapsed whitespace"
-PARTITIONS = (("selection_train", range(0, 14)), ("val", range(14, 16)), ("test", range(16, 20)))
 _TR_UPPER = str.maketrans({"I": "ı", "İ": "i"})
 
 
@@ -31,14 +32,14 @@ def _exact(text):
     return text
 
 
-def partition(fold):
-    for name, folds in PARTITIONS:
+def partition(fold, partitions):
+    for name, folds in partitions:
         if fold in folds:
             return name
-    raise ValueError("fold %r outside 0-19" % (fold,))
+    raise ValueError("fold %r outside every audit partition" % (fold,))
 
 
-def _groups(rows, key):
+def _groups(rows, key, partitions):
     by = {}
     for r in rows:
         by.setdefault(key(r["text"]), []).append(r)
@@ -50,7 +51,7 @@ def _groups(rows, key):
         for r in members:
             sets.setdefault(tuple(r["gold"]), []).append(r["uid"])
         groups.append({"text": k, "uids": sorted(r["uid"] for r in members),
-                       "partitions": sorted({partition(r["fold"]) for r in members}),
+                       "partitions": sorted({partition(r["fold"], partitions) for r in members}),
                        "label_sets": [{"labels": list(labels), "uids": sorted(uids)}
                                       for labels, uids in sorted(sets.items())]})
     groups.sort(key=lambda g: (g["text"], g["uids"][0]))
@@ -60,16 +61,20 @@ def _groups(rows, key):
             "groups": groups}
 
 
-def _flags(rows, key):
-    final_train = {key(r["text"]) for r in rows if r["fold"] <= 15}
-    selection_train = {key(r["text"]) for r in rows if r["fold"] <= 13}
-    return {"test_in_final_train": sorted(r["uid"] for r in rows if r["fold"] >= 16 and key(r["text"]) in final_train),
-            "val_in_selection_train": sorted(r["uid"] for r in rows
-                                             if r["fold"] in (14, 15) and key(r["text"]) in selection_train)}
+def _flags(rows, key, flag_pairs):
+    """{"<eval>_in_<train>": uids of eval-split rows whose text occurs in the train split} for each flag pair."""
+    out = {}
+    for ev, ev_folds, tr, tr_folds in flag_pairs:
+        seen = {key(r["text"]) for r in rows if r["fold"] in tr_folds}
+        out["%s_in_%s" % (ev, tr)] = sorted(r["uid"] for r in rows if r["fold"] in ev_folds and key(r["text"]) in seen)
+    return out
 
 
-def build_audit(banking_rows, hotel_rows, flag_rows=None):
+def build_audit(banking_rows, hotel_rows, partitions, flag_pairs, flag_rows=None):
     """Raw rows ({"uid", "text", "gold", "fold", ...}) -> (audit dict, dup_flags dict). Pure; nothing is dropped.
+
+    partitions: ((name, folds), ...) disjoint; flag_pairs: ((eval name, eval folds, train name, train folds), ...);
+    both from pilot.data.audit_layout().
 
     The audit describes every raw row. The dup flags are computed over flag_rows (default: banking_rows), the banking
     rows actually written to the splits, so a later dedup row never names a uid that is not in any split.
@@ -82,13 +87,13 @@ def build_audit(banking_rows, hotel_rows, flag_rows=None):
         "normalization": NORMALIZATION,
         "uids": {"n_rows": sum(seen.values()), "n_unique": len(seen),
                  "duplicates": sorted(u for u, n in seen.items() if n > 1)},
-        "exact": _groups(banking_rows, _exact),
-        "normalized": _groups(banking_rows, normalize_tr),
+        "exact": _groups(banking_rows, _exact, partitions),
+        "normalized": _groups(banking_rows, normalize_tr, partitions),
         "hotels_in_banking": {"uids": sorted(r["uid"] for r in hotel_rows if normalize_tr(r["text"]) in banking_norm)},
     }
     audit["hotels_in_banking"]["n"] = len(audit["hotels_in_banking"]["uids"])
     flag_rows = banking_rows if flag_rows is None else flag_rows
-    flags = {"normalized": _flags(flag_rows, normalize_tr), "exact": _flags(flag_rows, _exact)}
+    flags = {"normalized": _flags(flag_rows, normalize_tr, flag_pairs), "exact": _flags(flag_rows, _exact, flag_pairs)}
     return audit, flags
 
 

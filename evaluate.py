@@ -22,13 +22,13 @@ import random
 import time
 
 from intents import INTENTS, QUESTIONS
-from pilot.data import (DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file,
-                        verify_split_file)
+from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, manifest_is_committed, parse_jsonl, repo_relpath,
+                        sha256_file, verify_split_file)
 
 SUBSET_SEED = 0                                             # fixed shuffle before --n, so subsets are comparable
 # the majority baseline's tag comes from the training split the evaluated role's models are trained on, never from
-# the labels being scored (val -> model selection runs, test -> final models; see pilot.data.SPLITS)
-MAJORITY_SOURCE = {"val": "selection_train", "test": "final_train"}
+# the labels being scored (val -> model selection runs, test -> final models; see pilot.data.TRAINED_ON)
+MAJORITY_SOURCE = TRAINED_ON
 
 
 def load_agent(checkpoint, device):

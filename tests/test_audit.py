@@ -52,7 +52,7 @@ def test_normalize_tr_does_not_merge_acronym_case_variants():
 
 
 def test_synthetic_groups_exact_vs_normalized(tmp_path, synthetic_raw):
-    audit, _ = build_audit(*_raw_rows(synthetic_raw()[0]))
+    audit, _ = build_audit(*_raw_rows(synthetic_raw()[0]), **pilot.data.audit_layout())
     norm = {g["text"]: g for g in audit["normalized"]["groups"]}
     assert norm["evet"]["uids"] == ["bank_0_1", "bank_16_1"]
     assert norm["evet"]["partitions"] == ["selection_train", "test"]
@@ -93,7 +93,7 @@ def test_val_flag_uses_selection_train_only():
             {"uid": "bank_14_0", "text": "tamam.", "gold": [], "fold": 14},
             {"uid": "bank_15_0", "text": "Peki", "gold": [], "fold": 15},
             {"uid": "bank_16_0", "text": "peki", "gold": [], "fold": 16}]
-    audit, flags = build_audit(rows, [])
+    audit, flags = build_audit(rows, [], **pilot.data.audit_layout())
     assert flags["normalized"] == {"test_in_final_train": ["bank_16_0"], "val_in_selection_train": ["bank_14_0"]}
     assert flags["exact"] == {"test_in_final_train": [], "val_in_selection_train": []}
     assert [g["partitions"] for g in audit["normalized"]["groups"]] == [["test", "val"], ["selection_train", "val"]]
@@ -125,7 +125,7 @@ def test_audit_outputs_are_byte_identical_across_builds(tmp_path, synthetic_raw)
 
 
 def test_render_markdown_is_pure(tmp_path, synthetic_raw):
-    audit, flags = build_audit(*_raw_rows(synthetic_raw()[0]))
+    audit, flags = build_audit(*_raw_rows(synthetic_raw()[0]), **pilot.data.audit_layout())
     assert render_markdown(audit, flags) == render_markdown(json.loads(json.dumps(audit)), flags)
 
 
@@ -184,3 +184,11 @@ def test_dup_flags_name_only_uids_that_are_in_the_splits(tmp_path, synthetic_raw
     assert flagged <= in_splits, flagged - in_splits
     assert ("bank_19_9" in flags["exact"]["test_in_final_train"]) is include_no_intent
     assert "bank_19_9" in json.dumps(_load(out_dir, "audit/audit.json"))   # the audit still reports every raw row
+
+
+def test_audit_layout_is_derived_from_splits():
+    layout = pilot.data.audit_layout()
+    assert layout["partitions"] == (("selection_train", tuple(range(14))), ("val", (14, 15)),
+                                    ("test", (16, 17, 18, 19)))
+    assert layout["flag_pairs"] == (("test", (16, 17, 18, 19), "final_train", tuple(range(16))),
+                                    ("val", (14, 15), "selection_train", tuple(range(14))))

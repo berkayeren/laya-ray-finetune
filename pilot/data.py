@@ -37,6 +37,24 @@ SPLITS = [
     {"name": "test", "domain": "banking", "folds": [16, 17, 18, 19], "role": "test"},
     {"name": "hotels_probe", "domain": "hotels", "folds": list(range(20)), "role": "ood_probe"},
 ]
+# the training split whose models each evaluation split scores (val -> model selection runs, test -> final models)
+TRAINED_ON = {"val": "selection_train", "test": "final_train"}
+
+
+def audit_layout():
+    """Audit partitions and dup-flag pairs derived from SPLITS, the only place fold boundaries are written down.
+
+    partitions: the banking splits in SPLITS order that do not overlap an earlier one (selection_train, val, test);
+    flag_pairs: (evaluation split, its folds, the TRAINED_ON split, its folds).
+    """
+    by = {s["name"]: s for s in SPLITS}
+    partitions, used = [], set()
+    for s in SPLITS:
+        if s["domain"] == "banking" and not used & set(s["folds"]):
+            partitions.append((s["name"], tuple(s["folds"])))
+            used |= set(s["folds"])
+    pairs = tuple((ev, tuple(by[ev]["folds"]), tr, tuple(by[tr]["folds"])) for ev, tr in sorted(TRAINED_ON.items()))
+    return {"partitions": tuple(partitions), "flag_pairs": pairs}
 
 
 AUDIT_FILES = {"audit_json": "audit/audit.json", "audit_md": "audit/audit.md", "dup_flags_json": "audit/dup_flags.json"}
@@ -181,7 +199,7 @@ def build(root, raw_sha256, include_no_intent=True, ood_tags=None):
     # The dup flags cover only the banking rows the splits keep (no-intent rows drop out with include_no_intent off).
     banking = [r for key in sorted(cache) if key[0] == "banking" for r in cache[key]]
     audit, flags = build_audit(banking, [r for key in sorted(cache) if key[0] == "hotels" for r in cache[key]],
-                               flag_rows=[r for r in banking if include_no_intent or r["gold"]])
+                               flag_rows=[r for r in banking if include_no_intent or r["gold"]], **audit_layout())
     files["audit/audit.json"] = _json_bytes(audit)
     files["audit/audit.md"] = render_markdown(audit, flags).encode("utf-8")
     files["audit/dup_flags.json"] = _json_bytes(flags)
