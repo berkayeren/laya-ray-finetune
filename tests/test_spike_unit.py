@@ -633,3 +633,48 @@ def test_markdown_has_token_lengths_section():
     md = spike.render_markdown(report)
     assert md.index("## Token lengths (D-09b)") < md.index("## Verdict")
     assert "0.00% of messages over 128 tokens" in md and "14854 neg8 items" in md
+
+
+# ---- quiet-machine preflight (plan 02-04, RESEARCH Pitfall 2): refuse to measure when memory is short ----
+
+def test_preflight_refuses_below_threshold():
+    swap, outs = [3.0e9, 3.0e9], [10, 10]
+    low = spike.preflight(4.4 * 2**30, swap, outs, 9.0)
+    assert low["passed"] is False and low["available_gib"] == 4.4 and low["override"] is False
+    assert spike.preflight(9.0 * 2**30, swap, outs, 9.0)["passed"] is True
+    forced = spike.preflight(4.4 * 2**30, swap, outs, 0)
+    assert forced["passed"] is True and forced["override"] is True and forced["min_available_gib"] == 0
+    assert spike.MIN_AVAILABLE_GIB == 9.0
+
+
+def test_preflight_flags_swap_growth_while_idle():
+    grew = spike.preflight(10 * 2**30, [3.0e9, 3.2e9], [10, 12], 9.0)
+    assert grew["swap_grew_while_idle"] is True and grew["swapouts_grew_while_idle"] is True
+    assert grew["swap_used_bytes"] == [3.0e9, 3.2e9] and grew["swapouts"] == [10, 12]
+    flat = spike.preflight(10 * 2**30, [3.0e9, 3.0e9], [10, 10], 9.0)
+    assert flat["swap_grew_while_idle"] is False and flat["swapouts_grew_while_idle"] is False
+    assert spike.preflight(10 * 2**30, [3.0e9, 3.0e9], [None, 10], 9.0)["swapouts_grew_while_idle"] is None
+
+
+def test_orchestrator_refuses_busy_machine_before_any_child(tmp_path):
+    out = tmp_path / "out"
+    r = subprocess.run([sys.executable, "mps_spike.py", "--min-available-gib", "100000", "--out", str(out),
+                        "--storage", str(tmp_path / "ray")], cwd=REPO_ROOT, capture_output=True, text=True, timeout=60)
+    assert r.returncode != 0, r.stdout
+    assert "GiB available" in r.stderr and "--min-available-gib 0" in r.stderr, r.stderr
+    assert not (out / "mps_spike.json").exists()
+    neg = subprocess.run([sys.executable, "mps_spike.py", "--min-available-gib", "-1"], cwd=REPO_ROOT,
+                         capture_output=True, text=True, timeout=60)
+    assert neg.returncode == 2 and "--min-available-gib" in neg.stderr, neg.stderr
+
+
+def test_markdown_preflight_section_and_busy_machine_flag():
+    quiet = _report(FULL, [config(at_epoch(4, 128, 3000.0))])
+    quiet["preflight"] = spike.preflight(12 * 2**30, [3.0e9, 3.0e9], [10, 10], 9.0)
+    md = spike.render_markdown(quiet)
+    assert md.index("## Preflight") < md.index("## Verdict") and "Busy-machine run" not in md
+    for pf in (spike.preflight(4.0 * 2**30, [3.0e9, 3.0e9], [10, 10], 0),
+               spike.preflight(12 * 2**30, [3.0e9, 3.1e9], [10, 10], 9.0)):
+        busy = dict(quiet, preflight=pf)
+        md = spike.render_markdown(busy)
+        assert md.index("Busy-machine run: background memory pressure was present") < md.index("## Verdict")
