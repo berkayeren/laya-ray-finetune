@@ -678,3 +678,96 @@ def test_markdown_preflight_section_and_busy_machine_flag():
         busy = dict(quiet, preflight=pf)
         md = spike.render_markdown(busy)
         assert md.index("Busy-machine run: background memory pressure was present") < md.index("## Verdict")
+
+
+# ---- attempt chain (plan 02-05, D-08): one swap-only rerun, then the embeddings-frozen rung; D-09a overhead ----
+
+POLICY = {"measured_steps": 20, "swap_rerun": True}
+
+
+def chained(status, rung="none", fallback="0", purpose="initial", swap=0):
+    """An attempt of the 4x128 config with the given outcome, shaped like mps_spike's worker payload."""
+    if status == "not_implemented":
+        return dict(strict_raised(4, 128, rung=rung), fallback=fallback, purpose=purpose)
+    a = dict(attempt(4, 128, rung=rung, swap=swap, fallback=fallback), purpose=purpose)
+    if status == "oom":
+        a.update(status="oom", oom={"regime": "padded", "stage": "measured", "step": 3, "message": OOM_TEXT})
+    elif status == "crashed":
+        a = {"status": "crashed", "returncode": -9, "purpose": purpose, "micro_batch": 4, "max_len": 128,
+             "grad_accum": 8, "rung": rung, "fallback": fallback, "device": "mps"}
+    elif status == "error":
+        a.update(status="error", error="ValueError: boom")
+    return a
+
+
+def test_followup_swap_rerun_once_then_rung():
+    first = chained("ok", swap=1)
+    assert spike.followup([first], POLICY) == {"rung": "none", "fallback": "0", "purpose": "swap_rerun"}
+    again = chained("ok", purpose="swap_rerun", swap=1)
+    assert spike.followup([first, again], POLICY) == {"rung": "embeddings_frozen", "fallback": "0",
+                                                       "purpose": "rung_embeddings_frozen"}
+    assert spike.followup([first], dict(POLICY, swap_rerun=False))["rung"] == "embeddings_frozen"
+    # a swap rerun that ran clean stands: the chain ends on it
+    assert spike.followup([first, chained("ok", purpose="swap_rerun")], POLICY) is None
+    # an attempt that stopped short of the measured steps is a memory failure, never a swap rerun
+    short = dict(first, regimes=dict(first["regimes"], padded=dict(first["regimes"]["padded"], times=_times(19, 1.0))))
+    assert spike.followup([short], POLICY)["purpose"] == "rung_embeddings_frozen"
+
+
+def test_followup_oom_and_crash_go_to_embeddings_frozen():
+    for status in ("oom", "crashed"):
+        assert spike.followup([chained(status)], POLICY) == {"rung": "embeddings_frozen", "fallback": "0",
+                                                             "purpose": "rung_embeddings_frozen"}, status
+    chain = [chained("oom"), chained("oom", rung="embeddings_frozen", purpose="rung_embeddings_frozen")]
+    assert spike.followup(chain, POLICY) is None
+
+
+def test_followup_keeps_fallback_setting_on_the_rung():
+    chain = [chained("not_implemented"), chained("oom", fallback="1", purpose="op_inventory")]
+    assert spike.followup(chain, POLICY) == {"rung": "embeddings_frozen", "fallback": "1",
+                                             "purpose": "rung_embeddings_frozen"}
+
+
+def test_followup_error_or_passing_attempt_ends_chain():
+    assert spike.followup([chained("error")], POLICY) is None
+    assert spike.followup([chained("ok")], POLICY) is None
+    assert spike.followup([chained("ok", rung="embeddings_frozen")], POLICY) is None
+
+
+def test_followup_never_leaves_allowed_rungs():
+    outcomes = ("ok", "ok_swap", "oom", "crashed", "not_implemented")
+    ends = []
+
+    def drive(chain, policy):
+        nxt = spike.followup(chain, policy)
+        if nxt is None:
+            ends.append(len(chain))
+            return
+        assert nxt["rung"] in spike.RUNGS and nxt["fallback"] in ("0", "1"), nxt
+        assert len(chain) < 5, [(a["rung"], a["fallback"], a["purpose"], a["status"]) for a in chain]
+        for o in outcomes:
+            # a fallback attempt never raises NotImplementedError, and a swap rerun repeats an op path that
+            # already completed every step, so neither can return not_implemented
+            if o == "not_implemented" and (nxt["fallback"] == "1" or nxt["purpose"] == "swap_rerun"):
+                continue
+            a = chained("ok" if o == "ok_swap" else o, rung=nxt["rung"], fallback=nxt["fallback"],
+                        purpose=nxt["purpose"], swap=1 if o == "ok_swap" else 0)
+            drive(chain + [a], policy)
+
+    for policy in (POLICY, dict(POLICY, swap_rerun=False)):
+        for o in outcomes:
+            drive([chained("ok" if o == "ok_swap" else o, swap=1 if o == "ok_swap" else 0)], policy)
+    assert ends and max(ends) == 5
+
+
+def test_ray_overhead_delta():
+    ray = dict(attempt(4, 128, real_median=1.1), torch_threads=4)
+    inproc = dict(attempt(4, 128, real_median=1.0), torch_threads=4)
+    o = spike.ray_overhead(ray, inproc, "chosen")
+    assert (o["basis"], o["micro_batch"], o["max_len"], o["rung"], o["fallback"]) == ("chosen", 4, 128, "none", "0")
+    assert o["ray"]["real_median_s"] == 1.1 and o["inprocess"]["real_median_s"] == 1.0
+    assert o["delta_real_pct"] == 10.0 and o["delta_padded_pct"] == 0.0 and o["inprocess"]["status"] == "ok"
+    gone = spike.ray_overhead(ray, {"status": "crashed", "returncode": -9}, "reference")
+    assert gone["basis"] == "reference" and gone["inprocess"]["status"] == "crashed"
+    assert gone["delta_real_pct"] is None and gone["delta_padded_pct"] is None
+    assert gone["inprocess"]["real_median_s"] is None and gone["ray"]["real_median_s"] == 1.1
