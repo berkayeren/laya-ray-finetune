@@ -258,3 +258,104 @@ def test_flag_off_refuses_to_overwrite_a_default_manifest(tmp_path, synthetic_ra
     with pytest.raises(SystemExit, match="refusing to overwrite"):
         pilot.data.prepare(root, out_dir, raw_sha256, include_no_intent=False)
     assert {p: _read(p) for p in before} == before
+
+
+# --- HOTELS out-of-domain probe (DATA-05, D-08, D-09) ---------------------------------------------------------
+
+def _raw_uids(root, domain, fold):
+    with open(os.path.join(root, "turkish", domain, "fold%d.json" % fold), encoding="utf-8") as f:
+        return [r["uid"] for r in json.load(f)]
+
+
+def test_hotels_probe_holds_every_raw_hotel_row_all_false_in_fold_order(tmp_path, synthetic_raw):
+    root, raw_sha256 = synthetic_raw()
+    # reverse one hotel fold so "original in-fold order" and "sorted by uid" disagree
+    _edit_fold(root, raw_sha256, "turkish/hotels/fold7.json", lambda rows: rows.reverse())
+    out_dir = str(tmp_path / "data")
+    m = pilot.data.prepare(root, out_dir, raw_sha256)
+    assert _raw_uids(root, "hotels", 7) == ["hotel_7_1", "hotel_7_0"]
+    rows = _rows(out_dir, "hotels_probe")
+    assert [r["uid"] for r in rows] == [u for i in range(20) for u in _raw_uids(root, "hotels", i)]
+    assert "hotel_4_1" in [r["uid"] for r in rows]                       # no intents key, still present
+    for r in rows:
+        assert list(r) == ["state", "uid", "questions", "expected"]
+        assert r["questions"] == QUESTIONS and list(r["expected"]) == list(INTENTS)
+        assert not any(r["expected"].values()), r["uid"]                 # hotel_7_1 carries affirm, still false
+    e = m["splits"]["hotels_probe"]
+    assert (e["n_messages"], e["n_no_intent"], e["role"], e["domain"]) == (22, 1, "ood_probe", "hotels")
+    assert e["folds"] == list(range(20)) and e["gold_valid_tags"] == "ood_scoring_tags"
+    assert pilot.data.verify_split_file(_split(out_dir, "hotels_probe"),
+                                        manifest_path=os.path.join(out_dir, "splits.json")) == e
+
+
+def test_hotels_probe_ignores_the_no_intent_flag(tmp_path, synthetic_raw):
+    on_dir, _ = prepared(tmp_path, synthetic_raw, name="on")
+    root, raw_sha256 = synthetic_raw()
+    off_dir = str(tmp_path / "off")
+    m = pilot.data.prepare(root, off_dir, raw_sha256, include_no_intent=False)
+    assert _read(_split(off_dir, "hotels_probe")) == _read(_split(on_dir, "hotels_probe"))
+    assert "hotel_4_1" in _uids(off_dir, "hotels_probe")
+    assert (m["splits"]["hotels_probe"]["n_messages"], m["splits"]["hotels_probe"]["n_no_intent"]) == (22, 1)
+
+
+def test_hotels_text_equal_to_banking_text_stays_in_both(tmp_path, synthetic_raw):
+    out_dir, _ = prepared(tmp_path, synthetic_raw)
+    assert [r["uid"] for r in _rows(out_dir, "hotels_probe") if r["state"] == "Evet."] == ["hotel_7_1"]
+    assert [r["uid"] for r in _rows(out_dir, "selection_train") if r["state"] == "Evet."] == ["bank_0_1"]
+
+
+def test_hotels_probe_uids_disjoint_from_banking_and_refused_for_training(tmp_path, synthetic_raw):
+    out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
+    probe = set(_uids(out_dir, "hotels_probe"))
+    assert probe and all(u.startswith("hotel_") for u in probe)
+    for name in SPLIT_NAMES:
+        assert not probe & set(_uids(out_dir, name)), name
+    with pytest.raises(SystemExit, match="role ood_probe"):
+        pilot.data.verify_split_file(_split(out_dir, "hotels_probe"), manifest_path=manifest_path, roles=("train",))
+
+
+def test_hotels_ood_scoring_tags_rederived_and_drift_refused(tmp_path, synthetic_raw):
+    root, raw_sha256 = synthetic_raw()
+    derived = sorted(set(INTENTS) - {"affirm"})                          # synthetic hotel tags: booking, affirm
+    m = pilot.data.prepare(root, str(tmp_path / "a"), raw_sha256)
+    assert m["ood_scoring_tags"] == derived
+    m = pilot.data.prepare(root, str(tmp_path / "b"), raw_sha256, ood_tags=list(reversed(derived)))
+    assert m["ood_scoring_tags"] == derived
+    with pytest.raises(SystemExit, match="drifted"):
+        pilot.data.prepare(root, str(tmp_path / "c"), raw_sha256, ood_tags=derived[1:])
+    assert not os.path.exists(str(tmp_path / "c"))
+
+
+# --- uid uniqueness across banking + HOTELS (D-14) ------------------------------------------------------------
+
+def _assert_nothing_written(out_dir):
+    written = [os.path.join(d, f) for d, _, fs in os.walk(out_dir) for f in fs]
+    assert not os.path.exists(os.path.join(out_dir, "splits.json"))
+    assert not [p for p in written if p.endswith(".jsonl")], written
+
+
+def test_duplicate_uid_within_banking_hard_fails_before_any_write(tmp_path, synthetic_raw):
+    root, raw_sha256 = synthetic_raw(dup_uid="within")
+    out_dir = str(tmp_path / "data")
+    os.makedirs(out_dir)
+    with pytest.raises(SystemExit, match=r"bank_1_0 \(banking fold 1, banking fold 1\)"):
+        pilot.data.prepare(root, out_dir, raw_sha256)
+    _assert_nothing_written(out_dir)
+
+
+def test_duplicate_uid_across_banking_and_hotels_hard_fails_before_any_write(tmp_path, synthetic_raw):
+    root, raw_sha256 = synthetic_raw(dup_uid="cross")
+    out_dir = str(tmp_path / "data")
+    os.makedirs(out_dir)
+    with pytest.raises(SystemExit, match=r"bank_0_0 \(banking fold 0, hotels fold 0\)"):
+        pilot.data.prepare(root, out_dir, raw_sha256, include_no_intent=False)
+    _assert_nothing_written(out_dir)
+
+
+def test_uid_check_counts_each_raw_message_once(tmp_path, synthetic_raw):
+    _, manifest_path = prepared(tmp_path, synthetic_raw)
+    # 20 + 9 banking rows, 20 + 2 hotel rows; the overlapping derived splits are not double-counted
+    assert _manifest(manifest_path)["uid_check"] == {"n_rows": 51, "n_unique": 51}
+    rows = [{"uid": "x_%d" % i, "domain": "banking", "fold": 0} for i in range(12)] * 2
+    with pytest.raises(SystemExit, match=r"12 duplicate uid\(s\).* \.\.\.$"):            # lists at most 10
+        pilot.data.assert_unique_uids(rows)
