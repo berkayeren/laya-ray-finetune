@@ -79,6 +79,17 @@ def majority_tag(manifest_path, role):
     return name, max(INTENTS, key=counts.get)
 
 
+def provenance(checkpoint, manifest_path, entry, n_subset, majority_source):
+    """Report header: model identity, split, manifest and subset. Paths are repo-relative or hashed, never local."""
+    from pilot.weights import identity
+    return {"checkpoint": checkpoint if checkpoint == "multilingual" else repo_relpath(checkpoint),
+            "checkpoint_identity": identity(checkpoint),
+            "split": {"path": entry["path"], "sha256": entry["sha256"], "role": entry["role"]},
+            "manifest": {"path": repo_relpath(manifest_path), "sha256": sha256_file(manifest_path)},
+            "manifest_is_committed": manifest_is_committed(manifest_path),
+            "n_subset": n_subset, "subset_seed": SUBSET_SEED, "majority_source": majority_source}
+
+
 def f1(tp, fp, fn):
     p = tp / (tp + fp) if tp + fp else 0.0
     r = tp / (tp + fn) if tp + fn else 0.0
@@ -152,12 +163,7 @@ def main():
     items = [{"uid": c["uid"], "text": c["state"]} for c in cases]
     gold = {c["uid"]: {k for k, v in c["expected"].items() if v} for c in cases}
     device = "cuda" if a.gpus_per_worker else "cpu"
-    from pilot.weights import identity
-    provenance = {"checkpoint_identity": identity(a.checkpoint),
-                  "split": {"path": entry["path"], "sha256": entry["sha256"], "role": entry["role"]},
-                  "manifest": {"path": repo_relpath(a.manifest), "sha256": sha256_file(a.manifest)},
-                  "manifest_is_committed": manifest_is_committed(a.manifest),
-                  "n_subset": a.n, "subset_seed": SUBSET_SEED, "majority_source": majority_source}
+    header = provenance(a.checkpoint, a.manifest, entry, a.n, majority_source)
 
     load_secs = None                                        # Ray path: actors load inside the timed region
     if a.workers == 0:
@@ -186,7 +192,7 @@ def main():
     uids = [c["uid"] for c in cases]
     # seconds = wall time of the scoring pass (includes actor start-up and model loads on the Ray path);
     # sec_per_msg = model scoring time per message, excluding checkpoint fetch, digest checks and model build
-    report = {"checkpoint": a.checkpoint, **provenance, "workers": a.workers, "seconds": round(secs, 1),
+    report = {**header, "workers": a.workers, "seconds": round(secs, 1),
               "load_seconds": None if load_secs is None else round(load_secs, 1),
               "inference_seconds": round(infer_secs, 1), "sec_per_msg": round(infer_secs / len(cases), 3),
               **metrics([gold[u] for u in uids], [by_uid[u] for u in uids], majority)}

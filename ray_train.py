@@ -75,6 +75,14 @@ def require_single_node(nodes):
                          "but the Ray cluster has %d alive nodes" % len(alive))
 
 
+def provenance(entry, manifest_path, base, base_dir):
+    """Checkpoint provenance: split, manifest and base model by repo-relative path and sha256, never a local path."""
+    return {"data": entry["path"], "data_role": entry["role"], "data_sha256": entry["sha256"],
+            "manifest": repo_relpath(manifest_path), "manifest_sha256": sha256_file(manifest_path),
+            "manifest_is_committed": manifest_is_committed(manifest_path),
+            "base": identity("multilingual" if base == "multilingual" else base_dir)}
+
+
 def holdout_messages(rows, calib_max_messages, calib_frac, seed):
     """(train_rows, calib_rows): whole messages held out for temperature calibration.
 
@@ -263,10 +271,7 @@ def main():
            "max_messages": a.max_messages, "calib_max_messages": a.calib_max_messages,
            "calib_frac": a.calib_frac, "calib_batch": a.calib_batch,
            "seed": a.seed,
-           "provenance": {"data": entry["path"], "data_role": entry["role"], "data_sha256": entry["sha256"],
-                          "manifest": repo_relpath(a.manifest), "manifest_sha256": sha256_file(a.manifest),
-                          "manifest_is_committed": manifest_is_committed(a.manifest),
-                          "base": identity("multilingual" if a.base == "multilingual" else base_dir)}}
+           "provenance": provenance(entry, a.manifest, a.base, base_dir)}
     trainer = TorchTrainer(
         train_loop_per_worker, train_loop_config=cfg,
         scaling_config=ScalingConfig(num_workers=a.workers, use_gpu=a.gpu,

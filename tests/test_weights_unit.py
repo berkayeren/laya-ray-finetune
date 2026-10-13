@@ -5,6 +5,7 @@ touches the network.
 import ast
 import fnmatch
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -172,6 +173,49 @@ def test_identity_of_a_local_checkpoint_hashes_its_files(tmp_path):
     assert got == {"local": True, "model_sha256": hashlib.sha256(b"weights").hexdigest(), "config_sha256": None}
 
 
-def test_repo_relpath_hides_the_local_checkout_path(tmp_path):
+def test_repo_relpath_never_returns_a_local_path(tmp_path, monkeypatch):
     assert pilot.data.repo_relpath(pilot.data.DEFAULT_MANIFEST) == "data/splits.json"
-    assert pilot.data.repo_relpath(str(tmp_path / "x.json")) == str(tmp_path / "x.json")
+    assert pilot.data.repo_relpath(str(tmp_path / "x.json")) == "<outside-repo>/x.json"
+    assert pilot.data.repo_relpath(str(tmp_path / "ckpt") + os.sep) == "<outside-repo>/ckpt"
+    monkeypatch.chdir(REPO)
+    rel = os.path.relpath(str(tmp_path / "v" / "splits.json"))              # a cwd-relative '../..' path
+    assert pilot.data.repo_relpath(rel) == "<outside-repo>/splits.json"
+    assert pilot.data.repo_relpath("./ckpt") == "ckpt"
+
+
+def _assert_no_local_path(obj, tmp_path):
+    text = json.dumps(obj, ensure_ascii=False)
+    for p in {str(tmp_path), os.path.realpath(str(tmp_path)), os.path.expanduser("~"), REPO}:
+        assert p not in text, (p, text)
+
+
+def test_evaluate_report_header_carries_no_local_path(tmp_path):
+    import evaluate
+    ckpt = tmp_path / "ckpts" / "run1"
+    ckpt.mkdir(parents=True)
+    (ckpt / "model.safetensors").write_bytes(b"weights")
+    (ckpt / "rl_agent_config.json").write_bytes(b"{}")
+    manifest = tmp_path / "variant" / "splits.json"
+    manifest.parent.mkdir()
+    manifest.write_bytes(b"{}")
+    entry = {"path": "splits/test.jsonl", "sha256": "0" * 64, "role": "test"}
+    header = evaluate.provenance(str(ckpt), str(manifest), entry, 20, "final_train")
+    _assert_no_local_path(header, tmp_path)
+    assert header["checkpoint"] == "<outside-repo>/run1" and header["manifest"]["path"] == "<outside-repo>/splits.json"
+    assert header["checkpoint_identity"]["model_sha256"] == hashlib.sha256(b"weights").hexdigest()
+    assert header["manifest_is_committed"] is False
+    assert evaluate.provenance("multilingual", pilot.data.DEFAULT_MANIFEST, entry, None, "final_train")[
+        "checkpoint"] == "multilingual"
+
+
+def test_ray_train_checkpoint_provenance_carries_no_local_path(tmp_path):
+    ray_train = pytest.importorskip("ray_train")
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "model.safetensors").write_bytes(b"weights")
+    manifest = tmp_path / "splits.json"
+    manifest.write_bytes(b"{}")
+    entry = {"path": "splits/final_train.jsonl", "sha256": "0" * 64, "role": "train"}
+    prov = ray_train.provenance(entry, str(manifest), str(base), str(base))
+    _assert_no_local_path(prov, tmp_path)
+    assert prov["manifest"] == "<outside-repo>/splits.json" and prov["base"]["local"] is True

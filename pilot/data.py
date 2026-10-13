@@ -69,9 +69,14 @@ def parse_jsonl(raw):
 
 
 def repo_relpath(path):
-    """`path` relative to the repo root when inside the repo (reports then carry no local home dir), else as given."""
+    """`path` relative to the repo root, for reports and checkpoints; never a local or cwd-relative path.
+
+    Outside the repo only the base name is kept ("<outside-repo>/NAME"); the recorded sha256 is the identity.
+    """
     rel = os.path.relpath(os.path.realpath(path), os.path.realpath(REPO_ROOT))
-    return path if rel == ".." or rel.startswith(".." + os.sep) else rel.replace(os.sep, "/")
+    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+        return "<outside-repo>/" + os.path.basename(os.path.normpath(path))
+    return rel.replace(os.sep, "/")
 
 
 def questions_sha256():
