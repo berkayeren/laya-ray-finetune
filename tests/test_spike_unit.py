@@ -498,3 +498,93 @@ def test_verdict_reads_last_attempt_as_standing():
     p = v["per_config"][0]
     assert p["fallback"] == "1" and p["status"] == "ok" and p["fits"] is True
     assert v["chosen"]["fallback"] == "1"
+
+
+# ---- inventory wiring (plan 02-03 task 2): worker capture, per-config attempt chain, markdown section ----
+
+def test_worker_tags_fallback_warnings_by_stage(monkeypatch):
+    import warnings
+    from laya import train as lt
+    real_items, real_configure, real_forward = mps_spike.tiny_items, mps_spike.configure_model, lt._forward
+
+    def items(*args):
+        warnings.warn(fallback_warning("aten::tok"))
+        return real_items(*args)
+
+    def configure(*args):
+        warnings.warn(fallback_warning("aten::cfg"))
+        warnings.warn("an unrelated warning")
+        return real_configure(*args)
+
+    def forward(*args):
+        warnings.warn(fallback_warning("aten::fwd"))
+        return real_forward(*args)
+
+    monkeypatch.setattr(mps_spike, "tiny_items", items)
+    monkeypatch.setattr(mps_spike, "configure_model", configure)
+    monkeypatch.setattr(lt, "_forward", forward)
+    payload = mps_spike.spike_worker(worker_cfg())
+    assert payload["status"] == "ok", payload
+    assert payload["fallback_ops"] == [{"op": "aten::tok", "stage": "tokenize"}, {"op": "aten::cfg", "stage": "setup"},
+                                       {"op": "aten::fwd", "stage": "step"}]
+    assert payload["other_warnings"] >= 1 and "env_seen" in payload
+
+
+def test_worker_records_not_implemented_as_an_attempt(monkeypatch):
+    import warnings
+    from laya import train as lt
+    calls, real = [], lt._forward
+
+    def strict_on_third(*args):
+        calls.append(1)
+        warnings.warn(fallback_warning("aten::w"))
+        if len(calls) == 3:                     # warm-up = calls 1-2, measured padded step 0 starts at call 3
+            raise NotImplementedError(STRICT_TEXT)
+        return real(*args)
+
+    monkeypatch.setattr(lt, "_forward", strict_on_third)
+    payload = mps_spike.spike_worker(worker_cfg())
+    assert payload["status"] == "not_implemented", payload
+    assert payload["error_op"]["op"] == "aten::linalg_eig" and payload["error_op"]["stage"] == "step"
+    assert payload["error_op"]["message"].startswith("The operator 'aten::linalg_eig'")
+    assert payload["fallback_ops"] == [{"op": "aten::w", "stage": "step"}]
+    assert payload["n_neg8_items"] == 64 and payload["param_device"] == "cpu" and payload["trainable_params"] > 0
+    ident = (payload["micro_batch"], payload["max_len"], payload["rung"], payload["fallback"], payload["purpose"])
+    assert ident == (2, 32, "none", "0", "initial") and payload["transport"] == "return"
+    assert len(calls) == 3                                                  # nothing runs after the raise
+
+
+def test_run_config_reruns_strict_failure_with_fallback_in_a_new_launch():
+    seen = []
+
+    def launcher(cfg, mode):
+        seen.append((cfg["fallback"], cfg["expect_env"]["PYTORCH_ENABLE_MPS_FALLBACK"], cfg["purpose"], cfg["rung"],
+                     cfg["run_name"]))
+        if cfg["fallback"] == "0":
+            return dict(strict_raised(4, 128), fallback_ops=[])
+        return fallback_rerun(4, 128, [{"op": "aten::x", "stage": "step"}])
+
+    base = {"micro_batch": 4, "max_len": 128, "grad_accum": 8, "device": "mps"}
+    entry = mps_spike.run_config(base, 4, {"measured_steps": 20}, launcher=launcher)
+    assert [s[:4] for s in seen] == [("0", "0", "initial", "none"), ("1", "1", "op_inventory", "none")]
+    assert seen[0][4] != seen[1][4]
+    assert entry["standing"] == 1 and [a["fallback"] for a in entry["attempts"]] == ["0", "1"]
+    clean = mps_spike.run_config(base, 4, {"measured_steps": 20}, launcher=lambda cfg, mode: attempt(4, 128))
+    assert len(clean["attempts"]) == 1 and clean["standing"] == 0
+    crashed = mps_spike.run_config(base, 4, {"measured_steps": 20},
+                                   launcher=lambda cfg, mode: {"status": "crashed", "returncode": -9})
+    assert crashed["attempts"][0]["fallback"] == "0" and crashed["attempts"][0]["rung"] == "none"
+
+
+def test_markdown_has_fallback_op_inventory_section():
+    cfgs = [config(strict_raised(4, 128), fallback_rerun(4, 128, [{"op": "aten::x", "stage": "step"}],
+                                                         real_median=20.0), standing=1)]
+    report = _report(FULL, cfgs)
+    report["op_inventory"] = spike.op_inventory(cfgs)
+    md = spike.render_markdown(report)
+    assert md.index("## Fallback-op inventory") < md.index("## Verdict")
+    assert "| `aten::x` | step | 4x128 | none | yes | no all-MPS baseline" in md
+    assert "| op_inventory | ok |" in md and "| initial | not_implemented |" in md
+    empty = _report(FULL, [config(attempt(4, 128))])
+    empty["op_inventory"] = spike.op_inventory(empty["configs"])
+    assert "raised nowhere" in spike.render_markdown(empty)

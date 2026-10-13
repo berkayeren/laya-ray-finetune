@@ -448,6 +448,16 @@ def _verdict_lines(v):
     return lines + ["", verdict_line(v)]
 
 
+def _inventory_lines(inv):
+    lines = ["", "## Fallback-op inventory", "", inv["note"]]
+    if inv["entries"]:
+        lines += ["", "| op | stage | config | rung | blocks | reason |", "|---|---|---|---|---|---|"]
+        lines += ["| `%s` | %s | %dx%d | %s | %s | %s |" % (e["op"], e["stage"], e["micro_batch"], e["max_len"],
+                                                          e["rung"], _yn(e["blocks"]), e["reason"].replace("|", "/"))
+                  for e in inv["entries"]]
+    return lines
+
+
 def build_report(meta, configs):
     return {"schema": "mps_spike/1", "meta": meta, "configs": configs}
 
@@ -469,9 +479,9 @@ def render_markdown(report):
              "%d CPUs" % (proto["grid"], proto["warmup_steps"], proto["measured_steps"], proto["effective_batch"],
                           proto["seed"], proto["cpus"]),
              "",
-             "| micro-batch | max_len | grad-accum | rung | fallback | status | padded median s | padded p90 s "
-             "| real median s | real p90 s | peak GiB | swap delta MiB | swapouts delta |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "| micro-batch | max_len | grad-accum | rung | fallback | purpose | status | padded median s "
+             "| padded p90 s | real median s | real p90 s | peak GiB | swap delta MiB | swapouts delta |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for c in report["configs"]:
         for a in c["attempts"]:
             reg = a.get("regimes") or {}
@@ -479,11 +489,13 @@ def render_markdown(report):
             pt, rt = pad.get("times") or {}, real.get("times") or {}
             swap = [r.get("swap_delta_bytes") for r in (pad, real) if r.get("swap_delta_bytes") is not None]
             outs = [r.get("swapouts_delta") for r in (pad, real) if r.get("swapouts_delta") is not None]
-            lines.append("| %d | %d | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            lines.append("| %d | %d | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 c["micro_batch"], c["max_len"], c["grad_accum"], a.get("rung", "-"), a.get("fallback", "-"),
-                a.get("status", "-"), _fmt(pt.get("median_s")), _fmt(pt.get("p90_s")), _fmt(rt.get("median_s")),
+                a.get("purpose", "-"), a.get("status", "-"), _fmt(pt.get("median_s")), _fmt(pt.get("p90_s")), _fmt(rt.get("median_s")),
                 _fmt(rt.get("p90_s")), _fmt(a.get("peak_memory_bytes"), 2**30, 2),
                 _fmt(max(swap) if swap else None, 2**20, 1), max(outs) if outs else "-"))
+    if report.get("op_inventory"):
+        lines += _inventory_lines(report["op_inventory"])
     if report.get("verdict"):
         lines += _verdict_lines(report["verdict"])
     return "\n".join(lines) + "\n"
