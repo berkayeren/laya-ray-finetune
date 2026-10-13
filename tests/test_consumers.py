@@ -63,6 +63,33 @@ def test_evaluate_refuses_non_eval_role(tmp_repo, name):
     assert "role" in r.stderr, r.stderr
 
 
+@pytest.fixture
+def variant(tmp_repo, synthetic_raw):
+    """The documented `prepare_data.py --no-include-no-intent --out OTHER_DIR` variant inside tmp_repo."""
+    root, raw_sha256 = synthetic_raw()
+    pilot.data.prepare(root, str(tmp_repo / "other"), raw_sha256, include_no_intent=False)
+    return tmp_repo
+
+
+def test_evaluate_reads_the_variant_only_with_its_manifest(variant):
+    r = _run(variant, "evaluate.py", "other/splits/test.jsonl", "--workers", "0")
+    assert r.returncode != 0 and "not a split registered" in r.stderr, r.stderr
+    # verification passes with --manifest; the missing checkpoint dir is the next (pre-model-load) refusal
+    r = _run(variant, "evaluate.py", "other/splits/test.jsonl", "--workers", "0",
+             "--manifest", "other/splits.json", "--checkpoint", "no_such_ckpt")
+    assert r.returncode != 0 and "--checkpoint must be" in r.stderr, r.stderr
+
+
+def test_ray_train_reads_the_variant_only_with_its_manifest(variant):
+    args = ["ray_train.py", "--data", "other/splits/selection_train.jsonl", "--out", "ckpt",
+            "--base", str(variant / "no_such_base"), "--workers", "1"]
+    r = _run(variant, *args)
+    assert r.returncode != 0 and "not a split registered" in r.stderr, r.stderr
+    r = _run(variant, *(args + ["--manifest", "other/splits.json"]))
+    assert r.returncode != 0 and "--base must be" in r.stderr, r.stderr
+    assert not (variant / "ray_results").exists()
+
+
 def test_ray_train_refuses_tampered_split_before_ray(tmp_repo):
     _tamper(str(tmp_repo / "data" / "splits" / "selection_train.jsonl"))
     # an absolute, missing --base guarantees no hub download even if the guard ever regresses

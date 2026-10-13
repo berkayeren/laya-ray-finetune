@@ -55,7 +55,9 @@ splits, so treat it as a protocol change, not a fix.
 **No-intent rows are kept.** Banking messages without any intent stay in as all-negative rows by
 default. `python prepare_data.py --no-include-no-intent --out OTHER_DIR` builds the variant without
 them (1,384 / 201 / 1,585 / 398 messages). Write it to a different `--out` dir, because prepare
-refuses to overwrite the committed manifest with a differing one.
+refuses to overwrite the committed manifest with a differing one. Consume it with
+`--manifest OTHER_DIR/splits.json` on `evaluate.py` and `ray_train.py`; the files are still
+hash-verified against that manifest, and the manifest must match the current code and pins.
 
 **Every row labels all 48 tags.** `final_train` is 1,658 × 48 = 79,584 Laya items. There is no
 prepare-time negative sampling. Sampling negatives per run seed arrives with the Phase 4 training

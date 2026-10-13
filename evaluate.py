@@ -8,8 +8,11 @@ otherwise; the hotels_probe is scored only on ood_scoring_tags, which this scrip
 --checkpoint multilingual loads the pinned, sha256-verified hub weights (pilot.weights); any other value must be
 a local Laya checkpoint dir, so nothing downloads an unpinned revision.
 
+--manifest selects the prepare-written splits.json to verify against (default: the committed data/splits.json; use
+OTHER_DIR/splits.json for a `prepare_data.py --out OTHER_DIR` variant). Verification itself cannot be skipped.
+
 usage: python evaluate.py data/splits/test.jsonl [--checkpoint multilingual|DIR] [--n N]
-                          [--workers W] [--gpus-per-worker G] [--out report.json]
+                          [--workers W] [--gpus-per-worker G] [--out report.json] [--manifest splits.json]
 """
 import argparse
 import json
@@ -18,7 +21,7 @@ import random
 import time
 
 from intents import INTENTS, QUESTIONS
-from pilot.data import verify_split_file
+from pilot.data import DEFAULT_MANIFEST, verify_split_file
 
 
 def load_agent(checkpoint, device):
@@ -96,12 +99,14 @@ def main():
     ap.add_argument("--workers", type=int, default=1, help="Ray Data actors; 0 = no Ray")
     ap.add_argument("--gpus-per-worker", type=float, default=0)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--manifest", default=DEFAULT_MANIFEST,
+                    help="splits.json to verify against (default: the committed data/splits.json)")
     a = ap.parse_args()
     # hard-fail on a tampered/unregistered split (D-03); train splits and the OOD probe (scored only on
     # ood_scoring_tags, a Phase 3 scorer) are refused
     with open(a.test_jsonl, "rb") as f:
         raw = f.read()                                       # hash and parse the same bytes (no reread window)
-    verify_split_file(a.test_jsonl, roles=("test", "val"), data=raw)
+    verify_split_file(a.test_jsonl, manifest_path=a.manifest, roles=("test", "val"), data=raw)
 
     cases = [json.loads(l) for l in raw.decode("utf-8").splitlines()]
     random.Random(0).shuffle(cases)

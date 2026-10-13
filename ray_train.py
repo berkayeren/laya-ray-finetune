@@ -16,6 +16,8 @@ Rank 0:      fit calibration temperatures on a slice held out before training,
 (tampered, unregistered, val/test/probe) is refused before Ray starts. The split files label all 48 tags;
 per-seed negative sampling arrives with the Phase 4 training harness. --base multilingual fetches the pinned,
 sha256-verified Laya weights (pilot.weights) before Ray starts; any other value must be a local checkpoint dir.
+--manifest selects the prepare-written splits.json to verify against (default: the committed data/splits.json; use
+OTHER_DIR/splits.json for a `prepare_data.py --out OTHER_DIR` variant). Verification itself cannot be skipped.
 
 usage:
   python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
@@ -43,7 +45,7 @@ from laya.calibrate import fit_temperature_map
 from laya.common import collate_items, uses_parallel_layout
 
 from pilot import pins
-from pilot.data import verify_split_file
+from pilot.data import DEFAULT_MANIFEST, verify_split_file
 from pilot.weights import fetch
 
 
@@ -214,8 +216,10 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--storage", default=os.path.abspath("ray_results"),
                     help="Ray run storage (local dir; the script is single-node)")
+    ap.add_argument("--manifest", default=DEFAULT_MANIFEST,
+                    help="splits.json to verify --data against (default: the committed data/splits.json)")
     a = ap.parse_args()
-    entry = verify_split_file(a.data, roles=("train",))  # hard-fail before ray.init (D-03)
+    entry = verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))   # before ray.init (D-03)
     if a.base == "multilingual":                            # download once on the driver, pinned + verified (ENV-02)
         base_dir = fetch(pins.LAYA)
     elif os.path.isfile(os.path.join(a.base, "rl_agent_config.json")):
