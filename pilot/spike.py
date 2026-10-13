@@ -23,6 +23,12 @@ DEFAULT_GRID = ((4, 128), (4, 256), (8, 128), (8, 256))
 WARMUP_STEPS = 5
 MEASURED_STEPS = 20
 EFFECTIVE_BATCH = 32
+# D-02: projected selection-train neg8 epoch limit, seconds
+TIME_GATE_S = 7200
+# D-04/D-08: the only rungs that may count as FITS, in preference order (embedding freeze is a fallback rung only)
+RUNGS = ("none", "embeddings_frozen")
+# D-03 tie-break: configs within this fraction of the fastest projected epoch count as tied
+TIE_TOLERANCE = 0.05
 
 
 def parse_grid(text):
@@ -128,6 +134,140 @@ def child_outcome(returncode, payload):
     if returncode == 0 and isinstance(payload, dict):
         return payload
     return {"status": "crashed", "returncode": returncode}
+
+
+def optimizer_steps(n_items, micro_batch, grad_accum):
+    """Optimizer steps per epoch, the count laya.train.optimizer_updates(n, mb, accum, 1) gives (the last partial
+    accumulation window still steps once)."""
+    if n_items < 1:
+        raise ValueError("n_items must be a positive integer, got %r" % (n_items,))
+    return math.ceil(math.ceil(n_items / micro_batch) / grad_accum)
+
+
+def project_epoch_s(median_step_s, steps):
+    """D-02 projection: real-batch median optimizer-step time x optimizer steps per epoch, seconds."""
+    return round(median_step_s * steps, 1)
+
+
+def is_mps_oom(text):
+    """True for the MPS allocator's out-of-memory text (a plain RuntimeError; torch.OutOfMemoryError misses it)."""
+    return str(text).lstrip().startswith("MPS backend out of memory")
+
+
+def memory_ok(attempt, measured_steps):
+    """D-01 memory gate -> (ok, reason): every measured padded step ran without OOM and system swap did not grow."""
+    status = attempt.get("status")
+    if status != "ok":
+        if status == "oom":
+            o = attempt.get("oom") or {}
+            return False, "oom in %s %s step %s" % (o.get("regime"), o.get("stage"), o.get("step"))
+        if status == "crashed":
+            return False, "crashed (exit %s)" % attempt.get("returncode")
+        if status == "error":
+            return False, "error: %s" % scrub(attempt.get("error", ""))
+        return False, str(status)
+    pad = (attempt.get("regimes") or {}).get("padded") or {}
+    n = (pad.get("times") or {}).get("n", 0)
+    if n < measured_steps:
+        return False, "completed %d of %d measured padded steps" % (n, measured_steps)
+    swap = pad.get("swap_delta_bytes")
+    if swap is None:
+        return False, "no swap reading for the measured padded steps"
+    if swap > 0:
+        return False, "system swap grew by %.1f MiB during the measured padded steps (D-01)" % (swap / 2**20)
+    return True, "completed %d measured padded steps without OOM or swap growth" % measured_steps
+
+
+def protocol_complete(protocol):
+    """True only for the full D-07 protocol; anything else is a smoke run that can never decide Phase 2."""
+    grid = protocol["grid"]
+    if isinstance(grid, str):
+        grid = parse_grid(grid)
+    return (sorted(tuple(g) for g in grid) == sorted(DEFAULT_GRID) and protocol["warmup_steps"] == WARMUP_STEPS
+            and protocol["measured_steps"] == MEASURED_STEPS and protocol["effective_batch"] == EFFECTIVE_BATCH)
+
+
+RULES = {
+    "D-01": "memory: every measured padded step completes on MPS with no OOM and no system swap growth",
+    "D-02": "time: real-batch median optimizer step x optimizer steps per neg8 epoch <= %d s" % TIME_GATE_S,
+    "D-03": "choice: fastest projected epoch among FITS configs with max_len >= 128; configs within the tie tolerance "
+            "resolve to the smaller max_len, then the larger micro-batch; > 1% of messages over 128 tokens prefers a "
+            "passing max_len 256",
+    "D-04": "rung: only a full-encoder or embeddings-frozen run on MPS counts; a frozen encoder never FITS",
+    "D-08": "preference: rung none configs win over embeddings_frozen ones (embedding freeze is a fallback rung only)",
+}
+
+
+def _assess(c, measured_steps, blocking):
+    a = c["attempts"][c.get("standing", 0)]
+    mb, max_len, accum = c["micro_batch"], c["max_len"], c["grad_accum"]
+    rung, fallback = a.get("rung"), a.get("fallback")
+    mem, mem_reason = memory_ok(a, measured_steps)
+    n_items = a.get("n_neg8_items")
+    steps = optimizer_steps(n_items, mb, accum) if n_items else None
+    real = ((a.get("regimes") or {}).get("real") or {}).get("times") or {}
+    projected = (project_epoch_s(real["median_s"], steps)
+                 if steps and real.get("n") and real.get("median_s") is not None else None)
+    time_ok = projected is not None and projected <= TIME_GATE_S
+    device_ok = a.get("param_device") == "mps"
+    rung_ok = rung in RUNGS
+    blocked = list(blocking.get((mb, max_len, rung), []))
+    fails = [] if mem else [mem_reason]
+    if projected is None:
+        fails.append("no real-batch step timing to project an epoch (D-02)")
+    elif not time_ok:
+        fails.append("projected epoch %.1f min exceeds %d min (D-02)" % (projected / 60, TIME_GATE_S // 60))
+    if not device_ok:
+        fails.append("parameters on %s, not mps (D-04)" % a.get("param_device"))
+    if not rung_ok and rung is not None:
+        fails.append("rung %s never counts as FITS (D-04)" % rung)
+    elif rung is None:
+        fails.append("rung not recorded (D-04)")
+    if blocked:
+        fails.append("blocking fallback ops: %s (D-11)" % ", ".join(blocked))
+    fits = not fails
+    return {"micro_batch": mb, "max_len": max_len, "grad_accum": accum, "rung": rung, "fallback": fallback,
+            "status": a.get("status"), "memory_ok": mem, "memory_reason": mem_reason, "steps_per_epoch": steps,
+            "projected_epoch_s": projected, "time_ok": time_ok, "device_ok": device_ok, "rung_ok": rung_ok,
+            "blocking_ops": blocked, "peak_memory_bytes": a.get("peak_memory_bytes"), "fits": fits,
+            "reason": "FITS: all gates passed" if fits else "; ".join(fails)}
+
+
+def verdict(configs, protocol, token_stats=None, tie_tolerance=TIE_TOLERANCE, blocking=None):
+    """The Phase 2 outcome (LAYA-09 criterion 4) from the standing attempt of every grid config.
+
+    FITS needs the D-01 memory gate, the D-02 time gate, parameters on mps, an allowed rung (D-04) and no blocking
+    fallback op. The Phase 4 start config is chosen by D-08 (rung none first), D-03 (truncation, fastest) and the
+    tie-break. A run off the D-07 protocol is a smoke run and never asks for a Kaggle plan.
+    """
+    blocking = blocking or {}
+    complete = protocol_complete(protocol)
+    per = [_assess(c, protocol["measured_steps"], blocking) for c in configs]
+    pool = [p for p in per if p["fits"] and p["max_len"] >= 128]
+    if any(p["rung"] == "none" for p in pool):
+        pool = [p for p in pool if p["rung"] == "none"]
+    if token_stats is None:
+        truncation = "not applied: token stats not computed"
+    else:
+        pct = token_stats["pct_messages_over_128"]
+        if pct > 1.0:
+            truncation = "applied: %.1f%% of messages over 128 tokens (> 1%%, a passing max_len 256 is preferred)" % pct
+            if any(p["max_len"] >= 256 for p in pool):
+                pool = [p for p in pool if p["max_len"] >= 256]
+        else:
+            truncation = "applied: %.1f%% of messages over 128 tokens (<= 1%%, max_len 128 is allowed)" % pct
+    chosen = None
+    if pool:
+        fastest = min(p["projected_epoch_s"] for p in pool)
+        tied = [p for p in pool if p["projected_epoch_s"] <= fastest * (1 + tie_tolerance)]
+        best = sorted(tied, key=lambda p: (p["max_len"], -p["micro_batch"], p["projected_epoch_s"]))[0]
+        chosen = {k: best[k] for k in ("micro_batch", "max_len", "grad_accum", "rung", "fallback",
+                                       "projected_epoch_s", "peak_memory_bytes")}
+    result = "FITS" if chosen else "DOES NOT FIT"
+    untrusted = sum(1 for c in configs for a in c["attempts"] if a.get("status") in ("error", "crashed"))
+    return {"result": result, "protocol_complete": complete, "chosen": chosen,
+            "kaggle_plan_required": result == "DOES NOT FIT" and complete, "tie_tolerance": tie_tolerance,
+            "truncation_rule": truncation, "untrusted_attempts": untrusted, "per_config": per, "rules": dict(RULES)}
 
 
 def build_report(meta, configs):

@@ -124,8 +124,9 @@ def attempt(mb, max_len, rung="none", status="ok", swap=0, real_median=10.0, n_i
             "peak_memory_bytes": 8 * 2**30}
 
 
-def config(a, *more, standing=0):
-    return {"micro_batch": a["micro_batch"], "max_len": a["max_len"], "grad_accum": 32 // a["micro_batch"],
+def config(a, *more, standing=0, grad_accum=None):
+    return {"micro_batch": a["micro_batch"], "max_len": a["max_len"],
+            "grad_accum": grad_accum or 32 // a["micro_batch"],
             "attempts": [a] + list(more), "standing": standing}
 
 
@@ -151,9 +152,11 @@ def test_projection_465_steps_for_both_micro_batches():
 def test_projection_time_gate_boundary():
     steps = spike.optimizer_steps(64, 4, 2)
     assert steps == 8 and spike.project_epoch_s(900.0, steps) == 7200.0
-    ok = spike.verdict([config(attempt(4, 128, real_median=900.0, n_items=64))], FULL)["per_config"][0]
-    assert ok["projected_epoch_s"] == 7200.0 and ok["time_ok"] is True and ok["fits"] is True
-    late = spike.verdict([config(attempt(4, 128, real_median=900.01, n_items=64))], FULL)["per_config"][0]
+    ok = spike.verdict([config(attempt(4, 128, real_median=900.0, n_items=64), grad_accum=2)],
+                       FULL)["per_config"][0]
+    assert ok["steps_per_epoch"] == 8 and ok["projected_epoch_s"] == 7200.0 and ok["time_ok"] is True and ok["fits"] is True
+    late = spike.verdict([config(attempt(4, 128, real_median=900.01, n_items=64), grad_accum=2)],
+                         FULL)["per_config"][0]
     assert late["time_ok"] is False and late["fits"] is False
 
 
