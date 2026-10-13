@@ -16,6 +16,10 @@ from before the model exists, tagged by stage (setup, tokenize, step), and turns
 with status not_implemented naming the op. Only such a config is rerun, in a fresh process, with fallback 1, so the
 report can list every op that falls back to the CPU and whether it blocks training.
 
+Quiet-machine preflight: right after argument validation the orchestrator records available memory, two swap-used
+samples 5 s apart and the swapouts counter, and refuses below --min-available-gib (0 records an override); an override
+or idle swap growth is flagged in the markdown as a busy-machine run.
+
 Token lengths (D-09b): before the grid, a `--child stats` subprocess (CPU, no Ray) loads Laya's tokenizer from the
 re-verified pinned weights and reports, counts and percentiles only, how many selection_train messages exceed 128 and
 256 tokens untruncated; D-03's truncation rule reads that number. The same child counts the neg8 items, and the
@@ -27,7 +31,8 @@ DecisionModel.head_checkpointing, encoder.gradient_checkpointing_enable, encoder
 
 usage:
   python mps_spike.py --out results/spike
-  python mps_spike.py --grid 4x128 --warmup-steps 1 --measured-steps 2 --effective-batch 8 --out /tmp/spike  # smoke
+  python mps_spike.py --grid 4x128 --warmup-steps 1 --measured-steps 2 --effective-batch 8 --min-available-gib 0 \
+      --out /tmp/spike  # smoke on a busy machine (flagged as a busy-machine run)
 """
 import argparse
 import gc
@@ -501,6 +506,8 @@ def main():
     ap.add_argument("--tie-tolerance", type=float, default=spike.TIE_TOLERANCE,
                     help="FITS configs within this fraction of the fastest projected epoch count as tied (D-03)")
     ap.add_argument("--storage", default=os.path.abspath("ray_results"), help="Ray run storage (local dir)")
+    ap.add_argument("--min-available-gib", type=float, default=spike.MIN_AVAILABLE_GIB,
+                    help="refuse to measure below this much available memory; 0 records a busy-machine run")
     ap.add_argument("--child", nargs=2, metavar=("MODE", "CONFIG"), help=argparse.SUPPRESS)
     a = ap.parse_args()
     if a.child:
@@ -523,6 +530,27 @@ def main():
         ap.error("--cpus must be at least 1")
     if not a.tie_tolerance >= 0:
         ap.error("--tie-tolerance must not be negative")
+    if not a.min_available_gib >= 0:
+        ap.error("--min-available-gib must not be negative")
+
+    # quiet-machine preflight (RESEARCH Pitfall 2), before the split check, the fetch or any child: background apps
+    # move the system swap the D-01 gate reads, so a memory-starved machine could fake a DOES NOT FIT
+    import psutil
+    refuse = ("%.1f GiB available, below --min-available-gib %.1f: quit heavy apps (browsers, IDE indexers, Docker, "
+              "other Python processes), connect AC power and run under `caffeinate -i`, then retry; or pass "
+              "--min-available-gib 0 to record a busy-machine run")
+    available = psutil.virtual_memory().available
+    if available / 2**30 < a.min_available_gib:
+        raise SystemExit(refuse % (available / 2**30, a.min_available_gib))
+    swap0, outs0 = spike.swap_used(), spike.swapouts()
+    time.sleep(5)
+    pf = spike.preflight(psutil.virtual_memory().available, [swap0, spike.swap_used()], [outs0, spike.swapouts()],
+                         a.min_available_gib)
+    if not pf["passed"]:
+        raise SystemExit(refuse % (pf["available_gib"], a.min_available_gib))
+    print("preflight: %.2f GiB available (threshold %.1f%s), swap grew while idle: %s"
+          % (pf["available_gib"], a.min_available_gib, ", overridden" if pf["override"] else "",
+             pf["swap_grew_while_idle"]), flush=True)
 
     # D-05: the main checkout's locked venv, the hash-verified split and the pinned weights, before any child runs
     entry = verify_split_file(SPLIT, roles=("train",))
@@ -548,7 +576,6 @@ def main():
     # every measured attempt must have projected over the same neg8 items the stats child counted
     check_neg8(configs, stats["n_neg8_items"])
 
-    import psutil
     protocol = {"grid": ",".join("%dx%d" % g for g in grid), "warmup_steps": a.warmup_steps,
                 "measured_steps": a.measured_steps, "effective_batch": a.effective_batch, "seed": a.seed,
                 "cpus": a.cpus}
@@ -564,12 +591,13 @@ def main():
             "platform": {"macos": platform.mac_ver()[0], "machine": platform.machine(),
                          "total_memory_bytes": psutil.virtual_memory().total},
             "protocol": protocol,
-            "policy": {"tie_tolerance": a.tie_tolerance},
+            "policy": {"tie_tolerance": a.tie_tolerance, "min_available_gib": a.min_available_gib},
             "projection_basis": "real neg8 median optimizer step x optimizer steps per epoch over all 1,450 "
                                 "selection_train messages at effective batch 32; conservative: ray_train holds out "
                                 "up to 40 messages for calibration and Phase 5 calibrates on val (LAYA-05)",
             "hparams": HPARAMS, "laya_internals": LAYA_INTERNALS}
     report = spike.build_report(meta, configs)
+    report["preflight"] = pf
     report["token_stats"] = stats["token_stats"]
     report["neg8"] = {"n_items": stats["n_neg8_items"], "n_positives": stats["n_positives"],
                       "n_messages": stats["n_messages"], "seed": a.seed}

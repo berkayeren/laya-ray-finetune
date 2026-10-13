@@ -30,6 +30,9 @@ TIME_GATE_S = 7200
 RUNGS = ("none", "embeddings_frozen")
 # D-03 tie-break: configs within this fraction of the fastest projected epoch count as tied
 TIE_TOLERANCE = 0.05
+# quiet-machine preflight (RESEARCH Pitfall 2, Open Question 2): about 7.5 GiB projected need for the largest grid
+# config plus margin; plan 02-06's run-policy checkpoint confirms the value with the user
+MIN_AVAILABLE_GIB = 9.0
 
 
 def parse_grid(text):
@@ -142,6 +145,26 @@ def swapouts():
         return int(r.stdout.strip())
     except (OSError, subprocess.CalledProcessError, ValueError):
         return None
+
+
+def preflight(available_bytes, swap_samples, swapouts_samples, min_available_gib):
+    """Quiet-machine check before any measurement: enough available memory, and whether swap grew while idle.
+
+    Background apps move the system-wide swap the D-01 gate reads, so a memory-starved machine could fake a DOES NOT
+    FIT. min_available_gib 0 is the explicit override (a busy-machine run, flagged in the report).
+    """
+    available_gib = round(available_bytes / 2**30, 2)
+    return {"available_gib": available_gib, "min_available_gib": min_available_gib,
+            "swap_used_bytes": list(swap_samples), "swap_grew_while_idle": swap_samples[-1] > swap_samples[0],
+            "swapouts": list(swapouts_samples),
+            "swapouts_grew_while_idle": (None if any(v is None for v in swapouts_samples)
+                                         else swapouts_samples[-1] > swapouts_samples[0]),
+            "passed": available_gib >= min_available_gib, "override": min_available_gib == 0}
+
+
+def busy_machine(pf):
+    """True when the preflight was overridden or swap grew while the machine sat idle (RESEARCH Pitfall 2)."""
+    return bool(pf) and (pf["override"] or pf["swap_grew_while_idle"])
 
 
 def scrub(text):
@@ -503,6 +526,18 @@ def _token_lines(ts, neg8):
     return lines
 
 
+def _preflight_lines(pf):
+    outs = "-" if None in pf["swapouts"] else " -> ".join(str(v) for v in pf["swapouts"])
+    return ["", "## Preflight", "",
+            "- Available memory: %.2f GiB (threshold %.1f GiB%s): %s"
+            % (pf["available_gib"], pf["min_available_gib"], ", overridden" if pf["override"] else "",
+               "passed" if pf["passed"] else "failed"),
+            "- System swap used while idle (5 s apart): %s MiB; grew: %s"
+            % (" -> ".join("%.1f" % (v / 2**20) for v in pf["swap_used_bytes"]), _yn(pf["swap_grew_while_idle"])),
+            "- Swapouts counter: %s; grew: %s" % (outs, "-" if pf["swapouts_grew_while_idle"] is None
+                                                  else _yn(pf["swapouts_grew_while_idle"]))]
+
+
 def build_report(meta, configs):
     return {"schema": "mps_spike/1", "meta": meta, "configs": configs}
 
@@ -512,8 +547,8 @@ def _fmt(v, scale=1.0, digits=3):
 
 
 def render_markdown(report):
-    """Human-readable mps_spike.md: provenance lines, one table row per attempt, token lengths, the fallback-op
-    inventory, then the verdict section."""
+    """Human-readable mps_spike.md: provenance lines, one table row per attempt, the preflight, token lengths, the
+    fallback-op inventory, the busy-machine flag, then the verdict section."""
     m = report["meta"]
     split, model, versions, plat, proto = m["split"], m["model"], m["versions"], m["platform"], m["protocol"]
     lines = ["# MPS feasibility spike (Phase 2, LAYA-09)", "",
@@ -540,10 +575,15 @@ def render_markdown(report):
                 a.get("purpose", "-"), a.get("status", "-"), _fmt(pt.get("median_s")), _fmt(pt.get("p90_s")), _fmt(rt.get("median_s")),
                 _fmt(rt.get("p90_s")), _fmt(a.get("peak_memory_bytes"), 2**30, 2),
                 _fmt(max(swap) if swap else None, 2**20, 1), max(outs) if outs else "-"))
+    if report.get("preflight"):
+        lines += _preflight_lines(report["preflight"])
     if report.get("token_stats"):
         lines += _token_lines(report["token_stats"], report.get("neg8"))
     if report.get("op_inventory"):
         lines += _inventory_lines(report["op_inventory"])
+    if busy_machine(report.get("preflight")):
+        lines += ["", "Busy-machine run: background memory pressure was present; a DOES NOT FIT from this run is not "
+                      "trustworthy"]
     if report.get("verdict"):
         lines += _verdict_lines(report["verdict"])
     return "\n".join(lines) + "\n"
