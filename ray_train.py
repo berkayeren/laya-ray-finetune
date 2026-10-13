@@ -12,7 +12,8 @@ Rank 0:      fit calibration temperatures on a slice held out before training,
 
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
 (tampered, unregistered, val/test/probe) is refused before Ray starts. The split files label all 48 tags;
-per-seed negative sampling arrives with the Phase 4 training harness.
+per-seed negative sampling arrives with the Phase 4 training harness. --base multilingual fetches the pinned,
+sha256-verified Laya weights (pilot.weights) before Ray starts; any other value must be a local checkpoint dir.
 
 usage:
   python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
@@ -38,7 +39,9 @@ from laya import train as lt
 from laya.calibrate import fit_temperature_map
 from laya.common import collate_items, uses_parallel_layout
 
+from pilot import pins
 from pilot.data import verify_split_file
+from pilot.weights import fetch
 
 
 def train_loop_per_worker(c):
@@ -186,10 +189,15 @@ def main():
                     help="Ray run storage; use a shared path (NFS/S3) on a multi-node cluster")
     a = ap.parse_args()
     verify_split_file(a.data, roles=("train",))          # hard-fail before ray.init (D-03)
+    if a.base == "multilingual":                            # download once on the driver, pinned + verified (ENV-02)
+        base_dir = fetch(pins.LAYA)
+    elif os.path.isfile(os.path.join(a.base, "rl_agent_config.json")):
+        base_dir = os.path.abspath(a.base)
+    else:
+        raise SystemExit("--base must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % a.base)
 
     ray.init(ignore_reinit_error=True, include_dashboard=False,
              object_store_memory=int(a.object_store_gb * 1024**3) if a.object_store_gb else None)
-    base_dir = lt.resolve_checkpoint_dir(a.base)            # download once on the driver
     cfg = {"data": os.path.abspath(a.data), "base_dir": base_dir, "epochs": a.epochs,
            "micro_batch": a.micro_batch, "grad_accum": a.grad_accum, "encoder_lr": a.encoder_lr,
            "head_lr": a.head_lr, "loss": a.loss, "freeze_encoder": a.freeze_encoder,
