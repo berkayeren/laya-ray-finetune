@@ -56,3 +56,10 @@ def test_read_verified_rows_keeps_unicode_line_separators_inside_messages(tmp_pa
     rows = ray_train.read_verified_rows(path, entry["sha256"])
     assert rows == read_jsonl(path) and len(rows) == entry["n_messages"]
     assert {r["state"] for r in rows} >= set(LINE_SEPARATOR_TEXTS[:2])
+
+
+def test_run_name_is_per_split_seed_and_start_time():
+    entry = {"path": "splits/final_train.jsonl"}
+    name = ray_train.run_name(entry, 3, now=0)
+    assert name.startswith("laya-final_train-s3-") and name != ray_train.run_name(entry, 3, now=3600)
+    assert ray_train.run_name({"path": "splits/selection_train.jsonl"}, 3, now=0) != name

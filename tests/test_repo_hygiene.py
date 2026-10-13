@@ -102,8 +102,9 @@ def test_required_files_tracked(rel):
     assert tracked(rel) == [rel], "%s must be tracked (reproducibility depends on it)" % rel
 
 
-@pytest.mark.parametrize("rel", ["ray_results/laya-multi3nlu/params.json", "ckpt/model.safetensors",
-                                 "ckpt/rl_agent_config.json", "ckpt_s1/model.safetensors", "other/model.safetensors"])
+@pytest.mark.parametrize("rel", ["ray_results/laya-final_train-s0-20261013-120000/params.json",
+                                 "ckpt/model.safetensors", "ckpt/rl_agent_config.json", "ckpt_s1/model.safetensors",
+                                 "other/model.safetensors"])
 def test_training_outputs_are_gitignored(rel):
     # documented commands write Ray storage and checkpoints into the repo root; `git add .` must not pick them up
     r = subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", rel], cwd=REPO_ROOT)

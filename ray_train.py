@@ -83,6 +83,13 @@ def provenance(entry, manifest_path, base, base_dir):
             "base": identity("multilingual" if base == "multilingual" else base_dir)}
 
 
+def run_name(entry, seed, now=None):
+    """A fresh Ray experiment dir per run (split, seed, start time): Ray Train restores any checkpoint-manager
+    snapshot it finds under storage/<name>/, so a shared name would mix separate runs' provenance."""
+    stem = os.path.splitext(os.path.basename(entry["path"]))[0]
+    return "laya-%s-s%d-%s" % (stem, seed, time.strftime("%Y%m%d-%H%M%S", time.localtime(now)))
+
+
 def holdout_messages(rows, calib_max_messages, calib_frac, seed):
     """(train_rows, calib_rows): whole messages held out for temperature calibration.
 
@@ -281,7 +288,7 @@ def main():
         train_loop_per_worker, train_loop_config=cfg,
         scaling_config=ScalingConfig(num_workers=a.workers, use_gpu=a.gpu,
                                      resources_per_worker={"CPU": a.cpus_per_worker}),
-        run_config=RunConfig(name="laya-multi3nlu", storage_path=a.storage))
+        run_config=RunConfig(name=run_name(entry, a.seed), storage_path=a.storage))
     t0 = time.time()
     result = trainer.fit()
     print("metrics:", json.dumps(result.metrics, default=str))
