@@ -107,3 +107,13 @@ def test_ray_train_refuses_non_train_role(tmp_repo):
     assert r.returncode != 0
     assert "role" in r.stderr, r.stderr
     assert not (tmp_repo / "ray_results").exists()
+
+
+def test_ray_train_refuses_non_empty_out_before_ray(tmp_repo):
+    (tmp_repo / "ckpt").mkdir()
+    (tmp_repo / "ckpt" / "model.safetensors").write_bytes(b"stale")
+    r = _run(tmp_repo, "ray_train.py", "--data", "data/splits/selection_train.jsonl", "--out", "ckpt",
+             "--base", str(tmp_repo / "no_such_base"), "--workers", "1")
+    assert r.returncode != 0
+    assert "not empty" in r.stderr, r.stderr
+    assert not (tmp_repo / "ray_results").exists()

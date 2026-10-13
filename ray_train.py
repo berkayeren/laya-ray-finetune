@@ -222,6 +222,9 @@ def main():
                     help="splits.json to verify --data against (default: the committed data/splits.json)")
     a = ap.parse_args()
     entry = verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))   # before ray.init (D-03)
+    if os.path.exists(a.out) and (not os.path.isdir(a.out) or os.listdir(a.out)):
+        # copying over old files could leave a mixed checkpoint that laya.load still accepts
+        raise SystemExit("--out %s exists and is not empty; choose a new dir" % a.out)
     if a.base == "multilingual":                            # download once on the driver, pinned + verified (ENV-02)
         base_dir = fetch(pins.LAYA)
     elif os.path.isfile(os.path.join(a.base, "rl_agent_config.json")):
@@ -249,8 +252,10 @@ def main():
     t0 = time.time()
     result = trainer.fit()
     print("metrics:", json.dumps(result.metrics, default=str))
+    if os.path.isdir(a.out) and not os.listdir(a.out):
+        os.rmdir(a.out)                                     # an empty dir checked before training
     with result.checkpoint.as_directory() as d:
-        shutil.copytree(d, a.out, dirs_exist_ok=True)
+        shutil.copytree(d, a.out)                           # never merges: fails if --out was filled meanwhile
     print("checkpoint -> %s  (%.0fs)  load with laya.load(%r)" % (a.out, time.time() - t0, a.out))
 
 
