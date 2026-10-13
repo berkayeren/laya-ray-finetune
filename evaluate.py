@@ -61,10 +61,14 @@ def metrics(golds, probs):
     if not golds:
         raise SystemExit("no messages to score")
     out = {"n": len(golds)}
-    out["top1_hit"] = round(sum(max(p, key=p.get) in g for g, p in zip(golds, probs)) / len(golds), 3)
+    # top-1 is undefined on no-intent rows (no gold tag to hit), so both top-1 rates use the rows with gold tags;
+    # no-intent rows still count in the threshold metrics below (exact match = predict nothing)
+    tagged = [(g, p) for g, p in zip(golds, probs) if g]
+    out["n_top1"], out["n_no_intent"] = len(tagged), len(golds) - len(tagged)
+    out["top1_hit"] = round(sum(max(p, key=p.get) in g for g, p in tagged) / len(tagged), 3) if tagged else None
     counts = {k: sum(k in g for g in golds) for k in INTENTS}
     maj = max(counts, key=counts.get)
-    out["majority_top1_hit"] = round(counts[maj] / len(golds), 3)
+    out["majority_top1_hit"] = round(counts[maj] / len(tagged), 3) if tagged else None
     out["by_threshold"] = {}
     for t in (0.3, 0.5, 0.7, 0.9):
         tp = fp = fn = exact = 0
