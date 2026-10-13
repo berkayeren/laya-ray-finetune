@@ -22,45 +22,29 @@ A pilot that decides whether Laya (`laya-multilingual`) is good enough for Turki
 
 ## Technology Stack
 
-## Languages
+The root `CLAUDE.md` is the authoritative description of commands and architecture; this is a summary.
 
-- Python (version not pinned; no `.python-version`/`pyproject.toml`) - all code: `prepare_data.py`, `ray_train.py`, `evaluate.py`, `intents.py`
-- Not applicable
+## Languages and Runtime
 
-## Runtime
+- Python 3.12 (`requires-python = "==3.12.*"` in `pyproject.toml`), run directly as scripts with `argparse` CLIs: `prepare_data.py`, `ray_train.py`, `evaluate.py`, plus `intents.py` and the `pilot/` package.
+- Dependencies are exact-pinned in `pyproject.toml` and hash-locked in `requirements.txt` (universal lock, binary wheels only). `make env` builds `.venv` with `pip install --require-hashes --only-binary :all:`; `make lock` / `make lock-check` regenerate and check the lock.
+- Ray on a single node: `ray_train.py` refuses a multi-node cluster (workers read driver-local paths); `evaluate.py` uses Ray Data actors, or runs in-process with `--workers 0`. Devices: CPU, or CUDA via `--gpu` / `--gpus-per-worker`. There is no MPS path yet (Phase 2 spike, Phase 4 `--device mps`).
 
-- CPython, run directly as scripts (`python ray_train.py ...`); CLI via `argparse`
-- Ray cluster (local or multi-node); CPU or GPU workers (CUDA via `--gpu`, `--gpus-per-worker`)
-- pip (`pip install laya "ray[train,data]"`)
-- Lockfile: missing; no `requirements.txt`, no package config
+## Frameworks and Key Dependencies
 
-## Frameworks
-
-- `laya` (unpinned) - multilingual yes/no (`noul`) question model; imports `laya.train`, `laya.calibrate`, `laya.common`, and `laya.load` in `ray_train.py` and `evaluate.py`. Uses private/internal APIs, so verify against the installed version.
-- `ray[train]` (unpinned) - `TorchTrainer`, `ScalingConfig`, `RunConfig`, `Checkpoint` for DDP training in `ray_train.py`
-- `ray[data]` (unpinned) - `map_batches` with a `Predictor` actor class for distributed inference in `evaluate.py`
-- `torch` - model, DDP, `no_sync()` gradient accumulation (`ray_train.py`)
-- None (no test suite)
-- None (no linter, formatter, or build config). CLI entry `laya-train` comes from the `laya` package (used for `--dry-run` validation).
-
-## Key Dependencies
-
-- `laya` - training internals (`items_from_rows`, `split_calibration`, `encode_item`, `rlcd_loss`, `soft_ce_loss`, `save_checkpoint`, `fit_temperature_map`)
-- `ray` - distributed training and inference
-- `torch` - installed transitively
-- Stdlib only otherwise: `argparse`, `json`, `glob`, `random`, `shutil`, `tempfile`, `time`, `os`
+- `laya==0.4.6`: `evaluate.py` uses the public `laya.load(..., expected_sha256=...)`; `ray_train.py` uses private internals (`laya.train`: `load_checkpoint`, `items_from_rows`, `split_calibration`, `encode_item`, `_forward`, `rlcd_loss`/`soft_ce_loss`, `calibration_records`, `save_checkpoint`; `laya.calibrate.fit_temperature_map`; `laya.common`). Check them against the installed version when something breaks.
+- `ray[train,data]==2.59.0` (`TorchTrainer`, `ScalingConfig`, `RunConfig`, `Checkpoint`; Ray Data `map_batches`), `torch==2.14.1`, `transformers==5.19.0`, `huggingface-hub==2.2.0`, `safetensors==0.8.0`.
+- Dev: `pytest==9.1.1`, `pytest-timeout`, `torchmetrics`. No linter or formatter.
 
 ## Configuration
 
-- Configured entirely through CLI flags (`ray_train.py`: `--data --base --out --workers --gpu --epochs --micro-batch --grad-accum --encoder-lr --head-lr --loss --freeze-encoder --storage --object-store-gb --seed` etc.; `evaluate.py`: `--checkpoint --n --workers --gpus-per-worker --out`; `prepare_data.py`: `--neg --seed`)
-- No environment variables read by the code; no `.env` files
-- None. Task definition lives in `intents.py` (`INTENTS`, 48 tags).
+- CLI flags only. `prepare_data.py`: `--data-dir --out --include-no-intent/--no-include-no-intent --rewrite-manifest`. `ray_train.py`: `--data --base --out --workers --gpu --epochs --micro-batch --grad-accum --encoder-lr --head-lr --loss --freeze-encoder --max-messages --calib-max-messages --calib-frac --storage --manifest --seed` etc. `evaluate.py`: `--checkpoint --n --workers --gpus-per-worker --out --manifest`.
+- Every pinned revision and sha256 (dataset, 40 raw folds, Laya, BERTurk, OOD tag subset) lives in `pilot/pins.py`. The code reads no environment variables; `HF_HUB_OFFLINE=1` reuses the hub cache after a first fetch.
 
 ## Platform Requirements
 
-- 16 GB or more RAM per Ray worker (about 2.6 GB each plus overhead)
-- Multi3NLU++ Turkish banking folds downloaded manually into a `DATA_DIR`
-- Not applicable; research/fine-tuning scripts. Multi-node runs need a shared `--storage` (NFS/S3). Default storage is `./ray_results`.
+- About 2.6 GB RAM per Ray worker; plan for 16 GB or more per worker. Disk: about 1.5 GB venv + 1.1 GB weights.
+- Data: `make data` downloads the pinned Multi3NLU++ revision and verifies all 40 raw fold hashes. Weights: `make weights` (optional prefetch). Ray run storage defaults to `./ray_results` (gitignored), one experiment dir per run.
 
 <!-- GSD:stack-end -->
 
@@ -68,54 +52,30 @@ A pilot that decides whether Laya (`laya-multilingual`) is good enough for Turki
 
 ## Conventions
 
-## Naming Patterns
+## Naming and Style
 
-- lowercase snake_case, one script per job, at the repo root: `prepare_data.py`, `ray_train.py`.
-- snake_case, short verbs: `load`, `to_case`, `metrics`, `load_agent`, `f1`, `main`.
-- Ray entry callback is `train_loop_per_worker` (Ray naming).
-- Terse names are normal: `a` (parsed args), `c` (train config dict), `cfg` (model config), `tok`, `mb`, `accum`, `tp/fp/fn`, `g/p` (gold/probs).
-- Module constants are UPPER_CASE: `INTENTS` in `intents.py`, `QUESTIONS` in `prepare_data.py` and `evaluate.py`.
-- Intent tags are snake_case string keys, such as `transfer_payment_deposit`.
-- No type hints, no classes except `Predictor` in `evaluate.py` (a Ray Data actor).
-
-## Code Style
-
-- PEP 8-like, 4-space indent, double-quoted strings, lines up to ~120 characters. Hand-formatted, no tool.
-- Compact style: tuple-unpack counters (`tp, fp, fn = tp + ..., ...`), conditional expressions, and one-line `import gc; gc.collect()`.
-- `%`-style string formatting is used for messages (`"%s: %d messages" % (...)`). Use it for new log lines.
-- None configured.
-
-## Import Organization
+- snake_case modules and functions, short verbs (`to_case`, `metrics`, `fetch`, `verify_split_file`); UPPER_CASE module constants (`INTENTS`, `QUESTIONS`, `SPLITS`, `TRAINED_ON`); Ray callback `train_loop_per_worker`.
+- Terse local names are normal: `a` (parsed args), `c` (train config), `cfg` (model config), `tok`, `mb`, `tp/fp/fn`, `g/p`.
+- No type hints. The only class is `Predictor` in `evaluate.py` (a Ray Data actor).
+- PEP 8-like, 4-space indent, double quotes, lines up to ~120 characters, hand-formatted. Compact style: tuple-unpack counters, conditional expressions.
+- `%`-style formatting for messages (`"%s: %d messages" % (...)`).
 
 ## Error Handling
 
-- Almost none. There are no try/except blocks. Failures surface as raw exceptions.
-- Inputs are filtered with guard clauses, such as `if r.get("intents")` in `prepare_data.py`.
-- Zero-division is guarded with conditional expressions (`f1` in `evaluate.py`: `tp / (tp + fp) if tp + fp else 0.0`).
-- Argparse enforces required and choice arguments (`--loss` choices, `--data` required).
+- Refusals are `raise SystemExit("<what is wrong>; <how to fix>")` with %-formatted messages, raised before any model load or `ray.init` where possible (tampered, unregistered, missing or wrong-role splits; stale manifests; unpinned or mismatched weights). Argument errors use `ap.error(...)`.
+- Zero-division is guarded with conditional expressions (`f1` in `evaluate.py`). try/except is rare (e.g. `write_atomic` cleans up its temp file and re-raises).
 
-## Logging
+## Logging and Comments
 
-- Progress and summary lines go through `print`. `flush=True` is used inside Ray workers.
-- Reports print as `json.dumps(report, ensure_ascii=False, indent=2)`.
-- Only rank 0 prints in `ray_train.py`.
+- Progress goes through `print` (`flush=True` inside Ray workers; only rank 0 prints in `ray_train.py`). Reports print as `json.dumps(report, ensure_ascii=False, indent=2)`.
+- Every script and `pilot/` module opens with a docstring (purpose, design notes, `usage:`). Inline comments explain the "why" of invariants. Helpers that encode a contract carry a short docstring.
 
-## Comments
+## Data and I/O
 
-- Every script opens with a module docstring: purpose, design notes, and a `usage:` block.
-- Inline comments explain the "why" of invariants, such as "equal shards keep DDP collectives in step".
-- Docstrings on functions are rare, with one-line exceptions (`Predictor`).
-
-## Function Design
-
-## Module Design
-
-## Data and I/O Conventions
-
-- Open text files with `encoding="utf-8"` and write JSON with `ensure_ascii=False` (Turkish text).
-- JSONL, one case per line, in Laya's training schema (see `CLAUDE.md`).
-- Seeds are explicit: `random.Random(seed)`, never the global RNG. `evaluate.py` uses a fixed seed of 0.
-- File handles are often opened inline without `with` (`json.load(open(...))`). New code should prefer `with`.
+- Open files with `with` and `encoding="utf-8"`; write JSON with `ensure_ascii=False`. Outputs are written atomically (`pilot.data.write_atomic`).
+- JSONL in Laya's training schema, one case per line; parse split bytes with `pilot.data.parse_jsonl` (splits on `\n` only).
+- Seeds are explicit (`random.Random(seed)`); `evaluate.py` shuffles with a fixed seed of 0 before `--n`.
+- Reports and checkpoints carry repo-relative paths and sha256s, never local paths (`pilot.data.repo_relpath`).
 
 <!-- GSD:conventions-end -->
 
@@ -123,57 +83,34 @@ A pilot that decides whether Laya (`laya-multilingual`) is good enough for Turki
 
 ## Architecture
 
-## System Overview
-
-```text
-
-```
-
 ## Component Responsibilities
 
 | Component | Responsibility | File |
 |-----------|----------------|------|
-| Intent schema | 48 tag -> yes/no question text (the model input) | `intents.py` |
-| Data prep | Multi3NLU++ folds -> Laya JSONL; train folds 0-15, test 16-19 | `prepare_data.py` |
-| Trainer | DDP fine-tuning loop on Ray Train, calibration, checkpoint | `ray_train.py` |
-| Evaluator | Distributed inference + multi-label metrics | `evaluate.py` |
-| Reports | Saved evaluation JSON | `results/` |
+| Intent schema | 48 tags -> yes/no question text (the model input); the only `QUESTIONS` definition | `intents.py` |
+| Pins | Every pinned revision and sha256 | `pilot/pins.py` |
+| Splits | Producer (`prepare`, `SPLITS`, `TRAINED_ON`) and the only verifier (`verify_split_file`) | `pilot/data.py` |
+| Audit | Report-only duplicate audit, hash-registered in the manifest | `pilot/audit.py` |
+| Weights | Pinned, digest-verified fetch (`fetch`), provenance hashes (`identity`) | `pilot/weights.py` |
+| Data prep CLI | Pinned Multi3NLU++ -> `data/splits/*.jsonl`, `data/audit/`, `data/splits.json` | `prepare_data.py` |
+| Trainer | Single-node DDP fine-tuning on Ray Train, message-level calibration holdout, checkpoint | `ray_train.py` |
+| Evaluator | Ray Data inference + multi-label metrics vs. a train-derived majority baseline | `evaluate.py` |
+| Reports | Saved evaluation JSON (the two existing files use the legacy protocol) | `results/` |
+| Tests | Offline contracts and guards (`make test`); network tests via `make test-all` | `tests/` |
 
 ## Pattern Overview
 
-- Each of 48 tags is one Laya `noul` question; one forward pass yields a probability per tag.
-- No package, no tests, no shared library beyond `intents.py`.
-- Training depends on private Laya internals (`laya.train`, `laya.common`, `laya.calibrate`).
-
-## Layers
-
-## Data Flow
-
-### Primary Path
-
-### Evaluation Path
-
-## Key Abstractions
-
-## Entry Points
-
-- `prepare_data.py`, `ray_train.py`, `evaluate.py`: each has `main()` guarded by `if __name__ == "__main__"` and argparse CLI.
+- Each of the 48 tags is one Laya `noul` question; one forward pass yields a probability per tag.
+- Splits: `selection_train` (folds 0-13), `val` (14-15), `final_train` (0-15), `test` (16-19), `hotels_probe` (HOTELS 0-19, out-of-domain). Fold boundaries live only in `pilot.data.SPLITS`.
+- The committed `data/splits.json` registers each split's path, role, folds and sha256. Consumers verify the exact bytes they parse; a `--manifest` may differ only in what `prepare()` varies, never in roles, paths or folds.
+- `evaluate.py` scores only `val`/`test`; `ray_train.py` trains only on role `train`. Thresholds are never tuned on test.
 
 ## Architectural Constraints
 
-- **Threading:** Ray worker processes; each worker about 2.6 GB RAM.
-- **Global state:** Module-level `INTENTS` and `QUESTIONS` constants only.
-- **DDP invariants:** same seed on all ranks, equal-sized shards (remainder dropped), `model.no_sync()` on non-step micro-batches, only rank 0 attaches checkpoints.
-- **Duplication:** `QUESTIONS` is built separately in `prepare_data.py` and `evaluate.py`; keep in sync via `intents.py`.
-- **Splits hardcoded:** folds 0-15 / 16-19 in `prepare_data.py:main`.
-
-## Anti-Patterns
-
-### Divergent question text
-
-## Error Handling
-
-## Cross-Cutting Concerns
+- **DDP invariants:** same seed and items on every rank, equal-sized shards (remainder dropped), `model.no_sync()` on non-step micro-batches, only rank 0 attaches checkpoints.
+- **Single node:** `ray_train.py` refuses a multi-node Ray cluster.
+- **Laya internals:** private API use is confined to `ray_train.py`; Phase 3 moves it behind one adapter module.
+- **Global state:** module-level constants only (`INTENTS`, `QUESTIONS`, `SPLITS`, `TRAINED_ON`, pins).
 
 <!-- GSD:architecture-end -->
 
