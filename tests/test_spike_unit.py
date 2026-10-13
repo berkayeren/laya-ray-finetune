@@ -771,3 +771,79 @@ def test_ray_overhead_delta():
     assert gone["basis"] == "reference" and gone["inprocess"]["status"] == "crashed"
     assert gone["delta_real_pct"] is None and gone["delta_padded_pct"] is None
     assert gone["inprocess"]["real_median_s"] is None and gone["ray"]["real_median_s"] == 1.1
+
+
+# ---- chain and overhead wiring (plan 02-05 task 2): rung in the worker, policy, in-process rerun, markdown ----
+
+def test_worker_embeddings_frozen_rung_reports_fewer_trainable_params():
+    payload = mps_spike.spike_worker(worker_cfg(rung="embeddings_frozen", purpose="rung_embeddings_frozen"))
+    assert payload["status"] == "ok", payload
+    assert payload["trainable_params"] == payload["total_params"] - 1000 * 64
+    assert (payload["rung"], payload["purpose"]) == ("embeddings_frozen", "rung_embeddings_frozen")
+
+
+def test_run_config_swap_rerun_then_embeddings_frozen_in_new_launches():
+    seen = []
+
+    def launcher(cfg, mode):
+        seen.append((cfg["rung"], cfg["fallback"], cfg["purpose"], cfg["expect_env"]["PYTORCH_ENABLE_MPS_FALLBACK"],
+                     mode))
+        return attempt(4, 128, rung=cfg["rung"], swap=1 if cfg["rung"] == "none" else 0)
+
+    base = {"micro_batch": 4, "max_len": 128, "grad_accum": 8, "device": "mps"}
+    entry = mps_spike.run_config(base, 4, POLICY, launcher=launcher)
+    assert seen == [("none", "0", "initial", "0", "ray"), ("none", "0", "swap_rerun", "0", "ray"),
+                    ("embeddings_frozen", "0", "rung_embeddings_frozen", "0", "ray")]
+    assert entry["standing"] == 2 and [a["purpose"] for a in entry["attempts"]] == [s[2] for s in seen]
+    seen.clear()
+    mps_spike.run_config(base, 4, dict(POLICY, swap_rerun=False), launcher=launcher)
+    assert [s[2] for s in seen] == ["initial", "rung_embeddings_frozen"]
+
+
+def test_measure_overhead_reruns_chosen_or_reference_in_process():
+    launched = []
+
+    def launcher(cfg, mode):
+        launched.append((mode, cfg["purpose"], cfg["micro_batch"], cfg["max_len"], cfg["rung"], cfg["fallback"],
+                         cfg["expect_env"]["OMP_NUM_THREADS"], cfg["cpus"]))
+        return dict(attempt(cfg["micro_batch"], cfg["max_len"], real_median=1.0), torch_threads=cfg["cpus"])
+
+    ray = dict(attempt(8, 128, real_median=1.1), torch_threads=4)
+    configs = [config(attempt(4, 128, swap=1)), config(ray)]
+    bases = {(4, 128): {"micro_batch": 4, "max_len": 128, "grad_accum": 8, "device": "mps", "cpus": 4},
+             (8, 128): {"micro_batch": 8, "max_len": 128, "grad_accum": 4, "device": "mps", "cpus": 4}}
+    before = [len(c["attempts"]) for c in configs]
+    v = spike.verdict(configs, FULL)
+    assert chosen(v) == (8, 128, "none")
+    o = mps_spike.measure_overhead(v, configs, bases, 4, launcher=launcher)
+    assert launched == [("inprocess", "ray_overhead", 8, 128, "none", "0", "4", 4)]
+    assert o["basis"] == "chosen" and o["delta_real_pct"] == 10.0 and o["inprocess"]["torch_threads"] == 4
+    assert [len(c["attempts"]) for c in configs] == before            # never added to any config's attempts
+    launched.clear()
+    nothing = spike.verdict([configs[0]], FULL)
+    o = mps_spike.measure_overhead(nothing, [configs[0]], bases, 4, launcher=launcher)
+    assert o["basis"] == "reference" and launched[0][2:6] == (4, 128, "none", "0")
+
+    def refused(cfg, mode):
+        raise SystemExit("spike run refused: worker env")
+    o = mps_spike.measure_overhead(v, configs, bases, 4, launcher=refused)
+    assert o["inprocess"]["status"] == "refused" and o["delta_real_pct"] is None
+
+
+def test_swap_rerun_flag_defaults_on():
+    r = subprocess.run([sys.executable, "mps_spike.py", "--help"], cwd=REPO_ROOT, capture_output=True, text=True,
+                       timeout=60)
+    assert r.returncode == 0 and "--swap-rerun, --no-swap-rerun" in r.stdout, r.stdout
+
+
+def test_markdown_run_policy_and_overhead_section():
+    report = _report(FULL, [config(at_epoch(4, 128, 3000.0))])
+    report["meta"]["policy"] = {"min_available_gib": 0.0, "swap_rerun": False, "tie_tolerance": 0.05}
+    report["preflight"] = spike.preflight(4.0 * 2**30, [3.0e9, 3.0e9], [10, 10], 0)
+    report["ray_overhead"] = spike.ray_overhead(dict(attempt(4, 128, real_median=1.1), torch_threads=4),
+                                                dict(attempt(4, 128, real_median=1.0), torch_threads=4), "chosen")
+    md = spike.render_markdown(report)
+    assert "- Run policy: min_available_gib 0.0, swap_rerun False, tie_tolerance 0.05" in md
+    assert md.index("Run policy") < md.index("| micro-batch |")
+    assert md.index("## Ray vs in-process (D-09a)") < md.index("Busy-machine run") < md.index("## Verdict")
+    assert "real +10.0%" in md

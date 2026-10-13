@@ -585,6 +585,24 @@ def _preflight_lines(pf):
                                                   else _yn(pf["swapouts_grew_while_idle"]))]
 
 
+def _overhead_lines(o):
+    def side(d):
+        return "padded median %s s, real median %s s, %s torch threads" % (
+            _fmt(d.get("padded_median_s")), _fmt(d.get("real_median_s")), d.get("torch_threads") or "-")
+
+    def pct(v):
+        return "-" if v is None else "%+.1f%%" % v
+    label = ("the verdict's chosen config" if o["basis"] == "chosen" else
+             "reference config (nothing FITS; the delta is informational only)")
+    return ["", "## Ray vs in-process (D-09a)", "",
+            "- Basis: %s, %sx%s, rung %s, PYTORCH_ENABLE_MPS_FALLBACK=%s"
+            % (label, o["micro_batch"], o["max_len"], o["rung"], o["fallback"]),
+            "- Ray (1-worker TorchTrainer): %s" % side(o["ray"]),
+            "- In-process, no Ray (status %s): %s" % (o["inprocess"].get("status"), side(o["inprocess"])),
+            "- Ray overhead: padded %s, real %s (positive = Ray slower); never changes the verdict"
+            % (pct(o["delta_padded_pct"]), pct(o["delta_real_pct"]))]
+
+
 def build_report(meta, configs):
     return {"schema": "mps_spike/1", "meta": meta, "configs": configs}
 
@@ -594,8 +612,9 @@ def _fmt(v, scale=1.0, digits=3):
 
 
 def render_markdown(report):
-    """Human-readable mps_spike.md: provenance lines, one table row per attempt, the preflight, token lengths, the
-    fallback-op inventory, the busy-machine flag, then the verdict section."""
+    """Human-readable mps_spike.md: provenance lines and the run policy, one table row per attempt, the preflight,
+    token lengths, the fallback-op inventory, the Ray vs in-process overhead, the busy-machine flag, then the verdict
+    section."""
     m = report["meta"]
     split, model, versions, plat, proto = m["split"], m["model"], m["versions"], m["platform"], m["protocol"]
     lines = ["# MPS feasibility spike (Phase 2, LAYA-09)", "",
@@ -605,11 +624,15 @@ def render_markdown(report):
              "- macOS %s, %s, %.1f GiB memory" % (plat["macos"], plat["machine"], plat["total_memory_bytes"] / 2**30),
              "- Protocol: grid %s, %d warm-up + %d measured optimizer steps per regime, effective batch %d, seed %d, "
              "%d CPUs" % (proto["grid"], proto["warmup_steps"], proto["measured_steps"], proto["effective_batch"],
-                          proto["seed"], proto["cpus"]),
-             "",
-             "| micro-batch | max_len | grad-accum | rung | fallback | purpose | status | padded median s "
-             "| padded p90 s | real median s | real p90 s | peak GiB | swap delta MiB | swapouts delta |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+                          proto["seed"], proto["cpus"])]
+    pol = m.get("policy")
+    if pol:
+        lines.append("- Run policy: min_available_gib %s, swap_rerun %s, tie_tolerance %s"
+                     % (pol.get("min_available_gib"), pol.get("swap_rerun"), pol.get("tie_tolerance")))
+    lines += ["",
+              "| micro-batch | max_len | grad-accum | rung | fallback | purpose | status | padded median s "
+              "| padded p90 s | real median s | real p90 s | peak GiB | swap delta MiB | swapouts delta |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for c in report["configs"]:
         for a in c["attempts"]:
             reg = a.get("regimes") or {}
@@ -628,6 +651,8 @@ def render_markdown(report):
         lines += _token_lines(report["token_stats"], report.get("neg8"))
     if report.get("op_inventory"):
         lines += _inventory_lines(report["op_inventory"])
+    if report.get("ray_overhead"):
+        lines += _overhead_lines(report["ray_overhead"])
     if busy_machine(report.get("preflight")):
         lines += ["", "Busy-machine run: background memory pressure was present; a DOES NOT FIT from this run is not "
                       "trustworthy"]
