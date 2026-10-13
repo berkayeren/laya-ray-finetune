@@ -32,19 +32,21 @@ SUBSET_SEED = 0                                             # fixed shuffle befo
 MAJORITY_SOURCE = TRAINED_ON
 
 
-def resolve_checkpoint(checkpoint):
+def resolve_checkpoint(checkpoint, ident=None):
     """On the driver, before Ray starts: (local checkpoint dir, {file: sha256} that laya.load must verify).
 
     'multilingual' = the pinned hub weights, fetched and digest-checked here (ENV-02); anything else must be a local
-    checkpoint dir. Refusals and digest mismatches surface here as the real message, not as a Ray actor death.
+    checkpoint dir, bound to the digests in its recorded identity (ident, default identity(checkpoint)). Refusals and
+    digest mismatches surface here as the real message, not as a Ray actor death.
     """
+    from pilot.weights import checkpoint_digests, fetch, identity
     if checkpoint == "multilingual":
         from pilot import pins
-        from pilot.weights import fetch
-        return fetch(pins.LAYA), dict(pins.LAYA["sha256"])
+        return fetch(pins.LAYA), checkpoint_digests(checkpoint, None)
     if not os.path.isfile(os.path.join(checkpoint, "rl_agent_config.json")):
         raise SystemExit("--checkpoint must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % checkpoint)
-    return os.path.abspath(checkpoint), None                 # abspath: laya treats args with "/" as local
+    digests = checkpoint_digests(checkpoint, identity(checkpoint) if ident is None else ident)
+    return os.path.abspath(checkpoint), digests             # abspath: laya treats args with "/" as local
 
 
 def load_agent(model_dir, device, expected_sha256):
@@ -88,11 +90,11 @@ def majority_tag(manifest_path, role):
     return name, max(INTENTS, key=counts.get)
 
 
-def provenance(checkpoint, manifest_path, entry, n_subset, majority_source):
+def provenance(checkpoint, manifest_path, entry, n_subset, majority_source, ident=None):
     """Report header: model identity, split, manifest and subset. Paths are repo-relative or hashed, never local."""
     from pilot.weights import identity
     return {"checkpoint": checkpoint if checkpoint == "multilingual" else repo_relpath(checkpoint),
-            "checkpoint_identity": identity(checkpoint),
+            "checkpoint_identity": identity(checkpoint) if ident is None else ident,
             "split": {"path": entry["path"], "sha256": entry["sha256"], "role": entry["role"]},
             "manifest": {"path": repo_relpath(manifest_path), "sha256": sha256_file(manifest_path)},
             "manifest_is_committed": manifest_is_committed(manifest_path),
@@ -180,9 +182,11 @@ def main():
     gold = {c["uid"]: {k for k, v in c["expected"].items() if v} for c in cases}
     device = "cuda" if a.gpus_per_worker else "cpu"
     # n_subset: messages actually scored when --n was given (--n above the split size scores the whole split)
-    header = provenance(a.checkpoint, a.manifest, entry, None if a.n is None else len(cases), majority_source)
+    from pilot.weights import identity
+    ident = identity(a.checkpoint)                          # the scored bytes are bound to it (laya.load digests)
+    header = provenance(a.checkpoint, a.manifest, entry, None if a.n is None else len(cases), majority_source, ident)
     t0 = time.time()
-    model_dir, expected = resolve_checkpoint(a.checkpoint)  # driver-side fetch/refusal, before any Ray actor exists
+    model_dir, expected = resolve_checkpoint(a.checkpoint, ident)   # driver-side fetch/refusal, before any Ray actor
     resolve_secs = time.time() - t0
 
     load_secs = None                                        # Ray path: actors load inside the timed region

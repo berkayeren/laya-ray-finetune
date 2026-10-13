@@ -49,7 +49,7 @@ from laya.common import collate_items, uses_parallel_layout
 from pilot import pins
 from pilot.data import (DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file,
                         verify_split_file)
-from pilot.weights import fetch, identity
+from pilot.weights import checkpoint_digests, fetch, identity, verify_files
 
 
 def read_verified_rows(path, sha256):
@@ -75,12 +75,12 @@ def require_single_node(nodes):
                          "but the Ray cluster has %d alive nodes" % len(alive))
 
 
-def provenance(entry, manifest_path, base, base_dir):
+def provenance(entry, manifest_path, base, base_dir, ident=None):
     """Checkpoint provenance: split, manifest and base model by repo-relative path and sha256, never a local path."""
     return {"data": entry["path"], "data_role": entry["role"], "data_sha256": entry["sha256"],
             "manifest": repo_relpath(manifest_path), "manifest_sha256": sha256_file(manifest_path),
             "manifest_is_committed": manifest_is_committed(manifest_path),
-            "base": identity("multilingual" if base == "multilingual" else base_dir)}
+            "base": identity("multilingual" if base == "multilingual" else base_dir) if ident is None else ident}
 
 
 def epoch_config(cfg, max_len, head_max_len, ray_cfg, epoch):
@@ -113,6 +113,8 @@ def train_loop_per_worker(c):
     device = ray.train.torch.get_device()
     torch.manual_seed(c["seed"])
 
+    # the base must still be the bytes the driver recorded in provenance.base (load_checkpoint verifies nothing)
+    verify_files(c["base_dir"], c["base_sha256"], "base checkpoint")
     model, tok, cfg = lt.load_checkpoint(c["base_dir"])
     max_len = c["max_len"] or cfg.get("max_len", 512)
     head_max_len = c["head_max_len"] or cfg.get("head_max_len", 192)
@@ -279,18 +281,22 @@ def main():
         base_dir = os.path.abspath(a.base)
     else:
         raise SystemExit("--base must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % a.base)
+    base_name = "multilingual" if a.base == "multilingual" else base_dir
+    base_ident = identity(base_name)
+    base_sha256 = checkpoint_digests(base_name, base_ident)   # workers verify these bytes before loading
 
     ray.init(ignore_reinit_error=True, include_dashboard=False,
              object_store_memory=int(a.object_store_gb * 1024**3) if a.object_store_gb else None)
     require_single_node(ray.nodes())
-    cfg = {"data": os.path.abspath(a.data), "data_sha256": entry["sha256"], "base_dir": base_dir, "epochs": a.epochs,
+    cfg = {"data": os.path.abspath(a.data), "data_sha256": entry["sha256"], "base_dir": base_dir,
+           "base_sha256": base_sha256, "epochs": a.epochs,
            "micro_batch": a.micro_batch, "grad_accum": a.grad_accum, "encoder_lr": a.encoder_lr,
            "head_lr": a.head_lr, "loss": a.loss, "freeze_encoder": a.freeze_encoder,
            "shuffle_options": a.shuffle_options, "max_len": a.max_len, "head_max_len": a.head_max_len,
            "max_messages": a.max_messages, "calib_max_messages": a.calib_max_messages,
            "calib_frac": a.calib_frac, "calib_batch": a.calib_batch,
            "seed": a.seed,
-           "provenance": provenance(entry, a.manifest, a.base, base_dir)}
+           "provenance": provenance(entry, a.manifest, a.base, base_dir, base_ident)}
     trainer = TorchTrainer(
         train_loop_per_worker, train_loop_config=cfg,
         scaling_config=ScalingConfig(num_workers=a.workers, use_gpu=a.gpu,

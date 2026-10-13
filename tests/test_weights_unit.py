@@ -261,3 +261,38 @@ def test_resolve_checkpoint_runs_the_pinned_fetch_on_the_driver(tmp_path, monkey
     monkeypatch.setattr(pins, "LAYA", pin)
     with pytest.raises(SystemExit, match="sha256"):                     # the digest message, not an actor death
         evaluate.resolve_checkpoint("multilingual")
+
+
+def test_checkpoint_digests_bind_a_local_load_to_its_recorded_identity(tmp_path):
+    (tmp_path / "model.safetensors").write_bytes(b"weights")
+    (tmp_path / "rl_agent_config.json").write_bytes(b"{}")
+    ident = pilot.weights.identity(str(tmp_path))
+    assert pilot.weights.checkpoint_digests(str(tmp_path), ident) == {
+        "model.safetensors": hashlib.sha256(b"weights").hexdigest(),
+        "rl_agent_config.json": hashlib.sha256(b"{}").hexdigest()}
+    assert pilot.weights.checkpoint_digests("multilingual", None) == pins.LAYA["sha256"]
+    (tmp_path / "model.safetensors").unlink()
+    with pytest.raises(SystemExit, match="lacks model.safetensors"):
+        pilot.weights.checkpoint_digests(str(tmp_path), pilot.weights.identity(str(tmp_path)))
+
+
+def test_evaluate_load_is_refused_when_the_checkpoint_changed_after_its_identity(tmp_path):
+    import evaluate
+    (tmp_path / "model.safetensors").write_bytes(b"weights")
+    (tmp_path / "rl_agent_config.json").write_bytes(b"{}")
+    model_dir, expected = evaluate.resolve_checkpoint(str(tmp_path))
+    assert expected["model.safetensors"] == hashlib.sha256(b"weights").hexdigest()
+    (tmp_path / "model.safetensors").write_bytes(b"swapped")              # changed between identity and load
+    with pytest.raises(ValueError, match="model.safetensors"):            # laya verifies before parsing any weight
+        evaluate.load_agent(model_dir, "cpu", expected)
+
+
+def test_verify_files_refuses_a_changed_base(tmp_path):
+    (tmp_path / "model.safetensors").write_bytes(b"weights")
+    digests = {"model.safetensors": hashlib.sha256(b"weights").hexdigest()}
+    pilot.weights.verify_files(str(tmp_path), digests, "base checkpoint")
+    (tmp_path / "model.safetensors").write_bytes(b"swapped")
+    with pytest.raises(SystemExit, match="base checkpoint: model.safetensors sha256"):
+        pilot.weights.verify_files(str(tmp_path), digests, "base checkpoint")
+    with pytest.raises(SystemExit, match="missing"):
+        pilot.weights.verify_files(str(tmp_path), {"rl_agent_config.json": "0" * 64}, "base checkpoint")

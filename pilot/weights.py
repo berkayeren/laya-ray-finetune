@@ -23,14 +23,32 @@ def fetch(pin):
     if got != pin["revision"]:
         raise SystemExit("%s resolved to revision %s, pinned %s" % (pin["repo"], got, pin["revision"]))
     d = os.path.join(root, pin["subfolder"]) if pin.get("subfolder") else root
-    for rel in sorted(pin["sha256"]):
+    verify_files(d, pin["sha256"], "%s at pinned revision %s" % (pin["repo"], pin["revision"]))
+    return d
+
+
+def verify_files(d, sha256, what):
+    """Hard-fail unless every {path relative to d: sha256} file exists under d with that digest."""
+    for rel in sorted(sha256):
         path = os.path.join(d, rel)
         if not os.path.isfile(path):
-            raise SystemExit("%s/%s missing at pinned revision %s" % (pin["repo"], rel, pin["revision"]))
+            raise SystemExit("%s: %s missing" % (what, rel))
         have = sha256_file(path)
-        if have != pin["sha256"][rel]:
-            raise SystemExit("%s/%s sha256 %s != pinned %s" % (pin["repo"], rel, have, pin["sha256"][rel]))
-    return d
+        if have != sha256[rel]:
+            raise SystemExit("%s: %s sha256 %s != expected %s" % (what, rel, have, sha256[rel]))
+
+
+def checkpoint_digests(checkpoint, ident):
+    """{file: sha256} a load of `checkpoint` must match: the Laya pin for 'multilingual', else the weights and config
+    hashed into `ident` (identity(checkpoint)), so the bytes loaded are the bytes the provenance records."""
+    if checkpoint == "multilingual":
+        return dict(pins.LAYA["sha256"])
+    out = {"model.safetensors": ident["model_sha256"], "rl_agent_config.json": ident["config_sha256"]}
+    missing = sorted(rel for rel, h in out.items() if h is None)
+    if missing:
+        raise SystemExit("checkpoint %s lacks %s"
+                         % (os.path.basename(os.path.normpath(checkpoint)), ", ".join(missing)))
+    return out
 
 
 def identity(checkpoint):
