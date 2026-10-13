@@ -111,6 +111,40 @@ def _pinned_source(c, max_len):
     return model, maker(False), maker(True), len(items), skipped
 
 
+def tiny_model():
+    """Tiny ModernBERT encoder + Laya head (random init, CPU, no download) for the offline self-tests."""
+    from laya.common import DecisionModel
+    from transformers import ModernBertConfig, ModernBertModel
+
+    cfg = ModernBertConfig(vocab_size=1000, hidden_size=64, intermediate_size=96, num_hidden_layers=4,
+                           num_attention_heads=4, global_attn_every_n_layers=3, local_attention=16, pad_token_id=0,
+                           bos_token_id=1, eos_token_id=2, cls_token_id=1, sep_token_id=2)
+    return DecisionModel(ModernBertModel(cfg), 2, 2)
+
+
+def tiny_items(n, min_len, max_len, seed):
+    """n synthetic encoded noul items for tiny_model: [CLS] body [SEP], lengths uniform in [min_len, max_len]."""
+    rng = random.Random(seed)
+    out = []
+    for i in range(n):
+        body = [rng.randint(5, 54) for _ in range(rng.randint(min_len, max_len) - 2)]
+        out.append({"ids": [1] + body + [2], "markers": [3, 4], "qtype": 2,
+                    "target": [1.0, 0.0] if i % 2 == 0 else [0.0, 1.0]})
+    return out
+
+
+def _tiny_source(c, max_len):
+    """Offline self-test source used by tests/test_spike_*.py (the orchestrator always launches "pinned")."""
+    from laya.common import collate_items
+
+    def maker(items):
+        pool = itertools.cycle(items)
+        return lambda: collate_items([[next(pool) for _ in range(c["micro_batch"])]], 0)
+    real = maker(tiny_items(64, 8, min(24, max_len), c["seed"]))
+    padded = maker(tiny_items(64, max_len, max_len, c["seed"]))
+    return tiny_model(), real, padded, 64, {}
+
+
 def _measure(c):
     import psutil
     import torch
@@ -130,6 +164,8 @@ def _measure(c):
 
     if c["source"] == "pinned":
         model, real_maker, pad_maker, n_items, skipped = _pinned_source(c, max_len)
+    elif c["source"] == "tiny":
+        model, real_maker, pad_maker, n_items, skipped = _tiny_source(c, max_len)
     else:
         raise SystemExit("unknown model source %r" % (c["source"],))
 
