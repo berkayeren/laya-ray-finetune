@@ -221,3 +221,8 @@ __marimo__/
 
 # GSD planning docs (local-only)
 .planning/
+
+# Phase 1 data outputs: only the manifest is committed (D-02)
+/data/*
+!/data/splits.json
+.DS_Store

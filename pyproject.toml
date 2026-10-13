@@ -1,0 +1,28 @@
+# Direct exact pins for the pilot (source: .planning/research/STACK.md).
+# The project is never pip-installed (no [build-system]); tests use pythonpath.
+# Regenerate the hash lock with `make lock` and commit both files together.
+[project]
+name = "laya-pilot"
+version = "0.0.0"
+requires-python = "==3.12.*"
+dependencies = [
+  "laya==0.4.6", "torch==2.14.1", "transformers==5.19.0", "tokenizers==0.23.3",
+  "huggingface-hub==2.2.0", "safetensors==0.8.0", "ray[train,data]==2.59.0",
+  "numpy==2.5.4", "scipy==1.18.1", "scikit-learn==1.9.1", "psutil==7.2.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "pytest-timeout==2.4.0", "torchmetrics==1.9.0"]
+
+[tool.pytest]
+minversion = "9.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+markers = [
+  "unit: offline, fast, no weights or data downloads",
+  "data: needs the pinned Multi3NLU++ download (network on first run)",
+  "weights: fetches/verifies pinned HF weights (~1.1 GB on first run)",
+  "ray: starts a local Ray instance (Phase 3+)",
+  "mps: needs Apple MPS",
+]
