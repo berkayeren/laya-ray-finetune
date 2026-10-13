@@ -72,3 +72,9 @@ def test_intermediate_checkpoint_config_is_marked_and_traceable():
     assert out["fine_tuned"] is True and out["max_len"] == 128 and out["head_max_len"] == 64
     assert out["training"] == {"base_run": 1, "ray_train": ray_cfg, "epoch": 2, "calibrated": False}
     assert base["training"] == {"base_run": 1}                                   # the base config is not mutated
+
+
+def test_require_driver_node_refuses_a_worker_on_another_node():
+    ray_train.require_driver_node("a" * 56, "a" * 56)
+    with pytest.raises(SystemExit, match="single-node"):
+        ray_train.require_driver_node("b" * 56, "a" * 56)

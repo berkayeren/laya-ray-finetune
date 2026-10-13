@@ -75,6 +75,13 @@ def require_single_node(nodes):
                          "but the Ray cluster has %d alive nodes" % len(alive))
 
 
+def require_driver_node(node_id, driver_node_id):
+    """Worker-side half of require_single_node: an autoscaler can add a node after the driver's one-time check."""
+    if node_id != driver_node_id:
+        raise SystemExit("ray_train.py is single-node: this worker runs on node %s, not the driver's node %s, so the "
+                         "driver-local base weights and split are not here" % (node_id, driver_node_id))
+
+
 def provenance(entry, manifest_path, base, base_dir, ident=None):
     """Checkpoint provenance: split, manifest and base model by repo-relative path and sha256, never a local path."""
     return {"data": entry["path"], "data_role": entry["role"], "data_sha256": entry["sha256"],
@@ -108,6 +115,7 @@ def holdout_messages(rows, calib_max_messages, calib_frac, seed):
 
 
 def train_loop_per_worker(c):
+    require_driver_node(ray.get_runtime_context().get_node_id(), c["driver_node_id"])
     ctx = ray.train.get_context()
     rank, world = ctx.get_world_rank(), ctx.get_world_size()
     device = ray.train.torch.get_device()
@@ -135,8 +143,9 @@ def train_loop_per_worker(c):
     calib_uids = "\n".join(r.get("uid", "") for r in calib_rows).encode("utf-8")
     holdout = {"unit": "message", "n_messages": len(calib_rows), "n_items": len(calib_items),
                "uids_sha256": hashlib.sha256(calib_uids).hexdigest()}
-    # driver-local absolute paths (data, base_dir) stay out of every checkpoint; provenance identifies both
-    ray_cfg = dict({k: v for k, v in c.items() if k not in ("data", "base_dir")}, calibration_holdout=holdout)
+    # driver-local absolute paths (data, base_dir) and the run's node id stay out of every checkpoint
+    ray_cfg = dict({k: v for k, v in c.items() if k not in ("data", "base_dir", "driver_node_id")},
+                   calibration_holdout=holdout)
     per_rank = len(train_items) // world                    # equal shards keep DDP collectives in step
     if per_rank == 0:                                       # same on every rank: never publish an untrained "fine-tune"
         raise SystemExit("no training items per rank (%d items, %d workers); use more messages or fewer workers"
@@ -289,6 +298,7 @@ def main():
              object_store_memory=int(a.object_store_gb * 1024**3) if a.object_store_gb else None)
     require_single_node(ray.nodes())
     cfg = {"data": os.path.abspath(a.data), "data_sha256": entry["sha256"], "base_dir": base_dir,
+           "driver_node_id": ray.get_runtime_context().get_node_id(),
            "base_sha256": base_sha256, "epochs": a.epochs,
            "micro_batch": a.micro_batch, "grad_accum": a.grad_accum, "encoder_lr": a.encoder_lr,
            "head_lr": a.head_lr, "loss": a.loss, "freeze_encoder": a.freeze_encoder,
