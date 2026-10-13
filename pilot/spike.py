@@ -11,6 +11,7 @@ import json
 import math
 import os
 import random
+import re
 import subprocess
 
 import psutil
@@ -176,6 +177,143 @@ def memory_ok(attempt, measured_steps):
     if swap > 0:
         return False, "system swap grew by %.1f MiB during the measured padded steps (D-01)" % (swap / 2**20)
     return True, "completed %d measured padded steps without OOM or swap growth" % measured_steps
+
+
+# D-10: torch names the op the same way in both texts (verified on this torch build):
+#   strict (fallback 0) NotImplementedError: "The operator 'aten::linalg_eig' is not currently implemented for the MPS
+#   device. ..."; fallback 1 UserWarning: "The operator 'aten::linalg_eig' is not currently supported on the MPS
+#   backend and will fall back to run on the CPU. ..."
+OP_RE = re.compile(r"operator '([^']+)'")
+FALLBACK_MARK = "will fall back to run on the CPU"
+
+
+def op_name(text):
+    """The op an MPS NotImplementedError or fallback warning names ("aten::..."), or None."""
+    m = OP_RE.search(str(text))
+    return m.group(1) if m else None
+
+
+def is_fallback_warning(text):
+    """True for torch's "falls back to the CPU" UserWarning (PYTORCH_ENABLE_MPS_FALLBACK=1)."""
+    return FALLBACK_MARK in str(text)
+
+
+def tag_fallback_ops(messages, marks):
+    """[{"op", "stage"}] for the fallback warnings among `messages`, deduplicated by (op, stage), first appearance.
+
+    marks: (index, stage) pairs in ascending index order, recorded as len(caught) when the worker enters a stage, so
+    the message at position i belongs to the last mark whose index is <= i.
+    """
+    out, seen = [], set()
+    for i, text in enumerate(messages):
+        if not is_fallback_warning(text):
+            continue
+        stage = "setup"
+        for idx, name in marks:
+            if idx > i:
+                break
+            stage = name
+        key = (op_name(text) or "unknown op", stage)
+        if key not in seen:
+            seen.add(key)
+            out.append({"op": key[0], "stage": key[1]})
+    return out
+
+
+def blocks(stage, fallback_median_s, mps_median_s, time_ok):
+    """D-11 -> (blocks, reason): a step-path op blocks when its fallback run is more than 10% slower than an all-MPS
+    run of the same config and rung or, with no all-MPS baseline, when the fallback run fails the D-02 time gate."""
+    if stage != "step":
+        return False, "seen only in %s; setup and tokenization ops never block (D-11)" % stage
+    if mps_median_s is not None:
+        if fallback_median_s is None:
+            return True, "the fallback attempt measured no real-batch step to compare with all-MPS %.3f s" % mps_median_s
+        slower = fallback_median_s > 1.10 * mps_median_s
+        return slower, "fallback step %.3f s vs all-MPS %.3f s (%+.1f%%)" % (
+            fallback_median_s, mps_median_s, (fallback_median_s / mps_median_s - 1) * 100)
+    return not time_ok, "no all-MPS baseline; the config %s the D-02 time gate" % ("passes" if time_ok else "fails")
+
+
+def followup(chain, policy):
+    """The next attempt a config's chain needs, as {"rung", "fallback", "purpose"}, or None when the chain is done.
+
+    D-10: a strict (fallback 0) attempt that raised NotImplementedError is rerun once with fallback 1, in a fresh
+    process, to inventory every op that falls back. (Plan 02-05 adds the swap-rerun and embeddings-frozen rules.)
+    """
+    last = chain[-1]
+    if last.get("status") == "not_implemented" and last.get("fallback") == "0":
+        return {"rung": last.get("rung"), "fallback": "1", "purpose": "op_inventory"}
+    return None
+
+
+def standing(chain):
+    """Index of the attempt the verdict reads: the last one of the chain."""
+    return len(chain) - 1
+
+
+def _real_median(a):
+    t = ((a.get("regimes") or {}).get("real") or {}).get("times") or {}
+    return t.get("median_s") if t.get("n") else None
+
+
+def _projected(a, micro_batch, grad_accum):
+    """Projected neg8 epoch seconds of an attempt (D-02), or None without a real-batch timing or an item count."""
+    median, n_items = _real_median(a), a.get("n_neg8_items")
+    if median is None or not n_items:
+        return None
+    return project_epoch_s(median, optimizer_steps(n_items, micro_batch, grad_accum))
+
+
+def op_inventory(configs):
+    """D-10/D-11 inventory: every op a strict attempt raised on or its fallback rerun fell back on, with blocks/reason.
+
+    Returns {"entries": [{op, stage, micro_batch, max_len, rung, blocks, reason}], "note"}.
+    """
+    entries, raised = [], 0
+    for c in configs:
+        mb, max_len, accum = c["micro_batch"], c["max_len"], c["grad_accum"]
+        attempts = c["attempts"]
+        failed = [a for a in attempts if a.get("fallback") == "0" and a.get("status") == "not_implemented"]
+        if failed:
+            raised += 1
+        done = set()
+        for strict in failed:
+            rung = strict.get("rung")
+            if rung in done:
+                continue
+            done.add(rung)
+            err = strict.get("error_op") or {}
+            found = [{"op": err.get("op") or "unknown op", "stage": err.get("stage") or "setup"}]
+            fb = next((a for a in attempts if a.get("fallback") == "1" and a.get("rung") == rung), None)
+            if fb is None:
+                for f in found:
+                    entries.append(dict(f, micro_batch=mb, max_len=max_len, rung=rung, blocks=True,
+                                        reason="no fallback attempt ran"))
+                continue
+            for f in fb.get("fallback_ops") or []:
+                if (f["op"], f["stage"]) not in {(g["op"], g["stage"]) for g in found}:
+                    found.append({"op": f["op"], "stage": f["stage"]})
+            base = next((a for a in attempts if a.get("fallback") == "0" and a.get("rung") == rung
+                         and a.get("status") == "ok" and _real_median(a) is not None), None)
+            projected = _projected(fb, mb, accum)
+            time_ok = projected is not None and projected <= TIME_GATE_S
+            for f in found:
+                b, reason = blocks(f["stage"], _real_median(fb), _real_median(base) if base else None, time_ok)
+                entries.append(dict(f, micro_batch=mb, max_len=max_len, rung=rung, blocks=b, reason=reason))
+    note = ("strict PYTORCH_ENABLE_MPS_FALLBACK=0 pass raised nowhere: no op falls back from MPS" if not raised else
+            "%d config(s) raised under the strict pass; inventory from their fallback reruns" % raised)
+    return {"entries": entries, "note": note}
+
+
+def blocking_ops(inventory):
+    """{(micro_batch, max_len, rung): [op, ...]} of the blocking entries, the verdict's `blocking` argument."""
+    out = {}
+    for e in inventory["entries"]:
+        if e["blocks"]:
+            ops = out.setdefault((e["micro_batch"], e["max_len"], e["rung"]), [])
+            if e["op"] not in ops:
+                ops.append(e["op"])
+    return out
 
 
 def protocol_complete(protocol):
