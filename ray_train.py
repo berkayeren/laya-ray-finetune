@@ -3,8 +3,10 @@
 `laya.train.finetune` / `laya-train` run on one device. This script keeps Laya's
 own building blocks -- item encoding, RLCD / soft-CE loss, temperature
 calibration and the checkpoint layout `laya.load` reads -- and runs the training
-loop under Ray's TorchTrainer, so it scales from 1 CPU worker to N GPUs across
-nodes with only --workers / --gpu changed.
+loop under Ray's TorchTrainer, so it scales from 1 CPU worker to N GPUs on one
+node with only --workers / --gpu changed. It is single-node: workers read the
+base weights and the split from driver-local paths, so it refuses a multi-node
+Ray cluster.
 
 Per worker:  load base -> build items -> shard by rank -> DDP train
 Rank 0:      fit calibration temperatures on a slice held out before training,
@@ -17,7 +19,7 @@ sha256-verified Laya weights (pilot.weights) before Ray starts; any other value 
 
 usage:
   python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
-                      --workers 4 --gpu            # 4 GPUs (one node or several)
+                      --workers 4 --gpu            # 4 GPUs on one node
   python ray_train.py ... --workers 2 --freeze-encoder --max-messages 100   # CPU smoke test
 """
 import argparse
@@ -59,6 +61,14 @@ def read_verified_rows(path, sha256):
                          % (path, have, sha256))
     lines = (l.strip() for l in raw.decode("utf-8").splitlines())
     return [json.loads(l) for l in lines if l and not l.startswith("#")]
+
+
+def require_single_node(nodes):
+    """Refuse a multi-node cluster: base_dir and the split path are the driver's local paths (no copy elsewhere)."""
+    alive = [n for n in nodes if n.get("Alive")]
+    if len(alive) > 1:
+        raise SystemExit("ray_train.py is single-node: workers read the driver-local base weights and split, "
+                         "but the Ray cluster has %d alive nodes" % len(alive))
 
 
 def train_loop_per_worker(c):
@@ -203,7 +213,7 @@ def main():
     ap.add_argument("--object-store-gb", type=float, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--storage", default=os.path.abspath("ray_results"),
-                    help="Ray run storage; use a shared path (NFS/S3) on a multi-node cluster")
+                    help="Ray run storage (local dir; the script is single-node)")
     a = ap.parse_args()
     entry = verify_split_file(a.data, roles=("train",))  # hard-fail before ray.init (D-03)
     if a.base == "multilingual":                            # download once on the driver, pinned + verified (ENV-02)
@@ -215,6 +225,7 @@ def main():
 
     ray.init(ignore_reinit_error=True, include_dashboard=False,
              object_store_memory=int(a.object_store_gb * 1024**3) if a.object_store_gb else None)
+    require_single_node(ray.nodes())
     cfg = {"data": os.path.abspath(a.data), "data_sha256": entry["sha256"], "base_dir": base_dir, "epochs": a.epochs,
            "micro_batch": a.micro_batch, "grad_accum": a.grad_accum, "encoder_lr": a.encoder_lr,
            "head_lr": a.head_lr, "loss": a.loss, "freeze_encoder": a.freeze_encoder,

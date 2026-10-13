@@ -42,4 +42,4 @@ python evaluate.py data/splits/test.jsonl --checkpoint multilingual --workers 4 
 
 ## Resource notes
 
-Each Ray worker holds about 2.6 GB. Two CPU workers ran out of memory in a 7 GB sandbox, so plan for 16 GB or more per worker. On multi-node clusters, pass a shared `--storage` (NFS/S3) to `ray_train.py`. `--freeze-encoder` trains the head only. It fits small machines but gains much less. Disk: about 1.5 GB venv + 1.1 GB weights + a few MB data.
+Each Ray worker holds about 2.6 GB. Two CPU workers ran out of memory in a 7 GB sandbox, so plan for 16 GB or more per worker. `ray_train.py` is single-node: workers read the driver-local base weights and split, so it refuses a multi-node Ray cluster. `--freeze-encoder` trains the head only. It fits small machines but gains much less. Disk: about 1.5 GB venv + 1.1 GB weights + a few MB data.

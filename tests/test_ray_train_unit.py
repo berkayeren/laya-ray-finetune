@@ -26,3 +26,9 @@ def test_read_verified_rows_refuses_a_file_changed_after_driver_verification(tmp
     _write(tmp_path / "s.jsonl", [{"uid": "a", "state": "y"}])
     with pytest.raises(SystemExit, match="verified on the driver"):
         ray_train.read_verified_rows(str(tmp_path / "s.jsonl"), digest)
+
+
+def test_require_single_node_refuses_a_multi_node_cluster():
+    ray_train.require_single_node([{"Alive": True}, {"Alive": False}])          # one alive node: fine
+    with pytest.raises(SystemExit, match="single-node"):
+        ray_train.require_single_node([{"Alive": True}, {"Alive": True}])
