@@ -225,4 +225,9 @@ __marimo__/
 # Phase 1 data outputs: only the manifest is committed (D-02)
 /data/*
 !/data/splits.json
+
+# Training outputs: Ray run storage (default --storage) and checkpoints (fp16 weights, configs) are never committed
+/ray_results/
+/ckpt*/
+*.safetensors
 .DS_Store
