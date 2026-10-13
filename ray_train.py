@@ -10,8 +10,12 @@ Per worker:  load base -> build items -> shard by rank -> DDP train
 Rank 0:      fit calibration temperatures on a slice held out before training,
              save the final checkpoint and report it to Ray.
 
+--data must be a split registered in data/splits.json with role train and a matching sha256; anything else
+(tampered, unregistered, val/test/probe) is refused before Ray starts. The split files label all 48 tags;
+per-seed negative sampling arrives with the Phase 4 training harness.
+
 usage:
-  python ray_train.py --data data_neg8/train.jsonl --base multilingual --out ckpt \
+  python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
                       --workers 4 --gpu            # 4 GPUs (one node or several)
   python ray_train.py ... --workers 2 --freeze-encoder --max-messages 100   # CPU smoke test
 """
@@ -33,6 +37,8 @@ from ray.train.torch import TorchTrainer
 from laya import train as lt
 from laya.calibrate import fit_temperature_map
 from laya.common import collate_items, uses_parallel_layout
+
+from pilot.data import verify_split_file
 
 
 def train_loop_per_worker(c):
@@ -179,6 +185,7 @@ def main():
     ap.add_argument("--storage", default=os.path.abspath("ray_results"),
                     help="Ray run storage; use a shared path (NFS/S3) on a multi-node cluster")
     a = ap.parse_args()
+    verify_split_file(a.data, roles=("train",))          # hard-fail before ray.init (D-03)
 
     ray.init(ignore_reinit_error=True, include_dashboard=False,
              object_store_memory=int(a.object_store_gb * 1024**3) if a.object_store_gb else None)
