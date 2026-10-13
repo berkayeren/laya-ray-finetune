@@ -56,6 +56,32 @@ def make_raw(root, dup_uid=None):
     return root, raw_sha256
 
 
+def add_raw_row(root, raw_sha256, domain, fold, row):
+    """Append `row` to a synthetic raw fold and update its pinned sha256 in place."""
+    rel = "turkish/%s/fold%d.json" % (domain, fold)
+    path = os.path.join(root, rel)
+    with open(path, encoding="utf-8") as f:
+        rows = json.load(f)
+    rows.append(dict(row, lang="tr"))
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, ensure_ascii=False, indent=1)
+    raw_sha256[rel] = _sha256(path)
+
+
+# Unicode line separators that str.splitlines() splits on but a text-mode file (and JSONL) does not (WR-13)
+LINE_SEPARATOR_TEXTS = ("Kartım\u2028kayboldu", "Kartım\x85bloke", "Hesap\u2029kapat")
+
+
+def prepared_with_line_separators(tmp_path, synthetic_raw):
+    """prepare() over the synthetic snapshot plus banking rows whose text holds U+2028 / U+0085 / U+2029."""
+    root, raw_sha256 = synthetic_raw()
+    for i, (fold, text) in enumerate(zip((4, 12, 17), LINE_SEPARATOR_TEXTS)):   # train, train, test folds
+        add_raw_row(root, raw_sha256, "banking", fold, {"uid": "bank_sep_%d" % i, "text": text, "intents": ["card"]})
+    out_dir = str(tmp_path / "data")
+    pilot.data.prepare(root, out_dir, raw_sha256)
+    return out_dir, os.path.join(out_dir, "splits.json")
+
+
 @pytest.fixture
 def synthetic_raw(tmp_path):
     """Callable bound to tmp_path / "raw": synthetic_raw(dup_uid=None) -> (root, raw_sha256)."""

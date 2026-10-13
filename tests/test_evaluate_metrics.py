@@ -62,6 +62,16 @@ def test_majority_tag_refuses_a_tampered_train_split(tmp_path, synthetic_raw):
         evaluate.majority_tag(manifest_path, "test")
 
 
+def test_majority_tag_and_parse_read_unicode_line_separators(tmp_path, synthetic_raw):
+    from conftest import LINE_SEPARATOR_TEXTS, prepared_with_line_separators
+    out_dir, manifest_path = prepared_with_line_separators(tmp_path, synthetic_raw)
+    assert evaluate.majority_tag(manifest_path, "test")[0] == "final_train"   # no JSONDecodeError mid-message
+    with open(os.path.join(out_dir, "splits", "test.jsonl"), "rb") as f:
+        raw = f.read()
+    cases = evaluate.parse_jsonl(raw)
+    assert len(cases) == raw.count(b"\n") and LINE_SEPARATOR_TEXTS[2] in {c["state"] for c in cases}
+
+
 class _FakeAgent:
     def predict_batch(self, texts, questions, batch_size, sort_by_length):
         return [{"answers": {k: {"noul": 0.5} for k in questions}} for _ in texts]

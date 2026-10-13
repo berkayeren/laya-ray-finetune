@@ -43,3 +43,16 @@ def test_holdout_messages_is_message_level_deterministic_and_disjoint():
     again = ray_train.holdout_messages([dict(r) for r in rows], 40, 0.1, 0)   # what another rank computes
     assert again == (train, calib)
     assert len(ray_train.holdout_messages(rows, 3, 0.1, 0)[1]) == 3          # --calib-max-messages caps it
+
+
+def test_read_verified_rows_keeps_unicode_line_separators_inside_messages(tmp_path, synthetic_raw):
+    # json.dumps(ensure_ascii=False) leaves U+2028/U+0085/U+2029 raw; prepare() writes them, workers must read them
+    from laya.train import read_jsonl
+    from conftest import LINE_SEPARATOR_TEXTS, prepared_with_line_separators
+    import pilot.data
+    out_dir, manifest_path = prepared_with_line_separators(tmp_path, synthetic_raw)
+    path = str(tmp_path / "data" / "splits" / "final_train.jsonl")
+    entry = pilot.data.verify_split_file(path, manifest_path=manifest_path, roles=("train",))
+    rows = ray_train.read_verified_rows(path, entry["sha256"])
+    assert rows == read_jsonl(path) and len(rows) == entry["n_messages"]
+    assert {r["state"] for r in rows} >= set(LINE_SEPARATOR_TEXTS[:2])

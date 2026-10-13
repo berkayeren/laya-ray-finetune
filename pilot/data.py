@@ -58,6 +58,16 @@ def sha256_bytes(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def parse_jsonl(raw):
+    """Rows of JSONL bytes, split on "\n" only (the producer's terminator), stripped, blank and '#' lines skipped.
+
+    Same rows as laya.train.read_jsonl (text-mode lines). Never str.splitlines(): it also splits on U+0085, U+2028,
+    U+2029 and other separators that json.dumps(ensure_ascii=False) leaves raw inside message text.
+    """
+    lines = (l.strip() for l in raw.decode("utf-8").split("\n"))
+    return [json.loads(l) for l in lines if l and not l.startswith("#")]
+
+
 def repo_relpath(path):
     """`path` relative to the repo root when inside the repo (reports then carry no local home dir), else as given."""
     rel = os.path.relpath(os.path.realpath(path), os.path.realpath(REPO_ROOT))

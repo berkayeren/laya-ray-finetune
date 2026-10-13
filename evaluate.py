@@ -22,7 +22,8 @@ import random
 import time
 
 from intents import INTENTS, QUESTIONS
-from pilot.data import DEFAULT_MANIFEST, manifest_is_committed, repo_relpath, sha256_file, verify_split_file
+from pilot.data import (DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file,
+                        verify_split_file)
 
 SUBSET_SEED = 0                                             # fixed shuffle before --n, so subsets are comparable
 # the majority baseline's tag comes from the training split the evaluated role's models are trained on, never from
@@ -72,8 +73,8 @@ def majority_tag(manifest_path, role):
         raw = f.read()
     verify_split_file(path, manifest_path=manifest_path, roles=("train",), data=raw)
     counts = dict.fromkeys(INTENTS, 0)
-    for l in raw.decode("utf-8").splitlines():
-        for k, v in json.loads(l)["expected"].items():
+    for r in parse_jsonl(raw):
+        for k, v in r["expected"].items():
             counts[k] += bool(v)
     return name, max(INTENTS, key=counts.get)
 
@@ -143,7 +144,7 @@ def main():
     entry = verify_split_file(a.test_jsonl, manifest_path=a.manifest, roles=("test", "val"), data=raw)
     majority_source, majority = majority_tag(a.manifest, entry["role"])
 
-    cases = [json.loads(l) for l in raw.decode("utf-8").splitlines()]
+    cases = parse_jsonl(raw)
     random.Random(SUBSET_SEED).shuffle(cases)
     cases = cases[:a.n] if a.n else cases
     if not cases:

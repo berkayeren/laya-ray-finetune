@@ -47,7 +47,8 @@ from laya.calibrate import fit_temperature_map
 from laya.common import collate_items, uses_parallel_layout
 
 from pilot import pins
-from pilot.data import DEFAULT_MANIFEST, manifest_is_committed, repo_relpath, sha256_file, verify_split_file
+from pilot.data import (DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file,
+                        verify_split_file)
 from pilot.weights import fetch, identity
 
 
@@ -55,7 +56,7 @@ def read_verified_rows(path, sha256):
     """Rows of a JSONL split whose bytes must hash to `sha256` (the driver-verified digest); parses those same bytes.
 
     Workers re-check because they read the file minutes after the driver verified it (fetch, ray.init).
-    Line handling matches laya.train.read_jsonl (strip; skip blank and '#' lines).
+    Rows match laya.train.read_jsonl (pilot.data.parse_jsonl splits on "\n" only).
     """
     with open(path, "rb") as f:
         raw = f.read()
@@ -63,8 +64,7 @@ def read_verified_rows(path, sha256):
     if have != sha256:
         raise SystemExit("%s sha256 %s != %s verified on the driver; regenerate with `make data`"
                          % (path, have, sha256))
-    lines = (l.strip() for l in raw.decode("utf-8").splitlines())
-    return [json.loads(l) for l in lines if l and not l.startswith("#")]
+    return parse_jsonl(raw)
 
 
 def require_single_node(nodes):
