@@ -16,6 +16,11 @@ from before the model exists, tagged by stage (setup, tokenize, step), and turns
 with status not_implemented naming the op. Only such a config is rerun, in a fresh process, with fallback 1, so the
 report can list every op that falls back to the CPU and whether it blocks training.
 
+Token lengths (D-09b): before the grid, a `--child stats` subprocess (CPU, no Ray) loads Laya's tokenizer from the
+re-verified pinned weights and reports, counts and percentiles only, how many selection_train messages exceed 128 and
+256 tokens untruncated; D-03's truncation rule reads that number. The same child counts the neg8 items, and the
+orchestrator refuses a report whose measured attempts saw a different count (the projection's basis).
+
 Laya internals used (the Phase 3 adapter list): lt.load_checkpoint, lt.items_from_rows, lt.encode_item, lt._forward,
 lt.rlcd_loss, laya.common.collate_items, laya.common.uses_parallel_layout, laya.common.DecisionModel,
 DecisionModel.head_checkpointing, encoder.gradient_checkpointing_enable, encoder.embeddings.tok_embeddings.
@@ -119,6 +124,56 @@ def _pinned_source(c, max_len, mark):
                                  tok.pad_token_id)
         return make
     return model, maker(False), maker(True), len(items), skipped
+
+
+# a max_len no message reaches, so build_sequence keeps every state token (the untruncated length)
+UNTRUNCATED = 100000
+
+
+def stats_cfg(base_dir, data_sha256, seed, cpus):
+    """Config of the `--child stats` run (CPU, no Ray) over the verified selection_train split."""
+    return {"base_dir": base_dir, "base_sha256": dict(pins.LAYA["sha256"]), "data": SPLIT, "data_sha256": data_sha256,
+            "seed": seed, "cpus": cpus, "expect_env": spike.spike_env("0", cpus)}
+
+
+def token_lengths(c):
+    """--child stats payload: D-09b token stats with Laya's tokenizer and the neg8 item count, no text or uids.
+
+    Only the tokenizer is needed, so the model is dropped right after the load; the child exits before any measured
+    run, so its memory never overlaps the grid.
+    """
+    import torch
+    from laya import train as lt
+    from laya.common import uses_parallel_layout
+    from pilot.weights import verify_files
+    from ray_train import read_verified_rows
+
+    torch.set_num_threads(c["cpus"])
+    verify_files(c["base_dir"], c["base_sha256"], "base checkpoint")
+    model, tok, cfg = lt.load_checkpoint(c["base_dir"])
+    del model
+    gc.collect()
+    head_max_len, parallel = cfg.get("head_max_len", 192), uses_parallel_layout(cfg)
+    rows = read_verified_rows(c["data"], c["data_sha256"])
+    seqs, states = [], []
+    for row in rows:
+        items = lt.items_from_rows(tok, [row], UNTRUNCATED, head_max_len)[0]
+        seqs.append([len(lt.encode_item(tok, it, UNTRUNCATED, head_max_len, None, parallel)["ids"]) for it in items])
+        if items:
+            states.append(len(items[0]["state_ids"]))
+    n_neg8 = len(lt.items_from_rows(tok, spike.neg8_rows(rows, c["seed"]), 128, head_max_len)[0])
+    return {"status": "ok", "token_stats": spike.token_stats(seqs, states), "n_neg8_items": n_neg8,
+            "n_positives": sum(1 for r in rows for v in r["expected"].values() if v), "n_messages": len(rows)}
+
+
+def check_neg8(configs, n_items):
+    """Refuse when a measured attempt built a different neg8 item count than the stats child (the D-02 basis)."""
+    for c in configs:
+        for i, att in enumerate(c["attempts"]):
+            if att.get("status") == "ok" and att.get("n_neg8_items") != n_items:
+                raise SystemExit("neg8 item count %s in attempt %s differs from %d in the stats child; the projection "
+                                 "would be wrong" % (att.get("n_neg8_items"),
+                                                     "%dx%d #%d" % (c["micro_batch"], c["max_len"], i), n_items))
 
 
 def tiny_model():
@@ -371,17 +426,22 @@ def run_ray(cfg):
 
 
 def run_child(mode, path):
-    """--child entry point: run one config (ray | inprocess) and write its payload to cfg["out_json"]."""
+    """--child entry point: run one config (ray | inprocess) or the token stats (stats); payload to cfg["out_json"]."""
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
-    if mode == "ray":
+    if mode == "stats":
+        try:
+            payload = token_lengths(cfg)
+        except SystemExit as e:
+            payload = {"status": "refused", "reason": spike.scrub(str(e))}
+    elif mode == "ray":
         payload = run_ray(cfg)
     elif mode == "inprocess":
         import torch
         torch.set_num_threads(cfg["cpus"])
         payload = spike_worker(dict(cfg, transport="return"))
     else:
-        raise SystemExit("--child mode must be 'ray' or 'inprocess', got %r" % (mode,))
+        raise SystemExit("--child mode must be 'ray', 'inprocess' or 'stats', got %r" % (mode,))
     write_atomic(cfg["out_json"], (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
@@ -467,6 +527,14 @@ def main():
     # D-05: the main checkout's locked venv, the hash-verified split and the pinned weights, before any child runs
     entry = verify_split_file(SPLIT, roles=("train",))
     base_dir = fetch(pins.LAYA)
+    # D-09b: token lengths and the neg8 item count, in a CPU child that exits before the first measured run
+    stats = launch(stats_cfg(base_dir, entry["sha256"], a.seed, a.cpus), "stats")
+    if stats.get("status") != "ok":
+        raise SystemExit("the token-stats child failed (%s, exit %s); run `python mps_spike.py --child stats CONFIG` "
+                         "to see why" % (stats.get("status"), stats.get("returncode")))
+    print("token stats: %.2f%% of %d messages over 128 tokens, %.2f%% over 256; %d neg8 items"
+          % (stats["token_stats"]["pct_messages_over_128"], stats["n_messages"],
+             stats["token_stats"]["pct_messages_over_256"], stats["n_neg8_items"]), flush=True)
     policy = {"measured_steps": a.measured_steps}
     configs = []
     for mb, max_len in grid:
@@ -476,6 +544,9 @@ def main():
                 "measured_steps": a.measured_steps, "seed": a.seed, "cpus": a.cpus, "storage": a.storage,
                 "hparams": HPARAMS}
         configs.append(run_config(base, a.cpus, policy))
+
+    # every measured attempt must have projected over the same neg8 items the stats child counted
+    check_neg8(configs, stats["n_neg8_items"])
 
     import psutil
     protocol = {"grid": ",".join("%dx%d" % g for g in grid), "warmup_steps": a.warmup_steps,
@@ -499,12 +570,15 @@ def main():
                                 "up to 40 messages for calibration and Phase 5 calibrates on val (LAYA-05)",
             "hparams": HPARAMS, "laya_internals": LAYA_INTERNALS}
     report = spike.build_report(meta, configs)
+    report["token_stats"] = stats["token_stats"]
+    report["neg8"] = {"n_items": stats["n_neg8_items"], "n_positives": stats["n_positives"],
+                      "n_messages": stats["n_messages"], "seed": a.seed}
     # D-10/D-11: every op a strict attempt raised on, from its fallback rerun; a blocking op keeps its config from FITS
     inventory = spike.op_inventory(configs)
     report["op_inventory"] = inventory
-    # plan 02-04 passes real token stats
-    report["verdict"] = spike.verdict(configs, protocol, token_stats=None, tie_tolerance=a.tie_tolerance,
-                                      blocking=spike.blocking_ops(inventory))
+    # D-03: the truncation rule reads pct_messages_over_128 from the stats child
+    report["verdict"] = spike.verdict(configs, protocol, token_stats=stats["token_stats"],
+                                      tie_tolerance=a.tie_tolerance, blocking=spike.blocking_ops(inventory))
     md = spike.write_report(a.out, report)
     print("report -> %s" % md)
     print(spike.verdict_line(report["verdict"]), flush=True)

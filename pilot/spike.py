@@ -98,6 +98,34 @@ def summarize(times):
             "min_s": round(s[0], 4), "max_s": round(s[-1], 4)}
 
 
+def _ranks(values):
+    """{min, median, p90, p99, max} of `values`, nearest-rank (an actual length, never an interpolated one)."""
+    s = sorted(values)
+    n = len(s)
+    return {"min": s[0], "median": s[math.ceil(0.5 * n) - 1], "p90": s[math.ceil(0.9 * n) - 1],
+            "p99": s[math.ceil(0.99 * n) - 1], "max": s[-1]}
+
+
+def token_stats(seq_lens_by_message, state_lens, thresholds=(128, 256)):
+    """D-09b token lengths of a split, counts and percentiles only (never text or uids).
+
+    seq_lens_by_message: per message, the untruncated (message, question) sequence lengths of its items; a message is
+    over L when its longest sequence exceeds L. state_lens: per message, the untruncated state length. The verdict's
+    D-03 truncation rule reads pct_messages_over_128.
+    """
+    seqs = [n for lens in seq_lens_by_message for n in lens]
+    if not seq_lens_by_message or not seqs or not state_lens:
+        raise ValueError("token stats need at least one message with one item")
+    n_msg = len(seq_lens_by_message)
+    out = {"n_messages": n_msg, "n_items": len(seqs)}
+    for t in thresholds:
+        over = sum(1 for lens in seq_lens_by_message if lens and max(lens) > t)
+        out["pct_messages_over_%d" % t] = round(100.0 * over / n_msg, 2)
+        out["n_items_over_%d" % t] = sum(1 for n in seqs if n > t)
+    out["seq_len"], out["state_len"] = _ranks(seqs), _ranks(state_lens)
+    return out
+
+
 def swap_used():
     """System swap in use, bytes (psutil equals sysctl vm.swapusage "used"); the D-01 gate value."""
     return psutil.swap_memory().used
@@ -458,6 +486,23 @@ def _inventory_lines(inv):
     return lines
 
 
+def _token_lines(ts, neg8):
+    lines = ["", "## Token lengths (D-09b)", "",
+             "Laya's own tokenizer, untruncated (message, question) sequences over all %d messages and %d items:"
+             % (ts["n_messages"], ts["n_items"])]
+    for t in sorted(int(k.rsplit("_", 1)[1]) for k in ts if k.startswith("pct_messages_over_")):
+        lines.append("- %.2f%% of messages over %d tokens; %d items over %d"
+                     % (ts["pct_messages_over_%d" % t], t, ts["n_items_over_%d" % t], t))
+    for key, label in (("seq_len", "sequence length"), ("state_len", "state length")):
+        r = ts[key]
+        lines.append("- %s: min %d, median %d, p90 %d, p99 %d, max %d"
+                     % (label, r["min"], r["median"], r["p90"], r["p99"], r["max"]))
+    if neg8:
+        lines.append("- projection basis: %d neg8 items (%d positives + up to 8 negatives for each of %d messages, "
+                     "seed %d)" % (neg8["n_items"], neg8["n_positives"], neg8["n_messages"], neg8["seed"]))
+    return lines
+
+
 def build_report(meta, configs):
     return {"schema": "mps_spike/1", "meta": meta, "configs": configs}
 
@@ -467,7 +512,8 @@ def _fmt(v, scale=1.0, digits=3):
 
 
 def render_markdown(report):
-    """Human-readable mps_spike.md: provenance lines, one table row per attempt, then the verdict section."""
+    """Human-readable mps_spike.md: provenance lines, one table row per attempt, token lengths, the fallback-op
+    inventory, then the verdict section."""
     m = report["meta"]
     split, model, versions, plat, proto = m["split"], m["model"], m["versions"], m["platform"], m["protocol"]
     lines = ["# MPS feasibility spike (Phase 2, LAYA-09)", "",
@@ -494,6 +540,8 @@ def render_markdown(report):
                 a.get("purpose", "-"), a.get("status", "-"), _fmt(pt.get("median_s")), _fmt(pt.get("p90_s")), _fmt(rt.get("median_s")),
                 _fmt(rt.get("p90_s")), _fmt(a.get("peak_memory_bytes"), 2**30, 2),
                 _fmt(max(swap) if swap else None, 2**20, 1), max(outs) if outs else "-"))
+    if report.get("token_stats"):
+        lines += _token_lines(report["token_stats"], report.get("neg8"))
     if report.get("op_inventory"):
         lines += _inventory_lines(report["op_inventory"])
     if report.get("verdict"):
