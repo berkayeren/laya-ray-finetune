@@ -24,6 +24,9 @@ from intents import INTENTS, QUESTIONS
 from pilot.data import DEFAULT_MANIFEST, repo_relpath, sha256_file, verify_split_file
 
 SUBSET_SEED = 0                                             # fixed shuffle before --n, so subsets are comparable
+# the majority baseline's tag comes from the training split the evaluated role's models are trained on, never from
+# the labels being scored (val -> model selection runs, test -> final models; see pilot.data.SPLITS)
+MAJORITY_SOURCE = {"val": "selection_train", "test": "final_train"}
 
 
 def load_agent(checkpoint, device):
@@ -51,13 +54,34 @@ class Predictor:
         return batch
 
 
+def majority_tag(manifest_path, role):
+    """(source split name, most frequent gold tag in it); ties go to the earlier tag in INTENTS."""
+    name = MAJORITY_SOURCE[role]
+    with open(manifest_path, encoding="utf-8") as f:
+        e = json.load(f).get("splits", {}).get(name)
+    if e is None:
+        raise SystemExit("%s registers no %s split for the majority baseline" % (manifest_path, name))
+    path = os.path.join(os.path.dirname(os.path.realpath(manifest_path)), e["path"])
+    if not os.path.isfile(path):
+        raise SystemExit("%s (majority baseline source) is missing; run `make data`" % path)
+    with open(path, "rb") as f:
+        raw = f.read()
+    verify_split_file(path, manifest_path=manifest_path, roles=("train",), data=raw)
+    counts = dict.fromkeys(INTENTS, 0)
+    for l in raw.decode("utf-8").splitlines():
+        for k, v in json.loads(l)["expected"].items():
+            counts[k] += bool(v)
+    return name, max(INTENTS, key=counts.get)
+
+
 def f1(tp, fp, fn):
     p = tp / (tp + fp) if tp + fp else 0.0
     r = tp / (tp + fn) if tp + fn else 0.0
     return p, r, (2 * p * r / (p + r) if p + r else 0.0)
 
 
-def metrics(golds, probs):
+def metrics(golds, probs, majority):
+    """majority: the baseline tag, fixed beforehand from training labels (majority_tag)."""
     if not golds:
         raise SystemExit("no messages to score")
     out = {"n": len(golds)}
@@ -66,9 +90,9 @@ def metrics(golds, probs):
     tagged = [(g, p) for g, p in zip(golds, probs) if g]
     out["n_top1"], out["n_no_intent"] = len(tagged), len(golds) - len(tagged)
     out["top1_hit"] = round(sum(max(p, key=p.get) in g for g, p in tagged) / len(tagged), 3) if tagged else None
+    out["majority_tag"] = majority
+    out["majority_top1_hit"] = round(sum(majority in g for g, _ in tagged) / len(tagged), 3) if tagged else None
     counts = {k: sum(k in g for g in golds) for k in INTENTS}
-    maj = max(counts, key=counts.get)
-    out["majority_top1_hit"] = round(counts[maj] / len(tagged), 3) if tagged else None
     out["by_threshold"] = {}
     for t in (0.3, 0.5, 0.7, 0.9):
         tp = fp = fn = exact = 0
@@ -113,6 +137,7 @@ def main():
     with open(a.test_jsonl, "rb") as f:
         raw = f.read()                                       # hash and parse the same bytes (no reread window)
     entry = verify_split_file(a.test_jsonl, manifest_path=a.manifest, roles=("test", "val"), data=raw)
+    majority_source, majority = majority_tag(a.manifest, entry["role"])
 
     cases = [json.loads(l) for l in raw.decode("utf-8").splitlines()]
     random.Random(SUBSET_SEED).shuffle(cases)
@@ -126,7 +151,7 @@ def main():
     provenance = {"checkpoint_identity": identity(a.checkpoint),
                   "split": {"path": entry["path"], "sha256": entry["sha256"], "role": entry["role"]},
                   "manifest": {"path": repo_relpath(a.manifest), "sha256": sha256_file(a.manifest)},
-                  "n_subset": a.n, "subset_seed": SUBSET_SEED}
+                  "n_subset": a.n, "subset_seed": SUBSET_SEED, "majority_source": majority_source}
 
     t0 = time.time()
     if a.workers == 0:
@@ -150,7 +175,7 @@ def main():
     uids = [c["uid"] for c in cases]
     report = {"checkpoint": a.checkpoint, **provenance, "workers": a.workers, "seconds": round(secs, 1),
               "sec_per_msg": round(secs / len(cases), 2),
-              **metrics([gold[u] for u in uids], [by_uid[u] for u in uids])}
+              **metrics([gold[u] for u in uids], [by_uid[u] for u in uids], majority)}
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if a.out:
         with open(a.out, "w", encoding="utf-8") as f:
