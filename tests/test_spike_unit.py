@@ -588,3 +588,48 @@ def test_markdown_has_fallback_op_inventory_section():
     empty = _report(FULL, [config(attempt(4, 128))])
     empty["op_inventory"] = spike.op_inventory(empty["configs"])
     assert "raised nowhere" in spike.render_markdown(empty)
+
+
+# ---- token lengths (plan 02-04, D-09b): counts and percentiles that drive the D-03 truncation rule ----
+
+def test_token_stats_counts_messages_over_thresholds():
+    ts = spike.token_stats([[50, 60], [120, 130], [300]], [5, 80, 250])
+    assert ts["n_messages"] == 3 and ts["n_items"] == 5
+    assert ts["pct_messages_over_128"] == 66.67 and ts["pct_messages_over_256"] == 33.33
+    assert ts["n_items_over_128"] == 2 and ts["n_items_over_256"] == 1
+    assert ts["seq_len"]["max"] == 300 and ts["seq_len"]["min"] == 50
+    assert ts["state_len"]["median"] == 80
+    assert set(ts["seq_len"]) == set(ts["state_len"]) == {"min", "median", "p90", "p99", "max"}
+
+    def numbers(v):
+        return all(numbers(x) for x in v.values()) if isinstance(v, dict) else \
+            isinstance(v, (int, float)) and not isinstance(v, bool)
+    assert numbers(ts), ts
+
+
+def test_token_stats_empty_split_refused():
+    with pytest.raises(ValueError):
+        spike.token_stats([], [])
+
+
+def test_verdict_applies_truncation_rule_from_token_stats():
+    ts = spike.token_stats([[80, 89], [40]], [30, 5])
+    assert ts["pct_messages_over_128"] == 0.0
+    v = spike.verdict([config(at_epoch(4, 128, 100.0)), config(at_epoch(4, 256, 300.0))], FULL, token_stats=ts)
+    assert v["truncation_rule"].startswith("applied") and chosen(v) == (4, 128, "none")
+
+
+def test_check_neg8_refuses_a_mismatched_attempt():
+    cfgs = [config(attempt(4, 128)), config(dict(attempt(8, 128), status="crashed"), standing=0)]
+    mps_spike.check_neg8(cfgs, 14854)                       # a crashed attempt without a count is not compared
+    with pytest.raises(SystemExit, match="differs from 14854"):
+        mps_spike.check_neg8([config(attempt(4, 128, n_items=14000))], 14854)
+
+
+def test_markdown_has_token_lengths_section():
+    report = _report(FULL, [config(at_epoch(4, 128, 3000.0))])
+    report["token_stats"] = spike.token_stats([[80, 89], [40]], [30, 5])
+    report["neg8"] = {"n_items": 14854, "n_positives": 3254, "n_messages": 1450, "seed": 0}
+    md = spike.render_markdown(report)
+    assert md.index("## Token lengths (D-09b)") < md.index("## Verdict")
+    assert "0.00% of messages over 128 tokens" in md and "14854 neg8 items" in md
