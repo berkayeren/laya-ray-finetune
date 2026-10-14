@@ -162,7 +162,7 @@ def test_matrix_lines_and_total():
     p = compute.project(toy_measured(), TOY_COUNTS, TOY_MATRIX)
     assert [l["id"] for l in p["lines"]] == LINE_IDS
     for l in p["lines"]:
-        assert l["basis"] in ("measured", "estimate", "provisional"), l["id"]
+        assert l["basis"] in ("measured", "measured (cpu, wall)", "estimate", "provisional"), l["id"]
         assert l["formula"] and l["source"] and l["seconds"] > 0, l["id"]
         assert l["hours"] == pytest.approx(l["seconds"] / 3600)
     assert p["total_s"] == pytest.approx(sum(l["seconds"] for l in p["lines"]))
@@ -205,8 +205,10 @@ def test_scoring_rate_falls_back_to_the_committed_cpu_rate():
     rate = side["timing"]["seconds"] / side["split"]["n_messages"]
     p = compute.project(toy_measured(), TOY_COUNTS, TOY_MATRIX)
     val = line(p, "laya_val_scoring")
-    assert val["s_per_unit"] == pytest.approx(rate) and val["basis"] == "measured"
+    assert val["s_per_unit"] == pytest.approx(rate) and val["basis"] == "measured (cpu, wall)"     # IN-03
     assert "cpu" in val["source"] and "2 Ray actors" in val["source"]
+    measured = dict(toy_measured(), berturk={"status": "ok", "s_per_step": 0.5, "s_per_msg_infer": 0.004})
+    assert line(compute.project(measured, TOY_COUNTS, TOY_MATRIX), "final_scoring")["basis"] == "measured (cpu, wall)"
     assert val["runs"] == 12 and val["units_per_epoch"] == 208 and val["unit"] == "message"
     assert val["seconds"] == pytest.approx(12 * 208 * rate)
     final = line(p, "final_scoring")
@@ -600,3 +602,27 @@ def test_swap_growth_in_a_measured_epoch_is_bannered():
     assert "**Swap grew during measured epoch(s) 2** (largest 423 MiB)" in md
     assert md.index("Swap grew during measured epoch") < md.index("## Measured run")
     assert any(x.startswith("Swap grew during measured epoch(s) 2 (largest 423 MiB)") for x in swapped["assumptions"])
+
+
+def test_run_overhead_enters_every_laya_run():
+    """04-REVIEW IN-03: the fixed cost of one ray_train.py process (the child's wall clock minus the record's terms)
+    is added once per Laya run; a report without it says so in its assumptions."""
+    rows = toy_rows()
+    rows[1].update(segment=1, resumed=True)
+    record = {"segments": [_segment(0, 0), _segment(1, 1, 7.0, 1)], "epochs": rows, "load_s": 20.0, "calib_s": 5.0,
+              "final_save_s": 3.0}
+    # the resumed child trained epoch 2 only: 930 + 10 s, plus 20 load + 7 resume load + 5 calibration + 3 final save
+    assert compute.run_overhead(1000.0, record) == pytest.approx(1000.0 - 975.0)
+    assert compute.run_overhead(10.0, record) == 0.0
+    without = toy_measured()
+    assert any("fixed overhead" in x for x in compute.assumptions(TOY_MATRIX, without, TOY_COUNTS))
+    with_ = toy_measured()
+    with_["laya"]["run_overhead_s"] = 25.0
+    assert not any("fixed overhead" in x for x in compute.assumptions(TOY_MATRIX, with_, TOY_COUNTS))
+    assert compute.laya_run_s(14854, 4, with_["laya"]) == pytest.approx(compute.laya_run_s(14854, 4, TOY_LAYA) + 25.0)
+    p0, p1 = (compute.project(m, TOY_COUNTS, TOY_MATRIX) for m in (without, with_))
+    assert line(p1, "laya_selection")["seconds"] == pytest.approx(line(p0, "laya_selection")["seconds"] + 3 * 25.0)
+    assert "+ 25.0 s run overhead" in line(p1, "laya_selection")["formula"]
+    assert "run overhead" not in line(p0, "laya_selection")["formula"]
+    assert "run overhead 25.0 s" in compute.render_markdown(compute.build_report(
+        toy_meta(), with_, TOY_COUNTS, TOY_MATRIX, p1, toy_preflight()))

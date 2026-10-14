@@ -59,6 +59,9 @@ def test_compute_checkpoint_on_cpu(tmp_path):
     assert report["resume"]["resume_load_s"] > 0 and report["resume"]["resume_peak_total_bytes"] > 0
     lines = {l["id"]: l for l in report["projection"]["lines"]}
     assert lines["laya_selection"]["seconds"] > 0 and lines["laya_final"]["seconds"] > 0
+    # the resumed child's fixed cost outside its record (process and Ray start, ...), once per run (04-REVIEW IN-03)
+    assert report["measured"]["laya"]["run_overhead_s"] > 0 and "run overhead" in lines["laya_selection"]["formula"]
+    assert not any("fixed overhead" in x for x in report["assumptions"])
     assert sorted(lines) == sorted(["laya_selection", "laya_val_scoring", "laya_final", "berturk_selection",
                                     "berturk_final", "fewshot_base", "fewshot_incremental", "fewshot_scoring",
                                     "final_scoring"])

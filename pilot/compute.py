@@ -9,7 +9,9 @@ items of the committed splits without a tokenizer (pilot.runs.neg_items) and pro
 Projection rate (RESEARCH Pitfall 6): s_per_step is the LARGEST train_s / optimizer_steps over the measured epochs, so
 the MPS warm-up of epoch 1 (or any slower later epoch) makes the projection conservative, never optimistic. A Laya run
 of E epochs on n items costs E x (optimizer_steps(n) x s_per_step + save_s_per_epoch) + load_s + calib_s +
-final_save_s, every term measured by the probe run.
+final_save_s + run_overhead_s, every term measured by the probe run; run_overhead_s (run_overhead) is the probe child's
+wall clock minus the record's own terms (process and Ray start, the driver's checks, item building, the --out copy),
+0 for a report from before it was measured, which assumptions() then discloses.
 
 Transparency (T-04-17): every projection line names its basis and its source. basis is the weakest input of the line:
 "estimate" when any of its rates is an estimate (ESTIMATES, used only when the BERTurk timing child did not finish
@@ -193,18 +195,30 @@ def measured_from_checkpoint(ckpt_dir):
     return {"laya": laya, "epochs": rows}
 
 
+def run_overhead(wall_s, record):
+    """Seconds of one ray_train.py process outside its run record's terms: `wall_s` (the child's wall clock) minus the
+    train and save seconds of the epochs its last segment trained, its load, resume-load, calibration and final-save
+    seconds; what is left (process and Ray start, the driver's split and weight checks, item building, the --out copy)
+    is paid once by every run (04-REVIEW IN-03). Never negative."""
+    seg = record["segments"][-1]
+    inside = sum(r["train_s"] + r["save_s"] for r in record["epochs"] if r["segment"] == seg["segment"])
+    inside += record["load_s"] + (seg.get("resume_load_s") or 0.0) + record["calib_s"] + record["final_save_s"]
+    return max(0.0, wall_s - inside)
+
+
 def laya_run_s(n_items, epochs, laya):
     """Seconds of one Laya run of `epochs` epochs on `n_items` items at the measured rate and overheads."""
     steps = spike.optimizer_steps(n_items, laya["micro_batch"], laya["grad_accum"])
     return epochs * (steps * laya["s_per_step"] + laya["save_s_per_epoch"]) + laya["load_s"] + laya["calib_s"] + \
-        laya["final_save_s"]
+        laya["final_save_s"] + (laya.get("run_overhead_s") or 0.0)
 
 
 # ---- rates: measured when the probe measured them, else the committed CPU scoring rate or a labelled estimate ----
 
 def laya_scoring_rate(measured):
-    """(s per message, basis, source) of Laya scoring: measured["scoring"] when present, else the committed CPU
-    zero-shot val timing (wall seconds / messages)."""
+    """(s per message, basis, source) of Laya scoring: measured["scoring"] when present (inference seconds / messages),
+    else the committed CPU zero-shot val timing, basis "measured (cpu, wall)": wall seconds / messages, Ray start and
+    actor loads included (04-REVIEW IN-03)."""
     s = measured.get("scoring")
     if s and s.get("status", "ok") == "ok":
         return s["s_per_msg"], "measured", ("scoring probe on %s: %s, %d messages"
@@ -212,7 +226,7 @@ def laya_scoring_rate(measured):
     with open(SCORING_DUMP, encoding="utf-8") as f:
         side = json.load(f)
     n, sec, sc = side["split"]["n_messages"], side["timing"]["seconds"], side["scorer"]
-    return sec / n, "measured", ("committed zero-shot val dump %s: %.2f s wall for %d messages on %s with %d Ray "
+    return sec / n, "measured (cpu, wall)", ("committed zero-shot val dump %s: %.2f s wall for %d messages on %s with %d Ray "
                                  "actors x %d torch threads; not yet measured on the fine-tuned scoring device"
                                  % (repo_relpath(SCORING_DUMP), sec, n, sc["device"], sc["workers"],
                                     sc["torch_threads"]))
@@ -230,8 +244,11 @@ def berturk_rates(measured):
 
 
 def _laya_source(laya):
+    over = laya.get("run_overhead_s")
     return ("probe run on %s: s/step = the largest train_s / optimizer_steps over %d measured epoch(s); save, load, "
-            "calibration and final-save seconds from the same record" % (laya["device"], laya["epochs_measured"]))
+            "calibration and final-save seconds from the same record%s"
+            % (laya["device"], laya["epochs_measured"], "" if over is None else
+               "; run overhead %.1f s = the probe child's wall clock minus the record's terms" % over))
 
 
 # ---- lines and per-model parts ----
@@ -268,9 +285,10 @@ def _same(parts, key):
 
 def _parts_line(id_, phase, what, parts, source, formula, provisional=False):
     """A line made of per-model parts: runs and seconds are their sums; epochs, units, unit and s/unit are shown only
-    when every part agrees; basis is the weakest part (estimate), else provisional for an unfrozen protocol."""
-    basis = "estimate" if any(p["basis"] == "estimate" for p in parts) else \
-        ("provisional" if provisional else "measured")
+    when every part agrees; basis is the weakest part (estimate), else provisional for an unfrozen protocol, else a
+    qualified measurement (measured (cpu, wall)) of any part, else measured."""
+    basis = "estimate" if any(p["basis"] == "estimate" for p in parts) else "provisional" if provisional else \
+        next((p["basis"] for p in parts if p["basis"] != "measured"), "measured")
     line = _line(id_, phase, what, sum(p["runs"] for p in parts), _same(parts, "epochs"),
                  _same(parts, "units_per_epoch"), _same(parts, "unit"), _same(parts, "s_per_unit"), basis, source,
                  sum(p["seconds"] for p in parts), formula)
@@ -289,11 +307,13 @@ def _items_key(matrix):
 def _laya_train_line(id_, phase, what, runs_, epochs, split, laya, counts, keys, items_key):
     n = counts[split][items_key]
     part = _laya_part(runs_, epochs, n, laya)
+    over = laya.get("run_overhead_s")
     formula = ("%s (%d) x [%s (%d) x (%d optimizer steps (%d %s %s items, micro-batch %d, grad-accum %d) x %.4f s "
-               "+ %.1f s save) + %.1f s load + %.1f s calibration + %.1f s final save]"
+               "+ %.1f s save) + %.1f s load + %.1f s calibration + %.1f s final save%s]"
                % (keys[0], runs_, keys[1], epochs, part["units_per_epoch"], n, split, items_key[8:],
                   laya["micro_batch"], laya["grad_accum"], laya["s_per_step"], laya["save_s_per_epoch"],
-                  laya["load_s"], laya["calib_s"], laya["final_save_s"]))
+                  laya["load_s"], laya["calib_s"], laya["final_save_s"],
+                  "" if over is None else " + %.1f s run overhead" % over))
     return _line(id_, phase, what, runs_, epochs, part["units_per_epoch"], "optimizer step", laya["s_per_step"],
                  "measured", _laya_source(laya), part["seconds"], formula)
 
@@ -450,6 +470,11 @@ def assumptions(matrix, measured=None, counts=None, interrupt=None):
     else:
         out.append("Scoring time is measured on the pinned zero-shot weights (a --n %s val subset); a fine-tuned "
                    "checkpoint has the same architecture and forward cost" % sc.get("n"))
+    if measured.get("laya") and measured["laya"].get("run_overhead_s") is None:
+        out.append("The Laya lines leave out each run's fixed overhead (process and Ray start, the driver's split and "
+                   "weight checks, item building, the --out copy): this probe predates its measurement (the probe "
+                   "child's wall clock minus the record's terms), so they are slightly optimistic, by that overhead "
+                   "once per Laya training run")
     grew = swap_grew_epochs(measured)
     if grew:
         out.append("Swap grew during measured epoch(s) %s (largest %.0f MiB): the run was under memory pressure (the "
@@ -501,9 +526,10 @@ def _measured_lines(measured):
                                           m["max_len"], m["grad_accum"], "on" if m["grad_checkpointing"] else "off",
                                           "on" if m["amp"] else "off"),
              "- Worker env: %s" % (", ".join("`%s`" % e for e in m["env"]) or "none (not an MPS run)"),
-             "- Load %s s, calibration %s s, final save %s s" % (_fmt(m["load_s"], digits=1),
-                                                                _fmt(m["calib_s"], digits=1),
-                                                                _fmt(m["final_save_s"], digits=1)),
+             "- Load %s s, calibration %s s, final save %s s%s" % (
+                 _fmt(m["load_s"], digits=1), _fmt(m["calib_s"], digits=1), _fmt(m["final_save_s"], digits=1),
+                 "" if m.get("run_overhead_s") is None else ", run overhead %s s (the child's wall clock minus these "
+                 "and the epochs' terms)" % _fmt(m["run_overhead_s"], digits=1)),
              "- Projection rate: %s s per optimizer step, the largest train_s / optimizer_steps over %d measured "
              "epoch(s) (epoch 1: %s s; RESEARCH Pitfall 6)" % (_fmt(m["s_per_step"], digits=4), m["epochs_measured"],
                                                                _fmt(m["s_per_step_epoch1"], digits=4)),

@@ -9,7 +9,8 @@ MPS env (strict fallback 0, HIGH and LOW watermarks 1.0). A fresh process, becau
 PYTORCH_ENABLE_MPS_FALLBACK once at import and the MPS allocator keeps a process-wide high-water mark. The child's
 checkpoint carries the per-epoch run record (pilot.runs.read_record); pilot.compute turns it into the projection of
 the whole experiment matrix (s_per_step = the largest train_s / optimizer_steps over the measured epochs; item counts
-of all five verified splits), a what-if table, a disk budget and the assumptions to confirm, and writes
+of all five verified splits; the fixed per-run overhead = the measuring child's wall clock minus its record's terms,
+compute.run_overhead), a what-if table, a disk budget and the assumptions to confirm, and writes
 compute_checkpoint.json and compute_checkpoint.md. The probe's checkpoint and Ray storage are deleted afterwards unless --keep-run.
 
 Probe protocol (RESEARCH Open Question 1): a 2-epoch probe that is interrupted and resumed (LAYA-04 on the real
@@ -283,6 +284,7 @@ def launch_rung(rung, ctx):
     print("probe run %s on rung %s, interrupt %s -> log %s (tail -f it)" % (rid, rung, a.interrupt, log), flush=True)
     first = cmd + (["--fail-after-epoch", "1"] if a.interrupt == "fail" else [])
     with open(log, "wb") as f:
+        t0 = time.monotonic()
         proc = subprocess.Popen(first, cwd=REPO_ROOT, env=env, stdout=f, stderr=subprocess.STDOUT, shell=False,
                                 start_new_session=True)
         try:
@@ -297,6 +299,7 @@ def launch_rung(rung, ctx):
             if proc.poll() is None:                         # Ctrl-C never reaches a child in its own session
                 kill_tree(proc)
             raise
+    wall = time.monotonic() - t0                            # the measuring child's wall clock unless resumed below
     oom = runs.failure_line(read_text(log))
     if oom:
         return oom_attempt(attempt, oom, interrupt)
@@ -312,7 +315,9 @@ def launch_rung(rung, ctx):
         interrupt["post_interrupt_available_gib"] = wait_for_memory(a.min_available_gib)
         print("interrupted after epoch 1 (%s); rerunning the same command to resume" % a.interrupt, flush=True)
         with open(log, "ab") as f:
+            t0 = time.monotonic()
             r = subprocess.run(cmd, cwd=REPO_ROOT, env=env, stdout=f, stderr=subprocess.STDOUT, shell=False)
+            wall = time.monotonic() - t0
         oom = runs.failure_line(read_text(log))
         if oom:
             return oom_attempt(attempt, oom, interrupt)
@@ -320,6 +325,8 @@ def launch_rung(rung, ctx):
             return dict(attempt, status="failed", returncode=r.returncode, interrupt=interrupt,
                         reason="the resumed run failed: %s" % last_line(log))
     measured = compute.measured_from_checkpoint(ckpt)
+    # the fixed cost every run pays outside its record's terms, from the child that wrote the checkpoint (IN-03)
+    measured["laya"]["run_overhead_s"] = compute.run_overhead(wall, runs.read_record(ckpt))
     ctx["result"] = {"measured": measured, "ckpt": ckpt, "rid": rid}
     return dict(attempt, status="ok", interrupt=interrupt, resume=compute.resume_summary(runs.read_record(ckpt)))
 
