@@ -24,8 +24,12 @@ separate --amp choice, on by default only on cuda.
 
 Run record (LAYA-06): the checkpoint config holds training.ray_train.record: device, parameter device, torch threads,
 worker env, precision and checkpointing choices, load, calibration and final-save seconds, and one row per completed
-epoch with the pilot.runs.EPOCH_FIELDS (device-synchronised wall clock of the training steps, save time, optimizer
-steps, items, peak memory sampled after every micro-batch backward and optimizer step, system swap delta).
+epoch with the pilot.runs.EPOCH_FIELDS (device-synchronised wall clock of the training steps, save time of the train
+state, RNG and export, optimizer steps, items, peak memory sampled after every micro-batch backward and optimizer step,
+system swap delta, and the segment that trained it). Across a kill and resume the record keeps exactly one row per
+completed epoch (the partial epoch leaves none) and one pilot.runs.SEGMENT_FIELDS entry per run segment (start epoch,
+git sha and dirty flag, device, resume load seconds and memory), plus code_changed_on_resume, the relative export names,
+train_state_bytes and export_bytes.
 
 Items (data_neg8 by default): the split files label all 48 tags. After the --max-messages subsample and the
 message-level calibration holdout, every training message keeps all its positives plus --neg K random negatives
@@ -47,6 +51,19 @@ a path, a resource or the time), e.g. laya-selection_train-neg8-s0-1a2b3c4d. It 
 storage/<run_id>/ is the run's only directory and the same command always lands in it; --print-run-id prints it after
 the split, base and pin checks and exits without starting Ray.
 
+Resume (LAYA-04): at the end of every epoch every rank reports Ray checkpoint storage/<run_id>/epoch-NNN: rank 0's
+train_state.pt (fp32 model, AdamW, cosine scheduler, GradScaler on cuda, epoch, record rows and segments, run_id and
+canonical config) and each rank's rng-rank<r>.pt (torch CPU RNG, MPS or CUDA RNG, the option-order random.Random). Ray
+keeps one (num_to_keep 1) and never retries in-process (max_failures 0). Rerunning the same command after a kill
+resumes from the last one: Ray's get_checkpoint hands it back on every rank, every load is weights_only, every rank
+refuses a state of another kind, run_id or canonical config (pilot.runs.check_state), and on cpu the result is
+byte-identical to an uninterrupted run. The fp16 laya export is never resume state. A finished run's final
+checkpoint carries final.json, so its rerun copies that checkpoint to the new --out without training. Rank 0 also writes
+each epoch's uncalibrated laya export to storage/<run_id>/exports/epoch-NNN, outside the rotation (--no-export-epochs
+skips them), for Phase 5 to pick the epoch on val. Before ray.init the driver refuses when the free disk under --storage
+is below pilot.runs.disk_need_bytes. A failed run ends in one line: the MPS OOM rung message, the snapshot dir to delete
+when Ray's snapshot points at deleted checkpoints, or "rerun the same command to resume".
+
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
 (tampered, unregistered, val/test/probe) is refused before Ray starts. --base multilingual fetches the pinned,
 sha256-verified Laya weights (pilot.weights) before Ray starts; any other value must be a local checkpoint dir.
@@ -60,6 +77,7 @@ usage:
   python ray_train.py ... --device mps --workers 1  # the full encoder on the Apple GPU
   python ray_train.py ... --device mps --workers 1 --freeze-embeddings   # fallback rung 1 after an MPS OOM
   python ray_train.py ... --workers 2 --freeze-encoder --max-messages 100   # CPU smoke test
+  python ray_train.py ... --print-run-id            # the run id (storage/<run_id>/); rerun a killed command to resume
 """
 import argparse
 import gc
@@ -68,6 +86,7 @@ import json
 import os
 import random
 import shutil
+import subprocess
 import tempfile
 import time
 from contextlib import contextmanager, nullcontext
@@ -76,17 +95,19 @@ import psutil
 import ray
 import ray.train
 import torch
-from ray.train import Checkpoint, RunConfig, ScalingConfig
+from ray.train import Checkpoint, CheckpointConfig, FailureConfig, RunConfig, ScalingConfig
 from ray.train.torch import TorchTrainer
 
 from pilot import laya_adapter as la
 from pilot import pins, runs, spike
-from pilot.data import (DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file,
+from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file,
                         verify_split_file)
 from pilot.weights import checkpoint_digests, fetch, identity, verify_files
 
 WEIGHT_DECAY = 0.01                                         # AdamW weight decay (part of the run identity)
 CLIP_GRAD_NORM = 1.0                                        # gradient-norm clip per optimizer step (same)
+FINAL_MARK = "final.json"                                   # in the final checkpoint: the run is finished
+SAVE_META = "save.json"                                     # in an epoch checkpoint: that epoch's save time
 
 
 def read_verified_rows(path, sha256):
@@ -169,16 +190,70 @@ def mps_oom_exit(epoch, step, rung):
         raise
 
 
-def fit_or_exit(trainer):
-    """trainer.fit(); a worker's MPS out-of-memory exit reaches the driver inside Ray's TrainingFailedError and ends
-    the run with that one line (SystemExit); every other failure is re-raised as Ray gave it."""
+def _failure_text(e):
+    """Type names and messages of `e` and every exception behind it (cause, context, Ray's controller and worker
+    failures), so a wrapped CheckpointManagerInitializationError is still found."""
+    seen, todo, parts = set(), [e], []
+    while todo:
+        x = todo.pop()
+        if x is None or id(x) in seen:
+            continue
+        seen.add(id(x))
+        parts.append("%s: %s" % (type(x).__name__, x))
+        todo += [x.__cause__, x.__context__, getattr(x, "controller_failure", None)]
+        todo += list((getattr(x, "worker_failures", None) or {}).values())
+    return "\n".join(parts)
+
+
+def _last_line(text):
+    """The last non-empty line of a Ray failure text: the worker's own exception line (`RuntimeError: ...`)."""
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    return lines[-1] if lines else str(text)
+
+
+def fit_or_exit(trainer, run_dir=None):
+    """trainer.fit(), with Ray's failures turned into one console line (SystemExit):
+    - a worker's MPS out-of-memory exit: the rung line (pilot.runs.oom_message), which wins over the others;
+    - a snapshot under run_dir whose checkpoints are gone (CheckpointManagerInitializationError): name the dir to delete;
+    - any other training failure: rerun the same command to resume from the last epoch checkpoint in run_dir.
+    Exceptions that are not Ray training failures propagate unchanged."""
     try:
         return trainer.fit()
-    except ray.train.TrainingFailedError as e:
-        line = runs.failure_line(str(e))
-        if line is None:
+    except Exception as e:
+        failed = isinstance(e, ray.train.TrainingFailedError)
+        line = runs.failure_line(str(e)) if failed else None
+        if line is not None:
+            raise SystemExit(line) from None
+        if "CheckpointManagerInitializationError" in _failure_text(e):
+            raise SystemExit("%s holds a Ray snapshot whose checkpoints are gone; delete that dir to start the run "
+                             "fresh" % run_dir) from None
+        if not failed:
             raise
-        raise SystemExit(line) from None
+        raise SystemExit("training failed (%s); rerun the same command to resume from the last epoch checkpoint in %s"
+                         % (_last_line(str(e)), run_dir)) from None
+
+
+def code_state():
+    """{"git_sha", "git_dirty"} of the repo this script runs from (tracked files only); both None without git. Recorded
+    per run segment, never part of the run_id (a code fix must not orphan a long epoch's checkpoint)."""
+    def git(*args):
+        r = subprocess.run(("git",) + args, cwd=REPO_ROOT, capture_output=True, text=True, timeout=60)
+        if r.returncode:
+            raise OSError(r.stderr)
+        return r.stdout.strip()
+    try:
+        return {"git_sha": git("rev-parse", "HEAD"),
+                "git_dirty": bool(git("status", "--porcelain", "--untracked-files=no"))}
+    except (OSError, subprocess.SubprocessError):
+        return {"git_sha": None, "git_dirty": None}
+
+
+def free_bytes(path):
+    """Free bytes on the volume of `path`, or of its nearest existing parent (the storage dir may not exist yet)."""
+    path = os.path.abspath(path)
+    while not os.path.exists(path):
+        path = os.path.dirname(path)
+    return shutil.disk_usage(path).free
 
 
 def provenance(entry, manifest_path, base, base_dir, ident=None):
@@ -289,6 +364,63 @@ def _rewrite_config(path, cfg):
     os.replace(tmp, os.path.join(path, "rl_agent_config.json"))
 
 
+def load_resume(c, rank):
+    """(train state, this rank's RNG state, save.json of that epoch, train_state.pt bytes, load seconds), or "final"
+    when the run already finished, or None when storage/<run_id> holds no checkpoint (a fresh start).
+
+    Every rank reads the same train_state.pt and checks it (rank-symmetric: ray.train.report is a barrier, so a refusal
+    on one rank only would leave the others waiting). Every load is weights_only (tensors and primitives only)."""
+    ck = ray.train.get_checkpoint()
+    if ck is None:
+        return None
+    with ck.as_directory() as d:
+        if os.path.exists(os.path.join(d, FINAL_MARK)):
+            return "final"
+        t = time.perf_counter()
+        path = os.path.join(d, "train_state.pt")
+        state = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
+        runs.check_state(state, c["run_id"], c["canonical"])
+        rng_state = torch.load(os.path.join(d, "rng-rank%d.pt" % rank), map_location="cpu", weights_only=True)
+        with open(os.path.join(d, SAVE_META), encoding="utf-8") as f:
+            meta = json.load(f)
+        return state, rng_state, meta, os.path.getsize(path), time.perf_counter() - t
+
+
+def device_rng_state(device):
+    """The device RNG state (mps or cuda), None on cpu."""
+    if device.type == "mps":
+        return torch.mps.get_rng_state()
+    return torch.cuda.get_rng_state(device) if device.type == "cuda" else None
+
+
+def set_rng_states(rs, device, rng):
+    """Restore torch's CPU RNG, the device RNG and the option-order random.Random from a saved rng-rank<r>.pt."""
+    torch.set_rng_state(rs["torch"])
+    if device.type == "mps":
+        torch.mps.set_rng_state(rs["device"])
+    elif device.type == "cuda":
+        torch.cuda.set_rng_state(rs["device"], device)
+    version, internal, gauss = rs["option"]
+    rng.setstate((version, tuple(internal), gauss))         # random.Random wants its (version, tuple, gauss) shape
+
+
+def dir_bytes(path):
+    return sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(path) for f in fs)
+
+
+def write_export(inner, tok, ecfg, run_dir, name):
+    """Rank 0's uncalibrated laya export of a completed epoch at run_dir/exports/<name>, outside Ray's checkpoint
+    rotation (Phase 5 picks the epoch on val without retraining); an existing export is kept (a resumed run)."""
+    final = os.path.join(run_dir, "exports", name)
+    if not os.path.isdir(final):
+        tmp = final + ".tmp"
+        shutil.rmtree(tmp, ignore_errors=True)               # a partial export of a killed save
+        os.makedirs(os.path.dirname(final), exist_ok=True)
+        la.save_checkpoint(inner, tok, ecfg, tmp)
+        os.rename(tmp, final)                                # whole or absent, never half-written
+    return final
+
+
 def train_loop_per_worker(c):
     require_driver_node(ray.get_runtime_context().get_node_id(), c["driver_node_id"])
     ctx = ray.train.get_context()
@@ -298,6 +430,16 @@ def train_loop_per_worker(c):
     device, env_seen = worker_device(c)
     torch.set_num_threads(c["cpus_per_worker"])
     torch.manual_seed(c["seed"])
+
+    # Resume (LAYA-04): rerunning the same command hands this run's latest checkpoint back through Ray
+    resume = load_resume(c, rank)
+    if resume == "final":                                   # finished: Ray returns the final checkpoint to the driver
+        if rank == 0:
+            print("run %s already finished; its final checkpoint is returned without training" % c["run_id"],
+                  flush=True)
+        return
+    state, rng_state, save_meta, state_bytes, resume_load_s = resume or (None, None, None, None, None)
+    run_dir = os.path.join(c["storage"], c["run_id"])
 
     # the base must still be the bytes the driver recorded in provenance.base (load_checkpoint verifies nothing)
     t_load = time.perf_counter()
@@ -328,9 +470,10 @@ def train_loop_per_worker(c):
     calib_uids = "\n".join(r.get("uid", "") for r in calib_rows).encode("utf-8")
     holdout = {"unit": "message", "n_messages": len(calib_rows), "n_items": len(calib_items),
                "uids_sha256": hashlib.sha256(calib_uids).hexdigest()}
-    # driver-local absolute paths (data, base_dir), the run's node id and the raw env dict stay out of every
+    # driver-local absolute paths (data, base_dir, storage), the run's node id and the raw env dict stay out of every
     # checkpoint (the env is recorded only as KEY=VALUE strings in the run record)
-    ray_cfg = dict({k: v for k, v in c.items() if k not in ("data", "base_dir", "driver_node_id", "expect_env")},
+    ray_cfg = dict({k: v for k, v in c.items() if k not in ("data", "base_dir", "storage", "driver_node_id",
+                                                            "expect_env")},
                    calibration_holdout=holdout)
     per_rank = len(train_items) // world                    # equal shards keep DDP collectives in step
     if per_rank == 0:                                       # same on every rank: never publish an untrained "fine-tune"
@@ -354,6 +497,10 @@ def train_loop_per_worker(c):
     if rank == 0:
         print("rung %s%s | trainable params %d of %d" % (c["rung"], " (head-only, weaker)" if runs.weaker(c["rung"])
                                                           else "", trainable_params, total_params), flush=True)
+    if state is not None:                                   # fp32 weights into the CPU model: one copy on the device
+        t = time.perf_counter()
+        model.load_state_dict(state["model"])
+        resume_load_s += time.perf_counter() - t
     amp = c["amp"]                                          # decoupled from checkpointing (02-REVIEW CR-01)
     model = ray.train.torch.prepare_model(model, move_to_device=device,
                                           parallel_strategy_kwargs={"find_unused_parameters": True})
@@ -380,9 +527,32 @@ def train_loop_per_worker(c):
     params = [p for g in groups for p in g["params"]]
     rng = random.Random(c["seed"] + rank)
     shuffle = ("choice",) if c["shuffle_options"] else ()
-
     mem_reset, mem_sync, mem_sample, mem_current, peak = memory_sampler(device)
-    rows_out = []
+
+    start_epoch, rows_out, segments, resume_peak = 0, [], [], None
+    if state is not None:
+        # after the optimizer and scheduler exist (the scheduler's constructor sets the lr the saved state restores)
+        t = time.perf_counter()
+        opt.load_state_dict(state["opt"])
+        sched.load_state_dict(state["sched"])
+        if scaler is not None:
+            scaler.load_state_dict(state["scaler"])
+        set_rng_states(rng_state, device, rng)
+        start_epoch, rows_out, segments = state["epoch"], list(state["history"]), list(state["segments"])
+        rows_out[-1]["save_s"] = save_meta["save_s"]       # the saved epoch's own save time, written after its state
+        del state, rng_state
+        gc.collect()
+        mem_sync()
+        resume_load_s += time.perf_counter() - t
+        mem_sample()
+        resume_peak = peak["total"]
+        if rank == 0:
+            print("resuming %s after epoch %d (segment %d, load %.1fs)" % (c["run_id"], start_epoch, len(segments),
+                                                                          resume_load_s), flush=True)
+    segment = dict(zip(runs.SEGMENT_FIELDS, (len(segments), start_epoch, start_epoch > 0, c["code"]["git_sha"],
+                                             c["code"]["git_dirty"], device.type, resume_load_s, resume_peak)))
+    segments.append(segment)
+    exports_dir = os.path.join(run_dir, "exports")
     record = {"device": device.type,
               "param_device": ",".join(sorted({p.device.type for p in inner.parameters()})),
               "torch_threads": torch.get_num_threads(),
@@ -396,8 +566,20 @@ def train_loop_per_worker(c):
               "neg": c["neg"], "neg_seed": c["neg_seed"], "n_train_messages": len(train_rows),
               "n_train_items": len(train_items), "n_train_items_counted": counted, "items_skipped": skipped,
               "load_s": load_s, "calib_s": None, "final_save_s": None, "run_id": c["run_id"],
-              "canonical": c["canonical"], "epochs": rows_out}
-    for epoch in range(c["epochs"]):
+              "canonical": c["canonical"], "segments": segments,
+              "code_changed_on_resume": len({s["git_sha"] for s in segments}) > 1,
+              "exports": [], "train_state_bytes": state_bytes, "export_bytes": None, "epochs": rows_out}
+
+    def note_exports():
+        names = sorted(n for n in os.listdir(exports_dir) if len(n) == 9 and n.startswith("epoch-")) \
+            if os.path.isdir(exports_dir) else []
+        record["exports"] = ["exports/" + n for n in names]   # relative names only, never the storage path
+        if names:
+            record["export_bytes"] = dir_bytes(os.path.join(exports_dir, names[-1]))
+
+    note_exports()
+    last = {"epoch": start_epoch, "loss": rows_out[-1]["loss"] if rows_out else None}
+    for epoch in range(start_epoch, c["epochs"]):
         t_epoch = time.time()
         order = list(shard)
         random.Random(c["seed"] + 1000 * epoch + rank).shuffle(order)
@@ -439,7 +621,7 @@ def train_loop_per_worker(c):
         train_s, swap_delta = time.perf_counter() - t0, spike.swap_used() - swap0
         row = dict(zip(runs.EPOCH_FIELDS, (epoch + 1, total / max(1, n), train_s, 0.0, steps, len(shard),
                                            peak["total"], peak["driver"], peak["rss"], mem_current(),
-                                           swap_delta)))
+                                           swap_delta, segment["segment"], segment["resumed"])))
         rows_out.append(row)
         metrics = {"epoch": epoch + 1, "loss": row["loss"], "epoch_seconds": round(time.time() - t_epoch, 1),
                    "train_s": train_s}
@@ -447,22 +629,41 @@ def train_loop_per_worker(c):
             print("epoch %d/%d loss %.4f train %.1fs peak %.2f GiB swap %+.0f MiB"
                   % (epoch + 1, c["epochs"], row["loss"], train_s, row["peak_total_bytes"] / 2**30,
                      swap_delta / 2**20), flush=True)
-        # every rank reports; only rank 0 attaches a checkpoint
-        if rank == 0 and epoch < c["epochs"] - 1:
-            ecfg = epoch_config(cfg, max_len, head_max_len, dict(ray_cfg, record=record), epoch + 1)
-            with tempfile.TemporaryDirectory() as d:
-                t_save = time.perf_counter()
-                la.save_checkpoint(inner, tok, ecfg, d)
-                row["save_s"] = time.perf_counter() - t_save   # ecfg shares this row
-                _rewrite_config(d, ecfg)
-                ray.train.report(metrics, checkpoint=Checkpoint.from_directory(d))
-        elif epoch < c["epochs"] - 1:
-            ray.train.report(metrics)
+
+        # Epoch checkpoint (LAYA-04): rank 0's fp32 train state + every rank's RNG; never the fp16 laya export
+        if device.type == "mps":
+            torch.mps.empty_cache()                         # the allocator cache before the state copies to CPU
+        gc.collect()
+        name = "epoch-%03d" % (epoch + 1)
+        with tempfile.TemporaryDirectory() as d:
+            t_save = time.perf_counter()
+            if rank == 0:
+                if c["export_epochs"]:
+                    ecfg = epoch_config(cfg, max_len, head_max_len, dict(ray_cfg, record=record), epoch + 1)
+                    write_export(inner, tok, ecfg, run_dir, name)
+                    note_exports()
+                path = os.path.join(d, "train_state.pt")
+                torch.save({"kind": "train_state", "run_id": c["run_id"], "canonical": c["canonical"],
+                            "epoch": epoch + 1, "model": inner.state_dict(), "opt": opt.state_dict(),
+                            "sched": sched.state_dict(), "scaler": scaler.state_dict() if scaler else None,
+                            "history": rows_out, "segments": segments}, path)
+                record["train_state_bytes"] = os.path.getsize(path)
+            torch.save({"torch": torch.get_rng_state(), "device": device_rng_state(device), "option": rng.getstate()},
+                       os.path.join(d, "rng-rank%d.pt" % rank))
+            row["save_s"] = time.perf_counter() - t_save    # the state above holds 0.0; save.json carries the time
+            if rank == 0:
+                with open(os.path.join(d, SAVE_META), "w", encoding="utf-8") as f:
+                    json.dump({"epoch": epoch + 1, "save_s": row["save_s"]}, f)
+            ray.train.report(metrics, checkpoint=Checkpoint.from_directory(d),
+                             checkpoint_dir_name="epoch-%03d" % (epoch + 1))
+        if c["fail_after_epoch"] == epoch + 1:              # test hook: every rank fails after the checkpoint
+            raise RuntimeError("simulated failure after epoch %d (--fail-after-epoch)" % (epoch + 1))
         last = metrics
 
     # Calibrate on the held-out messages and publish the final checkpoint from rank 0.
     del opt, sched, scaler, params, groups                 # free optimizer state before the eval pass
     gc.collect()
+    record["code_changed_on_resume"] = len({s["git_sha"] for s in segments}) > 1
     if rank == 0:
         inner.eval()
         t_calib = time.perf_counter()
@@ -483,7 +684,10 @@ def train_loop_per_worker(c):
             la.save_checkpoint(inner, tok, out_cfg, d)
             record["final_save_s"] = time.perf_counter() - t_save
             _rewrite_config(d, out_cfg)                      # the record now holds the final save time
-            ray.train.report(dict(last, temperature=fitted["temperature"]), checkpoint=Checkpoint.from_directory(d))
+            with open(os.path.join(d, FINAL_MARK), "w", encoding="utf-8") as f:
+                json.dump({"kind": "final", "run_id": c["run_id"]}, f)   # a rerun returns this without training
+            ray.train.report(dict(last, temperature=fitted["temperature"]), checkpoint=Checkpoint.from_directory(d),
+                             checkpoint_dir_name="final")
     else:
         ray.train.report(last)
 
@@ -533,6 +737,10 @@ def parser():
     ap.add_argument("--print-run-id", action="store_true",
                     help="print the run id this command trains under (its Ray dir and resume key), then exit without "
                          "starting Ray")
+    ap.add_argument("--export-epochs", action=argparse.BooleanOptionalAction, default=True,
+                    help="write each epoch's uncalibrated laya export to storage/<run_id>/exports/epoch-NNN for Phase 5 "
+                         "epoch selection (default on)")
+    ap.add_argument("--fail-after-epoch", type=int, default=None, help=argparse.SUPPRESS)   # test hook, never an env var
     return ap
 
 
@@ -578,6 +786,14 @@ def main(argv=None):
     if a.print_run_id:
         print(rid)
         return
+    run_dir = os.path.join(os.path.abspath(a.storage), rid)  # Ray's experiment dir: the resume key
+    need = runs.disk_need_bytes(os.path.getsize(os.path.join(base_dir, "model.safetensors")), a.epochs,
+                                a.export_epochs)
+    free = free_bytes(a.storage)
+    if free < need:                                         # before ray.init: a full disk mid-save corrupts the run
+        raise SystemExit("%.1f GiB free under --storage; this run needs about %.1f GiB (three train states during "
+                         "checkpoint rotation, per-epoch exports, the final checkpoint); free disk or pass another "
+                         "--storage" % (free / 2**30, need / 2**30))
 
     device, cpus = r["device"], r["cpus_per_worker"]
     object_store = int(a.object_store_gb * 1024**3) if a.object_store_gb else None
@@ -598,17 +814,24 @@ def main(argv=None):
                 "shuffle_options": a.shuffle_options, "max_len": a.max_len, "head_max_len": a.head_max_len,
                 "max_messages": a.max_messages, "neg": a.neg, "calib_max_messages": a.calib_max_messages,
                 "calib_frac": a.calib_frac, "calib_batch": a.calib_batch,
-                "seed": a.seed, "expect_env": env, "run_id": rid, "canonical": canon,
+                "seed": a.seed, "expect_env": env, "run_id": rid, "canonical": canon, "code": code_state(),
+                "storage": os.path.abspath(a.storage), "export_epochs": a.export_epochs,
+                "fail_after_epoch": a.fail_after_epoch,
                 "provenance": provenance(entry, a.manifest, a.base, base_dir, base_ident)}, **r)
     cfg["rung"] = runs.rung_label(cfg)                      # derived from the flags, into the record and the config
     trainer = TorchTrainer(
         train_loop_per_worker, train_loop_config=cfg,
         scaling_config=ScalingConfig(num_workers=a.workers, use_gpu=(device == "cuda"),
                                      resources_per_worker={"CPU": cpus}),
-        run_config=RunConfig(name=rid, storage_path=a.storage))
+        # one train state kept (each is ~6x the fp16 weights); no in-process retry: a rerun of the command resumes
+        run_config=RunConfig(name=rid, storage_path=os.path.abspath(a.storage),
+                             checkpoint_config=CheckpointConfig(num_to_keep=1),
+                             failure_config=FailureConfig(max_failures=0)))
     t0 = time.time()
-    result = fit_or_exit(trainer)
+    result = fit_or_exit(trainer, run_dir)
     print("metrics:", json.dumps(result.metrics, default=str))
+    if result.checkpoint is None:
+        raise SystemExit("the run reported no checkpoint; rerun the same command to resume from %s" % run_dir)
     if os.path.isdir(a.out) and not os.listdir(a.out):
         os.rmdir(a.out)                                     # an empty dir checked before training
     with result.checkpoint.as_directory() as d:

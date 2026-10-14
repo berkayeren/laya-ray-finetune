@@ -3,8 +3,8 @@
 ray_train.py writes one record per run into the checkpoint config, at training.ray_train.record: the device the
 parameters landed on, the worker env (KEY=VALUE strings, MPS only), the precision and checkpointing choices, the
 load, calibration and final-save times, and one row per completed epoch with exactly EPOCH_FIELDS (wall clock of the
-epoch's training steps, save time, optimizer steps, items, peak memory and the system swap delta). Nothing here may
-import torch: compute_checkpoint.py imports it before any child sets the MPS env, and torch reads
+epoch's training steps, save time, optimizer steps, items, peak memory, the system swap delta and the run segment that
+trained it), one SEGMENT_FIELDS entry per run segment (a killed run's rerun adds one). Nothing here may import torch: compute_checkpoint.py imports it before any child sets the MPS env, and torch reads
 PYTORCH_ENABLE_MPS_FALLBACK once, at import.
 
 The ladder (SPIKE_START, RUNG_NEXT, rung_label, rung_flags, oom_message, failure_line) turns a fallback into flags and
@@ -16,6 +16,7 @@ run_id() names the run by them (split, neg K, seed and the first 8 hex of the sh
 run_id is the Ray experiment name, so storage/<run_id>/ is the run's only resume directory: rerunning the same config
 resumes, another seed or config gets another dir. Every ray_train.py flag is in exactly one of IDENTITY (directly or
 through its resolved value) and NOT_IDENTITY (a test enforces it), so a new flag cannot silently drop out of the key.
+check_state refuses a resume from another run's train state; disk_need_bytes is the driver's free-disk floor.
 
 usage: from pilot import runs; record = runs.read_record(ckpt_dir); [row["train_s"] for row in record["epochs"]]
        runs.neg_items(rows, 8); runs.rung_label(cfg); runs.oom_message(epoch, micro_batch, rung)
@@ -43,8 +44,10 @@ IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_conf
 #   calib_batch: the batch size of the calibration forward pass (eval only, after training)
 #   gpu: an alias, represented by its resolved value (device)
 #   print_run_id: prints the run_id and exits
+#   fail_after_epoch: a test hook that kills the run after an epoch's checkpoint; the rerun must resume the same run
+#   export_epochs: whether per-epoch laya exports are written next to the run (outputs, not training)
 NOT_IDENTITY = ("data", "base", "out", "storage", "manifest", "cpus_per_worker", "object_store_gb", "calib_batch", "gpu",
-                "print_run_id")
+                "print_run_id", "fail_after_epoch", "export_epochs")
 
 
 def canonical(values):
@@ -57,6 +60,22 @@ def canonical(values):
     return {k: values[k] for k in IDENTITY}
 
 
+def check_state(state, run_id, canonical):
+    """Refuse a train state that is not this run's: its kind, run_id and canonical config must all match (every rank
+    checks the same file, so every rank refuses together and no rank waits at a report barrier)."""
+    for key, want in (("kind", "train_state"), ("run_id", run_id), ("canonical", canonical)):
+        if state.get(key) != want:
+            raise SystemExit("Ray storage holds a train state from another run (%s differs); delete storage/%s or "
+                             "choose another --storage" % (key, run_id))
+
+
+def disk_need_bytes(model_bytes, epochs, export_epochs):
+    """Bytes a run needs under --storage: three train states alive during checkpoint rotation (the temp dir, Ray's
+    copy, the previous epoch), each 6 x the fp16 weight bytes (fp32 weights + two AdamW moments), the per-epoch laya
+    exports, the final checkpoint and a 1 GiB margin."""
+    return 3 * 6 * model_bytes + (epochs * model_bytes if export_epochs else 0) + model_bytes + 2**30
+
+
 def run_id(canon):
     """laya-<split>-<negK or full>-s<seed>-<first 8 hex of the sha256 of the sorted, compact canonical JSON>.
 
@@ -67,9 +86,15 @@ def run_id(canon):
 
 # one row per completed epoch; peak_driver_bytes and current_allocated_bytes are None on CPU (never 0), where
 # peak_total_bytes is the peak RSS; on MPS peak_total_bytes is the peak of driver-allocated memory + RSS (the spike's
-# peak_memory_bytes basis)
+# peak_memory_bytes basis); segment is the run segment that trained the epoch, resumed whether that segment started from
+# a checkpoint (a killed run's rerun)
 EPOCH_FIELDS = ("epoch", "loss", "train_s", "save_s", "optimizer_steps", "n_items", "peak_total_bytes",
-                "peak_driver_bytes", "peak_rss_bytes", "current_allocated_bytes", "swap_delta_bytes")
+                "peak_driver_bytes", "peak_rss_bytes", "current_allocated_bytes", "swap_delta_bytes", "segment",
+                "resumed")
+# one entry per run segment (segment 0 = the first start; every rerun after a kill adds one); resume_load_s and
+# resume_peak_total_bytes are None on a segment that started at epoch 0
+SEGMENT_FIELDS = ("segment", "start_epoch", "resumed", "git_sha", "git_dirty", "device", "resume_load_s",
+                  "resume_peak_total_bytes")
 
 
 def neg_items(rows, k):
