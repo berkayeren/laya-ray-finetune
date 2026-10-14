@@ -71,3 +71,18 @@ def test_cpu_record_keeps_local_paths_and_raw_env_out(cpu_run):
         ray_cfg = json.load(f)["training"]["ray_train"]
     assert not {"data", "base_dir", "driver_node_id", "expect_env"} & set(ray_cfg), sorted(ray_cfg)
     assert ray_cfg["device"] == "cpu" and ray_cfg["cpus_per_worker"] == 1
+
+
+@pytest.mark.timeout(600)
+def test_neg_items_match_the_count(cpu_run):
+    """Default --neg 8: train items are the sampled positives + 8 negatives; calibration keeps all 48 labels."""
+    import json
+    rec = runs.read_record(cpu_run)
+    assert rec["neg"] == 8 and rec["neg_seed"] == 0
+    assert rec["n_train_items"] == rec["n_train_items_counted"] > 0
+    assert rec["n_train_items"] < 48 * rec["n_train_messages"]
+    assert rec["items_skipped"] == {}
+    assert all(row["n_items"] == rec["n_train_items"] for row in rec["epochs"])   # one worker: the whole shard
+    with open(os.path.join(cpu_run, "rl_agent_config.json"), encoding="utf-8") as f:
+        holdout = json.load(f)["training"]["ray_train"]["calibration_holdout"]
+    assert holdout["n_messages"] > 0 and holdout["n_items"] == 48 * holdout["n_messages"]

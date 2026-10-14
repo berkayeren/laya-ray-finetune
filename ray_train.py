@@ -27,9 +27,14 @@ worker env, precision and checkpointing choices, load, calibration and final-sav
 epoch with the pilot.runs.EPOCH_FIELDS (device-synchronised wall clock of the training steps, save time, optimizer
 steps, items, peak memory sampled after every micro-batch backward and optimizer step, system swap delta).
 
+Items (data_neg8 by default): the split files label all 48 tags. After the --max-messages subsample and the
+message-level calibration holdout, every training message keeps all its positives plus --neg K random negatives
+(pilot.spike.neg8_rows, one random.Random(--neg-seed) draw per run, --neg-seed defaulting to --seed); --neg 0 trains on
+all 48 labels (data_full). The calibration messages always keep all 48 labels. The record carries the items laya built
+and the torch-free count pilot.runs.neg_items gives, so the compute projection can count any split without a tokenizer.
+
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
-(tampered, unregistered, val/test/probe) is refused before Ray starts. The split files label all 48 tags;
-per-seed negative sampling arrives with the Phase 4 training harness. --base multilingual fetches the pinned,
+(tampered, unregistered, val/test/probe) is refused before Ray starts. --base multilingual fetches the pinned,
 sha256-verified Laya weights (pilot.weights) before Ray starts; any other value must be a local checkpoint dir.
 --manifest selects the prepare-written splits.json to verify against (default: the committed data/splits.json; use
 OTHER_DIR/splits.json for a `prepare_data.py --out OTHER_DIR` variant). Verification itself cannot be skipped, a
@@ -129,6 +134,7 @@ def resolve(a):
             "amp": (device == "cuda") if a.amp is None else a.amp,
             "grad_checkpointing": bool(a.grad_checkpointing and not a.freeze_encoder),
             "cpus_per_worker": a.cpus_per_worker or (4 if mps else 1),   # 4 = the spike's timing basis
+            "neg_seed": a.seed if a.neg_seed is None else a.neg_seed,
             "adamw_foreach": False if mps else None,
             "adamw_fused": False if mps else None}
 
@@ -252,6 +258,11 @@ def train_loop_per_worker(c):
         random.Random(c["seed"]).shuffle(rows)
         rows = rows[:c["max_messages"]]
     train_rows, calib_rows = holdout_messages(rows, c["calib_max_messages"], c["calib_frac"], c["seed"])
+    # neg-K sampling on the training messages only, after the holdout: calibration keeps all 48 labels (a neg8
+    # calibration set would carry about 22% positives against about 5% on val and test)
+    counted = runs.neg_items(train_rows, c["neg"])
+    if c["neg"]:
+        train_rows = spike.neg8_rows(train_rows, c["neg_seed"], c["neg"])
     train_items, skipped = la.items_from_rows(tok, train_rows, max_len, head_max_len)
     calib_items, calib_skipped = la.items_from_rows(tok, calib_rows, max_len, head_max_len)
     if not calib_items:                                     # same rows on every rank, so every rank stops here
@@ -270,9 +281,10 @@ def train_loop_per_worker(c):
                          % (len(train_items), world))
     shard = train_items[rank * per_rank:(rank + 1) * per_rank]
     if rank == 0:
-        print("messages %d -> train %d, calibration %d | items train %d (skipped %r, %d per rank x %d), "
-              "calibration %d (skipped %r)" % (len(rows), len(train_rows), len(calib_rows), len(train_items), skipped,
-                                               per_rank, world, len(calib_items), calib_skipped), flush=True)
+        print("messages %d -> train %d, calibration %d | neg %s: items train %d (counted %d, skipped %r, %d per rank "
+              "x %d), calibration %d (skipped %r)"
+              % (len(rows), len(train_rows), len(calib_rows), c["neg"] or "all", len(train_items), counted, skipped,
+                 per_rank, world, len(calib_items), calib_skipped), flush=True)
 
     if c["freeze_encoder"]:
         la.freeze_encoder(model)
@@ -314,6 +326,8 @@ def train_loop_per_worker(c):
               "grad_checkpointing": c["grad_checkpointing"], "amp": amp,
               "adamw_foreach": c["adamw_foreach"], "adamw_fused": c["adamw_fused"],
               "recommended_max_memory_bytes": torch.mps.recommended_max_memory() if device.type == "mps" else None,
+              "neg": c["neg"], "neg_seed": c["neg_seed"], "n_train_messages": len(train_rows),
+              "n_train_items": len(train_items), "n_train_items_counted": counted, "items_skipped": skipped,
               "load_s": load_s, "calib_s": None, "final_save_s": None, "epochs": rows_out}
     for epoch in range(c["epochs"]):
         t_epoch = time.time()
@@ -431,6 +445,9 @@ def parser():
     ap.add_argument("--max-len", type=int, default=None)
     ap.add_argument("--head-max-len", type=int, default=None)
     ap.add_argument("--max-messages", type=int, default=None, help="subsample messages (smoke tests)")
+    ap.add_argument("--neg", type=int, default=8,
+                    help="negatives kept per training message; 0 = all 48 labels (data_full)")
+    ap.add_argument("--neg-seed", type=int, default=None, help="negative-sampling seed; default --seed")
     ap.add_argument("--calib-max-messages", type=int, default=40,
                     help="messages held out (all their questions) for temperature calibration")
     ap.add_argument("--calib-frac", type=float, default=0.1, help="cap on the held-out share of messages")
@@ -449,6 +466,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.epochs < 1:
         ap.error("--epochs must be at least 1")
+    if a.neg < 0:
+        ap.error("--neg must be 0 (all labels) or a positive count")
     try:
         r = resolve(a)
     except ValueError as e:
@@ -494,7 +513,7 @@ def main(argv=None):
                 "micro_batch": a.micro_batch, "grad_accum": a.grad_accum, "encoder_lr": a.encoder_lr,
                 "head_lr": a.head_lr, "loss": a.loss, "freeze_encoder": a.freeze_encoder,
                 "shuffle_options": a.shuffle_options, "max_len": a.max_len, "head_max_len": a.head_max_len,
-                "max_messages": a.max_messages, "calib_max_messages": a.calib_max_messages,
+                "max_messages": a.max_messages, "neg": a.neg, "calib_max_messages": a.calib_max_messages,
                 "calib_frac": a.calib_frac, "calib_batch": a.calib_batch,
                 "seed": a.seed, "expect_env": env,
                 "provenance": provenance(entry, a.manifest, a.base, base_dir, base_ident)}, **r)

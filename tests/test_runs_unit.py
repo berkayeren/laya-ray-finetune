@@ -64,3 +64,38 @@ def test_import_is_torch_free():
     r = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "NO_TORCH", r.stdout
+
+
+def _labelled(n_pos, n_labels=48):
+    return {"expected": {"t%02d" % i: i < n_pos for i in range(n_labels)}}
+
+
+def test_neg_items_counts_positives_plus_k_negatives():
+    assert runs.neg_items([_labelled(2)], 8) == 10
+    assert runs.neg_items([_labelled(0)], 8) == 8
+    assert runs.neg_items([_labelled(45)], 8) == 48            # only 3 negatives left to keep
+    assert runs.neg_items([_labelled(2)], 0) == 48             # K 0 = every label (data_full)
+    assert runs.neg_items([_labelled(2), _labelled(0), _labelled(45)], 8) == 66
+    with pytest.raises(ValueError, match="positive count"):
+        runs.neg_items([_labelled(2)], -1)
+
+
+def test_neg_items_equals_what_neg8_rows_keeps():
+    from pilot import spike
+    rows = [_labelled(p) for p in (0, 1, 3, 12, 41, 47)]
+    for k in (1, 8, 20):
+        kept = spike.neg8_rows(rows, 0, k)
+        assert runs.neg_items(rows, k) == sum(len(r["expected"]) for r in kept)
+
+
+@pytest.mark.data
+def test_neg8_items_on_the_committed_train_splits():
+    """The compute projection's torch-free count equals the spike's n_neg8_items (14,854) on selection_train."""
+    import pilot.data
+    for name, want in (("selection_train", 14854), ("final_train", 17001)):
+        path = os.path.join(REPO_ROOT, "data", "splits", name + ".jsonl")
+        entry = pilot.data.verify_split_file(path, roles=("train",))
+        with open(path, "rb") as f:
+            rows = pilot.data.parse_jsonl(f.read())
+        assert len(rows) == entry["n_messages"]
+        assert runs.neg_items(rows, 8) == want, name

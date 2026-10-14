@@ -1,4 +1,4 @@
-"""Torch-free run-record schema of ray_train.py (LAYA-06): the per-epoch fields and the reader.
+"""Torch-free run-record schema of ray_train.py (LAYA-06): the per-epoch fields, the reader and the neg-K item count.
 
 ray_train.py writes one record per run into the checkpoint config, at training.ray_train.record: the device the
 parameters landed on, the worker env (KEY=VALUE strings, MPS only), the precision and checkpointing choices, the
@@ -19,6 +19,22 @@ from pilot.data import repo_relpath
 # peak_memory_bytes basis)
 EPOCH_FIELDS = ("epoch", "loss", "train_s", "save_s", "optimizer_steps", "n_items", "peak_total_bytes",
                 "peak_driver_bytes", "peak_rss_bytes", "current_allocated_bytes", "swap_delta_bytes")
+
+
+def neg_items(rows, k):
+    """Training items a neg-K run builds from `rows`, counted without a tokenizer (the compute projection's count).
+
+    Per row: every positive plus min(k, labels - positives) negatives (pilot.spike.neg8_rows keeps exactly these), or
+    every label for k 0 (data_full); labels = the row's `expected` entries. laya's items_from_rows skips nothing on a
+    well-formed split, so this equals the number of items laya builds (ray_train.py records both).
+    """
+    if k < 0:
+        raise ValueError("k must be 0 (all labels) or a positive count, got %r" % (k,))
+    n = 0
+    for r in rows:
+        labels, pos = len(r["expected"]), sum(1 for v in r["expected"].values() if v)
+        n += pos + min(k, labels - pos) if k else labels
+    return n
 
 
 def env_strings(env):
