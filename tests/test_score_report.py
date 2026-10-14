@@ -221,6 +221,77 @@ def test_line_separator_messages_stay_one_row(tmp_path, synthetic_raw):
     assert logits.shape[0] == len(uids) == entry["n_messages"] and "bank_sep_2" in uids
 
 
+# --- val-selected θ: chosen on the same run's full val dump only (EVAL-02, D-11, D-12) ----------------------------
+
+def _score_both(snap, root, model="prior"):
+    out_dir, manifest = snap
+    for name in ("val", "test"):
+        score.main([os.path.join(out_dir, "splits", "%s.jsonl" % name), "--model", model, "--manifest", manifest,
+                    "--out-root", str(root)])
+    return os.path.join(str(root), model), manifest
+
+
+def test_report_selects_theta_on_val_and_discloses_it(tmp_path, snap):
+    run_dir, manifest = _score_both(snap, tmp_path / "dumps")
+    rep = report.run_report(run_dir, "test", manifest)
+    assert set(rep["variants"]) == {"shipped", "raw"} and rep["headline"] == "shipped"
+    assert rep["variants"]["shipped"]["temperature"] == 1.0 and rep["variants"]["raw"]["temperature"] == 1.0
+    _, val_uids, val_side, entry = dumps.load_dump(run_dir, "val", manifest)
+    assert rep["theta_source"] == {"run_id": "prior", "split": "val", "dump_sha256": val_side["dump_sha256"],
+                                   "uids_sha256": entry["uids_sha256"], "n_messages": len(val_uids)}
+    for v in rep["variants"].values():
+        assert set(v["rows"]) == {"0.5", "val_selected"} and "val_selected_reason" not in v
+        row = v["rows"]["val_selected"]
+        th = row["theta"]
+        assert set(th) == {"global", "per_tag", "eligible_tags", "min_val_positives", "grid", "objective",
+                           "tie_break"}
+        assert th["grid"] == {"start": 0.05, "stop": 0.95, "step": 0.01, "n": 91} and th["min_val_positives"] == 10
+        assert list(th["per_tag"]) == th["eligible_tags"] and row["in_sample"] is False
+        assert row["n"] == v["rows"]["0.5"]["n"]
+
+
+def test_report_on_val_marks_theta_in_sample(tmp_path, snap):
+    run_dir, manifest = _score_both(snap, tmp_path / "dumps")
+    rep = report.run_report(run_dir, "val", manifest)
+    assert all(v["rows"]["val_selected"]["in_sample"] is True for v in rep["variants"].values())
+
+
+def test_report_without_val_dump(tmp_path, good_run):
+    run_dir, manifest = good_run
+    rep = report.run_report(run_dir, "test", manifest)
+    assert rep["theta_source"] is None
+    for v in rep["variants"].values():
+        assert v["rows"]["val_selected"] is None and v["val_selected_reason"] == "no val dump in run dir"
+        assert v["rows"]["0.5"]["n"] == 7
+
+
+def test_report_refuses_subset_val_dump(tmp_path, snap):
+    out_dir, manifest = snap
+    root = tmp_path / "dumps"
+    score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--model", "prior", "--manifest", manifest,
+                "--out-root", str(root)])
+    score.main([os.path.join(out_dir, "splits", "val.jsonl"), "--model", "prior", "--manifest", manifest,
+                "--n", "2", "--out-root", str(root)])
+    with pytest.raises(SystemExit, match="--n"):
+        report.run_report(str(root / "prior"), "test", manifest)
+
+
+def test_theta_never_reads_test(tmp_path, snap):
+    """Two runs with identical val dumps and different test probabilities get the same θ."""
+    a, manifest = _score_both(snap, tmp_path / "a")
+    b, _ = _score_both(snap, tmp_path / "b")
+    logits, uids, side, _ = dumps.load_dump(b, "test", manifest)
+    rng = np.random.default_rng(0)
+    other = rng.normal(0.0, 3.0, size=logits.shape).astype(np.float32)
+    dumps.write_dump(b, "test", other, uids, {k: v for k, v in side.items()
+                                               if k not in ("dump_sha256", "schema_version")})
+    ra, rb = report.run_report(a, "test", manifest), report.run_report(b, "test", manifest)
+    assert ra["dump_sha256"] != rb["dump_sha256"] and ra["theta_source"] == rb["theta_source"]
+    for v in ("shipped", "raw"):
+        assert ra["variants"][v]["rows"]["val_selected"]["theta"] == rb["variants"][v]["rows"]["val_selected"]["theta"]
+        assert ra["variants"][v]["rows"]["0.5"] != rb["variants"][v]["rows"]["0.5"]
+
+
 # --- report.py refuses every tampered dump (D-04) ----------------------------------------------------------------
 
 def _rewrite_npz(run_dir, **arrays):

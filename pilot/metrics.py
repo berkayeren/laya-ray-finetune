@@ -14,7 +14,19 @@ Semantics (ported from the legacy evaluate.metrics):
 - top-1: on rows with at least one gold tag only (n_top1), the argmax tag is gold; argmax ties go to the earlier
   INTENTS tag; None when no row has a gold tag
 
+Val-selected thresholds (EVAL-02, D-12), one rule for every system, chosen on val only and never on test:
+- GRID: 0.05..0.95 in steps of 0.01 (91 points), built as integers 5..95 divided by 100 so each point equals its
+  decimal literal; no rounding call
+- global θ: maximises val micro-F1 over GRID
+- per-tag θ: only for tags with at least MIN_VAL_POSITIVES (10) val positives, maximising that tag's val F1 over the
+  same grid; every other tag uses the global θ (theta_vector)
+- ties (global and per-tag alike): the θ closest to 0.5; between two equally close points, the lower θ; when every
+  point scores 0 that is 0.5. The per-tag objective and this tie rule are research assumption A2, confirmed by the
+  user on 2026-10-14 (the alternative, breaking per-tag ties toward the global θ, was rejected)
+- θ is selected on the probabilities a system reports, i.e. after its temperature (the caller passes them)
+
 usage: from pilot import metrics; metrics.metrics(Y, metrics.probabilities(logits, T), 0.5)
+       sel = metrics.select_theta(Y_val, P_val); metrics.metrics(Y, P, metrics.theta_vector(sel))
 """
 import numpy as np
 
@@ -22,6 +34,9 @@ from intents import INTENTS
 
 TAGS = list(INTENTS)
 N_RANKED = 5                                                # tags listed in best_tags / worst_tags
+GRID = np.arange(5, 96) / 100.0                             # 0.05..0.95, 91 points, each equal to its decimal literal
+MIN_VAL_POSITIVES = 10                                      # val positives a tag needs for its own θ
+TIE_RULE = "closest to 0.5; between two equally close points, the lower θ"
 
 
 def probabilities(logits, temperature):
@@ -43,14 +58,20 @@ def _prf(tp, fp, fn):
     return float(p), float(r), float(f)
 
 
-def metrics(Y, P, theta):
-    """The metric block of one system at one threshold: Y bool [n, 48] gold, P float [n, 48] probabilities."""
+def _arrays(Y, P, empty):
+    """(Y bool, P float64) checked to be the same non-empty [n, 48]; `empty` is the refusal for zero rows."""
     if len(Y) == 0:
-        raise SystemExit("no messages to score")
+        raise SystemExit(empty)
     Y = np.asarray(Y, dtype=bool)
     P = np.asarray(P, dtype=np.float64)
     if Y.ndim != 2 or Y.shape[1] != len(TAGS) or P.shape != Y.shape:
         raise SystemExit("gold %s and probabilities %s must both be [n, %d]" % (Y.shape, P.shape, len(TAGS)))
+    return Y, P
+
+
+def metrics(Y, P, theta):
+    """The metric block of one system at one threshold: Y bool [n, 48] gold, P float [n, 48] probabilities."""
+    Y, P = _arrays(Y, P, "no messages to score")
     th = np.asarray(theta, dtype=np.float64)
     if th.shape not in ((), (len(TAGS),)) or not np.isfinite(th).all():
         raise SystemExit("theta must be one finite float or %d finite per-tag values, got shape %s"
@@ -87,3 +108,45 @@ def metrics(Y, P, theta):
             "mean_tags_predicted": float(pred.sum(axis=1).mean()), "mean_gold_tags": float(Y.sum(axis=1).mean()),
             "per_tag": per_tag,
             "best_tags": {t: per_tag[t]["f1"] for t in best}, "worst_tags": {t: per_tag[t]["f1"] for t in worst}}
+
+
+def pick(scores):
+    """The GRID point with the best score; ties go to the point closest to 0.5, then to the lower θ (TIE_RULE)."""
+    scores = np.asarray(scores, dtype=np.float64)
+    if scores.shape != GRID.shape:
+        raise SystemExit("%d scores for a %d-point θ grid" % (scores.size, GRID.size))
+    cand = np.flatnonzero(scores == scores.max())
+    return float(GRID[cand[np.argmin(np.abs(GRID[cand] - 0.5))]])   # argmin keeps the first (lower) on a tie
+
+
+def _f1_counts(tp, fp, fn):
+    """F1 = 2tp / (2tp + fp + fn) elementwise; 0 where tp is 0 (so 0/0 is 0)."""
+    den = 2 * tp + fp + fn
+    return np.where(tp > 0, 2 * tp / np.maximum(den, 1), 0.0)
+
+
+def select_theta(Y_val, P_val):
+    """The val-selected θ (D-12): global θ on val micro-F1, per-tag θ on val F1 for tags with >= 10 val positives.
+
+    P_val are the probabilities the system reports (after its temperature). Only val may be passed in: the caller
+    applies the result to test with theta_vector, never the other way round.
+    """
+    Y, P = _arrays(Y_val, P_val, "no val messages to select θ on; score the full val split")
+    pred = P[None] >= GRID[:, None, None]                   # [91, n, 48], the inclusive decision rule
+    tp = (pred & Y[None]).sum(axis=1)                       # [91, 48] counts per grid point and tag
+    fp = (pred & ~Y[None]).sum(axis=1)
+    fn = (~pred & Y[None]).sum(axis=1)
+    support = Y.sum(axis=0)
+    eligible = [t for j, t in enumerate(TAGS) if support[j] >= MIN_VAL_POSITIVES]
+    per_tag_f1 = _f1_counts(tp, fp, fn)
+    return {"global": pick(_f1_counts(tp.sum(axis=1), fp.sum(axis=1), fn.sum(axis=1))),
+            "per_tag": {t: pick(per_tag_f1[:, TAGS.index(t)]) for t in eligible},
+            "eligible_tags": eligible, "min_val_positives": MIN_VAL_POSITIVES,
+            "grid": {"start": float(GRID[0]), "stop": float(GRID[-1]), "step": 0.01, "n": int(GRID.size)},
+            "objective": {"global": "val micro-F1", "per_tag": "val per-tag F1"},
+            "tie_break": TIE_RULE}
+
+
+def theta_vector(sel):
+    """float64 [48] θ in INTENTS order: a tag's own θ where select_theta gave one, the global θ elsewhere."""
+    return np.array([sel["per_tag"].get(t, sel["global"]) for t in TAGS], dtype=np.float64)
