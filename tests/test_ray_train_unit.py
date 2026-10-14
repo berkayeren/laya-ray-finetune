@@ -276,6 +276,35 @@ def test_a_raw_mps_oom_outside_the_step_gets_the_rung_line_not_resume_advice():
     assert str(e.value).startswith(runs.OOM_MARK + " while saving the checkpoint at epoch 3 (rung none)")
 
 
+def test_a_resume_with_no_epoch_left_never_loads_the_optimizer_state():
+    """04-REVIEW WR-01 (end-of-phase gate): a rerun after a calibration or final-save OOM resumes a train state that
+    already holds the last epoch. Its AdamW moments must stay off the device, and an OOM while it moves the model must
+    say rerun the same command, never a rung flag that would change the run_id and retrain every epoch."""
+    import torch
+    from pilot import runs
+    model = torch.nn.Linear(3, 2)
+    opt = torch.optim.AdamW(model.parameters())
+    model(torch.ones(1, 3)).sum().backward()
+    opt.step()
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=4)
+    sched.step()
+    saved = {"epoch": 2, "opt": opt.state_dict(), "sched": sched.state_dict(), "scaler": None}
+
+    def fresh():
+        o = torch.optim.AdamW(model.parameters())
+        return o, torch.optim.lr_scheduler.CosineAnnealingLR(o, T_max=4)
+    o, s = fresh()
+    assert ray_train.restore_optimizer(saved, 2, o, s, None, "none") is False
+    assert not o.state and s.last_epoch == 0                # no AdamW moment materialised, the scheduler untouched
+    o, s = fresh()
+    assert ray_train.restore_optimizer(saved, 3, o, s, None, "none") is True
+    assert len(o.state) == 2 and s.last_epoch == 1          # an epoch left: weight and bias moments, scheduler step
+    assert ray_train.training_done(saved, 2) and not ray_train.training_done(saved, 3)
+    assert not ray_train.training_done(None, 2)             # a fresh start
+    line = runs.oom_message(None, None, "none", runs.STAGE_RECALIBRATE_MOVE)
+    assert runs.resume_oom(line) and "--freeze-embeddings" not in line
+
+
 def test_driver_names_the_dir_of_a_corrupted_snapshot():
     from ray.train import ControllerError
     from ray.train.v2._internal.exceptions import CheckpointManagerInitializationError

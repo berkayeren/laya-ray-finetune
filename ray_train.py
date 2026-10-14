@@ -48,7 +48,10 @@ the epoch and micro-batch (or the stage outside the training step: model move, r
 the rung and the flags of the next rung; the driver gives a raw MPS out-of-memory error from anywhere else the same rung
 line, never "rerun to resume" (the rerun would resume into the same allocation). After the last epoch (calibration, the
 final save; pilot.runs.RESUME_STAGES) the line says to rerun the same command instead: every epoch is saved, the eval
-pass needs less memory than training, and a rung flag would change the run_id and retrain from epoch 0.
+pass needs less memory than training (the optimizer state is freed and the MPS cache emptied first), and a rung flag
+would change the run_id and retrain from epoch 0. That rerun resumes a train state that already holds the last epoch:
+it never loads the optimizer, scheduler or scaler state (restore_optimizer), and an OOM while it moves the model is a
+resume stage too (pilot.runs.STAGE_RECALIBRATE_MOVE).
 
 Run identity (LAYA-04): the run_id is pilot.runs.run_id of the command's canonical config (pilot.runs.IDENTITY: split,
 data and base digests, laya version, the resolved device and precision choices, every hyperparameter and the seeds; never
@@ -431,6 +434,27 @@ def set_rng_states(rs, device, rng):
     rng.setstate((version, tuple(internal), gauss))         # random.Random wants its (version, tuple, gauss) shape
 
 
+def training_done(state, epochs):
+    """True when a resumed train state already holds the last epoch (a rerun after an OOM in calibration or the final
+    save): the epoch loop is empty and the rerun only recalibrates."""
+    return state is not None and state["epoch"] >= epochs
+
+
+def restore_optimizer(state, epochs, opt, sched, scaler, rung):
+    """Restore AdamW, the cosine scheduler and the GradScaler of a resumed train state; returns True, or False without
+    touching them when no epoch is left to train (04-REVIEW WR-01): the AdamW moments (about 2.6 GB of the measured
+    3.86 GB full-encoder train state) would move to the device only to be freed before calibration, on the machine
+    that just ran out of memory calibrating."""
+    if training_done(state, epochs):
+        return False
+    with mps_oom_exit(None, None, rung, "while restoring the optimizer state of epoch %d" % state["epoch"]):
+        opt.load_state_dict(state["opt"])                   # moves the AdamW moments to the device
+    sched.load_state_dict(state["sched"])
+    if scaler is not None:
+        scaler.load_state_dict(state["scaler"])
+    return True
+
+
 def dir_bytes(path):
     return sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(path) for f in fs)
 
@@ -557,8 +581,11 @@ def train_loop_per_worker(c):
     if rank == 0:
         print("rung %s%s | trainable params %d of %d" % (c["rung"], " (head-only, weaker)" if runs.weaker(c["rung"])
                                                           else "", trainable_params, total_params), flush=True)
-    # the model move (and a resume's weights) allocate on the device outside the training step (04-REVIEW WR-01)
-    with mps_oom_exit(None, None, c["rung"], "while moving the model to the device"):
+    # the model move (and a resume's weights) allocate on the device outside the training step (04-REVIEW WR-01); a
+    # rerun with no epoch left only recalibrates, so its OOM says to rerun, never the next rung (a rung flag would
+    # change the run_id and retrain every epoch)
+    move = runs.STAGE_RECALIBRATE_MOVE if training_done(state, c["epochs"]) else "while moving the model to the device"
+    with mps_oom_exit(None, None, c["rung"], move):
         if state is not None:                               # fp32 weights into the CPU model: one copy on the device
             t = time.perf_counter()
             model.load_state_dict(state["model"])
@@ -595,11 +622,7 @@ def train_loop_per_worker(c):
     if state is not None:
         # after the optimizer and scheduler exist (the scheduler's constructor sets the lr the saved state restores)
         t = time.perf_counter()
-        with mps_oom_exit(None, None, c["rung"], "while restoring the optimizer state of epoch %d" % state["epoch"]):
-            opt.load_state_dict(state["opt"])               # moves the AdamW moments to the device
-        sched.load_state_dict(state["sched"])
-        if scaler is not None:
-            scaler.load_state_dict(state["scaler"])
+        restored = restore_optimizer(state, c["epochs"], opt, sched, scaler, c["rung"])
         set_rng_states(rng_state, device, rng)
         start_epoch, rows_out, segments = state["epoch"], list(state["history"]), list(state["segments"])
         rows_out[-1]["save_s"] = save_meta["save_s"]       # the saved epoch's own save time, written after its state
@@ -610,8 +633,10 @@ def train_loop_per_worker(c):
         mem_sample()
         resume_peak = peak["total"]
         if rank == 0:
-            print("resuming %s after epoch %d (segment %d, load %.1fs)" % (c["run_id"], start_epoch, len(segments),
-                                                                          resume_load_s), flush=True)
+            print("resuming %s after epoch %d (segment %d, load %.1fs)%s"
+                  % (c["run_id"], start_epoch, len(segments), resume_load_s,
+                     "" if restored else "; no epoch left: it only recalibrates, the optimizer state is not loaded"),
+                  flush=True)
     segment = dict(zip(runs.SEGMENT_FIELDS, (len(segments), start_epoch, start_epoch > 0, c["code"]["git_sha"],
                                              c["code"]["git_dirty"], c["code"]["git_diff_sha256"], device.type,
                                              resume_load_s, resume_peak)))
@@ -734,6 +759,8 @@ def train_loop_per_worker(c):
     # Calibrate on the held-out messages and publish the final checkpoint from rank 0.
     del opt, sched, scaler, params, groups                 # free optimizer state before the eval pass
     gc.collect()
+    if device.type == "mps":
+        torch.mps.empty_cache()                             # hand the freed AdamW blocks back before calibrating
     if rank == 0:
         inner.eval()
         t_calib = time.perf_counter()

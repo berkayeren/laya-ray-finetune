@@ -162,12 +162,17 @@ RUNG_NEXT = {"none": "embeddings_frozen",
              "encoder_frozen": None}
 _SMALLER = ["--micro-batch", "4", "--grad-accum", "8"]
 OOM_MARK = "MPS out of memory"
+# the model move of a rerun whose train state already holds the last epoch: it trains nothing, never loads the
+# optimizer state and only recalibrates (no rung flag shrinks the model it moves)
+STAGE_RECALIBRATE_MOVE = "while moving the model to the device to recalibrate"
 # stages after the last epoch is registered: every epoch is saved and the eval pass needs less memory than training
-# (the optimizer state is freed first), so the line says to rerun the same command, which resumes there; a rung flag
-# would change the run_id and retrain from epoch 0 (04-REVIEW WR-01). stage -> what the rerun does
+# (the optimizer state is freed and the MPS cache emptied first; a rerun that resumes there never loads it), so the
+# line says to rerun the same command, which resumes there; a rung flag would change the run_id and retrain from
+# epoch 0 (04-REVIEW WR-01). stage -> what the rerun does
 RESUME_STAGES = {"while calibrating after the last epoch": "it only recalibrates; a smaller --calib-batch keeps the "
                                                            "run id",
-                 "while saving the final checkpoint": "it recalibrates and saves again"}
+                 "while saving the final checkpoint": "it recalibrates and saves again",
+                 STAGE_RECALIBRATE_MOVE: "it only recalibrates"}
 RESUME_TODO = "every epoch is saved: rerun the same command to resume"
 
 

@@ -117,6 +117,25 @@ def test_killed_run_resumes_bitwise(prepared, full_run):
 
 
 @pytest.mark.timeout(600)
+def test_a_failure_after_the_last_epoch_resumes_into_calibration_only(prepared, full_run):
+    """04-REVIEW WR-01 (end-of-phase gate): the rerun after a failure past the last epoch's checkpoint (as after a
+    calibration or final-save OOM) trains nothing and never loads the optimizer state; it recalibrates the same
+    weights the uninterrupted run published."""
+    d, args = prepared
+    rid, full = full_run
+    r = _run("ray_train.py", *args, "--storage", d / "c", "--out", d / "cal", "--fail-after-epoch", "2", ok=False)
+    assert r.returncode != 0 and (d / "c" / rid / "epoch-002" / "train_state.pt").is_file(), r.stderr[-4000:]
+    r = _run("ray_train.py", *args, "--storage", d / "c", "--out", d / "cal")
+    out = r.stdout + r.stderr
+    assert "resuming %s after epoch 2" % rid in out and "the optimizer state is not loaded" in out, out[-4000:]
+    assert "epoch 1/2" not in out and "epoch 2/2" not in out
+    assert _sha256(d / "cal" / "model.safetensors") == _sha256(full / "model.safetensors")
+    rec = runs.read_record(str(d / "cal"))
+    assert [row["segment"] for row in rec["epochs"]] == [0, 0]
+    assert [s["start_epoch"] for s in rec["segments"]] == [0, 2] and rec["calib_s"] > 0
+
+
+@pytest.mark.timeout(600)
 def test_finished_run_reruns_without_training(prepared, full_run):
     d, args = prepared
     rid, full = full_run
