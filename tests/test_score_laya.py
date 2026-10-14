@@ -5,6 +5,8 @@ laya.load serves (la.noul_temperature), and report.py must read it like any base
 """
 import json
 import os
+import sys
+import types
 
 import numpy as np
 import pytest
@@ -106,3 +108,40 @@ def test_predictor_returns_logits_and_state(tiny):
     assert state["torch_threads"] == 1
     secs = list(out["infer_secs"])
     assert len(secs) == 3 and len(set(secs)) == 1 and secs[0] >= 0
+
+
+# --- refusals: agent state, arguments, checkpoint -------------------------------------------------------------------
+
+@pytest.mark.parametrize("agent,device,match", [
+    (types.SimpleNamespace(device="cpu", dtype="torch.bfloat16", amp_enabled=False), "cpu", "scoring is fp32"),
+    (types.SimpleNamespace(device="cpu", dtype="torch.float32", amp_enabled=True), "cpu", "LAYA_CPU_AMP"),
+    (types.SimpleNamespace(device="cpu", dtype="torch.float32", amp_enabled=False), "cuda", "requested cuda"),
+], ids=["bf16_dtype", "amp_on", "device_mismatch"])
+def test_check_agent_refuses(agent, device, match):
+    with pytest.raises(SystemExit, match=match):
+        score.check_agent(agent, device)
+
+
+def test_check_agent_passes_fp32_cpu_and_returns_its_state():
+    agent = types.SimpleNamespace(device=types.SimpleNamespace(type="cpu"), dtype="torch.float32", amp_enabled=False)
+    assert score.check_agent(agent, "cpu") == {"device": "cpu", "dtype": "torch.float32", "amp_enabled": False}
+
+
+def test_baseline_with_checkpoint_is_an_argument_error(tmp_path, synthetic_raw, capsys):
+    out_dir, manifest = prepared(tmp_path, synthetic_raw)
+    with pytest.raises(SystemExit) as e:
+        score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--model", "prior", "--checkpoint", "x",
+                    "--manifest", manifest, "--out-root", str(tmp_path / "dumps")])
+    assert e.value.code == 2 and "--checkpoint applies only to --model laya" in capsys.readouterr().err
+    assert not (tmp_path / "dumps").exists()
+
+
+def test_score_refuses_missing_checkpoint_before_ray(tmp_path, synthetic_raw, monkeypatch):
+    out_dir, manifest = prepared(tmp_path, synthetic_raw)
+    monkeypatch.chdir(tmp_path)                             # a stray ray_results/ would land in the cwd
+    with pytest.raises(SystemExit) as e:
+        score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--model", "laya", "--checkpoint", "no_such_ckpt",
+                    "--manifest", manifest, "--out-root", str(tmp_path / "dumps")])
+    assert "--checkpoint must be" in str(e.value.code)
+    assert not (tmp_path / "dumps").exists() and not (tmp_path / "ray_results").exists()
+    assert "ray" not in sys.modules or not sys.modules["ray"].is_initialized()

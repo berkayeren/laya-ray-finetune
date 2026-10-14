@@ -157,7 +157,7 @@ def _unpinned_calls(path, in_pilot=False):
 def test_no_unpinned_load_call_in_repo():
     out = subprocess.run(["git", "ls-files", "*.py"], cwd=REPO, capture_output=True, text=True, check=True).stdout
     files = [f for f in out.split() if not f.startswith("tests/")]
-    assert "evaluate.py" in files and "ray_train.py" in files and "pilot/weights.py" in files
+    assert "score.py" in files and "evaluate.py" in files and "ray_train.py" in files and "pilot/weights.py" in files
     bad = [b for f in files for b in _unpinned_calls(os.path.join(REPO, f), in_pilot=f.startswith("pilot/"))]
     assert not bad, "unpinned weight loads:\n" + "\n".join(bad)
 
@@ -180,8 +180,8 @@ def test_ast_guard_catches_unpinned_calls(tmp_path):
 
 
 def test_resolve_checkpoint_refuses_non_dir_without_importing_laya():
-    code = ("import sys, evaluate\n"
-            "try:\n    evaluate.resolve_checkpoint('not-a-dir')\n"
+    code = ("import sys, score\n"
+            "try:\n    score.resolve_checkpoint('not-a-dir')\n"
             "except SystemExit as e:\n    print('REFUSED', e)\n"
             "print('LAYA_IMPORTED' if 'laya' in sys.modules else 'LAYA_NOT_IMPORTED')\n")
     r = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=120)
@@ -217,8 +217,8 @@ def _assert_no_local_path(obj, tmp_path):
         assert p not in text, (p, text)
 
 
-def test_evaluate_report_header_carries_no_local_path(tmp_path):
-    import evaluate
+def test_score_sidecar_carries_no_local_path(tmp_path):
+    import score
     ckpt = tmp_path / "ckpts" / "run1"
     ckpt.mkdir(parents=True)
     (ckpt / "model.safetensors").write_bytes(b"weights")
@@ -226,14 +226,16 @@ def test_evaluate_report_header_carries_no_local_path(tmp_path):
     manifest = tmp_path / "variant" / "splits.json"
     manifest.parent.mkdir()
     manifest.write_bytes(b"{}")
-    entry = {"path": "splits/test.jsonl", "sha256": "0" * 64, "role": "test"}
-    header = evaluate.provenance(str(ckpt), str(manifest), entry, 20, "final_train")
-    _assert_no_local_path(header, tmp_path)
-    assert header["checkpoint"] == "<outside-repo>/run1" and header["manifest"]["path"] == "<outside-repo>/splits.json"
-    assert header["checkpoint_identity"]["model_sha256"] == hashlib.sha256(b"weights").hexdigest()
-    assert header["manifest_is_committed"] is False
-    assert evaluate.provenance("multilingual", pilot.data.DEFAULT_MANIFEST, entry, None, "final_train")[
-        "checkpoint"] == "multilingual"
+    entry = {"path": "splits/test.jsonl", "sha256": "0" * 64, "role": "test", "uids_sha256": "1" * 64,
+             "n_messages": 20}
+    side = dict(score.sidecar_base(entry, "test", str(manifest), 20),
+                system=score.laya_system(str(ckpt), pilot.weights.identity(str(ckpt))))
+    _assert_no_local_path(side, tmp_path)
+    assert side["system"]["checkpoint"] == "<outside-repo>/run1"
+    assert side["manifest"]["path"] == "<outside-repo>/splits.json"
+    assert side["system"]["checkpoint_identity"]["model_sha256"] == hashlib.sha256(b"weights").hexdigest()
+    assert side["manifest"]["is_committed"] is False
+    assert score.laya_system("multilingual", pilot.weights.identity("multilingual"))["checkpoint"] == "multilingual"
 
 
 def test_ray_train_checkpoint_provenance_carries_no_local_path(tmp_path):
@@ -250,17 +252,17 @@ def test_ray_train_checkpoint_provenance_carries_no_local_path(tmp_path):
 
 
 def test_resolve_checkpoint_runs_the_pinned_fetch_on_the_driver(tmp_path, monkeypatch):
-    import evaluate
+    import score
     root, pin = fake_snapshot(tmp_path, pins.LAYA)
     patch_download(monkeypatch, root)
     monkeypatch.setattr(pins, "LAYA", pin)
-    model_dir, expected = evaluate.resolve_checkpoint("multilingual")
+    model_dir, expected = score.resolve_checkpoint("multilingual")
     assert model_dir == os.path.join(root, "multilingual") and expected == pin["sha256"]
     root, pin = fake_snapshot(tmp_path / "bad", pins.LAYA, corrupt="model.safetensors")
     patch_download(monkeypatch, root)
     monkeypatch.setattr(pins, "LAYA", pin)
     with pytest.raises(SystemExit, match="sha256"):                     # the digest message, not an actor death
-        evaluate.resolve_checkpoint("multilingual")
+        score.resolve_checkpoint("multilingual")
 
 
 def test_checkpoint_digests_bind_a_local_load_to_its_recorded_identity(tmp_path):
@@ -276,15 +278,15 @@ def test_checkpoint_digests_bind_a_local_load_to_its_recorded_identity(tmp_path)
         pilot.weights.checkpoint_digests(str(tmp_path), pilot.weights.identity(str(tmp_path)))
 
 
-def test_evaluate_load_is_refused_when_the_checkpoint_changed_after_its_identity(tmp_path):
-    import evaluate
+def test_score_load_is_refused_when_the_checkpoint_changed_after_its_identity(tmp_path):
+    import score
     (tmp_path / "model.safetensors").write_bytes(b"weights")
     (tmp_path / "rl_agent_config.json").write_bytes(b"{}")
-    model_dir, expected = evaluate.resolve_checkpoint(str(tmp_path))
+    model_dir, expected = score.resolve_checkpoint(str(tmp_path))
     assert expected["model.safetensors"] == hashlib.sha256(b"weights").hexdigest()
     (tmp_path / "model.safetensors").write_bytes(b"swapped")              # changed between identity and load
     with pytest.raises(ValueError, match="model.safetensors"):            # laya verifies before parsing any weight
-        evaluate.load_agent(model_dir, "cpu", expected)
+        score.load_agent(model_dir, "cpu", expected)
 
 
 def test_verify_files_refuses_a_changed_base(tmp_path):
