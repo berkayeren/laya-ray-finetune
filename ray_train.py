@@ -46,7 +46,9 @@ weaker). pilot.runs.rung_label derives the rung from the resolved flags; the rec
 spike_departures and the trainable/total parameter counts. An MPS out-of-memory error ends the run with one line naming
 the epoch and micro-batch (or the stage outside the training step: model move, resume, checkpoint save, calibration),
 the rung and the flags of the next rung; the driver gives a raw MPS out-of-memory error from anywhere else the same rung
-line, never "rerun to resume" (the rerun would resume into the same allocation).
+line, never "rerun to resume" (the rerun would resume into the same allocation). After the last epoch (calibration, the
+final save; pilot.runs.RESUME_STAGES) the line says to rerun the same command instead: every epoch is saved, the eval
+pass needs less memory than training, and a rung flag would change the run_id and retrain from epoch 0.
 
 Run identity (LAYA-04): the run_id is pilot.runs.run_id of the command's canonical config (pilot.runs.IDENTITY: split,
 data and base digests, laya version, the resolved device and precision choices, every hyperparameter and the seeds; never

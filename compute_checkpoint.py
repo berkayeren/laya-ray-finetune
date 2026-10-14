@@ -20,8 +20,9 @@ SIGKILL after 120 s), waits for available memory to recover and reruns the ident
 epoch-001. --interrupt fail uses ray_train.py's hidden --fail-after-epoch 1 instead (deterministic; the CPU test);
 --interrupt none runs once. A kill that comes too late is recorded as missed, and the report then says the resume was
 not demonstrated. An attempt that ends with the MPS out-of-memory line is followed by a fresh child on the next rung of
-the LAYA-03 ladder (pilot.runs.next_rung), each with its own run_id (compute.attempt_chain); every attempt stays in the
-report, and an exhausted ladder is reported as status ladder_exhausted. Before any child, the disk under --storage
+the LAYA-03 ladder (pilot.runs.next_rung), each with its own run_id (compute.attempt_chain), except an out-of-memory
+after the last epoch (calibration, final save; pilot.runs.resume_oom), which ends the chain as failed; every attempt
+stays in the report, and an exhausted ladder is reported as status ladder_exhausted. Before any child, the disk under --storage
 must hold pilot.runs.disk_need_bytes for the run.
 
 Measured BERTurk and scoring rates (RESEARCH Open Question 2): after the Laya probe, a BERTurk timing child
@@ -258,6 +259,17 @@ def drop_storage(storage, own_storage, rids):
             drop_run(storage, rid)
 
 
+def oom_attempt(attempt, line, interrupt):
+    """The attempt of a child that ended in the MPS out-of-memory line: status oom (attempt_chain moves to the next
+    rung), or failed for an OOM after the last epoch (runs.resume_oom): every epoch is saved there, and the next rung
+    would retrain under another run_id and record a fallback for a config that trained (04-REVIEW WR-01)."""
+    line = spike.scrub(line)
+    if runs.resume_oom(line):
+        return dict(attempt, status="failed", line=line, interrupt=interrupt,
+                    reason="out of memory after the last epoch, so the ladder is not walked: %s" % line)
+    return dict(attempt, status="oom", line=line, interrupt=interrupt)
+
+
 def launch_rung(rung, ctx):
     """One probe attempt on `rung` in fresh children: the first launch (its own session) interrupted per --interrupt,
     then, after an interrupt that landed, the identical command again, which resumes from epoch 1. Returns the attempt
@@ -295,7 +307,7 @@ def launch_rung(rung, ctx):
             raise
     oom = runs.failure_line(read_text(log))
     if oom:
-        return dict(attempt, status="oom", line=spike.scrub(oom), interrupt=interrupt)
+        return oom_attempt(attempt, oom, interrupt)
     rc = proc.returncode
     if a.interrupt == "fail" and (rc == 0 or not compute.epoch_registered(storage, rid, 1)):
         return dict(attempt, status="failed", returncode=rc, interrupt=interrupt,
@@ -311,7 +323,7 @@ def launch_rung(rung, ctx):
             r = subprocess.run(cmd, cwd=REPO_ROOT, env=env, stdout=f, stderr=subprocess.STDOUT, shell=False)
         oom = runs.failure_line(read_text(log))
         if oom:
-            return dict(attempt, status="oom", line=spike.scrub(oom), interrupt=interrupt)
+            return oom_attempt(attempt, oom, interrupt)
         if r.returncode != 0:
             return dict(attempt, status="failed", returncode=r.returncode, interrupt=interrupt,
                         reason="the resumed run failed: %s" % last_line(log))

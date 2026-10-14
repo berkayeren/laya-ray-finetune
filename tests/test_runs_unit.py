@@ -168,6 +168,20 @@ def test_oom_message_names_the_next_rung():
     assert runs.failure_line("Training failed due to worker errors:\nValueError: bad batch\n") is None
 
 
+@pytest.mark.parametrize("stage", sorted(runs.RESUME_STAGES))
+def test_an_oom_after_the_last_epoch_says_resume_not_the_next_rung(stage):
+    """04-REVIEW WR-01: every epoch is saved there; a rung flag would change the run_id and retrain from epoch 0."""
+    for label in ("none", "embeddings_frozen", "encoder_frozen"):
+        msg = runs.oom_message(None, None, label, stage)
+        assert msg.startswith(runs.OOM_MARK + " " + stage) and runs.failure_line(msg) == msg
+        assert "rerun the same command to resume" in msg and runs.resume_oom(msg)
+        for flag in ("--freeze-embeddings", "--freeze-encoder", "--micro-batch", "exhausted"):
+            assert flag not in msg, (flag, msg)
+    for line in (runs.oom_message(2, 17, "none"), runs.oom_message(None, None, "none", "outside the training step"),
+                 runs.oom_message(1, None, "none", "while saving the checkpoint"), None, ""):
+        assert not runs.resume_oom(line), line
+
+
 def test_spike_departures():
     assert runs.spike_departures(_cfg(), 128) == {}
     assert runs.spike_departures(_cfg(), 256) == {"max_len": 256}

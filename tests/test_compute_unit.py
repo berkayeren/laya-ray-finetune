@@ -363,6 +363,20 @@ def test_attempt_chain_stops_on_failure():
     assert status == "failed" and seen == ["none"] and attempts[0]["rung"] == "none"
 
 
+def test_an_oom_after_the_last_epoch_does_not_walk_the_ladder():
+    """04-REVIEW WR-01: a calibration or final-save OOM ends the chain as failed (rerun to resume), not on a weaker
+    rung that would retrain under another run_id and record a fallback; a training-step OOM still walks it."""
+    import compute_checkpoint as cc
+    from pilot import runs
+    calib = runs.oom_message(None, None, "none", "while calibrating after the last epoch")
+    a = cc.oom_attempt({"run_id": "laya-a"}, runs.failure_line("[Rank 0]\nRuntimeError: " + calib), {"mode": "kill"})
+    assert a["status"] == "failed" and a["line"] == calib and calib in a["reason"]
+    assert cc.oom_attempt({"run_id": "laya-a"}, runs.oom_message(2, 5, "none"), {})["status"] == "oom"
+    launch, seen = _fake_launcher(["failed"])
+    attempts, status = compute.attempt_chain("none", launch)
+    assert status == "failed" and seen == ["none"]
+
+
 def _segment(i, start, load=None, peak=None):
     return {"segment": i, "start_epoch": start, "resumed": start > 0, "git_sha": "a" * 40, "git_dirty": False,
             "device": "mps", "resume_load_s": load, "resume_peak_total_bytes": peak}

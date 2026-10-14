@@ -9,7 +9,7 @@ PYTORCH_ENABLE_MPS_FALLBACK once, at import.
 
 The ladder (SPIKE_START, RUNG_NEXT, rung_label, rung_flags, oom_message, failure_line) turns a fallback into flags and
 a derived label: a run on any rung other than none says so in its record, and an MPS out-of-memory exit names the
-flags of the next rung.
+flags of the next rung, except after the last epoch (RESUME_STAGES), where it says to rerun the same command.
 
 Run identity (LAYA-04): IDENTITY lists every value that changes what a run trains; canonical() keeps exactly those and
 run_id() names the run by them (split, neg K, seed and the first 8 hex of the sha256 of the sorted canonical JSON). The
@@ -145,6 +145,13 @@ RUNG_NEXT = {"none": "embeddings_frozen",
              "encoder_frozen": None}
 _SMALLER = ["--micro-batch", "4", "--grad-accum", "8"]
 OOM_MARK = "MPS out of memory"
+# stages after the last epoch is registered: every epoch is saved and the eval pass needs less memory than training
+# (the optimizer state is freed first), so the line says to rerun the same command, which resumes there; a rung flag
+# would change the run_id and retrain from epoch 0 (04-REVIEW WR-01). stage -> what the rerun does
+RESUME_STAGES = {"while calibrating after the last epoch": "it only recalibrates; a smaller --calib-batch keeps the "
+                                                           "run id",
+                 "while saving the final checkpoint": "it recalibrates and saves again"}
+RESUME_TODO = "every epoch is saved: rerun the same command to resume"
 
 
 def rung_label(cfg):
@@ -191,9 +198,12 @@ def oom_message(epoch, step, label, stage=None):
     """One line for an MPS out-of-memory exit: where it happened, on which rung, and the command change to try next.
 
     stage names an allocation outside the training step (e.g. "while moving the model to the device"); epoch is then
-    the epoch it happened in or after, or None when it is not known, and step is ignored."""
+    the epoch it happened in or after, or None when it is not known, and step is ignored. A RESUME_STAGES stage gets
+    RESUME_TODO instead of the next rung (resume_oom tells the two apart)."""
     nxt = next_rung(label)
-    if nxt is None:
+    if stage in RESUME_STAGES:
+        todo = "%s (%s)" % (RESUME_TODO, RESUME_STAGES[stage])
+    elif nxt is None:
         todo = "no further rung: the fallback ladder is exhausted"
     else:
         todo = "rerun with %s" % " ".join(rung_flags(nxt))
@@ -212,3 +222,8 @@ def failure_line(text):
         if OOM_MARK in line:
             return line[line.index(OOM_MARK):].strip()
     return None
+
+
+def resume_oom(line):
+    """True for an oom_message line of a RESUME_STAGES stage: rerun the same command, never the next rung."""
+    return bool(line) and OOM_MARK in line and RESUME_TODO in line
