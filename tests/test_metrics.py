@@ -188,6 +188,21 @@ def test_select_theta_tie_takes_lower_global_and_per_tag():
     assert sel["global"] == 0.30 and sel["per_tag"] == {"card": 0.30}
 
 
+def test_per_tag_tie_ignores_global_theta():
+    # card ties at 0.30 / 0.70 on its own F1; lost_stolen drags the global micro-F1 optimum to 0.70. A2: card's own tie
+    # still goes to the lower of the two equally close points (0.30), not toward the global θ (the rejected rule would
+    # give 0.70); 0.30 / 0.70 is also one of the CR-01 float-distance pairs, so a failure here can be either regression
+    Y, P = np.zeros((221, 48), dtype=bool), np.zeros((221, 48))
+    j, k = TAGS.index("card"), TAGS.index("lost_stolen")
+    Y[:10, j] = True
+    P[:5, j], P[5:10, j], P[10:20, j], P[20, j] = 0.30, 0.70, 0.69, 0.29
+    Y[21:121, k] = True
+    P[21:121, k], P[121:221, k] = 0.95, 0.69
+    sel = metrics.select_theta(Y, P)
+    assert sel["eligible_tags"] == ["card", "lost_stolen"] and sel["global"] == 0.70
+    assert sel["per_tag"] == {"card": 0.30, "lost_stolen": 0.70}
+
+
 def test_pick_all_zero_scores_returns_half():
     assert metrics.pick(np.zeros(91)) == 0.5
 
