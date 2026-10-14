@@ -140,10 +140,14 @@ def read_text(path):
         return f.read()
 
 
+def last_text_line(text, default=""):
+    """The last non-empty line of a child's output, scrubbed for the report (the child's own SystemExit line)."""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return spike.scrub(lines[-1]) if lines else default
+
+
 def last_line(path):
-    """The last non-empty line of a child log, scrubbed for the report (the child's own SystemExit line)."""
-    lines = [ln.strip() for ln in read_text(path).splitlines() if ln.strip()]
-    return spike.scrub(lines[-1]) if lines else ""
+    return last_text_line(read_text(path))
 
 
 def protocol_complete(a, start):
@@ -478,9 +482,8 @@ def run_score_probe(a, base, env):
         r = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True, shell=False)
         sidecars = glob.glob(os.path.join(root, "*", "val.json"))
         if r.returncode != 0 or len(sidecars) != 1:
-            lines = [ln.strip() for ln in (r.stderr or r.stdout).splitlines() if ln.strip()]
             return {"status": "failed", "returncode": r.returncode,
-                    "reason": spike.scrub(lines[-1] if lines else "no sidecar written")}
+                    "reason": last_text_line(r.stderr or r.stdout, "no sidecar written")}
         with open(sidecars[0], encoding="utf-8") as f:
             side = json.load(f)
         n, sc = side["n_subset"], side["scorer"]
