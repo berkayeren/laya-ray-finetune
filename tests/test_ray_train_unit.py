@@ -284,9 +284,9 @@ def test_a_resume_with_no_epoch_left_never_loads_the_optimizer_state():
     from pilot import runs
     model = torch.nn.Linear(3, 2)
     opt = torch.optim.AdamW(model.parameters())
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=4)
     model(torch.ones(1, 3)).sum().backward()
     opt.step()
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=4)
     sched.step()
     saved = {"epoch": 2, "opt": opt.state_dict(), "sched": sched.state_dict(), "scaler": None}
 
