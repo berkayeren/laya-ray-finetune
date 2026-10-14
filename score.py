@@ -10,6 +10,10 @@ into metrics with numpy alone (D-05). Systems (--model, default laya):
   D-11). A loaded agent on another device, or on CPU in another dtype than float32 or with autocast on (an inherited
   LAYA_CPU_AMP would switch laya to bf16), is refused; the check reads the agent, not the environment.
   run_id: laya-zeroshot-<revision[:8]> for the pinned checkpoint, laya-<model_sha256[:12]> for a local one.
+  --workers 0 scores in-process; --workers N > 0 scores with N Ray Data actors (one checkpoint load each,
+  --cpus-per-worker CPUs and torch threads each, about 2.6 GB each). Both paths run the same Predictor, and Ray's
+  rows, which come back in any order, are reassembled by uid into split-file order (a duplicate, missing or unexpected
+  uid is refused). --gpus-per-worker > 0 scores on CUDA.
 - prior: p_t = messages carrying tag t / all messages, no-intent rows counted, in the training split the scored
   role's models are trained on (pilot.data.TRAINED_ON: final_train for test, selection_train for val)
 - majority: p = 1 on the most frequent tag of that training split (ties -> the earlier INTENTS tag), 0 elsewhere
@@ -148,6 +152,57 @@ def _under(path, root):
     return path == root or path.startswith(root + os.sep)
 
 
+class Predictor:
+    """Scores batches of messages with one Laya checkpoint load: a Ray Data actor, or called in-process (--workers 0).
+
+    Returns per row the uid, the float32 [48] margins (la.noul_logits), the served temperature, the agent's state
+    (device, dtype, amp, torch threads, versions; checked by check_agent after the load) and its share of the batch's
+    scoring time.
+    """
+
+    def __init__(self, model_dir, device, expected_sha256, threads):
+        import laya
+        import torch
+        torch.set_num_threads(threads)                      # Ray sets OMP_NUM_THREADS from num_cpus; torch too
+        self.agent = load_agent(model_dir, device, expected_sha256)
+        state = check_agent(self.agent, device)
+        self.temperature = la.noul_temperature(self.agent)
+        self.state = json.dumps(dict(state, torch_threads=torch.get_num_threads(), laya_version=laya.__version__,
+                                     torch_version=torch.__version__), sort_keys=True)
+
+    def __call__(self, batch):
+        texts = [str(t) for t in batch["text"]]
+        t = time.perf_counter()                             # scoring only: load/digest time is not per-message cost
+        logits = la.noul_logits(self.agent, texts, QUESTIONS)
+        dt = time.perf_counter() - t
+        b = len(texts)
+        return {"uid": np.asarray(batch["uid"]), "logits": logits, "temperature": [self.temperature] * b,
+                "agent_state": [self.state] * b, "infer_secs": [dt / b] * b}
+
+
+def assemble(rows, uids):
+    """float32 [len(uids), 48] logits of scored rows put back in `uids` order; SystemExit on a duplicate, missing or
+    unexpected uid, so no row is silently dropped, merged or invented (Ray returns rows in any order)."""
+    by_uid = {}
+    want = set(uids)
+    for r in rows:
+        u = str(r["uid"])
+        if u in by_uid:
+            raise SystemExit("duplicate uid %s in the scored rows" % u)
+        if u not in want:
+            raise SystemExit("unexpected uid %s in the scored rows" % u)
+        by_uid[u] = r["logits"]
+    for u in uids:
+        if u not in by_uid:
+            raise SystemExit("uid %s was not scored" % u)
+    return np.stack([np.asarray(by_uid[u], dtype=np.float32) for u in uids]).astype(np.float32, copy=False)
+
+
+def _rows(out):
+    """Predictor output (one batch, columns) -> one dict per row, the shape Ray Data's take_all returns."""
+    return [{k: out[k][i] for k in out} for i in range(len(out["uid"]))]
+
+
 def score_laya(a, checkpoint, cases):
     """(float32 [n, 48] margins in `cases` order, sidecar fields) of a Laya checkpoint; driver-side checks first."""
     from pilot.weights import identity
@@ -156,28 +211,36 @@ def score_laya(a, checkpoint, cases):
     la.check_version()
     rid = dumps.run_id("laya", ident)
     device = "cuda" if a.gpus_per_worker > 0 else "cpu"
-    texts = [c["state"] for c in cases]
+    uids = [c["uid"] for c in cases]
     t0 = time.time()
-    import laya
-    import torch
-    torch.set_num_threads(a.cpus_per_worker)
-    agent = load_agent(model_dir, device, expected)
-    state = check_agent(agent, device)
-    T = la.noul_temperature(agent)
-    infer = 0.0
-    parts = []
-    for i in range(0, len(texts), BATCH):
-        t = time.perf_counter()                             # scoring only: load/digest time is not per-message cost
-        parts.append(la.noul_logits(agent, texts[i:i + BATCH], QUESTIONS))
-        infer += time.perf_counter() - t
-    logits = np.concatenate(parts).astype(np.float32, copy=False)
+    if a.workers == 0:
+        p = Predictor(model_dir, device, expected, a.cpus_per_worker)
+        rows = []
+        for i in range(0, len(cases), BATCH):
+            chunk = cases[i:i + BATCH]
+            rows += _rows(p({"uid": np.array([c["uid"] for c in chunk]),
+                             "text": np.array([c["state"] for c in chunk], dtype=object)}))
+    else:
+        import ray
+        ray.init(ignore_reinit_error=True, log_to_driver=False)
+        ds = ray.data.from_items([{"uid": c["uid"], "text": c["state"]} for c in cases]).map_batches(
+            Predictor, fn_constructor_args=(model_dir, device, expected, a.cpus_per_worker),
+            compute=ray.data.ActorPoolStrategy(size=a.workers), num_cpus=a.cpus_per_worker,
+            num_gpus=a.gpus_per_worker, memory=3 * 1024**3, batch_size=BATCH, batch_format="numpy")
+        rows = ds.take_all()
     secs = time.time() - t0
+    temps = {float(r["temperature"]) for r in rows}
+    states = {str(r["agent_state"]) for r in rows}
+    if len(temps) != 1 or len(states) != 1:
+        raise SystemExit("scoring actors disagree on the loaded checkpoint (temperatures %s, %d agent states); "
+                         "rescore" % (sorted(temps), len(states)))
+    logits = assemble(rows, uids)                           # split-file order by uid; hard-fails on any gap
+    infer = sum(float(r["infer_secs"]) for r in rows)       # summed over actors: compute time, not wall time
     fields = {"run_id": rid, "system": laya_system(checkpoint, ident),
-              "temperature": {"shipped": T, "source": TEMPERATURE_SOURCE},
-              "scorer": dict(state, laya_version=laya.__version__, torch_version=torch.__version__,
-                             numpy_version=np.__version__, torch_threads=torch.get_num_threads(), workers=0,
+              "temperature": {"shipped": temps.pop(), "source": TEMPERATURE_SOURCE},
+              "scorer": dict(json.loads(states.pop()), numpy_version=np.__version__, workers=a.workers,
                              batching=BATCHING),
-              "timing": {"seconds": secs, "inference_seconds": infer, "sec_per_msg": infer / len(texts)}}
+              "timing": {"seconds": secs, "inference_seconds": infer, "sec_per_msg": infer / len(uids)}}
     return logits, fields
 
 
@@ -202,8 +265,6 @@ def main(argv=None):
         ap.error("--checkpoint applies only to --model laya")
     if a.workers < 0 or a.cpus_per_worker < 1 or a.gpus_per_worker < 0:
         ap.error("--workers must be >= 0, --cpus-per-worker >= 1 and --gpus-per-worker >= 0")
-    if a.model == "laya" and a.workers > 0:
-        ap.error("--workers > 0 arrives with the Ray path")
     if a.n is not None and a.out_root is not None and _under(a.out_root, dumps.DUMP_ROOT):
         raise SystemExit("subset (--n) dumps never go under results/dumps; omit --out-root to write a temp dir")
     if not os.path.isfile(a.split_jsonl):
