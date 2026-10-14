@@ -7,13 +7,18 @@ into metrics with numpy alone (D-05). Systems (--model, default laya):
   the digests of its recorded pilot.weights.identity), then checks the pinned laya version (la.check_version). Every
   load is the public laya.load(model_dir, device=..., expected_sha256=...) (D-16); the raw noul margins and the
   temperature laya.load serves come only through pilot.laya_adapter (la.noul_logits, la.noul_temperature; D-02,
-  D-11). A loaded agent on another device, or on CPU in another dtype than float32 or with autocast on (an inherited
-  LAYA_CPU_AMP would switch laya to bf16), is refused; the check reads the agent, not the environment.
+  D-11). Scoring is fp32 on every device (D-06): laya 0.4.6 autocasts to fp16 on mps (every 48-question message)
+  and to fp16/bf16 on cuda, and to bf16 on cpu under LAYA_CPU_AMP, so after the load la.force_fp32 turns autocast
+  off and the sidecar records laya's load-time default (laya_default_amp, laya_default_dtype). check_agent then
+  refuses an agent on another device, in another dtype than float32, with autocast on, or after a laya GPU-to-CPU
+  out-of-memory fallback, and runs again after every scored batch; it reads the agent, not the environment.
   run_id: laya-zeroshot-<revision[:8]> for the pinned checkpoint, laya-<model_sha256[:12]> for a local one.
-  --workers 0 scores in-process; --workers N > 0 scores with N Ray Data actors (one checkpoint load each,
+  --device cpu|mps|cuda picks the scoring device (default: cuda when --gpus-per-worker > 0, else cpu). mps scores
+  in-process only (--workers 0; Ray has no MPS device manager) and is refused before any load when MPS is not
+  available. --workers 0 scores in-process; --workers N > 0 scores with N Ray Data actors (one checkpoint load each,
   --cpus-per-worker CPUs and torch threads each, about 2.6 GB each). Both paths run the same Predictor, and Ray's
   rows, which come back in any order, are reassembled by uid into split-file order (a duplicate, missing or unexpected
-  uid is refused). --gpus-per-worker > 0 scores on CUDA.
+  uid is refused). --gpus-per-worker is the Ray actors' GPU resource (cuda).
 - prior: p_t = messages carrying tag t / all messages, no-intent rows counted, in the training split the scored
   role's models are trained on (pilot.data.TRAINED_ON: final_train for test, selection_train for val)
 - majority: p = 1 on the most frequent tag of that training split (ties -> the earlier INTENTS tag), 0 elsewhere
@@ -28,8 +33,8 @@ there; without --out-root it goes to a fresh temp dir) and its sidecar records n
 Module-level imports stay torch-, Ray- and laya-free.
 
 usage: python score.py data/splits/test.jsonl [--model laya|majority|prior] [--checkpoint multilingual|DIR]
-                       [--workers W] [--cpus-per-worker C] [--gpus-per-worker G] [--n N] [--out-root DIR]
-                       [--manifest M]
+                       [--device cpu|mps|cuda] [--workers W] [--cpus-per-worker C] [--gpus-per-worker G] [--n N]
+                       [--out-root DIR] [--manifest M]
 """
 import argparse
 import json
@@ -126,18 +131,24 @@ def load_agent(model_dir, device, expected_sha256):
 
 
 def check_agent(agent, device):
-    """The loaded agent's {device, dtype, amp_enabled}; SystemExit unless it runs where and how scoring requires.
+    """The agent's {device, dtype, amp_enabled}; SystemExit unless it runs where and how scoring requires.
 
-    Reads the agent's state, not the environment: on CPU laya switches to bf16 autocast when LAYA_CPU_AMP is set, and
-    scoring is fp32 (D-06, RESEARCH Pitfall 5).
+    Scoring is fp32 with autocast off on every device (D-06; 03-REVIEW WR-02): laya's own default is fp16 on mps,
+    fp16/bf16 on cuda and bf16 on cpu under LAYA_CPU_AMP, so the Predictor calls la.force_fp32 first. Reads the agent's
+    state, not the environment, and runs after the load and after every scored batch: laya's _infer retries a GPU
+    out-of-memory forward on CPU and moves back afterwards, so a nonzero cpu_fallback_count is refused as well.
     """
     kind = getattr(agent.device, "type", agent.device)
     if kind != device:
-        raise SystemExit("laya loaded on %s, requested %s; check --gpus-per-worker and the visible devices"
-                         % (kind, device))
-    if kind == "cpu" and (str(agent.dtype) != "torch.float32" or agent.amp_enabled is not False):
-        raise SystemExit("laya runs %s with autocast %s on CPU; scoring is fp32 (unset LAYA_CPU_AMP)"
-                         % (agent.dtype, agent.amp_enabled))
+        raise SystemExit("laya loaded on %s, requested %s; check --device and the visible devices" % (kind, device))
+    if str(agent.dtype) != "torch.float32" or agent.amp_enabled is not False:
+        raise SystemExit("laya runs %s with autocast %s on %s; scoring is fp32 (D-06)"
+                         % (agent.dtype, agent.amp_enabled, kind))
+    fell = getattr(agent, "cpu_fallback_count", 0)
+    if fell:
+        raise SystemExit("laya fell back from %s to CPU %d time(s) mid-run (%s); a dump comes from one device: "
+                         "rescore with more free memory or --device cpu"
+                         % (kind, fell, getattr(agent, "last_fallback_reason", None)))
     return {"device": str(kind), "dtype": str(agent.dtype), "amp_enabled": bool(agent.amp_enabled)}
 
 
@@ -156,8 +167,8 @@ class Predictor:
     """Scores batches of messages with one Laya checkpoint load: a Ray Data actor, or called in-process (--workers 0).
 
     Returns per row the uid, the float32 [48] margins (la.noul_logits), the served temperature, the agent's state
-    (device, dtype, amp, torch threads, versions; checked by check_agent after the load) and its share of the batch's
-    scoring time.
+    (device, dtype, amp, laya's load-time amp default, torch threads, versions; fp32 forced by la.force_fp32 and
+    checked by check_agent after the load and after every batch) and its share of the batch's scoring time.
     """
 
     def __init__(self, model_dir, device, expected_sha256, threads):
@@ -165,16 +176,20 @@ class Predictor:
         import torch
         torch.set_num_threads(threads)                      # Ray sets OMP_NUM_THREADS from num_cpus; torch too
         self.agent = load_agent(model_dir, device, expected_sha256)
+        self.device = device
+        before = la.force_fp32(self.agent)                  # before any forward: laya's mps/cuda default is fp16
         state = check_agent(self.agent, device)
         self.temperature = la.noul_temperature(self.agent)
-        self.state = json.dumps(dict(state, torch_threads=torch.get_num_threads(), laya_version=laya.__version__,
-                                     torch_version=torch.__version__), sort_keys=True)
+        self.state = json.dumps(dict(state, laya_default_amp=before["amp_enabled"],
+                                     laya_default_dtype=before["dtype"], torch_threads=torch.get_num_threads(),
+                                     laya_version=laya.__version__, torch_version=torch.__version__), sort_keys=True)
 
     def __call__(self, batch):
         texts = [str(t) for t in batch["text"]]
         t = time.perf_counter()                             # scoring only: load/digest time is not per-message cost
         logits = la.noul_logits(self.agent, texts, QUESTIONS)
         dt = time.perf_counter() - t
+        check_agent(self.agent, self.device)                # laya may have moved or re-cast it mid-batch (OOM)
         b = len(texts)
         return {"uid": np.asarray(batch["uid"]), "logits": logits, "temperature": [self.temperature] * b,
                 "agent_state": [self.state] * b, "infer_secs": [dt / b] * b}
@@ -203,14 +218,18 @@ def _rows(out):
     return [{k: out[k][i] for k in out} for i in range(len(out["uid"]))]
 
 
-def score_laya(a, checkpoint, cases):
-    """(float32 [n, 48] margins in `cases` order, sidecar fields) of a Laya checkpoint; driver-side checks first."""
+def score_laya(a, checkpoint, cases, device):
+    """(float32 [n, 48] margins in `cases` order, sidecar fields) of a Laya checkpoint on `device` (resolved by main);
+    driver-side checks first."""
     from pilot.weights import identity
     ident = identity(checkpoint)                            # the scored bytes are bound to it (laya.load digests)
     model_dir, expected = resolve_checkpoint(checkpoint, ident)   # refusal / pinned fetch before laya or Ray
     la.check_version()
+    if device == "mps":
+        import torch
+        if not torch.backends.mps.is_available():
+            raise SystemExit("--device mps, but MPS is not available here; use --device cpu")
     rid = dumps.run_id("laya", ident)
-    device = "cuda" if a.gpus_per_worker > 0 else "cpu"
     uids = [c["uid"] for c in cases]
     t0 = time.time()
     if a.workers == 0:
@@ -252,7 +271,11 @@ def main(argv=None):
                     help="--model laya only: multilingual (pinned hub weights; the default) or DIR (local checkpoint)")
     ap.add_argument("--workers", type=int, default=1, help="Ray Data actors; 0 = in-process, no Ray")
     ap.add_argument("--cpus-per-worker", type=int, default=2, help="CPUs and torch threads per actor (or in-process)")
-    ap.add_argument("--gpus-per-worker", type=float, default=0, help="> 0 scores on CUDA")
+    ap.add_argument("--gpus-per-worker", type=float, default=0,
+                    help="GPUs per Ray actor; > 0 implies --device cuda when --device is omitted")
+    ap.add_argument("--device", default=None, choices=("cpu", "mps", "cuda"),
+                    help="--model laya only: scoring device (default cuda if --gpus-per-worker > 0, else cpu); "
+                         "mps needs --workers 0")
     ap.add_argument("--n", type=int, default=None, help="score a fixed random subset of N messages (debug only)")
     ap.add_argument("--out-root", default=None,
                     help="dump root (default results/dumps; with --n a fresh temp dir, never results/dumps)")
@@ -265,6 +288,15 @@ def main(argv=None):
         ap.error("--checkpoint applies only to --model laya")
     if a.workers < 0 or a.cpus_per_worker < 1 or a.gpus_per_worker < 0:
         ap.error("--workers must be >= 0, --cpus-per-worker >= 1 and --gpus-per-worker >= 0")
+    if a.model != "laya" and a.device is not None:
+        ap.error("--device applies only to --model laya")
+    device = a.device or ("cuda" if a.gpus_per_worker > 0 else "cpu")
+    if a.device in ("cpu", "mps") and a.gpus_per_worker > 0:
+        ap.error("--gpus-per-worker > 0 scores on CUDA; it conflicts with --device %s" % a.device)
+    if device == "cuda" and a.workers > 0 and a.gpus_per_worker == 0:
+        ap.error("--device cuda with Ray actors needs --gpus-per-worker > 0; or use --workers 0")
+    if device == "mps" and a.workers != 0:
+        ap.error("--device mps scores in-process: use --workers 0")
     if a.n is not None and a.out_root is not None and _under(a.out_root, dumps.DUMP_ROOT):
         raise SystemExit("subset (--n) dumps never go under results/dumps; omit --out-root to write a temp dir")
     if not os.path.isfile(a.split_jsonl):
@@ -284,7 +316,7 @@ def main(argv=None):
     n_subset = None if a.n is None else len(cases)
 
     if a.model == "laya":
-        logits, fields = score_laya(a, a.checkpoint or "multilingual", cases)
+        logits, fields = score_laya(a, a.checkpoint or "multilingual", cases, device)
     else:
         t0 = time.time()
         name, e_tr, counts, n_tr = train_counts(a.manifest, entry["role"])

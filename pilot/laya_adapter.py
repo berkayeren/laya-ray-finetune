@@ -2,8 +2,9 @@
 
 laya.train, laya.common, laya.calibrate (and laya.agent) are not public: `laya-train` and `laya.load` are. This module
 is the only tracked .py file that imports them or touches DecisionModel internals (head_checkpointing, the encoder's
-gradient_checkpointing_enable, tok_embeddings) or the records_from_labeled logit route; an AST guard in
-tests/test_laya_adapter.py fails on any other file, tests included.
+gradient_checkpointing_enable, tok_embeddings) or the records_from_labeled logit route, and the only one that writes
+an agent's autocast switch (amp_enabled, force_fp32); an AST guard in tests/test_laya_adapter.py fails on any other
+file, tests included.
 
 Every laya import lives inside a function, so `import pilot.laya_adapter` stays torch-free (the spike orchestrator
 and report.py depend on that; `import laya` alone does not import torch, laya.train/common/calibrate do). Callers use
@@ -177,7 +178,22 @@ def head_checkpointing_on(model):
     return bool(getattr(model, "head_checkpointing", False))
 
 
-# ---- scoring: raw noul logits and the temperature laya applies ----
+# ---- scoring: fp32 on every device, raw noul logits and the temperature laya applies ----
+
+def force_fp32(agent):
+    """Turn off laya's autocast on a loaded agent; return its load-time {"amp_enabled", "dtype"} (the before-state).
+
+    laya 0.4.6 enables fp16 autocast on mps for every forward of mps_amp_min_rows (5) or more rows, which is every
+    48-question message, and fp16/bf16 autocast on cuda; cpu stays fp32 unless LAYA_CPU_AMP is set. Scoring is fp32 on
+    every device (D-06), so this switch is deliberate: the caller records the before-state next to the dump, and
+    score.check_agent asserts fp32 with autocast off. The only write to laya's autocast state (AST-guarded).
+    """
+    import torch
+    before = {"amp_enabled": bool(agent.amp_enabled), "dtype": str(agent.dtype)}
+    agent.amp_enabled = False
+    agent.dtype = torch.float32
+    return before
+
 
 def noul_logits(agent, texts, questions):
     """float32 [len(texts), len(questions)] margins z_true - z_false for 2-option noul questions.

@@ -70,6 +70,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTER = "pilot/laya_adapter.py"
 PRIVATE = ("laya.train", "laya.common", "laya.calibrate", "laya.agent")
 INTERNALS = ("head_checkpointing", "gradient_checkpointing_enable", "tok_embeddings", "records_from_labeled")
+AUTOCAST = ("amp_enabled",)                         # writable only through la.force_fp32; reads stay allowed
 
 
 @pytest.fixture(scope="module")
@@ -158,6 +159,23 @@ def test_noul_logits_empty_single_and_order(tiny_agent):
     assert np.allclose(ab, ba[::-1], atol=1e-6, rtol=0)
 
 
+def test_force_fp32_turns_autocast_off(tmp_path, tiny_agent):
+    """force_fp32 returns the load-time state and leaves an fp32 agent with autocast off whose margins equal those
+    of an agent that was never switched (tiny_agent, cpu fp32 since load)."""
+    import laya
+    import torch
+    agent = laya.load(tiny_checkpoint(tmp_path / "c", temperature=1.3), device="cpu")
+    setattr(agent, "amp_enabled", True)                     # setattr: the guard bans `.amp_enabled =` here
+    agent.dtype = torch.bfloat16                            # laya's cuda default on sm_80+; LAYA_CPU_AMP's on cpu
+    before = la.force_fp32(agent)
+    assert before == {"amp_enabled": True, "dtype": "torch.bfloat16"}
+    assert agent.amp_enabled is False and agent.dtype == torch.float32
+    texts = ["Kartım kayboldu 0", "Evet."]
+    got, want = la.noul_logits(agent, texts, QUESTIONS), la.noul_logits(tiny_agent, texts, QUESTIONS)
+    assert np.allclose(got, want, atol=1e-6, rtol=0), float(np.abs(got - want).max())
+    assert la.force_fp32(agent) == {"amp_enabled": False, "dtype": "torch.float32"}
+
+
 def test_noul_logits_refuses_bad_records(tiny_agent, monkeypatch):
     def fake(recs):
         return types.SimpleNamespace(records_from_labeled=lambda agent, pairs: recs)
@@ -179,8 +197,9 @@ def _private(name):
 
 def _private_laya_uses(path, label=None):
     """"path:line what" for every private laya import (any form), laya.<private> attribute chain, dynamic import of a
-    private module, or DecisionModel internal / logit-route attribute. Strings are not code: only the first argument
-    of importlib.import_module / __import__ is read as a module name."""
+    private module, DecisionModel internal / logit-route attribute, or write to an agent's autocast switch
+    (`x.amp_enabled = ...`; reads are fine). Strings are not code: only the first argument of
+    importlib.import_module / __import__ is read as a module name."""
     with open(path, encoding="utf-8") as f:
         tree = ast.parse(f.read(), filename=path)
     bad = []
@@ -200,6 +219,8 @@ def _private_laya_uses(path, label=None):
                 what = "laya.%s" % node.attr
             elif node.attr in INTERNALS:
                 what = ".%s" % node.attr
+            elif node.attr in AUTOCAST and isinstance(node.ctx, ast.Store):
+                what = ".%s = (write)" % node.attr
         elif isinstance(node, ast.Call):
             fn = node.func
             name = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else None
@@ -233,15 +254,18 @@ def test_guard_catches_every_form(tmp_path):
                  "m.head_checkpointing = True\n"
                  "m.encoder.gradient_checkpointing_enable()\n"
                  "m.encoder.embeddings.tok_embeddings\n"
-                 "c.records_from_labeled(a, p)\n", encoding="utf-8")
+                 "c.records_from_labeled(a, p)\n"
+                 "agent.amp_enabled = False\n", encoding="utf-8")
     found = _private_laya_uses(str(p))
-    assert len(found) == 12 and sorted(int(b.split(":")[-1].split()[0]) for b in found) == list(range(1, 13)), found
+    assert len(found) == 13 and sorted(int(b.split(":")[-1].split()[0]) for b in found) == list(range(1, 14)), found
     q = tmp_path / "clean.py"
     q.write_text("import laya\n"
                  "laya.load(path)\n"
                  "from pilot import laya_adapter as la\n"
                  "la.forward(m, b, d, False, False)\n"
-                 "s = \"laya.train\"\n", encoding="utf-8")
+                 "s = \"laya.train\"\n"
+                 "ok = agent.amp_enabled is False\n"
+                 "la.force_fp32(agent)\n", encoding="utf-8")
     assert _private_laya_uses(str(q)) == []
 
 

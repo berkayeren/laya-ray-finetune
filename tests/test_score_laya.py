@@ -63,6 +63,7 @@ def test_tiny_checkpoint_round_trips_through_score_and_report(tmp_path, tiny):
     assert side["temperature"]["shipped"] == TINY_T
     sc = side["scorer"]
     assert sc["device"] == "cpu" and sc["amp_enabled"] is False and sc["dtype"] == "torch.float32"
+    assert sc["laya_default_amp"] is False and sc["laya_default_dtype"] == "torch.float32"   # laya's cpu default
     assert sc["workers"] == 0 and sc["laya_version"] == la.LAYA_VERSION
     assert side["system"]["kind"] == "laya" and side["system"]["checkpoint"] == "<outside-repo>/ckpt"
     assert side["system"]["checkpoint_identity"] == identity(ckpt)
@@ -105,6 +106,7 @@ def test_predictor_returns_logits_and_state(tiny):
     assert len(states) == 1
     state = json.loads(states.pop())
     assert state["device"] == "cpu" and state["dtype"] == "torch.float32" and state["amp_enabled"] is False
+    assert state["laya_default_amp"] is False and state["laya_default_dtype"] == "torch.float32"
     assert state["torch_threads"] == 1
     secs = list(out["infer_secs"])
     assert len(secs) == 3 and len(set(secs)) == 1 and secs[0] >= 0
@@ -112,19 +114,103 @@ def test_predictor_returns_logits_and_state(tiny):
 
 # --- refusals: agent state, arguments, checkpoint -------------------------------------------------------------------
 
+def _agent(device, dtype="torch.float32", amp=False, **kw):
+    return types.SimpleNamespace(device=types.SimpleNamespace(type=device), dtype=dtype, amp_enabled=amp, **kw)
+
+
 @pytest.mark.parametrize("agent,device,match", [
-    (types.SimpleNamespace(device="cpu", dtype="torch.bfloat16", amp_enabled=False), "cpu", "scoring is fp32"),
-    (types.SimpleNamespace(device="cpu", dtype="torch.float32", amp_enabled=True), "cpu", "LAYA_CPU_AMP"),
-    (types.SimpleNamespace(device="cpu", dtype="torch.float32", amp_enabled=False), "cuda", "requested cuda"),
-], ids=["bf16_dtype", "amp_on", "device_mismatch"])
+    (_agent("cpu", "torch.bfloat16"), "cpu", r"torch.bfloat16 with autocast False on cpu; scoring is fp32 \(D-06\)"),
+    (_agent("cpu", amp=True), "cpu", r"laya runs torch.float32 with autocast True on cpu; scoring is fp32 \(D-06\)"),
+    (_agent("mps", "torch.float16", True), "mps", r"runs torch.float16 with autocast True on mps; scoring is fp32"),
+    (_agent("mps", amp=True), "mps", r"autocast True on mps; scoring is fp32 \(D-06\)"),
+    (_agent("cuda", "torch.float16", True), "cuda", r"runs torch.float16 with autocast True on cuda; scoring is fp32"),
+    (_agent("cuda", "torch.bfloat16", False), "cuda", r"torch.bfloat16 with autocast False on cuda; scoring is fp32"),
+    (_agent("cpu"), "cuda", "laya loaded on cpu, requested cuda"),
+    (_agent("cpu"), "mps", "laya loaded on cpu, requested mps"),
+    (_agent("mps", cpu_fallback_count=1, last_fallback_reason="MPS backend out of memory"), "mps",
+     r"fell back from mps to CPU 1 time\(s\) mid-run \(MPS backend out of memory\)"),
+], ids=["cpu_bf16", "cpu_amp_on", "mps_fp16_amp", "mps_amp_on", "cuda_fp16_amp", "cuda_bf16", "cpu_for_cuda",
+        "cpu_for_mps", "oom_fallback"])
 def test_check_agent_refuses(agent, device, match):
     with pytest.raises(SystemExit, match=match):
         score.check_agent(agent, device)
 
 
-def test_check_agent_passes_fp32_cpu_and_returns_its_state():
-    agent = types.SimpleNamespace(device=types.SimpleNamespace(type="cpu"), dtype="torch.float32", amp_enabled=False)
-    assert score.check_agent(agent, "cpu") == {"device": "cpu", "dtype": "torch.float32", "amp_enabled": False}
+@pytest.mark.parametrize("device", ["cpu", "mps", "cuda"])
+def test_check_agent_passes_fp32_and_returns_its_state(device):
+    assert score.check_agent(_agent(device, cpu_fallback_count=0), device) == {
+        "device": device, "dtype": "torch.float32", "amp_enabled": False}
+
+
+def test_predictor_rechecks_the_agent_after_every_batch(tiny, monkeypatch):
+    """laya's _infer can demote the agent mid-run (GPU OOM -> CPU); the batch that saw it is refused, not dumped."""
+    out_dir, _, ckpt = tiny
+    model_dir, expected = score.resolve_checkpoint(ckpt)
+    p = score.Predictor(model_dir, "cpu", expected, 1)
+    case = _split_cases(os.path.join(out_dir, "splits", "test.jsonl"))[0]
+    batch = {"uid": np.array([case["uid"]]), "text": np.array([case["state"]])}
+    p(batch)
+    real = la.noul_logits
+
+    def demoting(agent, texts, questions):
+        out = real(agent, texts, questions)
+        setattr(agent, "cpu_fallback_count", 1)             # what laya's OOM retry leaves behind
+        return out
+    monkeypatch.setattr(la, "noul_logits", demoting)
+    with pytest.raises(SystemExit, match="fell back from cpu to CPU 1 time"):
+        p(batch)
+
+
+@pytest.mark.parametrize("args,match", [
+    (["--model", "prior", "--device", "cpu"], "--device applies only to --model laya"),
+    (["--model", "majority", "--device", "mps"], "--device applies only to --model laya"),
+    (["--device", "cpu", "--gpus-per-worker", "1"], "it conflicts with --device cpu"),
+    (["--device", "mps", "--gpus-per-worker", "1", "--workers", "0"], "it conflicts with --device mps"),
+    (["--device", "cuda", "--workers", "2"], "--device cuda with Ray actors needs --gpus-per-worker > 0"),
+    (["--device", "mps", "--workers", "1"], "--device mps scores in-process: use --workers 0"),
+    (["--device", "mps"], "--device mps scores in-process: use --workers 0"),          # --workers defaults to 1
+    (["--device", "tpu"], "invalid choice"),
+], ids=["prior", "majority", "cpu_gpu", "mps_gpu", "cuda_no_gpu", "mps_ray", "mps_default_workers", "unknown"])
+def test_device_conflicts_are_argument_errors(tmp_path, synthetic_raw, capsys, args, match):
+    out_dir, manifest = prepared(tmp_path, synthetic_raw)
+    with pytest.raises(SystemExit) as e:
+        score.main([os.path.join(out_dir, "splits", "test.jsonl"), *args, "--manifest", manifest,
+                    "--out-root", str(tmp_path / "dumps")])
+    assert e.value.code == 2 and match in capsys.readouterr().err
+    assert not (tmp_path / "dumps").exists()
+
+
+@pytest.mark.parametrize("args,want", [
+    ([], "cpu"), (["--gpus-per-worker", "1"], "cuda"), (["--device", "cuda", "--workers", "0"], "cuda"),
+    (["--device", "cuda", "--gpus-per-worker", "1"], "cuda"), (["--device", "mps", "--workers", "0"], "mps"),
+    (["--device", "cpu"], "cpu"),
+], ids=["default_cpu", "gpu_implies_cuda", "cuda_inprocess", "cuda_ray", "mps_inprocess", "explicit_cpu"])
+def test_device_resolution(tmp_path, synthetic_raw, monkeypatch, args, want):
+    """Omitting --device keeps today's behaviour (cuda iff --gpus-per-worker > 0); the resolved device reaches
+    score_laya, which is stubbed so no model loads."""
+    out_dir, manifest = prepared(tmp_path, synthetic_raw)
+    seen = []
+
+    def stop(a, checkpoint, cases, device):
+        seen.append(device)
+        raise SystemExit("stub")
+    monkeypatch.setattr(score, "score_laya", stop)
+    with pytest.raises(SystemExit, match="stub"):
+        score.main([os.path.join(out_dir, "splits", "test.jsonl"), *args, "--manifest", manifest,
+                    "--out-root", str(tmp_path / "dumps")])
+    assert seen == [want]
+
+
+def test_mps_unavailable_is_refused_before_any_load(tmp_path, tiny, monkeypatch):
+    import torch
+    out_dir, manifest, ckpt = tiny
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    monkeypatch.setattr(score, "load_agent", lambda *x: pytest.fail("loaded a model"))
+    with pytest.raises(SystemExit) as e:
+        score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--checkpoint", ckpt, "--device", "mps",
+                    "--workers", "0", "--manifest", manifest, "--out-root", str(tmp_path / "dumps")])
+    assert "--device mps, but MPS is not available here; use --device cpu" in str(e.value.code)
+    assert not (tmp_path / "dumps").exists()
 
 
 def test_baseline_with_checkpoint_is_an_argument_error(tmp_path, synthetic_raw, capsys):
