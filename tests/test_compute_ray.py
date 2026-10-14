@@ -35,7 +35,7 @@ def test_compute_checkpoint_on_cpu(tmp_path):
     r = subprocess.run([sys.executable, "compute_checkpoint.py", "--device", "cpu", "--base", base,
                         "--data", os.path.join(data, "splits", "selection_train.jsonl"),
                         "--manifest", os.path.join(data, "splits.json"), "--epochs", "2", "--cpus", "2",
-                        "--interrupt", "fail",
+                        "--interrupt", "fail", "--berturk-source", "tiny",
                         "--min-available-gib", "0", "--max-messages", "12", "--calib-frac", "0.2",
                         "--out", str(out), "--storage", str(storage)],
                        cwd=REPO, env=env, capture_output=True, text=True, timeout=TIMEOUT)
@@ -62,6 +62,16 @@ def test_compute_checkpoint_on_cpu(tmp_path):
     assert sorted(lines) == sorted(["laya_selection", "laya_val_scoring", "laya_final", "berturk_selection",
                                     "berturk_final", "fewshot_base", "fewshot_incremental", "fewshot_scoring",
                                     "final_scoring"])
+    # the BERTurk timing child (tiny model, fresh process) and the scoring probe (--n 32 of val, in-process)
+    berturk, scoring = report["measured"]["berturk"], report["measured"]["scoring"]
+    assert berturk["status"] == "ok" and berturk["param_device"] == "cpu" and berturk["s_per_step"] > 0
+    assert scoring["device"] == "cpu" and scoring["dtype"] == "torch.float32" and scoring["amp_enabled"] is False
+    assert scoring["n"] == min(32, report["counts"]["val"]["n_messages"]) and scoring["s_per_msg"] > 0
+    for id_ in ("berturk_selection", "berturk_final", "laya_val_scoring", "final_scoring"):
+        assert lines[id_]["basis"] == "measured", id_
+    assert lines["berturk_selection"]["s_per_unit"] == berturk["s_per_step"]
+    assert lines["laya_val_scoring"]["s_per_unit"] == scoring["s_per_msg"]
+    assert "scoring probe" in lines["laya_val_scoring"]["source"]
     assert sorted(report["counts"]) == sorted(["selection_train", "val", "final_train", "test", "hotels_probe"])
     assert len(report["what_if"]) == 10 and report["disk"]["model_bytes"] > 0 and report["assumptions"]
     with open(out / "compute_checkpoint.md", encoding="utf-8") as f:
@@ -69,6 +79,7 @@ def test_compute_checkpoint_on_cpu(tmp_path):
     assert md.startswith("# Compute checkpoint") and "SMOKE RUN" in md
     assert "What-if" in md and "Disk" in md and "Assumptions to confirm" in md
     assert "Interruption and resume" in md and "Resume demonstrated" in md
+    assert "BERTurk timing probe" in md and "Scoring probe" in md
     home = os.path.expanduser("~").rstrip("/")
     assert home not in text and home not in md
     # the probe's Ray run dir and checkpoint are gone (no --keep-run)

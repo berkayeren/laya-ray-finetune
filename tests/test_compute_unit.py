@@ -434,3 +434,85 @@ def test_kill_after_registration_records_a_missed_kill():
     proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
     out = compute_checkpoint.kill_after_registration(proc, lambda: False, 0, poll_s=0.05)
     assert out["missed"] is True and out["leftover_processes"] is None and proc.returncode == 0
+
+
+# ---- plan 04-06 Task 2: measured BERTurk step and inference times, measured scoring rate ----
+
+def test_berturk_child_on_tiny_cpu(tmp_path):
+    out_json = tmp_path / "berturk.json"
+    cfg = {"source": "tiny", "device": "cpu", "cpus": 1, "seed": 0, "warmup_steps": 1, "measured_steps": 3,
+           "infer_msgs": 8, "out_json": str(out_json)}
+    path = tmp_path / "cfg.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run([sys.executable, "compute_checkpoint.py", "--child", "berturk", str(path)], cwd=REPO_ROOT,
+                       env=env, capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr[-3000:]
+    p = json.loads(out_json.read_text(encoding="utf-8"))
+    assert p["status"] == "ok", p
+    assert p["param_device"] == "cpu" and p["device"] == "cpu" and p["n_steps"] == 3
+    assert p["s_per_step"] > 0 and p["p90_s"] >= p["s_per_step"] and p["s_per_msg_infer"] > 0
+    assert p["peak_rss_bytes"] > 0 and p["peak_total_bytes"] > 0 and p["peak_driver_bytes"] is None
+    assert p["batch"] == 32 and p["max_len"] == 128 and p["torch_threads"] == 1 and p["n_params"] > 0
+    assert "plain PyTorch loop" in p["basis"]
+
+
+def test_berturk_child_refuses_tampered_weights(tmp_path, monkeypatch):
+    import hashlib
+    import compute_checkpoint
+    bert = tmp_path / "bert"
+    bert.mkdir()
+    digests = {}
+    for name in ("config.json", "model.safetensors", "tokenizer_config.json", "vocab.txt"):
+        (bert / name).write_bytes(name.encode("utf-8"))
+        digests[name] = hashlib.sha256(name.encode("utf-8")).hexdigest()
+    digests["model.safetensors"] = "0" * 64                                   # one planted file is not the pin
+    monkeypatch.setitem(compute_checkpoint.pins.BERTURK, "sha256", digests)
+    out_json = tmp_path / "berturk.json"
+    cfg = {"source": "pinned", "dir": str(bert), "data": str(tmp_path / "none.jsonl"), "data_sha256": "1" * 64,
+           "device": "cpu", "cpus": 1, "seed": 0, "warmup_steps": 1, "measured_steps": 1, "infer_msgs": 1,
+           "out_json": str(out_json)}
+    path = tmp_path / "cfg.json"
+    path.write_text(json.dumps(cfg), encoding="utf-8")
+    compute_checkpoint.run_child("berturk", str(path))
+    p = json.loads(out_json.read_text(encoding="utf-8"))
+    assert p["status"] == "refused" and "model.safetensors" in p["reason"] and "sha256" in p["reason"]
+
+
+def test_project_uses_measured_berturk_and_scoring():
+    measured = dict(toy_measured(), berturk={"status": "ok", "device": "mps", "s_per_step": 0.5,
+                                             "s_per_msg_infer": 0.004},
+                    scoring={"device": "mps", "dtype": "torch.float32", "amp_enabled": False, "n": 32,
+                             "s_per_msg": 0.2})
+    p = compute.project(measured, TOY_COUNTS, TOY_MATRIX)
+    sel = line(p, "berturk_selection")
+    assert sel["seconds"] == pytest.approx(3 * 10 * 46 * 0.5) and sel["basis"] == "measured"
+    val = line(p, "laya_val_scoring")
+    assert val["seconds"] == pytest.approx(3 * 4 * 208 * 0.2) and val["basis"] == "measured"
+    assert "scoring probe" in val["source"]
+    final = line(p, "final_scoring")
+    assert final["basis"] == "measured"
+    assert {part["model"]: part["s_per_unit"] for part in final["parts"]} == {"laya": 0.2, "berturk": 0.004}
+
+
+def test_markdown_and_assumptions_label_the_measured_probes():
+    measured = dict(toy_measured(), berturk={"status": "ok", "device": "mps", "param_device": "mps",
+                                             "s_per_step": 0.5, "p90_s": 0.6, "n_steps": 20,
+                                             "s_per_msg_infer": 0.004, "peak_total_bytes": 3 * 2**30,
+                                             "peak_driver_bytes": 2 * 2**30, "peak_rss_bytes": 2**30,
+                                             "basis": "plain PyTorch loop, fp32"},
+                    scoring={"device": "mps", "dtype": "torch.float32", "amp_enabled": False, "n": 32,
+                             "s_per_msg": 0.2, "basis": "--n 32 val subset"})
+    a = compute.assumptions(TOY_MATRIX, measured, TOY_COUNTS)
+    assert not any("BERTurk rates are estimates" in x for x in a)
+    assert not any("committed CPU zero-shot rate" in x for x in a)
+    assert any("HF Trainer" in x for x in a) and any("zero-shot weights" in x for x in a)
+    report = compute.build_report(toy_meta(), measured, TOY_COUNTS, TOY_MATRIX,
+                                  compute.project(measured, TOY_COUNTS, TOY_MATRIX), toy_preflight(), assumptions=a)
+    md = compute.render_markdown(report)
+    assert "## BERTurk timing probe" in md and "## Scoring probe" in md and "plain PyTorch loop" in md
+    failed = dict(toy_measured(), berturk={"status": "oom", "reason": "MPS backend out of memory"})
+    md = compute.render_markdown(compute.build_report(
+        toy_meta(), failed, TOY_COUNTS, TOY_MATRIX, compute.project(failed, TOY_COUNTS, TOY_MATRIX), toy_preflight()))
+    assert "## BERTurk timing probe" in md and "keep the estimate" in md
+    assert any("BERTurk rates are estimates" in x for x in compute.assumptions(TOY_MATRIX, failed, TOY_COUNTS))
