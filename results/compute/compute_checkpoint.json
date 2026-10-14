@@ -1,0 +1,640 @@
+{
+  "schema": "compute_checkpoint/1",
+  "meta": {
+    "generated_utc": "2026-10-14T16:55:33Z",
+    "split": {
+      "path": "splits/selection_train.jsonl",
+      "sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+      "n_messages": 1450
+    },
+    "manifest": {
+      "path": "data/splits.json",
+      "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103",
+      "is_committed": true
+    },
+    "spike_report": {
+      "path": "results/spike/mps_spike.json",
+      "sha256": "a8ff3ab967c91d70958a2e9ff1d91939826e27dd9247d2c6c2ad43510f188285"
+    },
+    "model": {
+      "repo": "convaiinnovations/laya",
+      "subfolder": "multilingual",
+      "revision": "7b928d828b7b0e022f929d9bd2e44165aa270148",
+      "model_sha256": "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204"
+    },
+    "versions": {
+      "torch": "2.14.1",
+      "ray": "2.59.0",
+      "laya": "0.4.6",
+      "transformers": "5.19.0",
+      "psutil": "7.2.2",
+      "python": "3.12.7"
+    },
+    "platform": {
+      "macos": "26.6.2",
+      "machine": "arm64",
+      "total_memory_bytes": 17179869184
+    },
+    "protocol": {
+      "device": "mps",
+      "epochs": 2,
+      "seed": 0,
+      "cpus": 4,
+      "neg": 8,
+      "spike_start": {
+        "micro_batch": 8,
+        "max_len": 128,
+        "grad_accum": 4,
+        "rung": "none",
+        "fallback": 0
+      },
+      "run_id": "laya-selection_train-neg8-s0-db11040d",
+      "interrupt": {
+        "mode": "kill",
+        "kill_delay_s": 60.0
+      },
+      "berturk": true,
+      "score_probe": true,
+      "test_hooks": {
+        "max_messages": null,
+        "calib_frac": null,
+        "berturk_source": "pinned"
+      },
+      "protocol_complete": true
+    }
+  },
+  "status": "ok",
+  "preflight": {
+    "available_gib": 8.75,
+    "min_available_gib": 7.0,
+    "swap_used_bytes": [
+      515964928,
+      515964928
+    ],
+    "swap_grew_while_idle": false,
+    "swapouts": [
+      3168236,
+      3168236
+    ],
+    "swapouts_grew_while_idle": false,
+    "passed": true,
+    "override": false
+  },
+  "attempts": [
+    {
+      "run_id": "laya-selection_train-neg8-s0-db11040d",
+      "status": "ok",
+      "interrupt": {
+        "mode": "kill",
+        "after_epoch": 1,
+        "delay_s": 60.0,
+        "missed": false,
+        "leftover_processes": 0,
+        "post_interrupt_available_gib": 10.753326416015625
+      },
+      "resume": {
+        "segments": 2,
+        "resume_load_s": 3.576609166106209,
+        "resume_peak_total_bytes": 5725323264,
+        "resume_demonstrated": true
+      },
+      "rung": "none"
+    }
+  ],
+  "interrupt": {
+    "mode": "kill",
+    "after_epoch": 1,
+    "delay_s": 60.0,
+    "missed": false,
+    "leftover_processes": 0,
+    "post_interrupt_available_gib": 10.753326416015625
+  },
+  "resume": {
+    "segments": 2,
+    "resume_load_s": 3.576609166106209,
+    "resume_peak_total_bytes": 5725323264,
+    "resume_demonstrated": true
+  },
+  "measured": {
+    "laya": {
+      "s_per_step": 1.835481490136796,
+      "s_per_step_epoch1": 1.835481490136796,
+      "epochs_measured": 2,
+      "save_s_per_epoch": 6.015912666916847,
+      "load_s": 3.851590709062293,
+      "calib_s": 12.604028291068971,
+      "final_save_s": 0.39878474990837276,
+      "peak_total_bytes": 9760620544,
+      "peak_driver_bytes": 8528740352,
+      "peak_rss_bytes": 2038398976,
+      "swap_delta_bytes": 443285504,
+      "micro_batch": 8,
+      "grad_accum": 4,
+      "max_len": 128,
+      "neg": 8,
+      "rung": "none",
+      "fallback": false,
+      "weaker": false,
+      "device": "mps",
+      "param_device": "mps",
+      "grad_checkpointing": true,
+      "amp": false,
+      "env": [
+        "HF_HUB_OFFLINE=1",
+        "OMP_NUM_THREADS=4",
+        "PYTORCH_ENABLE_MPS_FALLBACK=0",
+        "PYTORCH_MPS_HIGH_WATERMARK_RATIO=1.0",
+        "PYTORCH_MPS_LOW_WATERMARK_RATIO=1.0",
+        "TOKENIZERS_PARALLELISM=false"
+      ],
+      "train_state_bytes": 3861528521
+    },
+    "epochs": [
+      {
+        "epoch": 1,
+        "loss": 0.8072839504021982,
+        "train_s": 829.6376335418317,
+        "save_s": 5.382942582946271,
+        "optimizer_steps": 452,
+        "n_items": 14439,
+        "peak_total_bytes": 9264644096,
+        "peak_driver_bytes": 8375222272,
+        "peak_rss_bytes": 1767374848,
+        "current_allocated_bytes": 3880395008,
+        "swap_delta_bytes": 0,
+        "segment": 0,
+        "resumed": false
+      },
+      {
+        "epoch": 2,
+        "loss": 0.4982663094915659,
+        "train_s": 825.9816927090287,
+        "save_s": 6.015912666916847,
+        "optimizer_steps": 452,
+        "n_items": 14439,
+        "peak_total_bytes": 9760620544,
+        "peak_driver_bytes": 8528740352,
+        "peak_rss_bytes": 2038398976,
+        "current_allocated_bytes": 3887014144,
+        "swap_delta_bytes": 443285504,
+        "segment": 1,
+        "resumed": true
+      }
+    ],
+    "berturk": {
+      "status": "ok",
+      "source": "pinned",
+      "device": "mps",
+      "param_device": "mps",
+      "dtype": "torch.float32",
+      "n_params": 110654256,
+      "torch_threads": 4,
+      "batch": 32,
+      "max_len": 128,
+      "warmup_steps": 3,
+      "s_per_step": 0.3955,
+      "p90_s": 0.4246,
+      "n_steps": 20,
+      "infer_msgs": 64,
+      "infer_s": 0.12316891690716147,
+      "s_per_msg_infer": 0.001924514326674398,
+      "peak_total_bytes": 5374443520,
+      "peak_driver_bytes": 4496801792,
+      "peak_rss_bytes": 877641728,
+      "basis": "plain PyTorch loop, fp32, AdamW, batch 32, max_len 128; Phase 6 trains with the HF Trainer"
+    },
+    "scoring": {
+      "status": "ok",
+      "device": "mps",
+      "dtype": "torch.float32",
+      "amp_enabled": false,
+      "n": 32,
+      "s_per_msg": 0.3206341823170078,
+      "basis": "--n 32 val subset of the --base weights (the pinned zero-shot model in the real run; same architecture as a fine-tuned checkpoint), in-process, fp32"
+    }
+  },
+  "counts": {
+    "selection_train": {
+      "n_messages": 1450,
+      "n_items_neg8": 14854,
+      "n_items_full": 69600
+    },
+    "val": {
+      "n_messages": 208,
+      "n_items_neg8": 2147,
+      "n_items_full": 9984
+    },
+    "final_train": {
+      "n_messages": 1658,
+      "n_items_neg8": 17001,
+      "n_items_full": 79584
+    },
+    "test": {
+      "n_messages": 413,
+      "n_items_neg8": 4228,
+      "n_items_full": 19824
+    },
+    "hotels_probe": {
+      "n_messages": 1009,
+      "n_items_neg8": 8072,
+      "n_items_full": 48432
+    }
+  },
+  "matrix": {
+    "lr_grid": 3,
+    "max_epochs": 4,
+    "final_seeds": 3,
+    "neg": 8,
+    "effective_batch": 32,
+    "berturk_epochs": 10,
+    "berturk_batch": 32,
+    "fewshot_tags": 6,
+    "fewshot_k": [
+      5,
+      10
+    ],
+    "fewshot_draws": 3,
+    "fewshot_neg_per_pos": 4,
+    "fewshot_replay": 200,
+    "fewshot_epochs": 10,
+    "fewshot_base_runs": 3,
+    "eval_seeds": 3
+  },
+  "projection": {
+    "lines": [
+      {
+        "id": "laya_selection",
+        "phase": 5,
+        "what": "Laya selection runs (LR grid x val-selected epoch ceiling)",
+        "runs": 3,
+        "epochs": 4,
+        "units_per_epoch": 465,
+        "unit": "optimizer step",
+        "s_per_unit": 1.835481490136796,
+        "basis": "measured",
+        "source": "probe run on mps: s/step = the largest train_s / optimizer_steps over 2 measured epoch(s); save, load, calibration and final-save seconds from the same record",
+        "seconds": 10364.740878216442,
+        "hours": 2.8790946883934563,
+        "formula": "lr_grid (3) x [max_epochs (4) x (465 optimizer steps (14854 selection_train neg8 items, micro-batch 8, grad-accum 4) x 1.8355 s + 6.0 s save) + 3.9 s load + 12.6 s calibration + 0.4 s final save]"
+      },
+      {
+        "id": "laya_val_scoring",
+        "phase": 5,
+        "what": "Laya val scoring of every selection epoch export",
+        "runs": 12,
+        "epochs": null,
+        "units_per_epoch": 208,
+        "unit": "message",
+        "s_per_unit": 0.3206341823170078,
+        "basis": "measured",
+        "source": "scoring probe on mps: --n 32 val subset of the --base weights (the pinned zero-shot model in the real run; same architecture as a fine-tuned checkpoint), in-process, fp32, 32 messages",
+        "seconds": 800.3029190632515,
+        "hours": 0.22230636640645873,
+        "formula": "lr_grid (3) x max_epochs (4) epoch exports x 208 val messages x 0.3206 s"
+      },
+      {
+        "id": "laya_final",
+        "phase": 5,
+        "what": "Laya final seeds on final_train (projected at the epoch ceiling)",
+        "runs": 3,
+        "epochs": 4,
+        "units_per_epoch": 532,
+        "unit": "optimizer step",
+        "s_per_unit": 1.835481490136796,
+        "basis": "measured",
+        "source": "probe run on mps: s/step = the largest train_s / optimizer_steps over 2 measured epoch(s); save, load, calibration and final-save seconds from the same record",
+        "seconds": 11840.467996286427,
+        "hours": 3.2890188878573405,
+        "formula": "final_seeds (3) x [max_epochs (4) x (532 optimizer steps (17001 final_train neg8 items, micro-batch 8, grad-accum 4) x 1.8355 s + 6.0 s save) + 3.9 s load + 12.6 s calibration + 0.4 s final save]"
+      },
+      {
+        "id": "berturk_selection",
+        "phase": 6,
+        "what": "BERTurk selection runs (LR grid)",
+        "runs": 3,
+        "epochs": 10,
+        "units_per_epoch": 46,
+        "unit": "optimizer step",
+        "s_per_unit": 0.3955,
+        "basis": "measured",
+        "source": "BERTurk timing probe on mps: plain PyTorch loop, fp32, AdamW, batch 32, max_len 128; Phase 6 trains with the HF Trainer",
+        "seconds": 545.7900000000001,
+        "hours": 0.15160833333333334,
+        "formula": "lr_grid (3) x berturk_epochs (10) x 46 optimizer steps (ceil(1450 selection_train messages / batch 32)) x 0.3955 s"
+      },
+      {
+        "id": "berturk_final",
+        "phase": 6,
+        "what": "BERTurk final seeds on final_train",
+        "runs": 3,
+        "epochs": 10,
+        "units_per_epoch": 52,
+        "unit": "optimizer step",
+        "s_per_unit": 0.3955,
+        "basis": "measured",
+        "source": "BERTurk timing probe on mps: plain PyTorch loop, fp32, AdamW, batch 32, max_len 128; Phase 6 trains with the HF Trainer",
+        "seconds": 616.98,
+        "hours": 0.17138333333333333,
+        "formula": "final_seeds (3) x berturk_epochs (10) x 52 optimizer steps (ceil(1658 final_train messages / batch 32)) x 0.3955 s"
+      },
+      {
+        "id": "fewshot_base",
+        "phase": 9,
+        "what": "Few-shot base runs, held-out labels masked (both models)",
+        "runs": 6,
+        "epochs": null,
+        "units_per_epoch": null,
+        "unit": "optimizer step",
+        "s_per_unit": null,
+        "basis": "provisional",
+        "source": "Laya: probe run on mps: s/step = the largest train_s / optimizer_steps over 2 measured epoch(s); save, load, calibration and final-save seconds from the same record; BERTurk: BERTurk timing probe on mps: plain PyTorch loop, fp32, AdamW, batch 32, max_len 128; Phase 6 trains with the HF Trainer",
+        "seconds": 10910.530878216443,
+        "hours": 3.0307030217267896,
+        "formula": "per model fewshot_base_runs (3) on selection_train: Laya at max_epochs (4), 465 optimizer steps per epoch; BERTurk at berturk_epochs (10), 46 optimizer steps per epoch",
+        "parts": [
+          {
+            "model": "laya",
+            "runs": 3,
+            "epochs": 4,
+            "units_per_epoch": 465,
+            "unit": "optimizer step",
+            "s_per_unit": 1.835481490136796,
+            "basis": "measured",
+            "seconds": 10364.740878216442,
+            "items": 14854
+          },
+          {
+            "model": "berturk",
+            "runs": 3,
+            "epochs": 10,
+            "units_per_epoch": 46,
+            "unit": "optimizer step",
+            "s_per_unit": 0.3955,
+            "basis": "measured",
+            "seconds": 545.7900000000001
+          }
+        ]
+      },
+      {
+        "id": "fewshot_incremental",
+        "phase": 9,
+        "what": "Few-shot incremental runs on k-shot support sets plus replay (both models)",
+        "runs": 12,
+        "epochs": 10,
+        "units_per_epoch": null,
+        "unit": "optimizer step",
+        "s_per_unit": null,
+        "basis": "provisional",
+        "source": "Laya: probe run on mps: s/step = the largest train_s / optimizer_steps over 2 measured epoch(s); save, load, calibration and final-save seconds from the same record; BERTurk: BERTurk timing probe on mps: plain PyTorch loop, fp32, AdamW, batch 32, max_len 128; Phase 6 trains with the HF Trainer",
+        "seconds": 15870.094031439712,
+        "hours": 4.408359453177698,
+        "formula": "per model and k: fewshot_draws (3) runs x fewshot_epochs (10) on fewshot_tags (6) x k x (1 + fewshot_neg_per_pos 4) + fewshot_replay (200) messages (k 5: 350, k 10: 500); Laya items = ceil(messages x 10.244 selection_train neg8 items per message)",
+        "parts": [
+          {
+            "model": "laya",
+            "runs": 3,
+            "epochs": 10,
+            "units_per_epoch": 113,
+            "unit": "optimizer step",
+            "s_per_unit": 1.835481490136796,
+            "basis": "measured",
+            "seconds": 6453.322842821362,
+            "items": 3586,
+            "k": 5,
+            "messages": 350
+          },
+          {
+            "model": "laya",
+            "runs": 3,
+            "epochs": 10,
+            "units_per_epoch": 161,
+            "unit": "optimizer step",
+            "s_per_unit": 1.835481490136796,
+            "basis": "measured",
+            "seconds": 9096.41618861835,
+            "items": 5123,
+            "k": 10,
+            "messages": 500
+          },
+          {
+            "model": "berturk",
+            "runs": 3,
+            "epochs": 10,
+            "units_per_epoch": 11,
+            "unit": "optimizer step",
+            "s_per_unit": 0.3955,
+            "basis": "measured",
+            "seconds": 130.51500000000001,
+            "k": 5,
+            "messages": 350
+          },
+          {
+            "model": "berturk",
+            "runs": 3,
+            "epochs": 10,
+            "units_per_epoch": 16,
+            "unit": "optimizer step",
+            "s_per_unit": 0.3955,
+            "basis": "measured",
+            "seconds": 189.84,
+            "k": 10,
+            "messages": 500
+          }
+        ]
+      },
+      {
+        "id": "fewshot_scoring",
+        "phase": 9,
+        "what": "Few-shot scoring of every incremental model on test (both models)",
+        "runs": 12,
+        "epochs": null,
+        "units_per_epoch": 413,
+        "unit": "message",
+        "s_per_unit": null,
+        "basis": "provisional",
+        "source": "Laya: scoring probe on mps: --n 32 val subset of the --base weights (the pinned zero-shot model in the real run; same architecture as a fine-tuned checkpoint), in-process, fp32, 32 messages; BERTurk: BERTurk timing probe on mps: plain PyTorch loop, fp32, AdamW, batch 32, max_len 128; Phase 6 trains with the HF Trainer",
+        "seconds": 799.3004502830445,
+        "hours": 0.22202790285640125,
+        "formula": "per model len(fewshot_k) (2) x fewshot_draws (3) models x 413 test messages x s/msg (Laya 0.3206, BERTurk 0.0019)",
+        "parts": [
+          {
+            "model": "laya",
+            "runs": 6,
+            "epochs": null,
+            "units_per_epoch": 413,
+            "unit": "message",
+            "s_per_unit": 0.3206341823170078,
+            "basis": "measured",
+            "seconds": 794.5315037815453
+          },
+          {
+            "model": "berturk",
+            "runs": 6,
+            "epochs": null,
+            "units_per_epoch": 413,
+            "unit": "message",
+            "s_per_unit": 0.001924514326674398,
+            "basis": "measured",
+            "seconds": 4.768946501499158
+          }
+        ]
+      },
+      {
+        "id": "final_scoring",
+        "phase": 8,
+        "what": "Final scoring: every seed of both models on val, test and HOTELS",
+        "runs": 6,
+        "epochs": null,
+        "units_per_epoch": 1630,
+        "unit": "message",
+        "s_per_unit": null,
+        "basis": "measured",
+        "source": "Laya: scoring probe on mps: --n 32 val subset of the --base weights (the pinned zero-shot model in the real run; same architecture as a fine-tuned checkpoint), in-process, fp32, 32 messages; BERTurk: BERTurk timing probe on mps: plain PyTorch loop, fp32, AdamW, batch 32, max_len 128; Phase 6 trains with the HF Trainer",
+        "seconds": 1577.312026587606,
+        "hours": 0.4381422296076683,
+        "formula": "per model eval_seeds (3) x (208 val + 413 test + 1009 hotels_probe = 1630 messages) x s/msg (Laya 0.3206, BERTurk 0.0019)",
+        "parts": [
+          {
+            "model": "laya",
+            "runs": 3,
+            "epochs": null,
+            "units_per_epoch": 1630,
+            "unit": "message",
+            "s_per_unit": 0.3206341823170078,
+            "basis": "measured",
+            "seconds": 1567.9011515301681
+          },
+          {
+            "model": "berturk",
+            "runs": 3,
+            "epochs": null,
+            "units_per_epoch": 1630,
+            "unit": "message",
+            "s_per_unit": 0.001924514326674398,
+            "basis": "measured",
+            "seconds": 9.410875057437806
+          }
+        ]
+      }
+    ],
+    "total_s": 53325.519180092924,
+    "total_h": 14.81264421669248
+  },
+  "what_if": [
+    {
+      "label": "lr_grid 1 x max_epochs 2",
+      "lr_grid": 1,
+      "max_epochs": 2,
+      "fewshot_base_runs": 3,
+      "total_s": 32613.841991566886,
+      "total_h": 9.059400553213024
+    },
+    {
+      "label": "lr_grid 1 x max_epochs 3",
+      "lr_grid": 1,
+      "max_epochs": 3,
+      "fewshot_base_runs": 3,
+      "total_s": 39066.06932007001,
+      "total_h": 10.85168592224167
+    },
+    {
+      "label": "lr_grid 1 x max_epochs 4",
+      "lr_grid": 1,
+      "max_epochs": 4,
+      "fewshot_base_runs": 3,
+      "total_s": 45518.29664857313,
+      "total_h": 12.643971291270313
+    },
+    {
+      "label": "lr_grid 2 x max_epochs 2",
+      "lr_grid": 2,
+      "max_epochs": 2,
+      "fewshot_base_runs": 3,
+      "total_s": 34665.03982632185,
+      "total_h": 9.629177729533847
+    },
+    {
+      "label": "lr_grid 2 x max_epochs 3",
+      "lr_grid": 2,
+      "max_epochs": 3,
+      "fewshot_base_runs": 3,
+      "total_s": 42043.47387032744,
+      "total_h": 11.678742741757622
+    },
+    {
+      "label": "lr_grid 2 x max_epochs 4",
+      "lr_grid": 2,
+      "max_epochs": 4,
+      "fewshot_base_runs": 3,
+      "total_s": 49421.90791433303,
+      "total_h": 13.728307753981397
+    },
+    {
+      "label": "lr_grid 3 x max_epochs 2",
+      "lr_grid": 3,
+      "max_epochs": 2,
+      "fewshot_base_runs": 3,
+      "total_s": 36716.23766107682,
+      "total_h": 10.198954905854672
+    },
+    {
+      "label": "lr_grid 3 x max_epochs 3",
+      "lr_grid": 3,
+      "max_epochs": 3,
+      "fewshot_base_runs": 3,
+      "total_s": 45020.87842058487,
+      "total_h": 12.505799561273575
+    },
+    {
+      "label": "lr_grid 3 x max_epochs 4",
+      "lr_grid": 3,
+      "max_epochs": 4,
+      "fewshot_base_runs": 3,
+      "total_s": 53325.519180092924,
+      "total_h": 14.81264421669248
+    },
+    {
+      "label": "few-shot compute fallback (1 base run per model)",
+      "lr_grid": 3,
+      "max_epochs": 4,
+      "fewshot_base_runs": 1,
+      "total_s": 46051.83192794863,
+      "total_h": 12.792175535541286
+    }
+  ],
+  "disk": {
+    "model_bytes": 643835514,
+    "train_state_bytes": 3861528521,
+    "train_state_basis": "measured",
+    "per_run_peak_bytes": 14803763133,
+    "run_floor_bytes": 15881958646,
+    "selection_exports_bytes": 7726026168,
+    "laya_final_checkpoints_bytes": 3863013084
+  },
+  "assumptions": [
+    "Matrix value lr_grid = 3 is provisional (RESEARCH A2): FEATURES TS-12 example shared LR grid {2e-5, 3e-5, 5e-5}, used by Laya (Phase 5) and BERTurk (Phase 6)",
+    "Matrix value max_epochs = 4 is provisional (RESEARCH A2): ray_train.py default --epochs 4, the ceiling of the val-selected epoch (final seeds at it)",
+    "Matrix value final_seeds = 3 is provisional (RESEARCH A2): LAYA-08 / BASE-01: three final seeds per model on final_train",
+    "Matrix value neg = 8 is provisional (RESEARCH A2): the spike's data_neg8 item mix (ray_train.py --neg 8): every positive plus 8 negatives per message",
+    "Matrix value effective_batch = 32 is provisional (RESEARCH A2): the spike's micro-batch 8 x grad-accum 4; the projection uses the measured run's own values",
+    "Matrix value berturk_epochs = 10 is provisional (RESEARCH A2): STACK: BERTurk 5-10 epochs; the upper bound is projected",
+    "Matrix value berturk_batch = 32 is provisional (RESEARCH A2): BERTurk batch 32 messages (one sequence per message, all 48 labels)",
+    "Matrix value fewshot_tags = 6 is provisional (RESEARCH A2): FEATURES TS-14: 6 held-out tags (frozen only in the Phase 8 protocol.json)",
+    "Matrix value fewshot_k = 5, 10 is provisional (RESEARCH A2): FEATURES TS-14 / ROADMAP Phase 8: k = 5 and 10 support messages per new tag",
+    "Matrix value fewshot_draws = 3 is provisional (RESEARCH A2): ROADMAP Phase 8: at most 3 support-set draws",
+    "Matrix value fewshot_neg_per_pos = 4 is provisional (RESEARCH A2): FEATURES TS-14 default: 4 negative support messages per positive",
+    "Matrix value fewshot_replay = 200 is provisional (RESEARCH A2): FEATURES TS-14 default: 200 replay messages of the old tags",
+    "Matrix value fewshot_epochs = 10 is provisional (RESEARCH A2): FEATURES TS-14 default: about 10 continued-training epochs",
+    "Matrix value fewshot_base_runs = 3 is provisional (RESEARCH A2): base runs per model with the held-out labels masked (one per final seed); the pre-declared compute fallback is 1",
+    "Matrix value eval_seeds = 3 is provisional (RESEARCH A2): ROADMAP Phase 8: 3 seeds x 2 models scored once on val, test and HOTELS",
+    "Negatives are drawn per seed (RESEARCH A4): ray_train.py --neg-seed defaults to --seed, so the seed variance includes the neg8 sampling; pin --neg-seed 0 to exclude it",
+    "The git sha is recorded per run segment and kept out of the run_id (RESEARCH A3): a resume across a code change is flagged code_changed_on_resume, not refused",
+    "BERTurk is timed with a plain PyTorch loop (fp32, AdamW, batch 32, max_len 128), not the HF Trainer Phase 6 trains with; the Trainer's own overhead (data collation, logging, per-epoch evaluation hooks) is assumed small",
+    "Scoring time is measured on the pinned zero-shot weights (a --n 32 val subset); a fine-tuned checkpoint has the same architecture and forward cost",
+    "Scoring runs in fp32 on MPS (la.force_fp32 turns laya's fp16 autocast off); the scoring rate assumes fp32",
+    "Per-epoch laya exports stay on (--export-epochs) so Phase 5 picks the epoch on val without retraining; Phase 5 prunes them after val scoring (see Disk)",
+    "The measurement probe trains 2 epoch(s), interrupted after epoch 1 and resumed by rerunning the same command (see Interruption and resume), so the resumed process's warm-up is in the rate; the projection uses the slowest measured epoch",
+    "Every split is counted over all its messages, without the 40-message calibration holdout, because Phase 5 calibrates on val (LAYA-05); slightly conservative",
+    "BERTurk's per-epoch val evaluation for its epoch choice is not a separate line (lr_grid x berturk_epochs val passes at 0.002 s per message, about 12 s)"
+  ]
+}
