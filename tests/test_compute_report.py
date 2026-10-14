@@ -3,8 +3,9 @@
 - results/compute/compute_checkpoint.json is a complete-protocol run (schema compute_checkpoint/1, status ok): one
   asserted MPS worker on the spike's start config (or a labelled fallback rung), gradient checkpointing on, AMP off,
   the spike's MPS env, at least 2 epoch rows with every peak below the machine's memory, and a demonstrated resume
-- its projection and what-if table equal pilot.compute recomputed from its own measured block, counts and matrix, so
-  the committed totals cannot be edited by hand or drift from the projection code
+- its projection, what-if table, disk budget and assumptions equal pilot.compute recomputed from its own measured
+  block, counts, matrix and interrupt, so none of them can be edited by hand or drift from the code (a change to that
+  code re-derives them from the same JSON: r["assumptions"] = compute.assumptions(...); compute.write_report(...))
 - results/compute/compute_checkpoint.md equals compute.render_markdown(report) byte for byte
 - the JSON passes the repository's text and path hygiene check (no message text, no local home path)
 """
@@ -75,6 +76,10 @@ def test_projection_recomputes(report):
     assert report["projection"] == json.loads(json.dumps(compute.project(m, c, x)))
     assert report["what_if"] == json.loads(json.dumps(compute.what_if(m, c, x)))
     assert report["projection"]["total_h"] > 0
+    # 04-REVIEW WR-02: the approval list and the disk budget are derived fields too
+    assert report["assumptions"] == compute.assumptions(x, m, c, report["interrupt"])
+    assert report["disk"] == json.loads(json.dumps(compute.disk_budget(report["disk"]["model_bytes"], x,
+                                                                       m["laya"]["train_state_bytes"])))
 
 
 def test_markdown_renders_from_json(report):
