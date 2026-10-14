@@ -53,7 +53,7 @@ def toy_meta(protocol_complete=True):
             "spike_report": {"path": "results/spike/mps_spike.json", "sha256": "c" * 64},
             "model": {"repo": "org/laya", "subfolder": "multilingual", "revision": "d" * 40, "model_sha256": "e" * 64},
             "versions": {"torch": "2.14.1", "python": "3.12.0"},
-            "platform": {"macos": "26.0", "machine": "arm64", "total_memory_bytes": 16 * 2**30},
+            "platform": {"macos": "26.6.2", "machine": "arm64", "total_memory_bytes": 16 * 2**30},
             "protocol": {"device": "mps", "epochs": 2, "seed": 0, "cpus": 4, "neg": 8,
                          "spike_start": {"micro_batch": 8, "max_len": 128, "grad_accum": 4, "rung": "none",
                                          "fallback": 0},
@@ -155,7 +155,7 @@ def full_report(protocol_complete=True, override=False):
     return compute.build_report(toy_meta(protocol_complete), measured, TOY_COUNTS, TOY_MATRIX, p,
                                 toy_preflight(override), what_if=compute.what_if(measured, TOY_COUNTS, TOY_MATRIX),
                                 disk=compute.disk_budget(2**30, TOY_MATRIX),
-                                assumptions=compute.assumptions(TOY_MATRIX, measured))
+                                assumptions=compute.assumptions(TOY_MATRIX, measured, TOY_COUNTS))
 
 
 def test_matrix_lines_and_total():

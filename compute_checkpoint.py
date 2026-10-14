@@ -7,9 +7,10 @@ memory, swap growth while idle), verifies the training split, reads the start co
 `ray_train.py --device mps --workers 1` with the spike's micro-batch, max_len and grad-accum, --neg 8 and the spike's
 MPS env (strict fallback 0, HIGH and LOW watermarks 1.0). A fresh process, because torch reads
 PYTORCH_ENABLE_MPS_FALLBACK once at import and the MPS allocator keeps a process-wide high-water mark. The child's
-checkpoint carries the per-epoch run record (pilot.runs.read_record); pilot.compute turns it into the projection
-(s_per_step = the largest train_s / optimizer_steps over the measured epochs) and writes compute_checkpoint.json and
-compute_checkpoint.md. The probe's checkpoint and Ray storage are deleted afterwards unless --keep-run.
+checkpoint carries the per-epoch run record (pilot.runs.read_record); pilot.compute turns it into the projection of
+the whole experiment matrix (s_per_step = the largest train_s / optimizer_steps over the measured epochs; item counts
+of all five verified splits), a what-if table, a disk budget and the assumptions to confirm, and writes
+compute_checkpoint.json and compute_checkpoint.md. The probe's checkpoint and Ray storage are deleted afterwards unless --keep-run.
 
 A run off the protocol (not mps, not the pinned weights, not the committed selection_train under the committed
 manifest, a start config other than the spike's at rung none, or a test hook) is bannered SMOKE RUN with
@@ -73,7 +74,8 @@ def child_command(a, start, base, ckpt, storage):
            "--manifest", os.path.abspath(a.manifest), "--base", base, "--out", ckpt, "--storage", storage,
            "--device", a.device, "--workers", "1", "--cpus-per-worker", str(a.cpus), "--epochs", str(a.epochs),
            "--micro-batch", str(start["micro_batch"]), "--grad-accum", str(start["grad_accum"]),
-           "--max-len", str(start["max_len"]), "--neg", str(NEG), "--seed", str(a.seed)] + runs.rung_flags(start["rung"])
+           "--max-len", str(start["max_len"]), "--neg", str(NEG), "--seed", str(a.seed)]
+    cmd += runs.rung_flags(start["rung"])
     if a.max_messages is not None:
         cmd += ["--max-messages", str(a.max_messages)]
     if a.calib_frac is not None:
@@ -145,9 +147,9 @@ def main(argv=None):
         base, model = "multilingual", {"repo": pins.LAYA["repo"], "subfolder": pins.LAYA["subfolder"],
                                        "revision": pins.LAYA["revision"],
                                        "model_sha256": pins.LAYA["sha256"]["model.safetensors"]}
-        fetch(pins.LAYA)                                    # pinned and sha256-verified before any child
+        base_dir = fetch(pins.LAYA)                         # pinned and sha256-verified before any child
     elif os.path.isfile(os.path.join(a.base, "rl_agent_config.json")):
-        base = os.path.abspath(a.base)
+        base = base_dir = os.path.abspath(a.base)
         model = identity(base)                              # hashes only: no local path enters the report
     else:
         raise SystemExit("--base must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % a.base)
@@ -181,8 +183,9 @@ def main(argv=None):
                          % (r.returncode, tmp, TAIL_LINES, log, tail(log)))
 
     measured = compute.measured_from_checkpoint(ckpt)
-    counts = compute.split_counts(a.manifest)
+    counts = compute.split_counts(a.manifest)              # all five registered splits, verified bytes
     projection = compute.project(measured, counts, compute.MATRIX)
+    model_bytes = os.path.getsize(os.path.join(base_dir, "model.safetensors"))
     import psutil
     meta = {"generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "split": {"path": entry["path"], "sha256": entry["sha256"], "n_messages": entry["n_messages"]},
@@ -198,7 +201,11 @@ def main(argv=None):
                          "spike_start": start, "run_id": rid,
                          "test_hooks": {"max_messages": a.max_messages, "calib_frac": a.calib_frac},
                          "protocol_complete": protocol_complete(a, start)}}
-    report = compute.build_report(meta, measured, counts, compute.MATRIX, projection, pf)
+    report = compute.build_report(meta, measured, counts, compute.MATRIX, projection, pf,
+                                  what_if=compute.what_if(measured, counts, compute.MATRIX),
+                                  disk=compute.disk_budget(model_bytes, compute.MATRIX,
+                                                           measured["laya"]["train_state_bytes"]),
+                                  assumptions=compute.assumptions(compute.MATRIX, measured, counts))
     md = compute.write_report(a.out, report)
     print("report -> %s" % md)
     print("projected total: %.2f h over %d lines" % (projection["total_h"], len(projection["lines"])), flush=True)

@@ -49,9 +49,15 @@ def test_compute_checkpoint_on_cpu(tmp_path):
     assert [row["epoch"] for row in report["measured"]["epochs"]] == [1]
     lines = {l["id"]: l for l in report["projection"]["lines"]}
     assert lines["laya_selection"]["seconds"] > 0 and lines["laya_final"]["seconds"] > 0
+    assert sorted(lines) == sorted(["laya_selection", "laya_val_scoring", "laya_final", "berturk_selection",
+                                    "berturk_final", "fewshot_base", "fewshot_incremental", "fewshot_scoring",
+                                    "final_scoring"])
+    assert sorted(report["counts"]) == sorted(["selection_train", "val", "final_train", "test", "hotels_probe"])
+    assert len(report["what_if"]) == 10 and report["disk"]["model_bytes"] > 0 and report["assumptions"]
     with open(out / "compute_checkpoint.md", encoding="utf-8") as f:
         md = f.read()
     assert md.startswith("# Compute checkpoint") and "SMOKE RUN" in md
+    assert "What-if" in md and "Disk" in md and "Assumptions to confirm" in md
     home = os.path.expanduser("~").rstrip("/")
     assert home not in text and home not in md
     # the probe's Ray run dir and checkpoint are gone (no --keep-run)
