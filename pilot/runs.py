@@ -11,13 +11,59 @@ The ladder (SPIKE_START, RUNG_NEXT, rung_label, rung_flags, oom_message, failure
 a derived label: a run on any rung other than none says so in its record, and an MPS out-of-memory exit names the
 flags of the next rung.
 
+Run identity (LAYA-04): IDENTITY lists every value that changes what a run trains; canonical() keeps exactly those and
+run_id() names the run by them (split, neg K, seed and the first 8 hex of the sha256 of the sorted canonical JSON). The
+run_id is the Ray experiment name, so storage/<run_id>/ is the run's only resume directory: rerunning the same config
+resumes, another seed or config gets another dir. Every ray_train.py flag is in exactly one of IDENTITY (directly or
+through its resolved value) and NOT_IDENTITY (a test enforces it), so a new flag cannot silently drop out of the key.
+
 usage: from pilot import runs; record = runs.read_record(ckpt_dir); [row["train_s"] for row in record["epochs"]]
        runs.neg_items(rows, 8); runs.rung_label(cfg); runs.oom_message(epoch, micro_batch, rung)
+       rid = runs.run_id(runs.canonical(values))
 """
+import hashlib
 import json
 import os
 
 from pilot.data import repo_relpath
+
+# ---- LAYA-04 run identity ----
+
+# every value that changes what a run trains: the split by name and bytes, the base model by digest, the laya version,
+# the resolved device and its precision / checkpointing / optimizer choices, every hyperparameter and the seeds
+IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_config_sha256", "laya_version", "device",
+            "workers", "epochs", "micro_batch", "grad_accum", "encoder_lr", "head_lr", "weight_decay", "clip_grad_norm",
+            "loss", "neg", "neg_seed", "freeze_encoder", "freeze_embeddings", "grad_checkpointing", "amp", "max_len",
+            "head_max_len", "max_messages", "calib_max_messages", "calib_frac", "shuffle_options", "seed",
+            "adamw_foreach", "adamw_fused")
+# ray_train.py flags that never change training, so never the run_id:
+#   data, base, manifest: paths, represented in IDENTITY by the verified sha256s (data_sha256, base_*_sha256)
+#   out, storage: where the result and the Ray run dir go
+#   cpus_per_worker, object_store_gb: resources (Ray scheduling, torch threads, object store size)
+#   calib_batch: the batch size of the calibration forward pass (eval only, after training)
+#   gpu: an alias, represented by its resolved value (device)
+#   print_run_id: prints the run_id and exits
+NOT_IDENTITY = ("data", "base", "out", "storage", "manifest", "cpus_per_worker", "object_store_gb", "calib_batch", "gpu",
+                "print_run_id")
+
+
+def canonical(values):
+    """{key: values[key]} for exactly the IDENTITY keys; ValueError naming any missing or unexpected key."""
+    missing = [k for k in IDENTITY if k not in values]
+    extra = sorted(k for k in values if k not in IDENTITY)
+    if missing or extra:
+        raise ValueError("run identity: missing %s; unexpected %s" % (", ".join(missing) or "none",
+                                                                    ", ".join(extra) or "none"))
+    return {k: values[k] for k in IDENTITY}
+
+
+def run_id(canon):
+    """laya-<split>-<negK or full>-s<seed>-<first 8 hex of the sha256 of the sorted, compact canonical JSON>.
+
+    sort_keys and fixed separators make the id independent of key and flag order."""
+    blob = json.dumps(canon, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "laya-%s-%s-s%d-%s" % (canon["split"], "neg%d" % canon["neg"] if canon["neg"] else "full", canon["seed"],
+                                  hashlib.sha256(blob).hexdigest()[:8])
 
 # one row per completed epoch; peak_driver_bytes and current_allocated_bytes are None on CPU (never 0), where
 # peak_total_bytes is the peak RSS; on MPS peak_total_bytes is the peak of driver-allocated memory + RSS (the spike's

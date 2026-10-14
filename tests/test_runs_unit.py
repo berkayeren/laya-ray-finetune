@@ -168,3 +168,36 @@ def test_spike_departures():
     smaller = runs.spike_departures(_cfg(micro_batch=4, grad_accum=8), 128)
     assert "effective_batch" not in smaller and smaller["grad_accum"] == 8           # 4 x 8 keeps the 32
     assert runs.spike_departures(_cfg(grad_accum=2), 128)["effective_batch"] == 16
+
+
+def _identity(**kw):
+    vals = {k: 0 for k in runs.IDENTITY}
+    vals.update(split="selection_train", neg=8, seed=0, device="cpu", data_sha256="a" * 64)
+    vals.update(kw)
+    return vals
+
+
+def test_canonical_refuses_missing_and_extra_keys():
+    vals = _identity()
+    assert runs.canonical(vals) == vals
+    with pytest.raises(ValueError, match="missing seed"):
+        runs.canonical({k: v for k, v in vals.items() if k != "seed"})
+    with pytest.raises(ValueError, match="unexpected out"):
+        runs.canonical(dict(vals, out="ckpt"))
+
+
+def test_run_id_is_stable_and_follows_seed_and_neg():
+    a = runs.run_id(runs.canonical(_identity()))
+    assert a == runs.run_id(runs.canonical(_identity()))
+    assert a.startswith("laya-selection_train-neg8-s0-") and len(a.rsplit("-", 1)[1]) == 8
+    b = runs.run_id(runs.canonical(_identity(seed=1)))
+    assert a != b and "-s0-" in a and "-s1-" in b
+    assert "-full-" in runs.run_id(runs.canonical(_identity(neg=0)))
+    assert runs.run_id(runs.canonical(_identity(encoder_lr=1e-5))) != a
+
+
+def test_run_id_does_not_depend_on_key_order():
+    vals = _identity()
+    reordered = dict(reversed(list(vals.items())))
+    assert list(reordered) != list(vals)
+    assert runs.run_id(reordered) == runs.run_id(vals) == runs.run_id(runs.canonical(reordered))

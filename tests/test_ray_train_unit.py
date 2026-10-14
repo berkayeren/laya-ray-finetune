@@ -58,11 +58,48 @@ def test_read_verified_rows_keeps_unicode_line_separators_inside_messages(tmp_pa
     assert {r["state"] for r in rows} >= set(LINE_SEPARATOR_TEXTS[:2])
 
 
-def test_run_name_is_per_split_seed_and_start_time():
-    entry = {"path": "splits/final_train.jsonl"}
-    name = ray_train.run_name(entry, 3, now=0)
-    assert name.startswith("laya-final_train-s3-") and name != ray_train.run_name(entry, 3, now=3600)
-    assert ray_train.run_name({"path": "splits/selection_train.jsonl"}, 3, now=0) != name
+def _dests():
+    return {act.dest for act in ray_train.parser()._actions if act.dest != "help"}
+
+
+def test_every_flag_is_classified():
+    """Every ray_train.py flag is in the run identity (directly or by its resolved value) or named as not changing
+    training, so a new flag cannot silently drop out of the resume key."""
+    from pilot import runs
+    assert not set(runs.IDENTITY) & set(runs.NOT_IDENTITY)
+    assert _dests() <= set(runs.IDENTITY) | set(runs.NOT_IDENTITY), sorted(
+        _dests() - set(runs.IDENTITY) - set(runs.NOT_IDENTITY))
+    assert set(runs.NOT_IDENTITY) <= _dests(), sorted(set(runs.NOT_IDENTITY) - _dests())
+
+
+ENTRY = {"path": "splits/selection_train.jsonl", "sha256": "a" * 64, "role": "train"}
+BASE_IDENT = {"repo": "r", "subfolder": "s", "revision": "c" * 40, "model_sha256": "b" * 64}
+
+
+def _rid(*argv):
+    from pilot import runs
+    a = ray_train.parser().parse_args(list(argv))
+    vals = ray_train.identity_values(a, ray_train.resolve(a), ENTRY, "multilingual", BASE_IDENT)
+    return runs.run_id(runs.canonical(vals))
+
+
+def test_run_id_ignores_paths_and_resources_and_follows_the_seed():
+    base = ["--data", "d.jsonl", "--out", "o"]
+    rid = _rid(*base)
+    assert rid.startswith("laya-selection_train-neg8-s0-")
+    for other in (["--out", "elsewhere"], ["--storage", "/x/ray"], ["--cpus-per-worker", "3"],
+                  ["--manifest", "m.json"], ["--object-store-gb", "2"], ["--calib-batch", "4"]):
+        assert _rid(*(base + other)) == rid, other
+    assert _rid("--out", "o", "--data", "d.jsonl") == rid                     # flag order never matters
+    assert _rid("--seed", "3", "--neg", "2", *base) == _rid(*(base + ["--neg", "2", "--seed", "3"]))
+    s1 = _rid(*(base + ["--seed", "1"]))
+    assert s1 != rid and "-s1-" in s1
+    assert _rid(*(base + ["--gpu"])) == _rid(*(base + ["--device", "cuda"])) != rid
+    for other in (["--device", "mps"], ["--encoder-lr", "1e-5"], ["--neg", "0"], ["--epochs", "3"],
+                  ["--freeze-embeddings"], ["--micro-batch", "4"], ["--neg-seed", "7"], ["--no-grad-checkpointing"]):
+        assert _rid(*(base + other)) != rid, other
+    assert "-full-" in _rid(*(base + ["--neg", "0"]))
+    assert _rid(*(base + ["--neg-seed", "0"])) == rid                        # --neg-seed defaults to --seed
 
 
 def test_intermediate_checkpoint_config_is_marked_and_traceable():

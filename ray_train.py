@@ -41,6 +41,12 @@ weaker). pilot.runs.rung_label derives the rung from the resolved flags; the rec
 spike_departures and the trainable/total parameter counts. An MPS out-of-memory error ends the run with one line naming
 the epoch, micro-batch, rung and the flags of the next rung.
 
+Run identity (LAYA-04): the run_id is pilot.runs.run_id of the command's canonical config (pilot.runs.IDENTITY: split,
+data and base digests, laya version, the resolved device and precision choices, every hyperparameter and the seeds; never
+a path, a resource or the time), e.g. laya-selection_train-neg8-s0-1a2b3c4d. It is the Ray experiment name, so
+storage/<run_id>/ is the run's only directory and the same command always lands in it; --print-run-id prints it after
+the split, base and pin checks and exits without starting Ray.
+
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
 (tampered, unregistered, val/test/probe) is refused before Ray starts. --base multilingual fetches the pinned,
 sha256-verified Laya weights (pilot.weights) before Ray starts; any other value must be a local checkpoint dir.
@@ -78,6 +84,9 @@ from pilot import pins, runs, spike
 from pilot.data import (DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file,
                         verify_split_file)
 from pilot.weights import checkpoint_digests, fetch, identity, verify_files
+
+WEIGHT_DECAY = 0.01                                         # AdamW weight decay (part of the run identity)
+CLIP_GRAD_NORM = 1.0                                        # gradient-norm clip per optimizer step (same)
 
 
 def read_verified_rows(path, sha256):
@@ -187,11 +196,24 @@ def epoch_config(cfg, max_len, head_max_len, ray_cfg, epoch):
                 training=dict(cfg.get("training") or {}, ray_train=ray_cfg, epoch=epoch, calibrated=False))
 
 
-def run_name(entry, seed, now=None):
-    """A fresh Ray experiment dir per run (split, seed, start time): Ray Train restores any checkpoint-manager
-    snapshot it finds under storage/<name>/, so a shared name would mix separate runs' provenance."""
-    stem = os.path.splitext(os.path.basename(entry["path"]))[0]
-    return "laya-%s-s%d-%s" % (stem, seed, time.strftime("%Y%m%d-%H%M%S", time.localtime(now)))
+def identity_values(a, r, entry, base_name, base_ident):
+    """The pilot.runs.IDENTITY values of a command: parsed args `a`, resolve(a) `r`, the verified split `entry` and the
+    base identity. Paths enter only as their verified digests, aliases (--gpu) only as their resolved value."""
+    return {"split": os.path.splitext(os.path.basename(entry["path"]))[0],
+            "data_sha256": entry["sha256"], "data_role": entry["role"],
+            "base_model_sha256": base_ident["model_sha256"],
+            "base_config_sha256": (pins.LAYA["sha256"]["rl_agent_config.json"] if base_name == "multilingual"
+                                   else base_ident["config_sha256"]),
+            "laya_version": la.LAYA_VERSION,
+            "device": r["device"], "amp": r["amp"], "grad_checkpointing": r["grad_checkpointing"],
+            "neg_seed": r["neg_seed"], "adamw_foreach": r["adamw_foreach"], "adamw_fused": r["adamw_fused"],
+            "weight_decay": WEIGHT_DECAY, "clip_grad_norm": CLIP_GRAD_NORM,
+            "workers": a.workers, "epochs": a.epochs, "micro_batch": a.micro_batch, "grad_accum": a.grad_accum,
+            "encoder_lr": a.encoder_lr, "head_lr": a.head_lr, "loss": a.loss, "neg": a.neg,
+            "freeze_encoder": a.freeze_encoder, "freeze_embeddings": a.freeze_embeddings, "max_len": a.max_len,
+            "head_max_len": a.head_max_len, "max_messages": a.max_messages,
+            "calib_max_messages": a.calib_max_messages, "calib_frac": a.calib_frac,
+            "shuffle_options": a.shuffle_options, "seed": a.seed}
 
 
 def holdout_messages(rows, calib_max_messages, calib_frac, seed):
@@ -271,6 +293,8 @@ def train_loop_per_worker(c):
     require_driver_node(ray.get_runtime_context().get_node_id(), c["driver_node_id"])
     ctx = ray.train.get_context()
     rank, world = ctx.get_world_rank(), ctx.get_world_size()
+    if rank == 0:
+        print("run_id %s" % c["run_id"], flush=True)
     device, env_seen = worker_device(c)
     torch.set_num_threads(c["cpus_per_worker"])
     torch.manual_seed(c["seed"])
@@ -347,7 +371,7 @@ def train_loop_per_worker(c):
                                      if n.startswith("encoder.") and p.requires_grad], "lr": c["encoder_lr"]})
     # foreach/fused only where resolve() pins them (mps: the single-tensor loop the spike measured)
     impl = {k: c["adamw_" + k] for k in ("foreach", "fused") if c["adamw_" + k] is not None}
-    opt = torch.optim.AdamW(groups, weight_decay=0.01, **impl)
+    opt = torch.optim.AdamW(groups, weight_decay=WEIGHT_DECAY, **impl)
     mb, accum = c["micro_batch"], c["grad_accum"]
     steps_per_epoch = -(-len(shard) // mb)
     updates = c["epochs"] * -(-steps_per_epoch // accum)
@@ -371,7 +395,8 @@ def train_loop_per_worker(c):
               "trainable_params": trainable_params, "total_params": total_params,
               "neg": c["neg"], "neg_seed": c["neg_seed"], "n_train_messages": len(train_rows),
               "n_train_items": len(train_items), "n_train_items_counted": counted, "items_skipped": skipped,
-              "load_s": load_s, "calib_s": None, "final_save_s": None, "epochs": rows_out}
+              "load_s": load_s, "calib_s": None, "final_save_s": None, "run_id": c["run_id"],
+              "canonical": c["canonical"], "epochs": rows_out}
     for epoch in range(c["epochs"]):
         t_epoch = time.time()
         order = list(shard)
@@ -403,7 +428,7 @@ def train_loop_per_worker(c):
                 with mps_oom_exit(epoch + 1, n, c["rung"]):   # the step closes micro-batch n
                     if scaler:
                         scaler.unscale_(opt)
-                    torch.nn.utils.clip_grad_norm_(params, 1.0)
+                    torch.nn.utils.clip_grad_norm_(params, CLIP_GRAD_NORM)
                     (scaler.step(opt), scaler.update()) if scaler else opt.step()
                     sched.step()
                     opt.zero_grad(set_to_none=True)
@@ -505,6 +530,9 @@ def parser():
                     help="Ray run storage (local dir; the script is single-node)")
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST,
                     help="splits.json to verify --data against (default: the committed data/splits.json)")
+    ap.add_argument("--print-run-id", action="store_true",
+                    help="print the run id this command trains under (its Ray dir and resume key), then exit without "
+                         "starting Ray")
     return ap
 
 
@@ -526,7 +554,7 @@ def main(argv=None):
     if a.amp and r["device"] in ("mps", "cpu"):
         ap.error("--amp is CUDA-only (the MPS fine-tune is measured with AMP off); drop --amp")
     entry = verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))   # before ray.init (D-03)
-    if os.path.exists(a.out) and (not os.path.isdir(a.out) or os.listdir(a.out)):
+    if not a.print_run_id and os.path.exists(a.out) and (not os.path.isdir(a.out) or os.listdir(a.out)):
         # copying over old files could leave a mixed checkpoint that laya.load still accepts
         raise SystemExit("--out %s exists and is not empty; choose a new dir" % a.out)
     # the device must exist here before any pin check, fetch or ray.init (LAYA-02)
@@ -545,6 +573,11 @@ def main(argv=None):
     base_name = "multilingual" if a.base == "multilingual" else base_dir
     base_ident = identity(base_name)
     base_sha256 = checkpoint_digests(base_name, base_ident)   # workers verify these bytes before loading
+    canon = runs.canonical(identity_values(a, r, entry, base_name, base_ident))
+    rid = runs.run_id(canon)                                # the Ray experiment name: storage/<rid> is the resume dir
+    if a.print_run_id:
+        print(rid)
+        return
 
     device, cpus = r["device"], r["cpus_per_worker"]
     object_store = int(a.object_store_gb * 1024**3) if a.object_store_gb else None
@@ -565,14 +598,14 @@ def main(argv=None):
                 "shuffle_options": a.shuffle_options, "max_len": a.max_len, "head_max_len": a.head_max_len,
                 "max_messages": a.max_messages, "neg": a.neg, "calib_max_messages": a.calib_max_messages,
                 "calib_frac": a.calib_frac, "calib_batch": a.calib_batch,
-                "seed": a.seed, "expect_env": env,
+                "seed": a.seed, "expect_env": env, "run_id": rid, "canonical": canon,
                 "provenance": provenance(entry, a.manifest, a.base, base_dir, base_ident)}, **r)
     cfg["rung"] = runs.rung_label(cfg)                      # derived from the flags, into the record and the config
     trainer = TorchTrainer(
         train_loop_per_worker, train_loop_config=cfg,
         scaling_config=ScalingConfig(num_workers=a.workers, use_gpu=(device == "cuda"),
                                      resources_per_worker={"CPU": cpus}),
-        run_config=RunConfig(name=run_name(entry, a.seed), storage_path=a.storage))
+        run_config=RunConfig(name=rid, storage_path=a.storage))
     t0 = time.time()
     result = fit_or_exit(trainer)
     print("metrics:", json.dumps(result.metrics, default=str))
