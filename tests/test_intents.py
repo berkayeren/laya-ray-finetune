@@ -1,6 +1,6 @@
 """Single question source (DATA-03): QUESTIONS is the model input, so it must have one definition and match the data.
 
-QUESTIONS is assigned at module level only in intents.py, pilot/data.py and evaluate.py import it from there, its
+QUESTIONS is assigned at module level only in intents.py, pilot/data.py and score.py import it from there, its
 shape is {tag: {type: noul, instructions: INTENTS[tag]}} in INTENTS order, and the frozen data/splits.json records the
 sha256 of the current QUESTIONS (tag wording changed without regenerating the data fails here).
 """
@@ -17,7 +17,7 @@ from intents import INTENTS, QUESTIONS
 pytestmark = pytest.mark.unit
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IMPORTERS = ("pilot/data.py", "evaluate.py")
+IMPORTERS = ("pilot/data.py", "score.py")
 
 
 def tracked_py_files():

@@ -1,229 +1,60 @@
-"""Evaluate a Laya checkpoint on Multi3NLU++ Turkish banking (multi-label, 48 noul questions).
+"""Evaluate a Laya checkpoint on a registered val/test split: a thin wrapper over score.py + report.py.
 
-Inference is distributed with Ray Data: each worker actor loads the checkpoint
-once and scores batches of messages; with --workers 0 it runs in-process.
+Kept so the existing evaluate.py commands keep working. Scoring is score.py (the only place a model runs: split
+verification, pinned checkpoint resolution, Ray Data or in-process inference, the logit dump); metrics are report.py
+(numpy only, from the verified dump). This file forwards its flags to score.main (--model laya), then prints
+report.run_report on the dump it wrote, so its output equals `report.py RUN_DIR --split SPLIT` for the same run dir.
+It holds no metric, threshold or model-loading code of its own (tests/test_consumers.py checks this).
 
-The input must be a split registered in data/splits.json with a matching sha256 and role test or val (refused
-otherwise; the hotels_probe is scored only on ood_scoring_tags, which this script does not implement yet).
---checkpoint multilingual loads the pinned, sha256-verified hub weights (pilot.weights); any other value must be
-a local Laya checkpoint dir, so nothing downloads an unpinned revision. The driver resolves and checks the checkpoint
-before Ray starts; each actor's laya.load re-verifies the digests before parsing any weight.
+Every refusal comes from score.py, before any model load or ray.init: a tampered, unregistered, missing or wrong-role
+split (only test and val are scored), --n 0 or negative, and a --checkpoint that is neither 'multilingual' (the
+pinned, sha256-verified hub weights) nor a local Laya checkpoint dir. The dump lands under --out-root (default
+results/dumps/RUN_ID); with --n it is a debug subset and goes to a fresh temp dir (never results/dumps). The report's
+val-selected θ needs a full val dump in the same run dir (score val first); otherwise that row is null with a reason.
 
---manifest selects the prepare-written splits.json to verify against (default: the committed data/splits.json; use
-OTHER_DIR/splits.json for a `prepare_data.py --out OTHER_DIR` variant). Verification itself cannot be skipped, a
-manifest cannot change any split's role, path or folds, and the report records manifest_is_committed.
-
-usage: python evaluate.py data/splits/test.jsonl [--checkpoint multilingual|DIR] [--n N]
-                          [--workers W] [--gpus-per-worker G] [--out report.json] [--manifest splits.json]
+usage: python evaluate.py data/splits/test.jsonl [--checkpoint multilingual|DIR] [--n N] [--workers W]
+                          [--cpus-per-worker C] [--gpus-per-worker G] [--out-root DIR] [--out report.json]
+                          [--manifest splits.json]
+  python evaluate.py data/splits/test.jsonl --checkpoint ./ckpt --workers 0 --n 20
+  python evaluate.py data/splits/test.jsonl --checkpoint multilingual --workers 4 --gpus-per-worker 1 --out results/x.json
 """
 import argparse
 import json
 import os
-import random
-import time
 
-from intents import INTENTS, QUESTIONS
-from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, manifest_is_committed, parse_jsonl, repo_relpath,
-                        sha256_file, verify_split_file)
-
-SUBSET_SEED = 0                                             # fixed shuffle before --n, so subsets are comparable
-# the majority baseline's tag comes from the training split the evaluated role's models are trained on, never from
-# the labels being scored (val -> model selection runs, test -> final models; see pilot.data.TRAINED_ON)
-MAJORITY_SOURCE = TRAINED_ON
+import report
+import score
+from pilot.data import DEFAULT_MANIFEST, write_atomic
 
 
-def resolve_checkpoint(checkpoint, ident=None):
-    """On the driver, before Ray starts: (local checkpoint dir, {file: sha256} that laya.load must verify).
-
-    'multilingual' = the pinned hub weights, fetched and digest-checked here (ENV-02); anything else must be a local
-    checkpoint dir, bound to the digests in its recorded identity (ident, default identity(checkpoint)). Refusals and
-    digest mismatches surface here as the real message, not as a Ray actor death.
-    """
-    from pilot.weights import checkpoint_digests, fetch, identity
-    if checkpoint == "multilingual":
-        from pilot import pins
-        return fetch(pins.LAYA), checkpoint_digests(checkpoint, None)
-    if not os.path.isfile(os.path.join(checkpoint, "rl_agent_config.json")):
-        raise SystemExit("--checkpoint must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % checkpoint)
-    digests = checkpoint_digests(checkpoint, identity(checkpoint) if ident is None else ident)
-    return os.path.abspath(checkpoint), digests             # abspath: laya treats args with "/" as local
-
-
-def load_agent(model_dir, device, expected_sha256):
-    """laya.load of a dir resolved by resolve_checkpoint; laya re-checks expected_sha256 before parsing any weight."""
-    import laya
-    return laya.load(model_dir, device=device, expected_sha256=expected_sha256)
-
-
-class Predictor:
-    """Ray Data actor: one checkpoint load per worker, then batched forward passes."""
-
-    def __init__(self, model_dir, device, expected_sha256):
-        self.agent = load_agent(model_dir, device, expected_sha256)
-
-    def __call__(self, batch):
-        t = time.perf_counter()                             # scoring only: load/digest time is not per-message cost
-        results = self.agent.predict_batch(list(batch["text"]), QUESTIONS, batch_size=8, sort_by_length=True)
-        batch["probs"] = [json.dumps({k: a["noul"] for k, a in r["answers"].items()}) for r in results]
-        dt = time.perf_counter() - t
-        batch["infer_secs"] = [dt / len(results)] * len(results)   # each row's share of its batch
-        return batch
-
-
-def majority_tag(manifest_path, role):
-    """(source split name, most frequent gold tag in it); ties go to the earlier tag in INTENTS."""
-    name = MAJORITY_SOURCE[role]
-    with open(manifest_path, encoding="utf-8") as f:
-        e = json.load(f).get("splits", {}).get(name)
-    if e is None:
-        raise SystemExit("%s registers no %s split for the majority baseline" % (manifest_path, name))
-    path = os.path.join(os.path.dirname(os.path.realpath(manifest_path)), e["path"])
-    if not os.path.isfile(path):
-        raise SystemExit("%s (majority baseline source) is missing; run `make data`" % path)
-    with open(path, "rb") as f:
-        raw = f.read()
-    verify_split_file(path, manifest_path=manifest_path, roles=("train",), data=raw)
-    counts = dict.fromkeys(INTENTS, 0)
-    for r in parse_jsonl(raw):
-        for k, v in r["expected"].items():
-            counts[k] += bool(v)
-    return name, max(INTENTS, key=counts.get)
-
-
-def provenance(checkpoint, manifest_path, entry, n_subset, majority_source, ident=None):
-    """Report header: model identity, split, manifest and subset. Paths are repo-relative or hashed, never local."""
-    from pilot.weights import identity
-    return {"checkpoint": checkpoint if checkpoint == "multilingual" else repo_relpath(checkpoint),
-            "checkpoint_identity": identity(checkpoint) if ident is None else ident,
-            "split": {"path": entry["path"], "sha256": entry["sha256"], "role": entry["role"]},
-            "manifest": {"path": repo_relpath(manifest_path), "sha256": sha256_file(manifest_path)},
-            "manifest_is_committed": manifest_is_committed(manifest_path),
-            "n_subset": n_subset, "subset_seed": SUBSET_SEED, "majority_source": majority_source}
-
-
-def f1(tp, fp, fn):
-    p = tp / (tp + fp) if tp + fp else 0.0
-    r = tp / (tp + fn) if tp + fn else 0.0
-    return p, r, (2 * p * r / (p + r) if p + r else 0.0)
-
-
-def metrics(golds, probs, majority):
-    """majority: the baseline tag, fixed beforehand from training labels (majority_tag)."""
-    if not golds:
-        raise SystemExit("no messages to score")
-    out = {"n": len(golds)}
-    # top-1 is undefined on no-intent rows (no gold tag to hit), so both top-1 rates use the rows with gold tags;
-    # no-intent rows still count in the threshold metrics below (exact match = predict nothing)
-    tagged = [(g, p) for g, p in zip(golds, probs) if g]
-    out["n_top1"], out["n_no_intent"] = len(tagged), len(golds) - len(tagged)
-    out["top1_hit"] = round(sum(max(p, key=p.get) in g for g, p in tagged) / len(tagged), 3) if tagged else None
-    out["majority_tag"] = majority
-    out["majority_top1_hit"] = round(sum(majority in g for g, _ in tagged) / len(tagged), 3) if tagged else None
-    counts = {k: sum(k in g for g in golds) for k in INTENTS}
-    out["by_threshold"] = {}
-    for t in (0.3, 0.5, 0.7, 0.9):
-        tp = fp = fn = exact = 0
-        for g, p in zip(golds, probs):
-            pred = {k for k, v in p.items() if v >= t}
-            tp, fp, fn = tp + len(g & pred), fp + len(pred - g), fn + len(g - pred)
-            exact += g == pred
-        prec, rec, f = f1(tp, fp, fn)
-        out["by_threshold"][str(t)] = {"precision": round(prec, 3), "recall": round(rec, 3),
-                                       "micro_f1": round(f, 3), "exact_match": round(exact / len(golds), 3)}
-    # per-tag F1 at 0.5, the most and least learnable tags
-    per = {}
-    for k in INTENTS:
-        tp = sum(k in g and p[k] >= 0.5 for g, p in zip(golds, probs))
-        fp = sum(k not in g and p[k] >= 0.5 for g, p in zip(golds, probs))
-        fn = sum(k in g and p[k] < 0.5 for g, p in zip(golds, probs))
-        if counts[k]:
-            per[k] = round(f1(tp, fp, fn)[2], 3)
-    out["macro_f1@0.5"] = round(sum(per.values()) / len(per), 3) if per else None   # None: no gold tag in these rows
-    # macro-F1 averages only tags with a gold positive in the scored rows, so the set can change with --n
-    out["n_tags_in_macro"] = len(per)
-    ranked = sorted(per, key=per.get)
-    out["best_tags@0.5"] = {k: per[k] for k in ranked[::-1][:5]}
-    out["worst_tags@0.5"] = {k: per[k] for k in ranked[:5]}
-    out["mean_tags_predicted@0.5"] = round(sum(sum(v >= 0.5 for v in p.values()) for p in probs) / len(probs), 2)
-    out["mean_gold_tags"] = round(sum(len(g) for g in golds) / len(golds), 2)
-    return out
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("test_jsonl")
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="score a Laya checkpoint on a val/test split and print its report")
+    ap.add_argument("split_jsonl")
     ap.add_argument("--checkpoint", default="multilingual",
                     help="multilingual (pinned hub weights) or DIR (local Laya checkpoint)")
-    ap.add_argument("--n", type=int, default=None, help="evaluate a fixed random subset of N messages")
-    ap.add_argument("--workers", type=int, default=1, help="Ray Data actors; 0 = no Ray")
-    ap.add_argument("--gpus-per-worker", type=float, default=0)
-    ap.add_argument("--out", default=None)
+    ap.add_argument("--n", default=None, help="score a fixed random subset of N messages (debug only)")
+    ap.add_argument("--workers", default="1", help="Ray Data actors; 0 = in-process, no Ray")
+    ap.add_argument("--cpus-per-worker", default="2")
+    ap.add_argument("--gpus-per-worker", default="0")
+    ap.add_argument("--out-root", default=None, help="dump root (default results/dumps; with --n a temp dir)")
+    ap.add_argument("--out", default=None, help="also write the report JSON here")
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST,
                     help="splits.json to verify against (default: the committed data/splits.json)")
-    a = ap.parse_args()
-    if a.n is not None and a.n <= 0:
-        ap.error("--n must be a positive number of messages (omit it to evaluate the whole split)")
-    # hard-fail on a tampered/unregistered split (D-03); train splits and the OOD probe (scored only on
-    # ood_scoring_tags, a Phase 3 scorer) are refused
-    if not os.path.isfile(a.test_jsonl):
-        raise SystemExit("%s not found; check the path, or run `make data` to write the registered splits"
-                         % a.test_jsonl)
-    with open(a.test_jsonl, "rb") as f:
-        raw = f.read()                                       # hash and parse the same bytes (no reread window)
-    entry = verify_split_file(a.test_jsonl, manifest_path=a.manifest, roles=("test", "val"), data=raw)
-    majority_source, majority = majority_tag(a.manifest, entry["role"])
-
-    cases = parse_jsonl(raw)
-    random.Random(SUBSET_SEED).shuffle(cases)
-    cases = cases[:a.n] if a.n is not None else cases
-    if not cases:
-        raise SystemExit("%s: no messages to evaluate (--n %r)" % (a.test_jsonl, a.n))
-    items = [{"uid": c["uid"], "text": c["state"]} for c in cases]
-    gold = {c["uid"]: {k for k, v in c["expected"].items() if v} for c in cases}
-    device = "cuda" if a.gpus_per_worker else "cpu"
-    # n_subset: messages actually scored when --n was given (--n above the split size scores the whole split)
-    from pilot.weights import identity
-    ident = identity(a.checkpoint)                          # the scored bytes are bound to it (laya.load digests)
-    header = provenance(a.checkpoint, a.manifest, entry, None if a.n is None else len(cases), majority_source, ident)
-    t0 = time.time()
-    model_dir, expected = resolve_checkpoint(a.checkpoint, ident)   # driver-side fetch/refusal, before any Ray actor
-    resolve_secs = time.time() - t0
-
-    load_secs = None                                        # Ray path: actors load inside the timed region
-    if a.workers == 0:
-        t0 = time.time()
-        p = Predictor(model_dir, device, expected)          # digest + model build
-        load_secs = resolve_secs + time.time() - t0         # fetch + digest + model build, timed separately
-    t0 = time.time()
-    if a.workers == 0:
-        rows = []
-        for i in range(0, len(items), 16):
-            chunk = items[i:i + 16]
-            b = p({"uid": [x["uid"] for x in chunk], "text": [x["text"] for x in chunk]})
-            rows += [{"uid": u, "probs": s, "infer_secs": t} for u, s, t in zip(b["uid"], b["probs"], b["infer_secs"])]
-    else:
-        import ray
-        ray.init(ignore_reinit_error=True, log_to_driver=False)
-        ds = ray.data.from_items(items).map_batches(
-            Predictor, fn_constructor_args=(model_dir, device, expected), batch_size=16,
-            concurrency=a.workers, num_gpus=a.gpus_per_worker, memory=3 * 1024**3,
-            batch_format="numpy")
-        rows = ds.take_all()
-    secs = time.time() - t0
-    infer_secs = sum(float(r["infer_secs"]) for r in rows)   # summed over actors: compute time, not wall time
-
-    by_uid = {r["uid"]: json.loads(r["probs"]) for r in rows}
-    uids = [c["uid"] for c in cases]
-    # seconds = wall time of the scoring pass (includes actor start-up and model loads on the Ray path);
-    # sec_per_msg = model scoring time per message, excluding checkpoint fetch, digest checks and model build
-    report = {**header, "workers": a.workers, "seconds": round(secs, 1),
-              "load_seconds": None if load_secs is None else round(load_secs, 1),
-              "inference_seconds": round(infer_secs, 1), "sec_per_msg": round(infer_secs / len(cases), 3),
-              **metrics([gold[u] for u in uids], [by_uid[u] for u in uids], majority)}
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    a = ap.parse_args(argv)
+    # every value goes to score.py unparsed, so its checks, exit codes and messages stay the only ones
+    score_argv = [a.split_jsonl, "--model", "laya", "--checkpoint", a.checkpoint, "--workers", a.workers,
+                  "--cpus-per-worker", a.cpus_per_worker, "--gpus-per-worker", a.gpus_per_worker,
+                  "--manifest", a.manifest]
+    score_argv += ["--n", a.n] if a.n is not None else []
+    score_argv += ["--out-root", a.out_root] if a.out_root is not None else []
+    run_dir, split_name = score.main(score_argv)
+    rep = report.run_report(run_dir, split_name, a.manifest)
+    text = json.dumps(rep, ensure_ascii=False, indent=2)
+    print(text)
     if a.out:
-        with open(a.out, "w", encoding="utf-8") as f:
-            json.dump(report, f, ensure_ascii=False, indent=2)
+        os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+        write_atomic(a.out, (text + "\n").encode("utf-8"))
+    return rep
 
 
 if __name__ == "__main__":

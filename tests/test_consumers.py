@@ -1,8 +1,11 @@
 """Consumers refuse tampered, unregistered or wrong-role splits before any model load or Ray startup (D-03).
 
 Each test runs the real script as a subprocess inside a hermetic copy of the repo whose data/splits.json is
-built from the synthetic snapshot, so the copied pilot package's DEFAULT_MANIFEST points at it.
+built from the synthetic snapshot, so the copied pilot package's DEFAULT_MANIFEST points at it. evaluate.py is a
+thin wrapper over score.py + report.py, so its refusals come from score.py; test_evaluate_is_a_thin_wrapper keeps it
+free of metric and model-loading code (the assumption-delta invariant of plan 03-01).
 """
+import ast
 import os
 import shutil
 import subprocess
@@ -22,7 +25,7 @@ TIMEOUT = 300                                               # ray/torch/laya imp
 def tmp_repo(tmp_path, synthetic_raw):
     repo = tmp_path / "repo"
     repo.mkdir()
-    for name in ("evaluate.py", "ray_train.py", "intents.py"):
+    for name in ("evaluate.py", "score.py", "report.py", "ray_train.py", "intents.py"):
         shutil.copyfile(os.path.join(REPO, name), str(repo / name))
     shutil.copytree(os.path.join(REPO, "pilot"), str(repo / "pilot"),
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -136,3 +139,16 @@ def test_evaluate_missing_split_gets_a_make_data_hint(tmp_repo):
     r = _run(tmp_repo, "evaluate.py", "data/splits/tset.jsonl", "--workers", "0")
     assert r.returncode != 0 and "not found" in r.stderr and "make data" in r.stderr, r.stderr
     assert "Traceback" not in r.stderr, r.stderr
+
+
+def test_evaluate_is_a_thin_wrapper():
+    """evaluate.py imports score and report, defines only main and holds no metric, threshold or model-loading code."""
+    with open(os.path.join(REPO, "evaluate.py"), encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    imported = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    assert {"score", "report"} <= imported, imported
+    funcs = [n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    forbidden = {"metrics", "f1", "select_theta", "majority_tag", "resolve_checkpoint", "load_agent"}
+    assert not set(funcs) & forbidden, funcs
+    assert funcs == ["main"], funcs
+    assert not [n for n in ast.walk(tree) if isinstance(n, (ast.ClassDef, ast.Lambda))]

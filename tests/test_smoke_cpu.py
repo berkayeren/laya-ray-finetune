@@ -80,3 +80,18 @@ def test_ray_train_then_score_and_report(trained):
     t = val_side["temperature"]["shipped"]
     assert rep["variants"]["shipped"]["temperature"] == t and 0.5 <= t <= 5.0   # laya.load clamps the served T
     assert rep["variants"]["raw"]["temperature"] == 1.0
+
+
+@pytest.mark.timeout(600)
+def test_evaluate_wrapper_matches_report(trained):
+    """evaluate.py (the thin wrapper) prints and writes byte for byte what report.py computes from the same dump."""
+    d, splits, manifest, ckpt = trained
+    _score(splits, "val", manifest, ckpt, d / "dumps2")     # the val dump the val-selected θ comes from
+    _run("evaluate.py", os.path.join(splits, "test.jsonl"), "--checkpoint", ckpt, "--workers", "0",
+         "--manifest", manifest, "--out-root", d / "dumps2", "--out", d / "e.json")
+    run_dir = os.path.join(str(d / "dumps2"), dumps.run_id("laya", identity(ckpt)))
+    _run("report.py", run_dir, "--split", "test", "--manifest", manifest, "--out", d / "r2.json")
+    with open(str(d / "e.json"), "rb") as f, open(str(d / "r2.json"), "rb") as g:
+        e, r = f.read(), g.read()
+    assert e == r
+    assert json.loads(e)["variants"]["shipped"]["rows"]["val_selected"] is not None
