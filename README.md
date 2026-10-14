@@ -159,7 +159,9 @@ or abstention-threshold fitting — use `evaluate.py` for held-out metrics.
 without no-intent rows and only 100 test messages, so they are not comparable to results on
 `data/splits/test.jsonl`. The metric definitions changed too: the majority row used a
 test-derived tag and the old top-1 denominator; current reports take the tag from the matching
-training split and compute top-1 over messages with gold tags. The reports are in `results/`.
+training split and compute top-1 over messages with gold tags. The two reports are kept for provenance
+in `results/legacy/`, whose [README](results/legacy/README.md) labels them as the legacy protocol; the full-test
+results table arrives with the Phase 3 reports under `results/reports/`.
 
 | run (100 test messages) | micro-F1 @0.5 | macro-F1 @0.5 | top-1 hit | tags predicted / gold |
 |---|---|---|---|---|

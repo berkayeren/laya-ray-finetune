@@ -328,3 +328,14 @@ def test_report_checker_flags_a_subset_report(tmp_path):
     assert sidecar_problems(str(path), home_dir(), set()) == ["subset is true (a subset run is never committed)"]
     path.write_text(json.dumps([1, 2]), encoding="utf-8")
     assert sidecar_problems(str(path), home_dir(), set()) == ["not a JSON object"]
+
+
+def test_legacy_results_are_labelled():
+    # D-08: the 100-message, no-no-intent reports must never be read as the full-test protocol
+    assert tracked("results/legacy/") == ["results/legacy/README.md", "results/legacy/finetuned_smoke.json",
+                                          "results/legacy/zeroshot_multilingual.json"]
+    with open(os.path.join(REPO_ROOT, "results", "legacy", "README.md"), encoding="utf-8") as f:
+        label = f.read()
+    assert "legacy protocol" in label and "not comparable" in label
+    assert tracked("results/zeroshot_multilingual.json", "results/finetuned_smoke.json") == [], \
+        "legacy reports must live under results/legacy/, not at the top of results/"
