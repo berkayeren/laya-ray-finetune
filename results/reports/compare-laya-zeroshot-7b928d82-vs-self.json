@@ -1,0 +1,257 @@
+{
+  "schema_version": 1,
+  "kind": "paired_bootstrap",
+  "split": "test",
+  "n": 413,
+  "B": 10000,
+  "seed": 0,
+  "manifest": {
+    "path": "data/splits.json",
+    "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103",
+    "is_committed": true
+  },
+  "a": {
+    "run_ids": [
+      "laya-zeroshot-7b928d82"
+    ],
+    "dump_sha256": {
+      "split": [
+        "63b04026c7898ccde5141897d216b5bfb1562a7ab12d585c1f27cb9bbe67a802"
+      ],
+      "val": [
+        "d5aa93dae8fc3d15baee382a3ab5409a92b18ab34d7f6686d4d6e7f93e9226b6"
+      ]
+    },
+    "temperature": {
+      "split": [
+        1.0
+      ],
+      "val": [
+        1.0
+      ]
+    },
+    "theta": {
+      "global": 0.32,
+      "per_tag": {
+        "transfer_payment_deposit": 0.25,
+        "request_info": 0.05,
+        "wrong_notworking_notshowing": 0.32,
+        "card": 0.09,
+        "make_open_apply_setup_get_activate": 0.75,
+        "account": 0.05,
+        "how_much": 0.19,
+        "affirm": 0.17,
+        "deny": 0.36,
+        "more_higher_after": 0.14,
+        "change": 0.27,
+        "cancel_close_leave_freeze": 0.25,
+        "current": 0.16
+      },
+      "eligible_tags": [
+        "transfer_payment_deposit",
+        "request_info",
+        "wrong_notworking_notshowing",
+        "card",
+        "make_open_apply_setup_get_activate",
+        "account",
+        "how_much",
+        "affirm",
+        "deny",
+        "more_higher_after",
+        "change",
+        "cancel_close_leave_freeze",
+        "current"
+      ],
+      "min_val_positives": 10,
+      "grid": {
+        "start": 0.05,
+        "stop": 0.95,
+        "step": 0.01,
+        "n": 91
+      },
+      "objective": {
+        "global": "val micro-F1",
+        "per_tag": "val per-tag F1"
+      },
+      "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+    }
+  },
+  "b": {
+    "run_ids": [
+      "laya-zeroshot-7b928d82"
+    ],
+    "dump_sha256": {
+      "split": [
+        "63b04026c7898ccde5141897d216b5bfb1562a7ab12d585c1f27cb9bbe67a802"
+      ],
+      "val": [
+        "d5aa93dae8fc3d15baee382a3ab5409a92b18ab34d7f6686d4d6e7f93e9226b6"
+      ]
+    },
+    "temperature": {
+      "split": [
+        1.0
+      ],
+      "val": [
+        1.0
+      ]
+    },
+    "theta": {
+      "global": 0.32,
+      "per_tag": {
+        "transfer_payment_deposit": 0.25,
+        "request_info": 0.05,
+        "wrong_notworking_notshowing": 0.32,
+        "card": 0.09,
+        "make_open_apply_setup_get_activate": 0.75,
+        "account": 0.05,
+        "how_much": 0.19,
+        "affirm": 0.17,
+        "deny": 0.36,
+        "more_higher_after": 0.14,
+        "change": 0.27,
+        "cancel_close_leave_freeze": 0.25,
+        "current": 0.16
+      },
+      "eligible_tags": [
+        "transfer_payment_deposit",
+        "request_info",
+        "wrong_notworking_notshowing",
+        "card",
+        "make_open_apply_setup_get_activate",
+        "account",
+        "how_much",
+        "affirm",
+        "deny",
+        "more_higher_after",
+        "change",
+        "cancel_close_leave_freeze",
+        "current"
+      ],
+      "min_val_positives": 10,
+      "grid": {
+        "start": 0.05,
+        "stop": 0.95,
+        "step": 0.01,
+        "n": 91
+      },
+      "objective": {
+        "global": "val micro-F1",
+        "per_tag": "val per-tag F1"
+      },
+      "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+    }
+  },
+  "theta_in_sample": false,
+  "thresholds": {
+    "0.5": {
+      "B": 10000,
+      "seed": 0,
+      "level": 0.95,
+      "method": "percentile (numpy linear interpolation)",
+      "n": 413,
+      "metrics": {
+        "micro_f1": {
+          "a": 0.19712662880053458,
+          "b": 0.19712662880053458,
+          "delta": 0.0,
+          "ci": [
+            0.0,
+            0.0
+          ],
+          "width": 0.0,
+          "n_undefined": 0
+        },
+        "macro_f1": {
+          "a": 0.20127246958684933,
+          "b": 0.20127246958684933,
+          "delta": 0.0,
+          "ci": [
+            0.0,
+            0.0
+          ],
+          "width": 0.0,
+          "n_undefined": 0
+        },
+        "exact_match": {
+          "a": 0.007263922518159807,
+          "b": 0.007263922518159807,
+          "delta": 0.0,
+          "ci": [
+            0.0,
+            0.0
+          ],
+          "width": 0.0,
+          "n_undefined": 0
+        },
+        "top1_hit": {
+          "a": 0.2135678391959799,
+          "b": 0.2135678391959799,
+          "delta": 0.0,
+          "ci": [
+            0.0,
+            0.0
+          ],
+          "width": 0.0,
+          "n_undefined": 0
+        }
+      }
+    },
+    "val_selected": {
+      "B": 10000,
+      "seed": 0,
+      "level": 0.95,
+      "method": "percentile (numpy linear interpolation)",
+      "n": 413,
+      "metrics": {
+        "micro_f1": {
+          "a": 0.2054136099165191,
+          "b": 0.2054136099165191,
+          "delta": 0.0,
+          "ci": [
+            0.0,
+            0.0
+          ],
+          "width": 0.0,
+          "n_undefined": 0
+        },
+        "macro_f1": {
+          "a": 0.21571227455879274,
+          "b": 0.21571227455879274,
+          "delta": 0.0,
+          "ci": [
+            0.0,
+            0.0
+          ],
+          "width": 0.0,
+          "n_undefined": 0
+        },
+        "exact_match": {
+          "a": 0.007263922518159807,
+          "b": 0.007263922518159807,
+          "delta": 0.0,
+          "ci": [
+            0.0,
+            0.0
+          ],
+          "width": 0.0,
+          "n_undefined": 0
+        },
+        "top1_hit": {
+          "a": 0.2135678391959799,
+          "b": 0.2135678391959799,
+          "delta": 0.0,
+          "ci": [
+            0.0,
+            0.0
+          ],
+          "width": 0.0,
+          "n_undefined": 0
+        }
+      }
+    }
+  },
+  "procedure": "EVAL-07: per-seed probabilities averaged per message and tag, then thresholded; test messages resampled with replacement with one index draw shared by both systems; 95% percentile interval of A - B",
+  "theta_rule": "D-12 applied to the seed-averaged val probabilities; Phase 8 freezes the rule for seed-averaged systems in protocol.json",
+  "note": "descriptive intervals only; the decision rule and its thresholds are frozen in protocol.json in Phase 8"
+}

@@ -23,8 +23,15 @@ pilot.metrics.paired_bootstrap resamples the split's messages with one index dra
 at the val-selected θ. The output records B, the RNG seed, the interval method, every run_id and dump_sha256, the
 temperatures and θ, and is descriptive only: it holds no decision label.
 
+--table PATH [PATH ...] (D-08): the markdown results table of saved reports (a directory expands to its sorted *.json),
+rendered in the given order: one row per single-system report and temperature variant (shipped first, then raw), a
+second table for paired-bootstrap comparisons, and a note for every report whose shipped T is 1.0. Labels come from
+each report's system block, never from a system-specific constant; values are rounded for display only. A --n subset
+report is refused: the table shows full-split numbers only. The README results block is this output, test-enforced.
+
 usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.json] [--manifest splits.json]
        python report.py --compare A_RUN[,A_RUN2...] B_RUN[,B_RUN2...] [--split test] [--B 10000] [--seed 0] [--out x.json]
+       python report.py --table results/reports [--out table.md]
 """
 import argparse
 import json
@@ -162,6 +169,95 @@ def compare(a_dirs, b_dirs, split="test", manifest_path=DEFAULT_MANIFEST, B=1000
             "procedure": COMPARE_PROCEDURE, "theta_rule": COMPARE_THETA_RULE, "note": COMPARE_NOTE}
 
 
+SINGLE_HEADER = ("system", "run_id", "temperature", "θ global (val)", "per-tag θ", "micro-F1 @0.5", "micro-F1 @val-θ",
+                 "macro-F1 @0.5", "macro-F1 @val-θ", "exact match @0.5", "exact match @val-θ", "top-1",
+                 "split, n (no-intent)")
+COMPARE_HEADER = ("A", "B", "θ", "metric", "delta (A - B)", "95% CI", "replicates")
+THRESHOLD_LABELS = (("0.5", "0.5"), ("val_selected", "val-selected"))
+
+
+def _num(v, fmt="%.3f"):
+    return "n/a" if v is None else fmt % v
+
+
+def _md(header, rows):
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
+    return "\n".join(lines + ["| " + " | ".join(r) + " |" for r in rows])
+
+
+def _system_label(system):
+    """kind plus the checkpoint (a model) or the training split its statistics come from (a baseline)."""
+    if system.get("checkpoint") is not None:
+        return "%s (%s)" % (system["kind"], system["checkpoint"])
+    src = system.get("baseline_source") or {}
+    return "%s (train: %s)" % (system["kind"], src.get("split", "n/a"))
+
+
+def _single_rows(r):
+    if r.get("subset"):
+        raise SystemExit("%s is a --n subset report; the results table shows full-split reports only" % r["run_id"])
+    rows = []
+    for name in ("shipped", "raw"):
+        v = r["variants"][name]
+        at5, sel = v["rows"]["0.5"], v["rows"]["val_selected"]
+        theta = None if sel is None else sel["theta"]
+        rows.append((_system_label(r["system"]), r["run_id"], "%s, T = %.2f" % (name, v["temperature"]),
+                     _num(None if theta is None else theta["global"], "%.2f"),
+                     "n/a" if theta is None else str(len(theta["per_tag"])),
+                     _num(at5["micro_f1"]), _num(None if sel is None else sel["micro_f1"]),
+                     _num(at5["macro_f1"]), _num(None if sel is None else sel["macro_f1"]),
+                     _num(at5["exact_match"]), _num(None if sel is None else sel["exact_match"]),
+                     _num(at5["top1_hit"]), "%s, %d (%d)" % (r["split"]["name"], at5["n"], at5["n_no_intent"])))
+    return rows
+
+
+def _compare_rows(c):
+    rows = []
+    for key, label in THRESHOLD_LABELS:
+        for metric, m in c["thresholds"][key]["metrics"].items():
+            ci = "n/a" if m["ci"] is None else "[%.3f, %.3f]" % tuple(m["ci"])
+            rows.append((",".join(c["a"]["run_ids"]), ",".join(c["b"]["run_ids"]), label, metric,
+                         _num(m["delta"], "%+.3f"), ci, str(c["B"])))
+    return rows
+
+
+def render_table(reports):
+    """Markdown of saved report dicts, in the given order (callers pass them in sorted path order)."""
+    singles, comps, notes = [], [], []
+    for r in reports:
+        if r.get("kind") == "paired_bootstrap":
+            comps.extend(_compare_rows(r))
+        elif "variants" in r:
+            singles.extend(_single_rows(r))
+            if r["variants"]["shipped"]["temperature"] == 1.0:
+                notes.append("- %s: shipped temperature is 1.0, so the T = 1 rows equal the headline rows."
+                             % r["run_id"])
+        else:
+            raise SystemExit("not a report.py report (no variants, not a paired_bootstrap): %s"
+                             % sorted(r)[:6])
+    if not (singles or comps):
+        raise SystemExit("no reports to tabulate")
+    parts = [_md(SINGLE_HEADER, singles)] if singles else []
+    if comps:
+        parts.append(_md(COMPARE_HEADER, comps))
+    if notes:
+        parts.append("\n".join(notes))
+    return "\n\n".join(parts) + "\n"
+
+
+def table_inputs(paths):
+    """Report paths of --table: files as given, a directory expanded to its sorted *.json."""
+    out = []
+    for p in paths:
+        if os.path.isdir(p):
+            out.extend(os.path.join(p, n) for n in sorted(os.listdir(p)) if n.endswith(".json"))
+        elif os.path.isfile(p):
+            out.append(p)
+        else:
+            raise SystemExit("%s not found; run `make baseline-reports` to rebuild the reports" % p)
+    return out
+
+
 def _run_dirs(ap, text):
     dirs = text.split(",")
     if not all(dirs):
@@ -180,9 +276,22 @@ def main(argv=None):
                     help="paired bootstrap of A - B; each side a comma-separated list of per-seed run dirs")
     ap.add_argument("--B", type=int, default=10000, help="bootstrap replicates for --compare (default 10000)")
     ap.add_argument("--seed", type=int, default=0, help="bootstrap RNG seed for --compare (default 0)")
+    ap.add_argument("--table", nargs="+", metavar="PATH", default=None,
+                    help="markdown table of saved reports (a directory expands to its sorted *.json)")
     a = ap.parse_args(argv)
-    if (a.run_dir is None) == (a.compare is None):
-        ap.error("give exactly one of RUN_DIR or --compare A_DIRS B_DIRS")
+    if sum(x is not None for x in (a.run_dir, a.compare, a.table)) != 1:
+        ap.error("give exactly one of RUN_DIR, --compare A_DIRS B_DIRS or --table PATH [PATH ...]")
+    if a.table is not None:
+        reports = []
+        for p in table_inputs(a.table):
+            with open(p, encoding="utf-8") as f:
+                reports.append(json.load(f))
+        text = render_table(reports)
+        print(text, end="")
+        if a.out:
+            os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+            write_atomic(a.out, text.encode("utf-8"))
+        return text
     if a.compare is not None:
         report = compare(_run_dirs(ap, a.compare[0]), _run_dirs(ap, a.compare[1]), a.split, a.manifest, a.B, a.seed)
     else:

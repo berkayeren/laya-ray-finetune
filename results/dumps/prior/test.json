@@ -1,0 +1,98 @@
+{
+  "dump_sha256": "b9fe2df0d0e762b7b80c90393f439926c12b0f20c76c934255c34ce7e1aaf99c",
+  "intents_order_sha256": "43c13c0bf2037c49b9d875bf979d46fc67bb672c762b383caf318d2b2e409d4b",
+  "logit": "margin z_true - z_false per tag; P(tag) = sigmoid(logit / T)",
+  "manifest": {
+    "is_committed": true,
+    "path": "data/splits.json",
+    "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103"
+  },
+  "n_subset": null,
+  "questions_sha256": "2e7255501fdeacd1b25ab62bd07f0e3b0cadec2e4ee0df813ea763c8ff68288d",
+  "run_id": "prior",
+  "schema_version": 1,
+  "scorer": {
+    "device": null,
+    "numpy_version": "2.5.4",
+    "workers": 0
+  },
+  "seed": null,
+  "split": {
+    "n_messages": 413,
+    "name": "test",
+    "path": "splits/test.jsonl",
+    "role": "test",
+    "sha256": "3abfb1836033c2d9af94ab17dcb386114bb6bf7a0a002b513514160ca37ed171",
+    "uids_sha256": "f0fc53ccb638cda616177cdb5f0580a6545fa6bf9a6686773437dbfa80d0439f"
+  },
+  "subset_seed": 0,
+  "system": {
+    "baseline_source": {
+      "n_messages": 1658,
+      "path": "splits/final_train.jsonl",
+      "sha256": "01c7274d7c9b0368191e7b2f42972b4025e08ef43e1fae14625777f09873024c",
+      "split": "final_train",
+      "tag_counts": {
+        "account": 179,
+        "acknowledge": 32,
+        "affirm": 111,
+        "appointment": 52,
+        "arrival": 35,
+        "balance": 59,
+        "business": 24,
+        "cancel_close_leave_freeze": 85,
+        "card": 184,
+        "change": 101,
+        "cheque": 31,
+        "contactless": 50,
+        "credit": 34,
+        "current": 57,
+        "debit": 44,
+        "deny": 108,
+        "direct_debit": 42,
+        "dont_know": 60,
+        "end_call": 26,
+        "existing": 17,
+        "fees_interests": 83,
+        "greet": 37,
+        "handoff": 51,
+        "how": 46,
+        "how_long": 14,
+        "how_much": 108,
+        "international": 74,
+        "less_lower_before": 58,
+        "limits": 64,
+        "loan": 57,
+        "lost_stolen": 41,
+        "make_open_apply_setup_get_activate": 186,
+        "more_higher_after": 101,
+        "mortgage": 50,
+        "new": 40,
+        "overdraft": 56,
+        "pin": 35,
+        "refund": 44,
+        "repeat": 6,
+        "request_info": 341,
+        "savings": 56,
+        "standing_order": 27,
+        "thank": 49,
+        "transfer_payment_deposit": 420,
+        "when": 55,
+        "why": 53,
+        "withdrawal": 39,
+        "wrong_notworking_notshowing": 215
+      }
+    },
+    "checkpoint": null,
+    "checkpoint_identity": null,
+    "clip_eps": 1e-06,
+    "kind": "prior"
+  },
+  "temperature": {
+    "shipped": 1.0,
+    "source": "baseline: logit of a train-split frequency (T = 1)"
+  },
+  "timing": {
+    "seconds": 0.054016828536987305
+  }
+}

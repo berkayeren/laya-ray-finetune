@@ -1,0 +1,2233 @@
+{
+  "schema_version": 1,
+  "run_id": "majority",
+  "split": {
+    "n_messages": 413,
+    "name": "test",
+    "path": "splits/test.jsonl",
+    "role": "test",
+    "sha256": "3abfb1836033c2d9af94ab17dcb386114bb6bf7a0a002b513514160ca37ed171",
+    "uids_sha256": "f0fc53ccb638cda616177cdb5f0580a6545fa6bf9a6686773437dbfa80d0439f"
+  },
+  "subset": false,
+  "system": {
+    "baseline_source": {
+      "n_messages": 1658,
+      "path": "splits/final_train.jsonl",
+      "sha256": "01c7274d7c9b0368191e7b2f42972b4025e08ef43e1fae14625777f09873024c",
+      "split": "final_train",
+      "tag_counts": {
+        "account": 179,
+        "acknowledge": 32,
+        "affirm": 111,
+        "appointment": 52,
+        "arrival": 35,
+        "balance": 59,
+        "business": 24,
+        "cancel_close_leave_freeze": 85,
+        "card": 184,
+        "change": 101,
+        "cheque": 31,
+        "contactless": 50,
+        "credit": 34,
+        "current": 57,
+        "debit": 44,
+        "deny": 108,
+        "direct_debit": 42,
+        "dont_know": 60,
+        "end_call": 26,
+        "existing": 17,
+        "fees_interests": 83,
+        "greet": 37,
+        "handoff": 51,
+        "how": 46,
+        "how_long": 14,
+        "how_much": 108,
+        "international": 74,
+        "less_lower_before": 58,
+        "limits": 64,
+        "loan": 57,
+        "lost_stolen": 41,
+        "make_open_apply_setup_get_activate": 186,
+        "more_higher_after": 101,
+        "mortgage": 50,
+        "new": 40,
+        "overdraft": 56,
+        "pin": 35,
+        "refund": 44,
+        "repeat": 6,
+        "request_info": 341,
+        "savings": 56,
+        "standing_order": 27,
+        "thank": 49,
+        "transfer_payment_deposit": 420,
+        "when": 55,
+        "why": 53,
+        "withdrawal": 39,
+        "wrong_notworking_notshowing": 215
+      }
+    },
+    "checkpoint": null,
+    "checkpoint_identity": null,
+    "clip_eps": 1e-06,
+    "kind": "majority"
+  },
+  "manifest": {
+    "path": "data/splits.json",
+    "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103",
+    "is_committed": true
+  },
+  "dump_sha256": "237a1c556337ad851bc5e8e2e2cd235525b620e78e27c25035315c5faf0a1fa0",
+  "headline": "shipped",
+  "theta_source": {
+    "run_id": "majority",
+    "split": "val",
+    "dump_sha256": "7be578917b18c35d0f9edb981f118be9bdb37d354ed50e4c16fa7fd0f6e4da2b",
+    "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+    "n_messages": 208
+  },
+  "variants": {
+    "shipped": {
+      "temperature": 1.0,
+      "rows": {
+        "0.5": {
+          "n": 413,
+          "n_top1": 398,
+          "n_no_intent": 15,
+          "micro_precision": 0.22276029055690072,
+          "micro_recall": 0.09956709956709957,
+          "micro_f1": 0.137621540762902,
+          "macro_f1": 0.007590759075907591,
+          "n_tags_in_macro": 48,
+          "exact_match": 0.004842615012106538,
+          "top1_hit": 0.23115577889447236,
+          "mean_tags_predicted": 1.0,
+          "mean_gold_tags": 2.23728813559322,
+          "per_tag": {
+            "transfer_payment_deposit": {
+              "support": 92,
+              "n_pred": 413,
+              "tp": 92,
+              "fp": 321,
+              "fn": 0,
+              "precision": 0.22276029055690072,
+              "recall": 1.0,
+              "f1": 0.36435643564356435
+            },
+            "request_info": {
+              "support": 88,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 88,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "wrong_notworking_notshowing": {
+              "support": 80,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 80,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "card": {
+              "support": 51,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 51,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "make_open_apply_setup_get_activate": {
+              "support": 45,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 45,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "account": {
+              "support": 51,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 51,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how_much": {
+              "support": 26,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 26,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "affirm": {
+              "support": 20,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 20,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "deny": {
+              "support": 23,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 23,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "more_higher_after": {
+              "support": 21,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 21,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "change": {
+              "support": 19,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 19,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "cancel_close_leave_freeze": {
+              "support": 26,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 26,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "fees_interests": {
+              "support": 21,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 21,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "international": {
+              "support": 16,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 16,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "limits": {
+              "support": 16,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 16,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "less_lower_before": {
+              "support": 15,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 15,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "balance": {
+              "support": 12,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "dont_know": {
+              "support": 11,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 11,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "current": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "overdraft": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "savings": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "loan": {
+              "support": 11,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 11,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "why": {
+              "support": 14,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 14,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "when": {
+              "support": 12,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "appointment": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "handoff": {
+              "support": 14,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 14,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "contactless": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "thank": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "mortgage": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "debit": {
+              "support": 14,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 14,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "refund": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "direct_debit": {
+              "support": 12,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "lost_stolen": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "withdrawal": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "new": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "greet": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "arrival": {
+              "support": 9,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "pin": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "credit": {
+              "support": 9,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "acknowledge": {
+              "support": 7,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 7,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "cheque": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "end_call": {
+              "support": 9,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "standing_order": {
+              "support": 7,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 7,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "business": {
+              "support": 5,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 5,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "existing": {
+              "support": 4,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 4,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how_long": {
+              "support": 3,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 3,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "repeat": {
+              "support": 4,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 4,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            }
+          },
+          "best_tags": {
+            "transfer_payment_deposit": 0.36435643564356435,
+            "request_info": 0.0,
+            "wrong_notworking_notshowing": 0.0,
+            "card": 0.0,
+            "make_open_apply_setup_get_activate": 0.0
+          },
+          "worst_tags": {
+            "request_info": 0.0,
+            "wrong_notworking_notshowing": 0.0,
+            "card": 0.0,
+            "make_open_apply_setup_get_activate": 0.0,
+            "account": 0.0
+          }
+        },
+        "val_selected": {
+          "n": 413,
+          "n_top1": 398,
+          "n_no_intent": 15,
+          "micro_precision": 0.22276029055690072,
+          "micro_recall": 0.09956709956709957,
+          "micro_f1": 0.137621540762902,
+          "macro_f1": 0.007590759075907591,
+          "n_tags_in_macro": 48,
+          "exact_match": 0.004842615012106538,
+          "top1_hit": 0.23115577889447236,
+          "mean_tags_predicted": 1.0,
+          "mean_gold_tags": 2.23728813559322,
+          "per_tag": {
+            "transfer_payment_deposit": {
+              "support": 92,
+              "n_pred": 413,
+              "tp": 92,
+              "fp": 321,
+              "fn": 0,
+              "precision": 0.22276029055690072,
+              "recall": 1.0,
+              "f1": 0.36435643564356435
+            },
+            "request_info": {
+              "support": 88,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 88,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "wrong_notworking_notshowing": {
+              "support": 80,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 80,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "card": {
+              "support": 51,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 51,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "make_open_apply_setup_get_activate": {
+              "support": 45,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 45,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "account": {
+              "support": 51,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 51,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how_much": {
+              "support": 26,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 26,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "affirm": {
+              "support": 20,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 20,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "deny": {
+              "support": 23,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 23,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "more_higher_after": {
+              "support": 21,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 21,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "change": {
+              "support": 19,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 19,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "cancel_close_leave_freeze": {
+              "support": 26,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 26,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "fees_interests": {
+              "support": 21,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 21,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "international": {
+              "support": 16,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 16,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "limits": {
+              "support": 16,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 16,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "less_lower_before": {
+              "support": 15,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 15,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "balance": {
+              "support": 12,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "dont_know": {
+              "support": 11,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 11,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "current": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "overdraft": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "savings": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "loan": {
+              "support": 11,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 11,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "why": {
+              "support": 14,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 14,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "when": {
+              "support": 12,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "appointment": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "handoff": {
+              "support": 14,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 14,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "contactless": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "thank": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "mortgage": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "debit": {
+              "support": 14,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 14,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "refund": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "direct_debit": {
+              "support": 12,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "lost_stolen": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "withdrawal": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "new": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "greet": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "arrival": {
+              "support": 9,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "pin": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "credit": {
+              "support": 9,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "acknowledge": {
+              "support": 7,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 7,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "cheque": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "end_call": {
+              "support": 9,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "standing_order": {
+              "support": 7,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 7,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "business": {
+              "support": 5,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 5,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "existing": {
+              "support": 4,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 4,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how_long": {
+              "support": 3,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 3,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "repeat": {
+              "support": 4,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 4,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            }
+          },
+          "best_tags": {
+            "transfer_payment_deposit": 0.36435643564356435,
+            "request_info": 0.0,
+            "wrong_notworking_notshowing": 0.0,
+            "card": 0.0,
+            "make_open_apply_setup_get_activate": 0.0
+          },
+          "worst_tags": {
+            "request_info": 0.0,
+            "wrong_notworking_notshowing": 0.0,
+            "card": 0.0,
+            "make_open_apply_setup_get_activate": 0.0,
+            "account": 0.0
+          },
+          "theta": {
+            "global": 0.5,
+            "per_tag": {
+              "transfer_payment_deposit": 0.5,
+              "request_info": 0.5,
+              "wrong_notworking_notshowing": 0.5,
+              "card": 0.5,
+              "make_open_apply_setup_get_activate": 0.5,
+              "account": 0.5,
+              "how_much": 0.5,
+              "affirm": 0.5,
+              "deny": 0.5,
+              "more_higher_after": 0.5,
+              "change": 0.5,
+              "cancel_close_leave_freeze": 0.5,
+              "current": 0.5
+            },
+            "eligible_tags": [
+              "transfer_payment_deposit",
+              "request_info",
+              "wrong_notworking_notshowing",
+              "card",
+              "make_open_apply_setup_get_activate",
+              "account",
+              "how_much",
+              "affirm",
+              "deny",
+              "more_higher_after",
+              "change",
+              "cancel_close_leave_freeze",
+              "current"
+            ],
+            "min_val_positives": 10,
+            "grid": {
+              "start": 0.05,
+              "stop": 0.95,
+              "step": 0.01,
+              "n": 91
+            },
+            "objective": {
+              "global": "val micro-F1",
+              "per_tag": "val per-tag F1"
+            },
+            "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+          },
+          "in_sample": false
+        }
+      }
+    },
+    "raw": {
+      "temperature": 1.0,
+      "rows": {
+        "0.5": {
+          "n": 413,
+          "n_top1": 398,
+          "n_no_intent": 15,
+          "micro_precision": 0.22276029055690072,
+          "micro_recall": 0.09956709956709957,
+          "micro_f1": 0.137621540762902,
+          "macro_f1": 0.007590759075907591,
+          "n_tags_in_macro": 48,
+          "exact_match": 0.004842615012106538,
+          "top1_hit": 0.23115577889447236,
+          "mean_tags_predicted": 1.0,
+          "mean_gold_tags": 2.23728813559322,
+          "per_tag": {
+            "transfer_payment_deposit": {
+              "support": 92,
+              "n_pred": 413,
+              "tp": 92,
+              "fp": 321,
+              "fn": 0,
+              "precision": 0.22276029055690072,
+              "recall": 1.0,
+              "f1": 0.36435643564356435
+            },
+            "request_info": {
+              "support": 88,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 88,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "wrong_notworking_notshowing": {
+              "support": 80,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 80,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "card": {
+              "support": 51,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 51,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "make_open_apply_setup_get_activate": {
+              "support": 45,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 45,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "account": {
+              "support": 51,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 51,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how_much": {
+              "support": 26,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 26,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "affirm": {
+              "support": 20,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 20,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "deny": {
+              "support": 23,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 23,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "more_higher_after": {
+              "support": 21,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 21,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "change": {
+              "support": 19,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 19,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "cancel_close_leave_freeze": {
+              "support": 26,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 26,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "fees_interests": {
+              "support": 21,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 21,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "international": {
+              "support": 16,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 16,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "limits": {
+              "support": 16,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 16,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "less_lower_before": {
+              "support": 15,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 15,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "balance": {
+              "support": 12,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "dont_know": {
+              "support": 11,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 11,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "current": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "overdraft": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "savings": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "loan": {
+              "support": 11,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 11,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "why": {
+              "support": 14,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 14,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "when": {
+              "support": 12,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "appointment": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "handoff": {
+              "support": 14,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 14,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "contactless": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "thank": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "mortgage": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "debit": {
+              "support": 14,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 14,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "refund": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "direct_debit": {
+              "support": 12,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "lost_stolen": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "withdrawal": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "new": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "greet": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "arrival": {
+              "support": 9,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "pin": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "credit": {
+              "support": 9,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "acknowledge": {
+              "support": 7,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 7,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "cheque": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "end_call": {
+              "support": 9,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "standing_order": {
+              "support": 7,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 7,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "business": {
+              "support": 5,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 5,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "existing": {
+              "support": 4,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 4,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how_long": {
+              "support": 3,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 3,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "repeat": {
+              "support": 4,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 4,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            }
+          },
+          "best_tags": {
+            "transfer_payment_deposit": 0.36435643564356435,
+            "request_info": 0.0,
+            "wrong_notworking_notshowing": 0.0,
+            "card": 0.0,
+            "make_open_apply_setup_get_activate": 0.0
+          },
+          "worst_tags": {
+            "request_info": 0.0,
+            "wrong_notworking_notshowing": 0.0,
+            "card": 0.0,
+            "make_open_apply_setup_get_activate": 0.0,
+            "account": 0.0
+          }
+        },
+        "val_selected": {
+          "n": 413,
+          "n_top1": 398,
+          "n_no_intent": 15,
+          "micro_precision": 0.22276029055690072,
+          "micro_recall": 0.09956709956709957,
+          "micro_f1": 0.137621540762902,
+          "macro_f1": 0.007590759075907591,
+          "n_tags_in_macro": 48,
+          "exact_match": 0.004842615012106538,
+          "top1_hit": 0.23115577889447236,
+          "mean_tags_predicted": 1.0,
+          "mean_gold_tags": 2.23728813559322,
+          "per_tag": {
+            "transfer_payment_deposit": {
+              "support": 92,
+              "n_pred": 413,
+              "tp": 92,
+              "fp": 321,
+              "fn": 0,
+              "precision": 0.22276029055690072,
+              "recall": 1.0,
+              "f1": 0.36435643564356435
+            },
+            "request_info": {
+              "support": 88,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 88,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "wrong_notworking_notshowing": {
+              "support": 80,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 80,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "card": {
+              "support": 51,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 51,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "make_open_apply_setup_get_activate": {
+              "support": 45,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 45,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "account": {
+              "support": 51,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 51,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how_much": {
+              "support": 26,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 26,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "affirm": {
+              "support": 20,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 20,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "deny": {
+              "support": 23,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 23,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "more_higher_after": {
+              "support": 21,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 21,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "change": {
+              "support": 19,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 19,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "cancel_close_leave_freeze": {
+              "support": 26,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 26,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "fees_interests": {
+              "support": 21,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 21,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "international": {
+              "support": 16,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 16,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "limits": {
+              "support": 16,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 16,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "less_lower_before": {
+              "support": 15,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 15,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "balance": {
+              "support": 12,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "dont_know": {
+              "support": 11,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 11,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "current": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "overdraft": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "savings": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "loan": {
+              "support": 11,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 11,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "why": {
+              "support": 14,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 14,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "when": {
+              "support": 12,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "appointment": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "handoff": {
+              "support": 14,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 14,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "contactless": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "thank": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "mortgage": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "debit": {
+              "support": 14,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 14,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "refund": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "direct_debit": {
+              "support": 12,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "lost_stolen": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "withdrawal": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "new": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "greet": {
+              "support": 10,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "arrival": {
+              "support": 9,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "pin": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "credit": {
+              "support": 9,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "acknowledge": {
+              "support": 7,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 7,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "cheque": {
+              "support": 8,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "end_call": {
+              "support": 9,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "standing_order": {
+              "support": 7,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 7,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "business": {
+              "support": 5,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 5,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "existing": {
+              "support": 4,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 4,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how_long": {
+              "support": 3,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 3,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "repeat": {
+              "support": 4,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 4,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            }
+          },
+          "best_tags": {
+            "transfer_payment_deposit": 0.36435643564356435,
+            "request_info": 0.0,
+            "wrong_notworking_notshowing": 0.0,
+            "card": 0.0,
+            "make_open_apply_setup_get_activate": 0.0
+          },
+          "worst_tags": {
+            "request_info": 0.0,
+            "wrong_notworking_notshowing": 0.0,
+            "card": 0.0,
+            "make_open_apply_setup_get_activate": 0.0,
+            "account": 0.0
+          },
+          "theta": {
+            "global": 0.5,
+            "per_tag": {
+              "transfer_payment_deposit": 0.5,
+              "request_info": 0.5,
+              "wrong_notworking_notshowing": 0.5,
+              "card": 0.5,
+              "make_open_apply_setup_get_activate": 0.5,
+              "account": 0.5,
+              "how_much": 0.5,
+              "affirm": 0.5,
+              "deny": 0.5,
+              "more_higher_after": 0.5,
+              "change": 0.5,
+              "cancel_close_leave_freeze": 0.5,
+              "current": 0.5
+            },
+            "eligible_tags": [
+              "transfer_payment_deposit",
+              "request_info",
+              "wrong_notworking_notshowing",
+              "card",
+              "make_open_apply_setup_get_activate",
+              "account",
+              "how_much",
+              "affirm",
+              "deny",
+              "more_higher_after",
+              "change",
+              "cancel_close_leave_freeze",
+              "current"
+            ],
+            "min_val_positives": 10,
+            "grid": {
+              "start": 0.05,
+              "stop": 0.95,
+              "step": 0.01,
+              "n": 91
+            },
+            "objective": {
+              "global": "val micro-F1",
+              "per_tag": "val per-tag F1"
+            },
+            "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+          },
+          "in_sample": false
+        }
+      }
+    }
+  }
+}

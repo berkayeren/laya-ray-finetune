@@ -1,0 +1,2183 @@
+{
+  "schema_version": 1,
+  "run_id": "laya-zeroshot-7b928d82",
+  "split": {
+    "n_messages": 413,
+    "name": "test",
+    "path": "splits/test.jsonl",
+    "role": "test",
+    "sha256": "3abfb1836033c2d9af94ab17dcb386114bb6bf7a0a002b513514160ca37ed171",
+    "uids_sha256": "f0fc53ccb638cda616177cdb5f0580a6545fa6bf9a6686773437dbfa80d0439f"
+  },
+  "subset": false,
+  "system": {
+    "baseline_source": null,
+    "checkpoint": "multilingual",
+    "checkpoint_identity": {
+      "model_sha256": "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204",
+      "repo": "convaiinnovations/laya",
+      "revision": "7b928d828b7b0e022f929d9bd2e44165aa270148",
+      "subfolder": "multilingual"
+    },
+    "clip_eps": null,
+    "kind": "laya"
+  },
+  "manifest": {
+    "path": "data/splits.json",
+    "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103",
+    "is_committed": true
+  },
+  "dump_sha256": "63b04026c7898ccde5141897d216b5bfb1562a7ab12d585c1f27cb9bbe67a802",
+  "headline": "shipped",
+  "theta_source": {
+    "run_id": "laya-zeroshot-7b928d82",
+    "split": "val",
+    "dump_sha256": "d5aa93dae8fc3d15baee382a3ab5409a92b18ab34d7f6686d4d6e7f93e9226b6",
+    "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+    "n_messages": 208
+  },
+  "variants": {
+    "shipped": {
+      "temperature": 1.0,
+      "rows": {
+        "0.5": {
+          "n": 413,
+          "n_top1": 398,
+          "n_no_intent": 15,
+          "micro_precision": 0.14258095698405027,
+          "micro_recall": 0.31926406926406925,
+          "micro_f1": 0.19712662880053458,
+          "macro_f1": 0.20127246958684933,
+          "n_tags_in_macro": 48,
+          "exact_match": 0.007263922518159807,
+          "top1_hit": 0.2135678391959799,
+          "mean_tags_predicted": 5.009685230024213,
+          "mean_gold_tags": 2.23728813559322,
+          "per_tag": {
+            "transfer_payment_deposit": {
+              "support": 92,
+              "n_pred": 160,
+              "tp": 46,
+              "fp": 114,
+              "fn": 46,
+              "precision": 0.2875,
+              "recall": 0.5,
+              "f1": 0.36507936507936506
+            },
+            "request_info": {
+              "support": 88,
+              "n_pred": 39,
+              "tp": 21,
+              "fp": 18,
+              "fn": 67,
+              "precision": 0.5384615384615384,
+              "recall": 0.23863636363636365,
+              "f1": 0.33070866141732286
+            },
+            "wrong_notworking_notshowing": {
+              "support": 80,
+              "n_pred": 19,
+              "tp": 14,
+              "fp": 5,
+              "fn": 66,
+              "precision": 0.7368421052631579,
+              "recall": 0.175,
+              "f1": 0.2828282828282828
+            },
+            "card": {
+              "support": 51,
+              "n_pred": 24,
+              "tp": 2,
+              "fp": 22,
+              "fn": 49,
+              "precision": 0.08333333333333333,
+              "recall": 0.0392156862745098,
+              "f1": 0.05333333333333334
+            },
+            "make_open_apply_setup_get_activate": {
+              "support": 45,
+              "n_pred": 163,
+              "tp": 33,
+              "fp": 130,
+              "fn": 12,
+              "precision": 0.20245398773006135,
+              "recall": 0.7333333333333333,
+              "f1": 0.3173076923076923
+            },
+            "account": {
+              "support": 51,
+              "n_pred": 37,
+              "tp": 4,
+              "fp": 33,
+              "fn": 47,
+              "precision": 0.10810810810810811,
+              "recall": 0.0784313725490196,
+              "f1": 0.09090909090909091
+            },
+            "how_much": {
+              "support": 26,
+              "n_pred": 21,
+              "tp": 8,
+              "fp": 13,
+              "fn": 18,
+              "precision": 0.38095238095238093,
+              "recall": 0.3076923076923077,
+              "f1": 0.3404255319148936
+            },
+            "affirm": {
+              "support": 20,
+              "n_pred": 8,
+              "tp": 2,
+              "fp": 6,
+              "fn": 18,
+              "precision": 0.25,
+              "recall": 0.1,
+              "f1": 0.14285714285714285
+            },
+            "deny": {
+              "support": 23,
+              "n_pred": 32,
+              "tp": 10,
+              "fp": 22,
+              "fn": 13,
+              "precision": 0.3125,
+              "recall": 0.43478260869565216,
+              "f1": 0.36363636363636365
+            },
+            "more_higher_after": {
+              "support": 21,
+              "n_pred": 7,
+              "tp": 2,
+              "fp": 5,
+              "fn": 19,
+              "precision": 0.2857142857142857,
+              "recall": 0.09523809523809523,
+              "f1": 0.14285714285714285
+            },
+            "change": {
+              "support": 19,
+              "n_pred": 21,
+              "tp": 12,
+              "fp": 9,
+              "fn": 7,
+              "precision": 0.5714285714285714,
+              "recall": 0.631578947368421,
+              "f1": 0.6
+            },
+            "cancel_close_leave_freeze": {
+              "support": 26,
+              "n_pred": 25,
+              "tp": 16,
+              "fp": 9,
+              "fn": 10,
+              "precision": 0.64,
+              "recall": 0.6153846153846154,
+              "f1": 0.6274509803921569
+            },
+            "fees_interests": {
+              "support": 21,
+              "n_pred": 13,
+              "tp": 2,
+              "fp": 11,
+              "fn": 19,
+              "precision": 0.15384615384615385,
+              "recall": 0.09523809523809523,
+              "f1": 0.11764705882352941
+            },
+            "international": {
+              "support": 16,
+              "n_pred": 4,
+              "tp": 3,
+              "fp": 1,
+              "fn": 13,
+              "precision": 0.75,
+              "recall": 0.1875,
+              "f1": 0.3
+            },
+            "limits": {
+              "support": 16,
+              "n_pred": 25,
+              "tp": 9,
+              "fp": 16,
+              "fn": 7,
+              "precision": 0.36,
+              "recall": 0.5625,
+              "f1": 0.43902439024390244
+            },
+            "less_lower_before": {
+              "support": 15,
+              "n_pred": 4,
+              "tp": 0,
+              "fp": 4,
+              "fn": 15,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "balance": {
+              "support": 12,
+              "n_pred": 6,
+              "tp": 0,
+              "fp": 6,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "dont_know": {
+              "support": 11,
+              "n_pred": 4,
+              "tp": 2,
+              "fp": 2,
+              "fn": 9,
+              "precision": 0.5,
+              "recall": 0.18181818181818182,
+              "f1": 0.26666666666666666
+            },
+            "current": {
+              "support": 13,
+              "n_pred": 37,
+              "tp": 0,
+              "fp": 37,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "overdraft": {
+              "support": 13,
+              "n_pred": 14,
+              "tp": 0,
+              "fp": 14,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "savings": {
+              "support": 13,
+              "n_pred": 128,
+              "tp": 6,
+              "fp": 122,
+              "fn": 7,
+              "precision": 0.046875,
+              "recall": 0.46153846153846156,
+              "f1": 0.0851063829787234
+            },
+            "loan": {
+              "support": 11,
+              "n_pred": 42,
+              "tp": 3,
+              "fp": 39,
+              "fn": 8,
+              "precision": 0.07142857142857142,
+              "recall": 0.2727272727272727,
+              "f1": 0.11320754716981132
+            },
+            "why": {
+              "support": 14,
+              "n_pred": 37,
+              "tp": 10,
+              "fp": 27,
+              "fn": 4,
+              "precision": 0.2702702702702703,
+              "recall": 0.7142857142857143,
+              "f1": 0.39215686274509803
+            },
+            "when": {
+              "support": 12,
+              "n_pred": 34,
+              "tp": 12,
+              "fp": 22,
+              "fn": 0,
+              "precision": 0.35294117647058826,
+              "recall": 1.0,
+              "f1": 0.5217391304347826
+            },
+            "appointment": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "handoff": {
+              "support": 14,
+              "n_pred": 69,
+              "tp": 13,
+              "fp": 56,
+              "fn": 1,
+              "precision": 0.18840579710144928,
+              "recall": 0.9285714285714286,
+              "f1": 0.3132530120481928
+            },
+            "contactless": {
+              "support": 13,
+              "n_pred": 101,
+              "tp": 11,
+              "fp": 90,
+              "fn": 2,
+              "precision": 0.10891089108910891,
+              "recall": 0.8461538461538461,
+              "f1": 0.19298245614035087
+            },
+            "thank": {
+              "support": 10,
+              "n_pred": 21,
+              "tp": 8,
+              "fp": 13,
+              "fn": 2,
+              "precision": 0.38095238095238093,
+              "recall": 0.8,
+              "f1": 0.5161290322580645
+            },
+            "mortgage": {
+              "support": 8,
+              "n_pred": 53,
+              "tp": 1,
+              "fp": 52,
+              "fn": 7,
+              "precision": 0.018867924528301886,
+              "recall": 0.125,
+              "f1": 0.03278688524590164
+            },
+            "debit": {
+              "support": 14,
+              "n_pred": 39,
+              "tp": 2,
+              "fp": 37,
+              "fn": 12,
+              "precision": 0.05128205128205128,
+              "recall": 0.14285714285714285,
+              "f1": 0.07547169811320754
+            },
+            "how": {
+              "support": 10,
+              "n_pred": 18,
+              "tp": 0,
+              "fp": 18,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "refund": {
+              "support": 10,
+              "n_pred": 60,
+              "tp": 7,
+              "fp": 53,
+              "fn": 3,
+              "precision": 0.11666666666666667,
+              "recall": 0.7,
+              "f1": 0.2
+            },
+            "direct_debit": {
+              "support": 12,
+              "n_pred": 192,
+              "tp": 10,
+              "fp": 182,
+              "fn": 2,
+              "precision": 0.052083333333333336,
+              "recall": 0.8333333333333334,
+              "f1": 0.09803921568627451
+            },
+            "lost_stolen": {
+              "support": 10,
+              "n_pred": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 8,
+              "precision": 1.0,
+              "recall": 0.2,
+              "f1": 0.3333333333333333
+            },
+            "withdrawal": {
+              "support": 10,
+              "n_pred": 27,
+              "tp": 2,
+              "fp": 25,
+              "fn": 8,
+              "precision": 0.07407407407407407,
+              "recall": 0.2,
+              "f1": 0.10810810810810811
+            },
+            "new": {
+              "support": 8,
+              "n_pred": 2,
+              "tp": 1,
+              "fp": 1,
+              "fn": 7,
+              "precision": 0.5,
+              "recall": 0.125,
+              "f1": 0.2
+            },
+            "greet": {
+              "support": 10,
+              "n_pred": 22,
+              "tp": 4,
+              "fp": 18,
+              "fn": 6,
+              "precision": 0.18181818181818182,
+              "recall": 0.4,
+              "f1": 0.25
+            },
+            "arrival": {
+              "support": 9,
+              "n_pred": 14,
+              "tp": 0,
+              "fp": 14,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "pin": {
+              "support": 8,
+              "n_pred": 313,
+              "tp": 5,
+              "fp": 308,
+              "fn": 3,
+              "precision": 0.01597444089456869,
+              "recall": 0.625,
+              "f1": 0.03115264797507788
+            },
+            "credit": {
+              "support": 9,
+              "n_pred": 19,
+              "tp": 3,
+              "fp": 16,
+              "fn": 6,
+              "precision": 0.15789473684210525,
+              "recall": 0.3333333333333333,
+              "f1": 0.21428571428571427
+            },
+            "acknowledge": {
+              "support": 7,
+              "n_pred": 3,
+              "tp": 0,
+              "fp": 3,
+              "fn": 7,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "cheque": {
+              "support": 8,
+              "n_pred": 3,
+              "tp": 0,
+              "fp": 3,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "end_call": {
+              "support": 9,
+              "n_pred": 16,
+              "tp": 0,
+              "fp": 16,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "standing_order": {
+              "support": 7,
+              "n_pred": 5,
+              "tp": 1,
+              "fp": 4,
+              "fn": 6,
+              "precision": 0.2,
+              "recall": 0.14285714285714285,
+              "f1": 0.16666666666666666
+            },
+            "business": {
+              "support": 5,
+              "n_pred": 162,
+              "tp": 3,
+              "fp": 159,
+              "fn": 2,
+              "precision": 0.018518518518518517,
+              "recall": 0.6,
+              "f1": 0.03592814371257485
+            },
+            "existing": {
+              "support": 4,
+              "n_pred": 11,
+              "tp": 0,
+              "fp": 11,
+              "fn": 4,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how_long": {
+              "support": 3,
+              "n_pred": 7,
+              "tp": 2,
+              "fp": 5,
+              "fn": 1,
+              "precision": 0.2857142857142857,
+              "recall": 0.6666666666666666,
+              "f1": 0.4
+            },
+            "repeat": {
+              "support": 4,
+              "n_pred": 6,
+              "tp": 3,
+              "fp": 3,
+              "fn": 1,
+              "precision": 0.5,
+              "recall": 0.75,
+              "f1": 0.6
+            }
+          },
+          "best_tags": {
+            "cancel_close_leave_freeze": 0.6274509803921569,
+            "change": 0.6,
+            "repeat": 0.6,
+            "when": 0.5217391304347826,
+            "thank": 0.5161290322580645
+          },
+          "worst_tags": {
+            "less_lower_before": 0.0,
+            "balance": 0.0,
+            "current": 0.0,
+            "overdraft": 0.0,
+            "appointment": 0.0
+          }
+        },
+        "val_selected": {
+          "n": 413,
+          "n_top1": 398,
+          "n_no_intent": 15,
+          "micro_precision": 0.13403763618355893,
+          "micro_recall": 0.4393939393939394,
+          "micro_f1": 0.2054136099165191,
+          "macro_f1": 0.21571227455879274,
+          "n_tags_in_macro": 48,
+          "exact_match": 0.007263922518159807,
+          "top1_hit": 0.2135678391959799,
+          "mean_tags_predicted": 7.3341404358353515,
+          "mean_gold_tags": 2.23728813559322,
+          "per_tag": {
+            "transfer_payment_deposit": {
+              "support": 92,
+              "n_pred": 224,
+              "tp": 54,
+              "fp": 170,
+              "fn": 38,
+              "precision": 0.24107142857142858,
+              "recall": 0.5869565217391305,
+              "f1": 0.34177215189873417
+            },
+            "request_info": {
+              "support": 88,
+              "n_pred": 124,
+              "tp": 56,
+              "fp": 68,
+              "fn": 32,
+              "precision": 0.45161290322580644,
+              "recall": 0.6363636363636364,
+              "f1": 0.5283018867924528
+            },
+            "wrong_notworking_notshowing": {
+              "support": 80,
+              "n_pred": 33,
+              "tp": 24,
+              "fp": 9,
+              "fn": 56,
+              "precision": 0.7272727272727273,
+              "recall": 0.3,
+              "f1": 0.4247787610619469
+            },
+            "card": {
+              "support": 51,
+              "n_pred": 66,
+              "tp": 8,
+              "fp": 58,
+              "fn": 43,
+              "precision": 0.12121212121212122,
+              "recall": 0.1568627450980392,
+              "f1": 0.13675213675213677
+            },
+            "make_open_apply_setup_get_activate": {
+              "support": 45,
+              "n_pred": 86,
+              "tp": 21,
+              "fp": 65,
+              "fn": 24,
+              "precision": 0.2441860465116279,
+              "recall": 0.4666666666666667,
+              "f1": 0.32061068702290074
+            },
+            "account": {
+              "support": 51,
+              "n_pred": 132,
+              "tp": 16,
+              "fp": 116,
+              "fn": 35,
+              "precision": 0.12121212121212122,
+              "recall": 0.3137254901960784,
+              "f1": 0.17486338797814208
+            },
+            "how_much": {
+              "support": 26,
+              "n_pred": 53,
+              "tp": 15,
+              "fp": 38,
+              "fn": 11,
+              "precision": 0.2830188679245283,
+              "recall": 0.5769230769230769,
+              "f1": 0.379746835443038
+            },
+            "affirm": {
+              "support": 20,
+              "n_pred": 53,
+              "tp": 9,
+              "fp": 44,
+              "fn": 11,
+              "precision": 0.16981132075471697,
+              "recall": 0.45,
+              "f1": 0.2465753424657534
+            },
+            "deny": {
+              "support": 23,
+              "n_pred": 41,
+              "tp": 12,
+              "fp": 29,
+              "fn": 11,
+              "precision": 0.2926829268292683,
+              "recall": 0.5217391304347826,
+              "f1": 0.375
+            },
+            "more_higher_after": {
+              "support": 21,
+              "n_pred": 26,
+              "tp": 6,
+              "fp": 20,
+              "fn": 15,
+              "precision": 0.23076923076923078,
+              "recall": 0.2857142857142857,
+              "f1": 0.2553191489361702
+            },
+            "change": {
+              "support": 19,
+              "n_pred": 36,
+              "tp": 13,
+              "fp": 23,
+              "fn": 6,
+              "precision": 0.3611111111111111,
+              "recall": 0.6842105263157895,
+              "f1": 0.4727272727272727
+            },
+            "cancel_close_leave_freeze": {
+              "support": 26,
+              "n_pred": 37,
+              "tp": 19,
+              "fp": 18,
+              "fn": 7,
+              "precision": 0.5135135135135135,
+              "recall": 0.7307692307692307,
+              "f1": 0.6031746031746031
+            },
+            "fees_interests": {
+              "support": 21,
+              "n_pred": 23,
+              "tp": 4,
+              "fp": 19,
+              "fn": 17,
+              "precision": 0.17391304347826086,
+              "recall": 0.19047619047619047,
+              "f1": 0.18181818181818182
+            },
+            "international": {
+              "support": 16,
+              "n_pred": 6,
+              "tp": 3,
+              "fp": 3,
+              "fn": 13,
+              "precision": 0.5,
+              "recall": 0.1875,
+              "f1": 0.2727272727272727
+            },
+            "limits": {
+              "support": 16,
+              "n_pred": 34,
+              "tp": 9,
+              "fp": 25,
+              "fn": 7,
+              "precision": 0.2647058823529412,
+              "recall": 0.5625,
+              "f1": 0.36
+            },
+            "less_lower_before": {
+              "support": 15,
+              "n_pred": 8,
+              "tp": 1,
+              "fp": 7,
+              "fn": 14,
+              "precision": 0.125,
+              "recall": 0.06666666666666667,
+              "f1": 0.08695652173913043
+            },
+            "balance": {
+              "support": 12,
+              "n_pred": 17,
+              "tp": 0,
+              "fp": 17,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "dont_know": {
+              "support": 11,
+              "n_pred": 20,
+              "tp": 3,
+              "fp": 17,
+              "fn": 8,
+              "precision": 0.15,
+              "recall": 0.2727272727272727,
+              "f1": 0.1935483870967742
+            },
+            "current": {
+              "support": 13,
+              "n_pred": 73,
+              "tp": 1,
+              "fp": 72,
+              "fn": 12,
+              "precision": 0.0136986301369863,
+              "recall": 0.07692307692307693,
+              "f1": 0.023255813953488372
+            },
+            "overdraft": {
+              "support": 13,
+              "n_pred": 19,
+              "tp": 1,
+              "fp": 18,
+              "fn": 12,
+              "precision": 0.05263157894736842,
+              "recall": 0.07692307692307693,
+              "f1": 0.0625
+            },
+            "savings": {
+              "support": 13,
+              "n_pred": 190,
+              "tp": 7,
+              "fp": 183,
+              "fn": 6,
+              "precision": 0.03684210526315789,
+              "recall": 0.5384615384615384,
+              "f1": 0.06896551724137931
+            },
+            "loan": {
+              "support": 11,
+              "n_pred": 57,
+              "tp": 3,
+              "fp": 54,
+              "fn": 8,
+              "precision": 0.05263157894736842,
+              "recall": 0.2727272727272727,
+              "f1": 0.08823529411764706
+            },
+            "why": {
+              "support": 14,
+              "n_pred": 63,
+              "tp": 12,
+              "fp": 51,
+              "fn": 2,
+              "precision": 0.19047619047619047,
+              "recall": 0.8571428571428571,
+              "f1": 0.3116883116883117
+            },
+            "when": {
+              "support": 12,
+              "n_pred": 49,
+              "tp": 12,
+              "fp": 37,
+              "fn": 0,
+              "precision": 0.24489795918367346,
+              "recall": 1.0,
+              "f1": 0.39344262295081966
+            },
+            "appointment": {
+              "support": 13,
+              "n_pred": 3,
+              "tp": 0,
+              "fp": 3,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "handoff": {
+              "support": 14,
+              "n_pred": 96,
+              "tp": 14,
+              "fp": 82,
+              "fn": 0,
+              "precision": 0.14583333333333334,
+              "recall": 1.0,
+              "f1": 0.2545454545454545
+            },
+            "contactless": {
+              "support": 13,
+              "n_pred": 132,
+              "tp": 12,
+              "fp": 120,
+              "fn": 1,
+              "precision": 0.09090909090909091,
+              "recall": 0.9230769230769231,
+              "f1": 0.16551724137931034
+            },
+            "thank": {
+              "support": 10,
+              "n_pred": 28,
+              "tp": 9,
+              "fp": 19,
+              "fn": 1,
+              "precision": 0.32142857142857145,
+              "recall": 0.9,
+              "f1": 0.47368421052631576
+            },
+            "mortgage": {
+              "support": 8,
+              "n_pred": 81,
+              "tp": 2,
+              "fp": 79,
+              "fn": 6,
+              "precision": 0.024691358024691357,
+              "recall": 0.25,
+              "f1": 0.0449438202247191
+            },
+            "debit": {
+              "support": 14,
+              "n_pred": 56,
+              "tp": 3,
+              "fp": 53,
+              "fn": 11,
+              "precision": 0.05357142857142857,
+              "recall": 0.21428571428571427,
+              "f1": 0.08571428571428572
+            },
+            "how": {
+              "support": 10,
+              "n_pred": 42,
+              "tp": 1,
+              "fp": 41,
+              "fn": 9,
+              "precision": 0.023809523809523808,
+              "recall": 0.1,
+              "f1": 0.038461538461538464
+            },
+            "refund": {
+              "support": 10,
+              "n_pred": 86,
+              "tp": 8,
+              "fp": 78,
+              "fn": 2,
+              "precision": 0.09302325581395349,
+              "recall": 0.8,
+              "f1": 0.16666666666666666
+            },
+            "direct_debit": {
+              "support": 12,
+              "n_pred": 253,
+              "tp": 10,
+              "fp": 243,
+              "fn": 2,
+              "precision": 0.039525691699604744,
+              "recall": 0.8333333333333334,
+              "f1": 0.07547169811320754
+            },
+            "lost_stolen": {
+              "support": 10,
+              "n_pred": 5,
+              "tp": 4,
+              "fp": 1,
+              "fn": 6,
+              "precision": 0.8,
+              "recall": 0.4,
+              "f1": 0.5333333333333333
+            },
+            "withdrawal": {
+              "support": 10,
+              "n_pred": 40,
+              "tp": 2,
+              "fp": 38,
+              "fn": 8,
+              "precision": 0.05,
+              "recall": 0.2,
+              "f1": 0.08
+            },
+            "new": {
+              "support": 8,
+              "n_pred": 4,
+              "tp": 3,
+              "fp": 1,
+              "fn": 5,
+              "precision": 0.75,
+              "recall": 0.375,
+              "f1": 0.5
+            },
+            "greet": {
+              "support": 10,
+              "n_pred": 31,
+              "tp": 6,
+              "fp": 25,
+              "fn": 4,
+              "precision": 0.1935483870967742,
+              "recall": 0.6,
+              "f1": 0.2926829268292683
+            },
+            "arrival": {
+              "support": 9,
+              "n_pred": 28,
+              "tp": 1,
+              "fp": 27,
+              "fn": 8,
+              "precision": 0.03571428571428571,
+              "recall": 0.1111111111111111,
+              "f1": 0.05405405405405406
+            },
+            "pin": {
+              "support": 8,
+              "n_pred": 341,
+              "tp": 6,
+              "fp": 335,
+              "fn": 2,
+              "precision": 0.017595307917888565,
+              "recall": 0.75,
+              "f1": 0.034383954154727794
+            },
+            "credit": {
+              "support": 9,
+              "n_pred": 28,
+              "tp": 5,
+              "fp": 23,
+              "fn": 4,
+              "precision": 0.17857142857142858,
+              "recall": 0.5555555555555556,
+              "f1": 0.2702702702702703
+            },
+            "acknowledge": {
+              "support": 7,
+              "n_pred": 8,
+              "tp": 0,
+              "fp": 8,
+              "fn": 7,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "cheque": {
+              "support": 8,
+              "n_pred": 8,
+              "tp": 0,
+              "fp": 8,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "end_call": {
+              "support": 9,
+              "n_pred": 30,
+              "tp": 0,
+              "fp": 30,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "standing_order": {
+              "support": 7,
+              "n_pred": 6,
+              "tp": 1,
+              "fp": 5,
+              "fn": 6,
+              "precision": 0.16666666666666666,
+              "recall": 0.14285714285714285,
+              "f1": 0.15384615384615385
+            },
+            "business": {
+              "support": 5,
+              "n_pred": 204,
+              "tp": 3,
+              "fp": 201,
+              "fn": 2,
+              "precision": 0.014705882352941176,
+              "recall": 0.6,
+              "f1": 0.028708133971291867
+            },
+            "existing": {
+              "support": 4,
+              "n_pred": 22,
+              "tp": 1,
+              "fp": 21,
+              "fn": 3,
+              "precision": 0.045454545454545456,
+              "recall": 0.25,
+              "f1": 0.07692307692307693
+            },
+            "how_long": {
+              "support": 3,
+              "n_pred": 15,
+              "tp": 2,
+              "fp": 13,
+              "fn": 1,
+              "precision": 0.13333333333333333,
+              "recall": 0.6666666666666666,
+              "f1": 0.2222222222222222
+            },
+            "repeat": {
+              "support": 4,
+              "n_pred": 12,
+              "tp": 4,
+              "fp": 8,
+              "fn": 0,
+              "precision": 0.3333333333333333,
+              "recall": 1.0,
+              "f1": 0.5
+            }
+          },
+          "best_tags": {
+            "cancel_close_leave_freeze": 0.6031746031746031,
+            "lost_stolen": 0.5333333333333333,
+            "request_info": 0.5283018867924528,
+            "new": 0.5,
+            "repeat": 0.5
+          },
+          "worst_tags": {
+            "balance": 0.0,
+            "appointment": 0.0,
+            "acknowledge": 0.0,
+            "cheque": 0.0,
+            "end_call": 0.0
+          },
+          "theta": {
+            "global": 0.32,
+            "per_tag": {
+              "transfer_payment_deposit": 0.25,
+              "request_info": 0.05,
+              "wrong_notworking_notshowing": 0.32,
+              "card": 0.09,
+              "make_open_apply_setup_get_activate": 0.75,
+              "account": 0.05,
+              "how_much": 0.19,
+              "affirm": 0.17,
+              "deny": 0.36,
+              "more_higher_after": 0.14,
+              "change": 0.27,
+              "cancel_close_leave_freeze": 0.25,
+              "current": 0.16
+            },
+            "eligible_tags": [
+              "transfer_payment_deposit",
+              "request_info",
+              "wrong_notworking_notshowing",
+              "card",
+              "make_open_apply_setup_get_activate",
+              "account",
+              "how_much",
+              "affirm",
+              "deny",
+              "more_higher_after",
+              "change",
+              "cancel_close_leave_freeze",
+              "current"
+            ],
+            "min_val_positives": 10,
+            "grid": {
+              "start": 0.05,
+              "stop": 0.95,
+              "step": 0.01,
+              "n": 91
+            },
+            "objective": {
+              "global": "val micro-F1",
+              "per_tag": "val per-tag F1"
+            },
+            "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+          },
+          "in_sample": false
+        }
+      }
+    },
+    "raw": {
+      "temperature": 1.0,
+      "rows": {
+        "0.5": {
+          "n": 413,
+          "n_top1": 398,
+          "n_no_intent": 15,
+          "micro_precision": 0.14258095698405027,
+          "micro_recall": 0.31926406926406925,
+          "micro_f1": 0.19712662880053458,
+          "macro_f1": 0.20127246958684933,
+          "n_tags_in_macro": 48,
+          "exact_match": 0.007263922518159807,
+          "top1_hit": 0.2135678391959799,
+          "mean_tags_predicted": 5.009685230024213,
+          "mean_gold_tags": 2.23728813559322,
+          "per_tag": {
+            "transfer_payment_deposit": {
+              "support": 92,
+              "n_pred": 160,
+              "tp": 46,
+              "fp": 114,
+              "fn": 46,
+              "precision": 0.2875,
+              "recall": 0.5,
+              "f1": 0.36507936507936506
+            },
+            "request_info": {
+              "support": 88,
+              "n_pred": 39,
+              "tp": 21,
+              "fp": 18,
+              "fn": 67,
+              "precision": 0.5384615384615384,
+              "recall": 0.23863636363636365,
+              "f1": 0.33070866141732286
+            },
+            "wrong_notworking_notshowing": {
+              "support": 80,
+              "n_pred": 19,
+              "tp": 14,
+              "fp": 5,
+              "fn": 66,
+              "precision": 0.7368421052631579,
+              "recall": 0.175,
+              "f1": 0.2828282828282828
+            },
+            "card": {
+              "support": 51,
+              "n_pred": 24,
+              "tp": 2,
+              "fp": 22,
+              "fn": 49,
+              "precision": 0.08333333333333333,
+              "recall": 0.0392156862745098,
+              "f1": 0.05333333333333334
+            },
+            "make_open_apply_setup_get_activate": {
+              "support": 45,
+              "n_pred": 163,
+              "tp": 33,
+              "fp": 130,
+              "fn": 12,
+              "precision": 0.20245398773006135,
+              "recall": 0.7333333333333333,
+              "f1": 0.3173076923076923
+            },
+            "account": {
+              "support": 51,
+              "n_pred": 37,
+              "tp": 4,
+              "fp": 33,
+              "fn": 47,
+              "precision": 0.10810810810810811,
+              "recall": 0.0784313725490196,
+              "f1": 0.09090909090909091
+            },
+            "how_much": {
+              "support": 26,
+              "n_pred": 21,
+              "tp": 8,
+              "fp": 13,
+              "fn": 18,
+              "precision": 0.38095238095238093,
+              "recall": 0.3076923076923077,
+              "f1": 0.3404255319148936
+            },
+            "affirm": {
+              "support": 20,
+              "n_pred": 8,
+              "tp": 2,
+              "fp": 6,
+              "fn": 18,
+              "precision": 0.25,
+              "recall": 0.1,
+              "f1": 0.14285714285714285
+            },
+            "deny": {
+              "support": 23,
+              "n_pred": 32,
+              "tp": 10,
+              "fp": 22,
+              "fn": 13,
+              "precision": 0.3125,
+              "recall": 0.43478260869565216,
+              "f1": 0.36363636363636365
+            },
+            "more_higher_after": {
+              "support": 21,
+              "n_pred": 7,
+              "tp": 2,
+              "fp": 5,
+              "fn": 19,
+              "precision": 0.2857142857142857,
+              "recall": 0.09523809523809523,
+              "f1": 0.14285714285714285
+            },
+            "change": {
+              "support": 19,
+              "n_pred": 21,
+              "tp": 12,
+              "fp": 9,
+              "fn": 7,
+              "precision": 0.5714285714285714,
+              "recall": 0.631578947368421,
+              "f1": 0.6
+            },
+            "cancel_close_leave_freeze": {
+              "support": 26,
+              "n_pred": 25,
+              "tp": 16,
+              "fp": 9,
+              "fn": 10,
+              "precision": 0.64,
+              "recall": 0.6153846153846154,
+              "f1": 0.6274509803921569
+            },
+            "fees_interests": {
+              "support": 21,
+              "n_pred": 13,
+              "tp": 2,
+              "fp": 11,
+              "fn": 19,
+              "precision": 0.15384615384615385,
+              "recall": 0.09523809523809523,
+              "f1": 0.11764705882352941
+            },
+            "international": {
+              "support": 16,
+              "n_pred": 4,
+              "tp": 3,
+              "fp": 1,
+              "fn": 13,
+              "precision": 0.75,
+              "recall": 0.1875,
+              "f1": 0.3
+            },
+            "limits": {
+              "support": 16,
+              "n_pred": 25,
+              "tp": 9,
+              "fp": 16,
+              "fn": 7,
+              "precision": 0.36,
+              "recall": 0.5625,
+              "f1": 0.43902439024390244
+            },
+            "less_lower_before": {
+              "support": 15,
+              "n_pred": 4,
+              "tp": 0,
+              "fp": 4,
+              "fn": 15,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "balance": {
+              "support": 12,
+              "n_pred": 6,
+              "tp": 0,
+              "fp": 6,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "dont_know": {
+              "support": 11,
+              "n_pred": 4,
+              "tp": 2,
+              "fp": 2,
+              "fn": 9,
+              "precision": 0.5,
+              "recall": 0.18181818181818182,
+              "f1": 0.26666666666666666
+            },
+            "current": {
+              "support": 13,
+              "n_pred": 37,
+              "tp": 0,
+              "fp": 37,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "overdraft": {
+              "support": 13,
+              "n_pred": 14,
+              "tp": 0,
+              "fp": 14,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "savings": {
+              "support": 13,
+              "n_pred": 128,
+              "tp": 6,
+              "fp": 122,
+              "fn": 7,
+              "precision": 0.046875,
+              "recall": 0.46153846153846156,
+              "f1": 0.0851063829787234
+            },
+            "loan": {
+              "support": 11,
+              "n_pred": 42,
+              "tp": 3,
+              "fp": 39,
+              "fn": 8,
+              "precision": 0.07142857142857142,
+              "recall": 0.2727272727272727,
+              "f1": 0.11320754716981132
+            },
+            "why": {
+              "support": 14,
+              "n_pred": 37,
+              "tp": 10,
+              "fp": 27,
+              "fn": 4,
+              "precision": 0.2702702702702703,
+              "recall": 0.7142857142857143,
+              "f1": 0.39215686274509803
+            },
+            "when": {
+              "support": 12,
+              "n_pred": 34,
+              "tp": 12,
+              "fp": 22,
+              "fn": 0,
+              "precision": 0.35294117647058826,
+              "recall": 1.0,
+              "f1": 0.5217391304347826
+            },
+            "appointment": {
+              "support": 13,
+              "n_pred": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "handoff": {
+              "support": 14,
+              "n_pred": 69,
+              "tp": 13,
+              "fp": 56,
+              "fn": 1,
+              "precision": 0.18840579710144928,
+              "recall": 0.9285714285714286,
+              "f1": 0.3132530120481928
+            },
+            "contactless": {
+              "support": 13,
+              "n_pred": 101,
+              "tp": 11,
+              "fp": 90,
+              "fn": 2,
+              "precision": 0.10891089108910891,
+              "recall": 0.8461538461538461,
+              "f1": 0.19298245614035087
+            },
+            "thank": {
+              "support": 10,
+              "n_pred": 21,
+              "tp": 8,
+              "fp": 13,
+              "fn": 2,
+              "precision": 0.38095238095238093,
+              "recall": 0.8,
+              "f1": 0.5161290322580645
+            },
+            "mortgage": {
+              "support": 8,
+              "n_pred": 53,
+              "tp": 1,
+              "fp": 52,
+              "fn": 7,
+              "precision": 0.018867924528301886,
+              "recall": 0.125,
+              "f1": 0.03278688524590164
+            },
+            "debit": {
+              "support": 14,
+              "n_pred": 39,
+              "tp": 2,
+              "fp": 37,
+              "fn": 12,
+              "precision": 0.05128205128205128,
+              "recall": 0.14285714285714285,
+              "f1": 0.07547169811320754
+            },
+            "how": {
+              "support": 10,
+              "n_pred": 18,
+              "tp": 0,
+              "fp": 18,
+              "fn": 10,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "refund": {
+              "support": 10,
+              "n_pred": 60,
+              "tp": 7,
+              "fp": 53,
+              "fn": 3,
+              "precision": 0.11666666666666667,
+              "recall": 0.7,
+              "f1": 0.2
+            },
+            "direct_debit": {
+              "support": 12,
+              "n_pred": 192,
+              "tp": 10,
+              "fp": 182,
+              "fn": 2,
+              "precision": 0.052083333333333336,
+              "recall": 0.8333333333333334,
+              "f1": 0.09803921568627451
+            },
+            "lost_stolen": {
+              "support": 10,
+              "n_pred": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 8,
+              "precision": 1.0,
+              "recall": 0.2,
+              "f1": 0.3333333333333333
+            },
+            "withdrawal": {
+              "support": 10,
+              "n_pred": 27,
+              "tp": 2,
+              "fp": 25,
+              "fn": 8,
+              "precision": 0.07407407407407407,
+              "recall": 0.2,
+              "f1": 0.10810810810810811
+            },
+            "new": {
+              "support": 8,
+              "n_pred": 2,
+              "tp": 1,
+              "fp": 1,
+              "fn": 7,
+              "precision": 0.5,
+              "recall": 0.125,
+              "f1": 0.2
+            },
+            "greet": {
+              "support": 10,
+              "n_pred": 22,
+              "tp": 4,
+              "fp": 18,
+              "fn": 6,
+              "precision": 0.18181818181818182,
+              "recall": 0.4,
+              "f1": 0.25
+            },
+            "arrival": {
+              "support": 9,
+              "n_pred": 14,
+              "tp": 0,
+              "fp": 14,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "pin": {
+              "support": 8,
+              "n_pred": 313,
+              "tp": 5,
+              "fp": 308,
+              "fn": 3,
+              "precision": 0.01597444089456869,
+              "recall": 0.625,
+              "f1": 0.03115264797507788
+            },
+            "credit": {
+              "support": 9,
+              "n_pred": 19,
+              "tp": 3,
+              "fp": 16,
+              "fn": 6,
+              "precision": 0.15789473684210525,
+              "recall": 0.3333333333333333,
+              "f1": 0.21428571428571427
+            },
+            "acknowledge": {
+              "support": 7,
+              "n_pred": 3,
+              "tp": 0,
+              "fp": 3,
+              "fn": 7,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "cheque": {
+              "support": 8,
+              "n_pred": 3,
+              "tp": 0,
+              "fp": 3,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "end_call": {
+              "support": 9,
+              "n_pred": 16,
+              "tp": 0,
+              "fp": 16,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "standing_order": {
+              "support": 7,
+              "n_pred": 5,
+              "tp": 1,
+              "fp": 4,
+              "fn": 6,
+              "precision": 0.2,
+              "recall": 0.14285714285714285,
+              "f1": 0.16666666666666666
+            },
+            "business": {
+              "support": 5,
+              "n_pred": 162,
+              "tp": 3,
+              "fp": 159,
+              "fn": 2,
+              "precision": 0.018518518518518517,
+              "recall": 0.6,
+              "f1": 0.03592814371257485
+            },
+            "existing": {
+              "support": 4,
+              "n_pred": 11,
+              "tp": 0,
+              "fp": 11,
+              "fn": 4,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "how_long": {
+              "support": 3,
+              "n_pred": 7,
+              "tp": 2,
+              "fp": 5,
+              "fn": 1,
+              "precision": 0.2857142857142857,
+              "recall": 0.6666666666666666,
+              "f1": 0.4
+            },
+            "repeat": {
+              "support": 4,
+              "n_pred": 6,
+              "tp": 3,
+              "fp": 3,
+              "fn": 1,
+              "precision": 0.5,
+              "recall": 0.75,
+              "f1": 0.6
+            }
+          },
+          "best_tags": {
+            "cancel_close_leave_freeze": 0.6274509803921569,
+            "change": 0.6,
+            "repeat": 0.6,
+            "when": 0.5217391304347826,
+            "thank": 0.5161290322580645
+          },
+          "worst_tags": {
+            "less_lower_before": 0.0,
+            "balance": 0.0,
+            "current": 0.0,
+            "overdraft": 0.0,
+            "appointment": 0.0
+          }
+        },
+        "val_selected": {
+          "n": 413,
+          "n_top1": 398,
+          "n_no_intent": 15,
+          "micro_precision": 0.13403763618355893,
+          "micro_recall": 0.4393939393939394,
+          "micro_f1": 0.2054136099165191,
+          "macro_f1": 0.21571227455879274,
+          "n_tags_in_macro": 48,
+          "exact_match": 0.007263922518159807,
+          "top1_hit": 0.2135678391959799,
+          "mean_tags_predicted": 7.3341404358353515,
+          "mean_gold_tags": 2.23728813559322,
+          "per_tag": {
+            "transfer_payment_deposit": {
+              "support": 92,
+              "n_pred": 224,
+              "tp": 54,
+              "fp": 170,
+              "fn": 38,
+              "precision": 0.24107142857142858,
+              "recall": 0.5869565217391305,
+              "f1": 0.34177215189873417
+            },
+            "request_info": {
+              "support": 88,
+              "n_pred": 124,
+              "tp": 56,
+              "fp": 68,
+              "fn": 32,
+              "precision": 0.45161290322580644,
+              "recall": 0.6363636363636364,
+              "f1": 0.5283018867924528
+            },
+            "wrong_notworking_notshowing": {
+              "support": 80,
+              "n_pred": 33,
+              "tp": 24,
+              "fp": 9,
+              "fn": 56,
+              "precision": 0.7272727272727273,
+              "recall": 0.3,
+              "f1": 0.4247787610619469
+            },
+            "card": {
+              "support": 51,
+              "n_pred": 66,
+              "tp": 8,
+              "fp": 58,
+              "fn": 43,
+              "precision": 0.12121212121212122,
+              "recall": 0.1568627450980392,
+              "f1": 0.13675213675213677
+            },
+            "make_open_apply_setup_get_activate": {
+              "support": 45,
+              "n_pred": 86,
+              "tp": 21,
+              "fp": 65,
+              "fn": 24,
+              "precision": 0.2441860465116279,
+              "recall": 0.4666666666666667,
+              "f1": 0.32061068702290074
+            },
+            "account": {
+              "support": 51,
+              "n_pred": 132,
+              "tp": 16,
+              "fp": 116,
+              "fn": 35,
+              "precision": 0.12121212121212122,
+              "recall": 0.3137254901960784,
+              "f1": 0.17486338797814208
+            },
+            "how_much": {
+              "support": 26,
+              "n_pred": 53,
+              "tp": 15,
+              "fp": 38,
+              "fn": 11,
+              "precision": 0.2830188679245283,
+              "recall": 0.5769230769230769,
+              "f1": 0.379746835443038
+            },
+            "affirm": {
+              "support": 20,
+              "n_pred": 53,
+              "tp": 9,
+              "fp": 44,
+              "fn": 11,
+              "precision": 0.16981132075471697,
+              "recall": 0.45,
+              "f1": 0.2465753424657534
+            },
+            "deny": {
+              "support": 23,
+              "n_pred": 41,
+              "tp": 12,
+              "fp": 29,
+              "fn": 11,
+              "precision": 0.2926829268292683,
+              "recall": 0.5217391304347826,
+              "f1": 0.375
+            },
+            "more_higher_after": {
+              "support": 21,
+              "n_pred": 26,
+              "tp": 6,
+              "fp": 20,
+              "fn": 15,
+              "precision": 0.23076923076923078,
+              "recall": 0.2857142857142857,
+              "f1": 0.2553191489361702
+            },
+            "change": {
+              "support": 19,
+              "n_pred": 36,
+              "tp": 13,
+              "fp": 23,
+              "fn": 6,
+              "precision": 0.3611111111111111,
+              "recall": 0.6842105263157895,
+              "f1": 0.4727272727272727
+            },
+            "cancel_close_leave_freeze": {
+              "support": 26,
+              "n_pred": 37,
+              "tp": 19,
+              "fp": 18,
+              "fn": 7,
+              "precision": 0.5135135135135135,
+              "recall": 0.7307692307692307,
+              "f1": 0.6031746031746031
+            },
+            "fees_interests": {
+              "support": 21,
+              "n_pred": 23,
+              "tp": 4,
+              "fp": 19,
+              "fn": 17,
+              "precision": 0.17391304347826086,
+              "recall": 0.19047619047619047,
+              "f1": 0.18181818181818182
+            },
+            "international": {
+              "support": 16,
+              "n_pred": 6,
+              "tp": 3,
+              "fp": 3,
+              "fn": 13,
+              "precision": 0.5,
+              "recall": 0.1875,
+              "f1": 0.2727272727272727
+            },
+            "limits": {
+              "support": 16,
+              "n_pred": 34,
+              "tp": 9,
+              "fp": 25,
+              "fn": 7,
+              "precision": 0.2647058823529412,
+              "recall": 0.5625,
+              "f1": 0.36
+            },
+            "less_lower_before": {
+              "support": 15,
+              "n_pred": 8,
+              "tp": 1,
+              "fp": 7,
+              "fn": 14,
+              "precision": 0.125,
+              "recall": 0.06666666666666667,
+              "f1": 0.08695652173913043
+            },
+            "balance": {
+              "support": 12,
+              "n_pred": 17,
+              "tp": 0,
+              "fp": 17,
+              "fn": 12,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "dont_know": {
+              "support": 11,
+              "n_pred": 20,
+              "tp": 3,
+              "fp": 17,
+              "fn": 8,
+              "precision": 0.15,
+              "recall": 0.2727272727272727,
+              "f1": 0.1935483870967742
+            },
+            "current": {
+              "support": 13,
+              "n_pred": 73,
+              "tp": 1,
+              "fp": 72,
+              "fn": 12,
+              "precision": 0.0136986301369863,
+              "recall": 0.07692307692307693,
+              "f1": 0.023255813953488372
+            },
+            "overdraft": {
+              "support": 13,
+              "n_pred": 19,
+              "tp": 1,
+              "fp": 18,
+              "fn": 12,
+              "precision": 0.05263157894736842,
+              "recall": 0.07692307692307693,
+              "f1": 0.0625
+            },
+            "savings": {
+              "support": 13,
+              "n_pred": 190,
+              "tp": 7,
+              "fp": 183,
+              "fn": 6,
+              "precision": 0.03684210526315789,
+              "recall": 0.5384615384615384,
+              "f1": 0.06896551724137931
+            },
+            "loan": {
+              "support": 11,
+              "n_pred": 57,
+              "tp": 3,
+              "fp": 54,
+              "fn": 8,
+              "precision": 0.05263157894736842,
+              "recall": 0.2727272727272727,
+              "f1": 0.08823529411764706
+            },
+            "why": {
+              "support": 14,
+              "n_pred": 63,
+              "tp": 12,
+              "fp": 51,
+              "fn": 2,
+              "precision": 0.19047619047619047,
+              "recall": 0.8571428571428571,
+              "f1": 0.3116883116883117
+            },
+            "when": {
+              "support": 12,
+              "n_pred": 49,
+              "tp": 12,
+              "fp": 37,
+              "fn": 0,
+              "precision": 0.24489795918367346,
+              "recall": 1.0,
+              "f1": 0.39344262295081966
+            },
+            "appointment": {
+              "support": 13,
+              "n_pred": 3,
+              "tp": 0,
+              "fp": 3,
+              "fn": 13,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "handoff": {
+              "support": 14,
+              "n_pred": 96,
+              "tp": 14,
+              "fp": 82,
+              "fn": 0,
+              "precision": 0.14583333333333334,
+              "recall": 1.0,
+              "f1": 0.2545454545454545
+            },
+            "contactless": {
+              "support": 13,
+              "n_pred": 132,
+              "tp": 12,
+              "fp": 120,
+              "fn": 1,
+              "precision": 0.09090909090909091,
+              "recall": 0.9230769230769231,
+              "f1": 0.16551724137931034
+            },
+            "thank": {
+              "support": 10,
+              "n_pred": 28,
+              "tp": 9,
+              "fp": 19,
+              "fn": 1,
+              "precision": 0.32142857142857145,
+              "recall": 0.9,
+              "f1": 0.47368421052631576
+            },
+            "mortgage": {
+              "support": 8,
+              "n_pred": 81,
+              "tp": 2,
+              "fp": 79,
+              "fn": 6,
+              "precision": 0.024691358024691357,
+              "recall": 0.25,
+              "f1": 0.0449438202247191
+            },
+            "debit": {
+              "support": 14,
+              "n_pred": 56,
+              "tp": 3,
+              "fp": 53,
+              "fn": 11,
+              "precision": 0.05357142857142857,
+              "recall": 0.21428571428571427,
+              "f1": 0.08571428571428572
+            },
+            "how": {
+              "support": 10,
+              "n_pred": 42,
+              "tp": 1,
+              "fp": 41,
+              "fn": 9,
+              "precision": 0.023809523809523808,
+              "recall": 0.1,
+              "f1": 0.038461538461538464
+            },
+            "refund": {
+              "support": 10,
+              "n_pred": 86,
+              "tp": 8,
+              "fp": 78,
+              "fn": 2,
+              "precision": 0.09302325581395349,
+              "recall": 0.8,
+              "f1": 0.16666666666666666
+            },
+            "direct_debit": {
+              "support": 12,
+              "n_pred": 253,
+              "tp": 10,
+              "fp": 243,
+              "fn": 2,
+              "precision": 0.039525691699604744,
+              "recall": 0.8333333333333334,
+              "f1": 0.07547169811320754
+            },
+            "lost_stolen": {
+              "support": 10,
+              "n_pred": 5,
+              "tp": 4,
+              "fp": 1,
+              "fn": 6,
+              "precision": 0.8,
+              "recall": 0.4,
+              "f1": 0.5333333333333333
+            },
+            "withdrawal": {
+              "support": 10,
+              "n_pred": 40,
+              "tp": 2,
+              "fp": 38,
+              "fn": 8,
+              "precision": 0.05,
+              "recall": 0.2,
+              "f1": 0.08
+            },
+            "new": {
+              "support": 8,
+              "n_pred": 4,
+              "tp": 3,
+              "fp": 1,
+              "fn": 5,
+              "precision": 0.75,
+              "recall": 0.375,
+              "f1": 0.5
+            },
+            "greet": {
+              "support": 10,
+              "n_pred": 31,
+              "tp": 6,
+              "fp": 25,
+              "fn": 4,
+              "precision": 0.1935483870967742,
+              "recall": 0.6,
+              "f1": 0.2926829268292683
+            },
+            "arrival": {
+              "support": 9,
+              "n_pred": 28,
+              "tp": 1,
+              "fp": 27,
+              "fn": 8,
+              "precision": 0.03571428571428571,
+              "recall": 0.1111111111111111,
+              "f1": 0.05405405405405406
+            },
+            "pin": {
+              "support": 8,
+              "n_pred": 341,
+              "tp": 6,
+              "fp": 335,
+              "fn": 2,
+              "precision": 0.017595307917888565,
+              "recall": 0.75,
+              "f1": 0.034383954154727794
+            },
+            "credit": {
+              "support": 9,
+              "n_pred": 28,
+              "tp": 5,
+              "fp": 23,
+              "fn": 4,
+              "precision": 0.17857142857142858,
+              "recall": 0.5555555555555556,
+              "f1": 0.2702702702702703
+            },
+            "acknowledge": {
+              "support": 7,
+              "n_pred": 8,
+              "tp": 0,
+              "fp": 8,
+              "fn": 7,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "cheque": {
+              "support": 8,
+              "n_pred": 8,
+              "tp": 0,
+              "fp": 8,
+              "fn": 8,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "end_call": {
+              "support": 9,
+              "n_pred": 30,
+              "tp": 0,
+              "fp": 30,
+              "fn": 9,
+              "precision": 0.0,
+              "recall": 0.0,
+              "f1": 0.0
+            },
+            "standing_order": {
+              "support": 7,
+              "n_pred": 6,
+              "tp": 1,
+              "fp": 5,
+              "fn": 6,
+              "precision": 0.16666666666666666,
+              "recall": 0.14285714285714285,
+              "f1": 0.15384615384615385
+            },
+            "business": {
+              "support": 5,
+              "n_pred": 204,
+              "tp": 3,
+              "fp": 201,
+              "fn": 2,
+              "precision": 0.014705882352941176,
+              "recall": 0.6,
+              "f1": 0.028708133971291867
+            },
+            "existing": {
+              "support": 4,
+              "n_pred": 22,
+              "tp": 1,
+              "fp": 21,
+              "fn": 3,
+              "precision": 0.045454545454545456,
+              "recall": 0.25,
+              "f1": 0.07692307692307693
+            },
+            "how_long": {
+              "support": 3,
+              "n_pred": 15,
+              "tp": 2,
+              "fp": 13,
+              "fn": 1,
+              "precision": 0.13333333333333333,
+              "recall": 0.6666666666666666,
+              "f1": 0.2222222222222222
+            },
+            "repeat": {
+              "support": 4,
+              "n_pred": 12,
+              "tp": 4,
+              "fp": 8,
+              "fn": 0,
+              "precision": 0.3333333333333333,
+              "recall": 1.0,
+              "f1": 0.5
+            }
+          },
+          "best_tags": {
+            "cancel_close_leave_freeze": 0.6031746031746031,
+            "lost_stolen": 0.5333333333333333,
+            "request_info": 0.5283018867924528,
+            "new": 0.5,
+            "repeat": 0.5
+          },
+          "worst_tags": {
+            "balance": 0.0,
+            "appointment": 0.0,
+            "acknowledge": 0.0,
+            "cheque": 0.0,
+            "end_call": 0.0
+          },
+          "theta": {
+            "global": 0.32,
+            "per_tag": {
+              "transfer_payment_deposit": 0.25,
+              "request_info": 0.05,
+              "wrong_notworking_notshowing": 0.32,
+              "card": 0.09,
+              "make_open_apply_setup_get_activate": 0.75,
+              "account": 0.05,
+              "how_much": 0.19,
+              "affirm": 0.17,
+              "deny": 0.36,
+              "more_higher_after": 0.14,
+              "change": 0.27,
+              "cancel_close_leave_freeze": 0.25,
+              "current": 0.16
+            },
+            "eligible_tags": [
+              "transfer_payment_deposit",
+              "request_info",
+              "wrong_notworking_notshowing",
+              "card",
+              "make_open_apply_setup_get_activate",
+              "account",
+              "how_much",
+              "affirm",
+              "deny",
+              "more_higher_after",
+              "change",
+              "cancel_close_leave_freeze",
+              "current"
+            ],
+            "min_val_positives": 10,
+            "grid": {
+              "start": 0.05,
+              "stop": 0.95,
+              "step": 0.01,
+              "n": 91
+            },
+            "objective": {
+              "global": "val micro-F1",
+              "per_tag": "val per-tag F1"
+            },
+            "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+          },
+          "in_sample": false
+        }
+      }
+    }
+  }
+}
