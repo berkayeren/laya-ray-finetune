@@ -59,6 +59,7 @@ import importlib.metadata
 import json
 import os
 import platform
+import shlex
 import shutil
 import signal
 import subprocess
@@ -697,7 +698,7 @@ def main(argv=None):
             if a.keep_run and runs.resume_oom(attempts[-1].get("line")) and ctx["cmds"]:
                 # console only: the command holds local paths, which never enter the report (IN-06)
                 print("every epoch of run %s is saved under %s; to resume it (recalibrate and save): %s"
-                      % (rid, storage, " ".join(ctx["cmds"][-1])), flush=True)
+                      % (rid, storage, shlex.join(ctx["cmds"][-1])), flush=True)   # quoted: paths may hold spaces
             raise SystemExit("probe %s after %d attempt(s) (last rung %s); report -> %s; logs kept in %s. Last %d "
                              "lines of %s:\n%s" % (status, len(attempts), attempts[-1]["rung"], md, tmp, TAIL_LINES,
                                                    ctx["logs"][-1], tail(ctx["logs"][-1])))

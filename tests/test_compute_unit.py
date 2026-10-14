@@ -588,6 +588,47 @@ def test_probe_storage_is_dropped_when_a_step_after_the_chain_raises(tmp_path, m
     assert not (storage / "laya-x").exists() and not os.path.exists(seen["tmp"])
 
 
+def test_keep_run_prints_a_resume_command_that_survives_spaces(tmp_path, monkeypatch, capsys):
+    """04-REVIEW IN-02: after an out-of-memory exit past the last epoch, --keep-run prints the probe's ray_train.py
+    command for copy-paste; it is shell-quoted, so a path with a space splits back into the same argv."""
+    import shlex
+    import compute_checkpoint as cc
+    from pilot import runs
+    base, storage = tmp_path / "base dir", tmp_path / "ray storage"
+    base.mkdir()
+    (base / "rl_agent_config.json").write_text("{}", encoding="utf-8")
+    (base / "model.safetensors").write_bytes(b"x")
+    monkeypatch.setattr(cc, "preflight", lambda g: {"passed": True})
+    monkeypatch.setattr(cc, "verify_split_file", lambda *a, **k: {"path": "p", "sha256": "0" * 64, "n_messages": 1})
+    monkeypatch.setattr(cc.compute, "spike_start", lambda p: {"micro_batch": 8, "max_len": 128, "grad_accum": 4,
+                                                                "rung": "none", "fallback": 0})
+    monkeypatch.setattr(cc.la, "check_version", lambda: None)
+    monkeypatch.setattr(cc, "identity", lambda b: {"model_sha256": "0" * 64})
+    monkeypatch.setattr(cc, "disk_preflight", lambda *a: None)
+    monkeypatch.setattr(cc, "build_meta", lambda *a: {})
+    monkeypatch.setattr(cc.compute, "build_report", lambda *a, **k: {})
+    monkeypatch.setattr(cc.compute, "write_report", lambda out, report: os.path.join(out, "compute_checkpoint.md"))
+    cmd = [sys.executable, "ray_train.py", "--base", str(base), "--storage", str(storage), "--out", "o"]
+
+    def launch(rung, ctx):
+        log = os.path.join(ctx["tmp"], "attempt-0.log")
+        with open(log, "w", encoding="utf-8") as f:
+            f.write("probe log\n")
+        ctx["rids"].append("laya-x")
+        ctx["cmds"].append(cmd)
+        ctx["logs"].append(log)
+        return {"run_id": "laya-x", "status": "failed",
+                "line": runs.oom_message(2, 0, "none", stage=runs.STAGE_FINAL_SAVE)}
+
+    monkeypatch.setattr(cc, "launch_rung", launch)
+    with pytest.raises(SystemExit, match="probe failed"):
+        cc.main(["--base", str(base), "--storage", str(storage), "--no-berturk", "--no-score-probe", "--keep-run",
+                 "--min-available-gib", "0", "--out", str(tmp_path / "out")])
+    out = capsys.readouterr().out
+    printed = out.split("to resume it (recalibrate and save): ", 1)[1].splitlines()[0]
+    assert shlex.split(printed) == cmd and printed == shlex.join(cmd)
+
+
 def test_protocol_complete_pins_the_timing_basis():
     """04-REVIEW WR-07: --cpus (the torch thread count s/step depends on), --epochs and --seed are part of the protocol;
     a run off compute.PROTOCOL is a SMOKE RUN."""
