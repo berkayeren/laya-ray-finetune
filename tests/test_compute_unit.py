@@ -552,3 +552,19 @@ def test_probe_storage_is_dropped_when_a_step_after_the_chain_raises(tmp_path, m
         cc.main(["--base", str(base), "--storage", str(storage), "--no-berturk", "--no-score-probe",
                  "--min-available-gib", "0", "--out", str(tmp_path / "out")])
     assert not (storage / "laya-x").exists() and not os.path.exists(seen["tmp"])
+
+
+def test_protocol_complete_pins_the_timing_basis():
+    """04-REVIEW WR-07: --cpus (the torch thread count s/step depends on), --epochs and --seed are part of the protocol;
+    a run off compute.PROTOCOL is a SMOKE RUN."""
+    import argparse
+    import compute_checkpoint as cc
+    from pilot.data import DEFAULT_MANIFEST
+    start = dict(compute.spike_start(SPIKE_REPORT))
+    real = dict(device="mps", base="multilingual", data=cc.DEFAULT_DATA, manifest=DEFAULT_MANIFEST, max_messages=None,
+                calib_frac=None, interrupt="kill", berturk=True, berturk_source="pinned", **compute.PROTOCOL)
+    assert cc.protocol_complete(argparse.Namespace(**real), start) is True
+    for k, v in (("cpus", 1), ("cpus", 10), ("epochs", 3), ("seed", 1)):
+        assert cc.protocol_complete(argparse.Namespace(**dict(real, **{k: v})), start) is False, (k, v)
+    md = compute.render_markdown(full_report(protocol_complete=False))
+    assert "--cpus, --epochs or --seed other than cpus 4, epochs 2, seed 0" in md

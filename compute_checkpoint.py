@@ -34,9 +34,10 @@ metric). Both replace the estimates in the projection (basis measured); a probe 
 estimate and the report says why. --no-berturk / --no-score-probe skip them.
 
 A run off the protocol (not mps, not the pinned weights, not the committed selection_train under the committed
-manifest, a start config other than the spike's at rung none, an interrupt other than kill, BERTurk weights other than
-the pinned ones, or a test hook) is bannered SMOKE RUN with
-meta.protocol.protocol_complete false; a busy-machine preflight is bannered too. Neither is a compute checkpoint.
+manifest, a start config other than the spike's at rung none, --cpus, --epochs or --seed other than compute.PROTOCOL
+(4, 2, 0), an interrupt other than kill, BERTurk weights other than the pinned ones, or a test hook) is bannered SMOKE
+RUN with meta.protocol.protocol_complete false; a busy-machine preflight is bannered too. Neither is a compute
+checkpoint.
 
 Run it on AC power, after quitting heavy apps, under `caffeinate -i` (the machine must not sleep mid-epoch).
 
@@ -152,9 +153,11 @@ def last_line(path):
 
 def protocol_complete(a, start):
     """True only for the real compute checkpoint: mps, the pinned weights, the committed selection_train under the
-    committed manifest, no test hook (--max-messages, --calib-frac, --interrupt fail), a kill-and-resume probe, and the
-    spike's start config at rung none."""
+    committed manifest, no test hook (--max-messages, --calib-frac, --interrupt fail), a kill-and-resume probe, the
+    spike's start config at rung none, and the timing basis compute.PROTOCOL (--cpus 4, the spike's thread count;
+    --epochs 2; --seed 0)."""
     return (a.device == "mps" and a.base == "multilingual"
+            and {"cpus": a.cpus, "epochs": a.epochs, "seed": a.seed} == compute.PROTOCOL
             and os.path.realpath(a.data) == os.path.realpath(DEFAULT_DATA) and manifest_is_committed(a.manifest)
             and a.max_messages is None and a.calib_frac is None and a.interrupt == "kill"
             and (not a.berturk or a.berturk_source == "pinned")

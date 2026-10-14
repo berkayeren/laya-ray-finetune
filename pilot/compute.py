@@ -35,6 +35,9 @@ from pilot.data import REPO_ROOT, SPLITS, parse_jsonl, repo_relpath, verify_spli
 
 SCHEMA = "compute_checkpoint/1"
 JSON_NAME, MD_NAME = "compute_checkpoint.json", "compute_checkpoint.md"
+# the probe's timing basis: --cpus (worker CPUs and torch threads, the spike's 4), a 2-epoch probe, seed 0; a run with
+# other values is off the protocol (compute_checkpoint.protocol_complete), since s/step depends on the thread count
+PROTOCOL = {"cpus": 4, "epochs": 2, "seed": 0}
 
 # The experiment matrix the projection covers. Every value is provisional (RESEARCH A2) until Phases 5, 6 and 8 freeze
 # it; the user confirms or trims them at the compute checkpoint (plan 04-08).
@@ -662,8 +665,9 @@ def render_markdown(report):
     lines = ["# Compute checkpoint (Phase 4, LAYA-07)", ""]
     if not meta["protocol"]["protocol_complete"]:
         lines += ["**SMOKE RUN: not a compute checkpoint.** The run left the protocol (not mps, not the pinned "
-                  "weights, not the committed selection_train, a start config other than the spike's, or a test "
-                  "hook); its numbers must not be used for the approval.", ""]
+                  "weights, not the committed selection_train, a start config other than the spike's, --cpus, "
+                  "--epochs or --seed other than %s, or a test hook); its numbers must not be used for the approval."
+                  % ", ".join("%s %s" % kv for kv in sorted(PROTOCOL.items())), ""]
     if report.get("status", "ok") != "ok":
         lines += ["**No measurement (status %s):** see Attempts; there is no projection to approve."
                   % report["status"], ""]

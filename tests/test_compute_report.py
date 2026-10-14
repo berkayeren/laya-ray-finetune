@@ -36,6 +36,8 @@ def test_is_the_complete_protocol_run(report):
     assert report["meta"]["protocol"]["protocol_complete"] is True
     assert report["status"] == "ok"
     assert report["meta"]["protocol"]["device"] == "mps"
+    proto = report["meta"]["protocol"]
+    assert {k: proto[k] for k in compute.PROTOCOL} == compute.PROTOCOL       # the timing basis (04-REVIEW WR-07)
 
 
 def test_laya_run_config(report):
