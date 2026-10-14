@@ -75,6 +75,11 @@ def test_compute_checkpoint_on_cpu(tmp_path):
     assert lines["berturk_selection"]["s_per_unit"] == berturk["s_per_step"]
     assert lines["laya_val_scoring"]["s_per_unit"] == scoring["s_per_msg"]
     assert "scoring probe" in lines["laya_val_scoring"]["source"]
+    # per-epoch persist inside save_s, a per-score.py-run overhead from the scoring probe (04-REVIEW IN-02)
+    assert report["measured"]["laya"]["save_s_includes_persist"] is True
+    assert scoring["wall_s"] > scoring["run_overhead_s"] > 0
+    assert "score.py runs x" in lines["laya_val_scoring"]["formula"]
+    assert not any("before Ray persists" in x or "score.py run's own overhead" in x for x in report["assumptions"])
     assert sorted(report["counts"]) == sorted(["selection_train", "val", "final_train", "test", "hotels_probe"])
     assert len(report["what_if"]) == 10 and report["disk"]["model_bytes"] > 0 and report["assumptions"]
     with open(out / "compute_checkpoint.md", encoding="utf-8") as f:

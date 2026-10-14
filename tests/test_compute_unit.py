@@ -646,6 +646,38 @@ def test_run_overhead_enters_every_laya_run():
         toy_meta(), with_, TOY_COUNTS, TOY_MATRIX, p1, toy_preflight()))
 
 
+def test_per_epoch_persist_and_scoring_overhead_are_charged_where_they_occur():
+    """04-REVIEW IN-02: Ray's persist of each epoch checkpoint is inside save_s (charged per epoch) when the record says
+    so, else disclosed; a score.py run's own overhead (the scoring probe's wall clock minus its inference seconds) is
+    added once per Laya scoring run, else disclosed. A report without either keeps its numbers."""
+    assert compute.laya_training_epochs(TOY_MATRIX) == 96 and compute.laya_scoring_runs(TOY_MATRIX) == 27
+    old = toy_measured()
+    a = compute.assumptions(TOY_MATRIX, old, TOY_COUNTS)
+    assert any("before Ray persists" in x and "96 Laya training epochs" in x for x in a)
+    new = toy_measured()
+    new["laya"]["save_s_includes_persist"] = True
+    assert not any("before Ray persists" in x for x in compute.assumptions(TOY_MATRIX, new, TOY_COUNTS))
+    assert "include Ray's persist" in line(compute.project(new, TOY_COUNTS, TOY_MATRIX), "laya_selection")["source"]
+    assert "persist" not in line(compute.project(old, TOY_COUNTS, TOY_MATRIX), "laya_selection")["source"]
+    sc = {"status": "ok", "device": "mps", "dtype": "torch.float32", "amp_enabled": False, "n": 32, "s_per_msg": 0.2,
+          "basis": "--n 32 val subset"}
+    m0, m1 = dict(toy_measured(), scoring=dict(sc)), dict(toy_measured(), scoring=dict(sc, run_overhead_s=15.0))
+    p0, p1 = (compute.project(m, TOY_COUNTS, TOY_MATRIX) for m in (m0, m1))
+    for id_, n_runs in (("laya_val_scoring", 12), ("fewshot_scoring", 6), ("final_scoring", 9)):
+        assert line(p1, id_)["seconds"] == pytest.approx(line(p0, id_)["seconds"] + n_runs * 15.0), id_
+        assert "%d score.py runs x 15.0 s run overhead" % n_runs in line(p1, id_)["formula"], id_
+        assert "run overhead" not in line(p0, id_)["formula"], id_
+    assert p1["total_s"] == pytest.approx(p0["total_s"] + 27 * 15.0)
+    assert all("run_overhead_s" not in part for part in line(p0, "final_scoring")["parts"])   # old reports unchanged
+    assert [part.get("score_runs") for part in line(p1, "final_scoring")["parts"]] == [9, None]
+    a0, a1 = (compute.assumptions(TOY_MATRIX, m, TOY_COUNTS) for m in (m0, m1))
+    assert any("score.py run's own overhead" in x and "27 Laya score.py runs" in x for x in a0)
+    assert not any("score.py run's own overhead" in x for x in a1)
+    assert any("BERTurk scoring lines carry no per-run load term" in x for x in a1)
+    md = compute.render_markdown(compute.build_report(toy_meta(), m1, TOY_COUNTS, TOY_MATRIX, p1, toy_preflight()))
+    assert "run overhead 15.0 s per score.py run" in md
+
+
 def test_a_stalled_child_is_killed_at_the_probe_timeout():
     """04-REVIEW IN-04: no child wait is unbounded; a child past --probe-timeout-s is killed (its whole tree)."""
     import compute_checkpoint

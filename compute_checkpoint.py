@@ -544,8 +544,10 @@ def run_score_probe(a, base, env):
                "--manifest", os.path.abspath(a.manifest), "--out-root", root]
         print("scoring probe: --n %d of val on %s" % (SCORE_PROBE_N, a.device), flush=True)
         try:
+            t0 = time.monotonic()
             r = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True, shell=False,
                                timeout=a.probe_timeout_s)
+            wall = time.monotonic() - t0
         except subprocess.TimeoutExpired:                   # --workers 0: one process, killed by run()
             return {"status": "timeout", "reason": "ran past --probe-timeout-s %.0f s and was killed"
                                                    % a.probe_timeout_s}
@@ -555,9 +557,12 @@ def run_score_probe(a, base, env):
                     "reason": last_text_line(r.stderr or r.stdout, "no sidecar written")}
         with open(sidecars[0], encoding="utf-8") as f:
             side = json.load(f)
-        n, sc = side["n_subset"], side["scorer"]
+        n, sc, infer = side["n_subset"], side["scorer"], side["timing"]["inference_seconds"]
+        # the per-run cost outside inference (process start, the weights' sha256 check, laya.load), which every
+        # score.py run of the matrix pays once (04-REVIEW IN-02)
         return {"status": "ok", "device": sc["device"], "dtype": sc["dtype"], "amp_enabled": sc["amp_enabled"],
-                "n": n, "s_per_msg": side["timing"]["inference_seconds"] / n, "basis": SCORING_BASIS}
+                "n": n, "s_per_msg": infer / n, "wall_s": wall, "run_overhead_s": max(0.0, wall - infer),
+                "basis": SCORING_BASIS}
     finally:
         shutil.rmtree(root, ignore_errors=True)
 

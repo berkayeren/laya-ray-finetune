@@ -105,7 +105,7 @@ def test_killed_run_resumes_bitwise(prepared, full_run):
     assert rec["code_changed_on_resume"] is (rec["segments"][0]["git_sha"] is None)
     assert rec["train_state_bytes"] > 0 and rec["export_bytes"] > 0
     assert rec["exports"] == ["exports/epoch-001", "exports/epoch-002"]
-    assert all(row["save_s"] > 0 for row in rec["epochs"])
+    assert all(row["save_s"] > 0 for row in rec["epochs"]) and rec["save_s_includes_persist"] is True   # IN-02
     assert rec["run_id"] == rid
     assert sorted(p.name for p in (run_dir / "exports").iterdir()) == ["epoch-001", "epoch-002"]
     ex = runs.read_record(str(run_dir / "exports" / "epoch-002"))                # a pre-save snapshot (IN-06)

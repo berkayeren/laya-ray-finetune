@@ -25,12 +25,13 @@ separate --amp choice, on by default only on cuda.
 Run record (LAYA-06): the checkpoint config holds training.ray_train.record: device, parameter device, torch threads,
 worker env, precision and checkpointing choices, load, calibration and final-save seconds, and one row per completed
 epoch with the pilot.runs.EPOCH_FIELDS (device-synchronised wall clock of the training steps, save time of the train
-state, RNG and export, optimizer steps, items, peak memory sampled after every micro-batch backward and optimizer step,
-system swap delta, and the segment that trained it). Across a kill and resume the record keeps exactly one row per
-completed epoch (the partial epoch leaves none) and one pilot.runs.SEGMENT_FIELDS entry per run segment (start epoch,
-git sha, dirty flag and uncommitted-diff digest, device, resume load seconds and memory), plus code_changed_on_resume
-(another HEAD or another uncommitted diff between segments, or no git; flagged, never refused), the relative export
-names, train_state_bytes and export_bytes.
+state, RNG and export plus Ray's persist of the epoch checkpoint (save_s_includes_persist; the epoch a rerun resumes
+from keeps the time up to the persist, from save.json), optimizer steps, items, peak memory sampled after every
+micro-batch backward and optimizer step, system swap delta, and the segment that trained it). Across a kill and resume
+the record keeps exactly one row per completed epoch (the partial epoch leaves none) and one pilot.runs.SEGMENT_FIELDS
+entry per run segment (start epoch, git sha, dirty flag and uncommitted-diff digest, device, resume load seconds and
+memory), plus code_changed_on_resume (another HEAD or another uncommitted diff between segments, or no git; flagged,
+never refused), the relative export names, train_state_bytes and export_bytes.
 
 Items (data_neg8 by default): the split files label all 48 tags. After the --max-messages subsample and the
 message-level calibration holdout, every training message keeps all its positives plus --neg K random negatives
@@ -657,7 +658,8 @@ def train_loop_per_worker(c):
               "load_s": load_s, "calib_s": None, "final_save_s": None, "run_id": c["run_id"],
               "canonical": c["canonical"], "segments": segments,
               "code_changed_on_resume": code_changed(segments),
-              "exports": [], "train_state_bytes": state_bytes, "export_bytes": None, "epochs": rows_out}
+              "exports": [], "train_state_bytes": state_bytes, "export_bytes": None, "save_s_includes_persist": True,
+              "epochs": rows_out}
 
     def note_exports():
         names = sorted(n for n in os.listdir(exports_dir) if len(n) == 9 and n.startswith("epoch-")) \
@@ -752,6 +754,10 @@ def train_loop_per_worker(c):
                     json.dump({"epoch": epoch + 1, "save_s": row["save_s"]}, f)
             ray.train.report(metrics, checkpoint=Checkpoint.from_directory(d),
                              checkpoint_dir_name="epoch-%03d" % (epoch + 1))
+            # plus Ray's persist (the train-state copy into storage, the rotation): a per-epoch cost the compute
+            # projection charges per epoch (04-REVIEW IN-02); the next epoch's state and the final record carry it,
+            # save.json (the resumed epoch's row) only the time up to the report
+            row["save_s"] = time.perf_counter() - t_save
         if c["fail_after_epoch"] == epoch + 1:              # test hook: every rank fails after the checkpoint
             raise RuntimeError("simulated failure after epoch %d (--fail-after-epoch)" % (epoch + 1))
         last = metrics

@@ -9,9 +9,13 @@ items of the committed splits without a tokenizer (pilot.runs.neg_items) and pro
 Projection rate (RESEARCH Pitfall 6): s_per_step is the LARGEST train_s / optimizer_steps over the measured epochs, so
 the MPS warm-up of epoch 1 (or any slower later epoch) makes the projection conservative, never optimistic. A Laya run
 of E epochs on n items costs E x (optimizer_steps(n) x s_per_step + save_s_per_epoch) + load_s + calib_s +
-final_save_s + run_overhead_s, every term measured by the probe run; run_overhead_s (run_overhead) is the probe child's
-wall clock minus the record's own terms (process and Ray start, the driver's checks, item building, the --out copy),
-0 for a report from before it was measured, which assumptions() then discloses.
+final_save_s + run_overhead_s, every term measured by the probe run; save_s_per_epoch includes Ray's persist of the
+epoch checkpoint (the train-state copy into storage) when the record says save_s_includes_persist, so that per-epoch
+cost is charged per epoch; run_overhead_s (run_overhead) is the probe child's wall clock minus the record's own terms
+(process and Ray start, the driver's checks, item building, the --out copy), charged once per run. A Laya scoring line
+adds, per score.py run, the scoring probe's run_overhead_s (its wall clock minus its inference seconds: process start,
+the weights' sha256 check, laya.load). A report from before a term was measured leaves it out (0), and assumptions()
+discloses each one left out (04-REVIEW IN-02).
 
 Transparency (T-04-17): every projection line names its basis and its source. basis is the weakest input of the line:
 "estimate" when any of its rates is an estimate (ESTIMATES, used only when the BERTurk timing child did not finish
@@ -199,7 +203,8 @@ def measured_from_checkpoint(ckpt_dir):
             "rung": record["rung"], "fallback": record["fallback"], "weaker": record["weaker"],
             "device": record["device"], "param_device": record["param_device"],
             "grad_checkpointing": record["grad_checkpointing"], "amp": record["amp"], "env": list(record["env"]),
-            "train_state_bytes": record.get("train_state_bytes")}
+            "train_state_bytes": record.get("train_state_bytes"),
+            "save_s_includes_persist": bool(record.get("save_s_includes_persist"))}
     return {"laya": laya, "epochs": rows}
 
 
@@ -207,7 +212,9 @@ def run_overhead(wall_s, record):
     """Seconds of one ray_train.py process outside its run record's terms: `wall_s` (the child's wall clock) minus the
     train and save seconds of the epochs its last segment trained, its load, resume-load, calibration and final-save
     seconds; what is left (process and Ray start, the driver's split and weight checks, item building, the --out copy)
-    is paid once by every run (04-REVIEW IN-03). Never negative."""
+    is paid once by every run (04-REVIEW IN-03). Ray's per-epoch persist of the epoch checkpoint is in the epochs'
+    save_s when the record says save_s_includes_persist, so it is charged per epoch, not here (04-REVIEW IN-02); in an
+    older record it stays in this residual. Never negative."""
     seg = record["segments"][-1]
     inside = sum(r["train_s"] + r["save_s"] for r in record["epochs"] if r["segment"] == seg["segment"])
     inside += record["load_s"] + (seg.get("resume_load_s") or 0.0) + record["calib_s"] + record["final_save_s"]
@@ -221,6 +228,28 @@ def laya_run_s(n_items, epochs, laya):
         laya["final_save_s"] + (laya.get("run_overhead_s") or 0.0)
 
 
+def laya_training_epochs(matrix):
+    """Laya training epochs in the matrix: selection, final seeds and few-shot base runs at max_epochs, plus the
+    few-shot incremental runs (the count the per-epoch persist disclosure names)."""
+    m = matrix
+    return (m["lr_grid"] + m["final_seeds"] + m["fewshot_base_runs"]) * m["max_epochs"] + \
+        len(m["fewshot_k"]) * m["fewshot_draws"] * m["fewshot_epochs"]
+
+
+def laya_scoring_runs(matrix):
+    """score.py runs of Laya in the matrix: one per selection epoch export on val, one per few-shot incremental model on
+    test, and one per final seed on each of val, test and HOTELS."""
+    m = matrix
+    return m["lr_grid"] * m["max_epochs"] + len(m["fewshot_k"]) * m["fewshot_draws"] + m["eval_seeds"] * len(SCORED)
+
+
+def laya_scoring_overhead(measured):
+    """Seconds of one score.py run outside its inference (the scoring probe's wall clock minus its inference seconds),
+    or None when the probe did not finish ok or predates the measurement (04-REVIEW IN-02)."""
+    s = measured.get("scoring")
+    return s.get("run_overhead_s") if s and s.get("status", "ok") == "ok" else None
+
+
 # ---- rates: measured when the probe measured them, else the committed CPU scoring rate or a labelled estimate ----
 
 def laya_scoring_rate(measured):
@@ -229,8 +258,11 @@ def laya_scoring_rate(measured):
     actor loads included (04-REVIEW IN-03)."""
     s = measured.get("scoring")
     if s and s.get("status", "ok") == "ok":
-        return s["s_per_msg"], "measured", ("scoring probe on %s: %s, %d messages"
-                                            % (s.get("device"), s.get("basis") or "measured", s.get("n") or 0))
+        over = laya_scoring_overhead(measured)
+        return s["s_per_msg"], "measured", ("scoring probe on %s: %s, %d messages%s"
+                                            % (s.get("device"), s.get("basis") or "measured", s.get("n") or 0,
+                                               "" if over is None else "; run overhead %.1f s per score.py run = the "
+                                               "probe's wall clock minus its inference seconds" % over))
     with open(SCORING_DUMP, encoding="utf-8") as f:
         side = json.load(f)
     n, sec, sc = side["split"]["n_messages"], side["timing"]["seconds"], side["scorer"]
@@ -254,8 +286,10 @@ def berturk_rates(measured):
 def _laya_source(laya):
     over = laya.get("run_overhead_s")
     return ("probe run on %s: s/step = the largest train_s / optimizer_steps over %d measured epoch(s); save, load, "
-            "calibration and final-save seconds from the same record%s"
-            % (laya["device"], laya["epochs_measured"], "" if over is None else
+            "calibration and final-save seconds from the same record%s%s"
+            % (laya["device"], laya["epochs_measured"],
+               "; the save seconds include Ray's persist of each epoch checkpoint"
+               if laya.get("save_s_includes_persist") else "", "" if over is None else
                "; run overhead %.1f s = the probe child's wall clock minus the record's terms" % over))
 
 
@@ -281,9 +315,14 @@ def _berturk_part(runs_, epochs, n_messages, batch, s_step, basis, **extra):
                  "seconds": runs_ * epochs * steps * s_step}, **extra)
 
 
-def _scoring_part(model, runs_, n_messages, s_msg, basis):
-    return {"model": model, "runs": runs_, "epochs": None, "units_per_epoch": n_messages, "unit": "message",
+def _scoring_part(model, runs_, n_messages, s_msg, basis, invocations=0, over=None):
+    """`runs_` models scored on `n_messages` each; `over` (a per-score.py-run overhead, None when not measured) is
+    added once per invocation, and only then is it a key of the part."""
+    part = {"model": model, "runs": runs_, "epochs": None, "units_per_epoch": n_messages, "unit": "message",
             "s_per_unit": s_msg, "basis": basis, "seconds": runs_ * n_messages * s_msg}
+    if over is not None:
+        part.update(score_runs=invocations, run_overhead_s=over, seconds=part["seconds"] + invocations * over)
+    return part
 
 
 def _same(parts, key):
@@ -341,6 +380,11 @@ def project(measured, counts, matrix):
     seconds per unit, basis (measured, estimate or provisional), source and formula; the total is their sum."""
     laya, ik, m = measured["laya"], _items_key(matrix), matrix
     s_msg, s_msg_basis, s_msg_source = laya_scoring_rate(measured)
+    s_over = laya_scoring_overhead(measured)
+    n_exports = m["lr_grid"] * m["max_epochs"]
+
+    def plus_over(n_runs):
+        return "" if s_over is None else " + %d score.py runs x %.1f s run overhead" % (n_runs, s_over)
     bert = berturk_rates(measured)
     b_step, b_msg, b_basis, b_source = bert
     sel, fin = counts["selection_train"], counts["final_train"]
@@ -349,11 +393,11 @@ def project(measured, counts, matrix):
         _laya_train_line("laya_selection", 5, "Laya selection runs (LR grid x val-selected epoch ceiling)",
                          m["lr_grid"], m["max_epochs"], "selection_train", laya, counts, ("lr_grid", "max_epochs"),
                          ik),
-        _line("laya_val_scoring", 5, "Laya val scoring of every selection epoch export", m["lr_grid"] * m["max_epochs"],
+        _line("laya_val_scoring", 5, "Laya val scoring of every selection epoch export", n_exports,
               None, n_val, "message", s_msg, s_msg_basis, s_msg_source,
-              m["lr_grid"] * m["max_epochs"] * n_val * s_msg,
-              "lr_grid (%d) x max_epochs (%d) epoch exports x %d val messages x %.4f s"
-              % (m["lr_grid"], m["max_epochs"], n_val, s_msg)),
+              n_exports * n_val * s_msg + n_exports * (s_over or 0.0),
+              "lr_grid (%d) x max_epochs (%d) epoch exports x %d val messages x %.4f s%s"
+              % (m["lr_grid"], m["max_epochs"], n_val, s_msg, plus_over(n_exports))),
         _laya_train_line("laya_final", 5, "Laya final seeds on final_train (projected at the epoch ceiling)",
                          m["final_seeds"], m["max_epochs"], "final_train", laya, counts, ("final_seeds", "max_epochs"),
                          ik),
@@ -397,21 +441,23 @@ def project(measured, counts, matrix):
                                    ", ".join("k %d: %d" % (k, msgs[k]) for k in m["fewshot_k"]), per_msg, ik[8:]),
         provisional=True))
     n_inc = len(m["fewshot_k"]) * m["fewshot_draws"]
-    fs = [_scoring_part("laya", n_inc, n_test, s_msg, s_msg_basis), _scoring_part("berturk", n_inc, n_test, b_msg,
-                                                                                   b_basis)]
+    fs = [_scoring_part("laya", n_inc, n_test, s_msg, s_msg_basis, n_inc, s_over),
+          _scoring_part("berturk", n_inc, n_test, b_msg, b_basis)]
     lines.append(_parts_line(
         "fewshot_scoring", 9, "Few-shot scoring of every incremental model on test (both models)", fs,
         "Laya: %s; BERTurk: %s" % (s_msg_source, b_source),
         "per model len(fewshot_k) (%d) x fewshot_draws (%d) models x %d test messages x s/msg (Laya %.4f, BERTurk "
-        "%.4f)" % (len(m["fewshot_k"]), m["fewshot_draws"], n_test, s_msg, b_msg), provisional=True))
+        "%.4f)%s" % (len(m["fewshot_k"]), m["fewshot_draws"], n_test, s_msg, b_msg,
+                     "" if s_over is None else "; Laya%s" % plus_over(n_inc)), provisional=True))
     n_eval = n_val + n_test + n_ood
-    final = [_scoring_part("laya", m["eval_seeds"], n_eval, s_msg, s_msg_basis),
+    final = [_scoring_part("laya", m["eval_seeds"], n_eval, s_msg, s_msg_basis, m["eval_seeds"] * len(SCORED), s_over),
              _scoring_part("berturk", m["eval_seeds"], n_eval, b_msg, b_basis)]
     lines.append(_parts_line(
         "final_scoring", 8, "Final scoring: every seed of both models on val, test and HOTELS", final,
         "Laya: %s; BERTurk: %s" % (s_msg_source, b_source),
         "per model eval_seeds (%d) x (%d val + %d test + %d hotels_probe = %d messages) x s/msg (Laya %.4f, BERTurk "
-        "%.4f)" % (m["eval_seeds"], n_val, n_test, n_ood, n_eval, s_msg, b_msg)))
+        "%.4f)%s" % (m["eval_seeds"], n_val, n_test, n_ood, n_eval, s_msg, b_msg,
+                     "" if s_over is None else "; Laya%s" % plus_over(m["eval_seeds"] * len(SCORED)))))
     total = sum(l["seconds"] for l in lines)
     return {"lines": lines, "total_s": total, "total_h": total / 3600}
 
@@ -483,6 +529,22 @@ def assumptions(matrix, measured=None, counts=None, interrupt=None):
                    "weight checks, item building, the --out copy): this probe predates its measurement (the probe "
                    "child's wall clock minus the record's terms), so they are slightly optimistic, by that overhead "
                    "once per Laya training run")
+    lay = measured.get("laya") or {}
+    if lay and not lay.get("save_s_includes_persist"):
+        out.append("The per-epoch save seconds stop before Ray persists the epoch checkpoint (ray.train.report copies "
+                   "the %s GiB train state into storage and drops the previous one): this probe predates timing it, "
+                   "so the Laya lines charge it at most once per run (inside the run overhead, when the probe measured "
+                   "one), not once per epoch; slightly optimistic, by that copy for each of the matrix's %d Laya "
+                   "training epochs" % (_fmt(lay.get("train_state_bytes"), 2**30, 2), laya_training_epochs(matrix)))
+    sc_ok = sc and sc.get("status", "ok") == "ok"
+    if sc_ok and laya_scoring_overhead(measured) is None:
+        out.append("The Laya scoring lines leave out each score.py run's own overhead (process start, the weights' "
+                   "sha256 check, laya.load): this probe predates its measurement (the scoring probe's wall clock "
+                   "minus its inference seconds), so they are slightly optimistic, by that overhead once per scoring "
+                   "run (%d Laya score.py runs in the matrix); the BERTurk scoring lines have no such term either"
+                   % laya_scoring_runs(matrix))
+    elif sc_ok:
+        out.append("The BERTurk scoring lines carry no per-run load term: only the Laya scoring probe measures one")
     grew = swap_grew_epochs(measured)
     if grew:
         out.append("Swap grew during measured epoch(s) %s (largest %.0f MiB): the run was under memory pressure (the "
@@ -584,8 +646,12 @@ def _probe_lines(measured):
         if sc.get("status", "ok") == "ok":
             lines += ["- %s" % sc["basis"],
                       "- Device %s, %s, autocast %s: %s s per message over %d messages (inference time, the sidecar's "
-                      "inference_seconds / n)" % (sc["device"], sc["dtype"], "on" if sc["amp_enabled"] else "off",
-                                                  _fmt(sc["s_per_msg"], digits=4), sc["n"])]
+                      "inference_seconds / n)%s" % (sc["device"], sc["dtype"], "on" if sc["amp_enabled"] else "off",
+                                                    _fmt(sc["s_per_msg"], digits=4), sc["n"],
+                                                    "" if sc.get("run_overhead_s") is None else
+                                                    "; run overhead %s s per score.py run (the probe's wall clock "
+                                                    "minus its inference seconds)" % _fmt(sc["run_overhead_s"],
+                                                                                          digits=1))]
         else:
             lines.append("- **Status %s** (%s): the Laya scoring lines keep the committed CPU rate"
                          % (sc.get("status"), sc.get("reason")))

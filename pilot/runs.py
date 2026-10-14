@@ -88,7 +88,9 @@ def run_id(canon):
 # one row per completed epoch; peak_driver_bytes and current_allocated_bytes are None on CPU (never 0), where
 # peak_total_bytes is the peak RSS; on MPS peak_total_bytes is the peak of driver-allocated memory + RSS (the spike's
 # peak_memory_bytes basis); segment is the run segment that trained the epoch, resumed whether that segment started from
-# a checkpoint (a killed run's rerun)
+# a checkpoint (a killed run's rerun); save_s is the epoch checkpoint's save (train state, RNG, export) plus Ray's
+# persist of it when the record says save_s_includes_persist, except in the row of the epoch a rerun resumed from,
+# which keeps the time up to the persist
 EPOCH_FIELDS = ("epoch", "loss", "train_s", "save_s", "optimizer_steps", "n_items", "peak_total_bytes",
                 "peak_driver_bytes", "peak_rss_bytes", "current_allocated_bytes", "swap_delta_bytes", "segment",
                 "resumed")
