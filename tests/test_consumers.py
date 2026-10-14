@@ -152,3 +152,16 @@ def test_evaluate_is_a_thin_wrapper():
     assert not set(funcs) & forbidden, funcs
     assert funcs == ["main"], funcs
     assert not [n for n in ast.walk(tree) if isinstance(n, (ast.ClassDef, ast.Lambda))]
+
+
+@pytest.mark.parametrize("flags, fix", [
+    (["--device", "mps", "--workers", "2"], "--workers 1"),
+    (["--gpu", "--device", "mps", "--workers", "1"], "alias"),
+    (["--amp", "--workers", "1"], "CUDA-only"),
+    (["--device", "mps", "--amp", "--workers", "1"], "CUDA-only"),
+], ids=["mps-workers-2", "gpu-with-mps", "amp-on-cpu", "amp-on-mps"])
+def test_device_flag_conflicts_are_argument_errors(tmp_repo, flags, fix):
+    r = _run(tmp_repo, "ray_train.py", "--data", "data/splits/selection_train.jsonl", "--out", "ckpt",
+             "--base", str(tmp_repo / "no_such_base"), *flags)
+    assert r.returncode == 2 and fix in r.stderr, r.stderr
+    assert not (tmp_repo / "ray_results").exists()
