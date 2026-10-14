@@ -380,6 +380,85 @@ def test_theta_never_reads_test(tmp_path, snap):
         assert ra["variants"][v]["rows"]["0.5"] != rb["variants"][v]["rows"]["0.5"]
 
 
+# --- θ comes only from a val dump of the same checkpoint, temperature and scorer (03-REVIEW WR-01) ------------------
+
+SOURCE_EDITS = {
+    "kind": ("system.kind", "another-system"),
+    "checkpoint": ("system.checkpoint", "runs/other-ckpt"),
+    "identity": ("system.checkpoint_identity", {"local": True, "model_sha256": "a" * 64, "config_sha256": "b" * 64}),
+    "temperature": ("temperature.shipped", 2.5),
+    "device": ("scorer.device", "mps"),
+    "dtype": ("scorer.dtype", "torch.float16"),
+    "amp": ("scorer.amp_enabled", True),
+}
+
+
+def _set_key(dotted, value):
+    def fn(side):
+        head, key = dotted.split(".")
+        side.setdefault(head, {})[key] = value
+    return fn
+
+
+@pytest.mark.parametrize("case", sorted(SOURCE_EDITS))
+def test_report_refuses_val_and_split_from_different_sources(tmp_path, snap, case):
+    dotted, value = SOURCE_EDITS[case]
+    run_dir, manifest = _score_both(snap, tmp_path / "dumps")
+    _edit_sidecar(run_dir, _set_key(dotted, value))        # the test dump now claims another source than val
+    with pytest.raises(SystemExit) as e:
+        report.run_report(run_dir, "test", manifest)
+    assert dotted in str(e.value.code) and "val dump" in str(e.value.code), e.value.code
+
+
+def test_compare_refuses_mixed_sources(tmp_path, snap):
+    a, manifest = _score_both(snap, tmp_path / "a")
+    b, _ = _score_both(snap, tmp_path / "b", model="majority")
+    _edit_sidecar(a, _set_key("scorer.device", "mps"))
+    with pytest.raises(SystemExit, match=r"scorer\.device"):
+        report.compare([a], [b], "test", manifest, B=50, seed=0)
+    with pytest.raises(SystemExit, match=r"scorer\.device"):
+        report.compare([b], [a], "test", manifest, B=50, seed=0)
+
+
+def test_baseline_source_may_differ_between_val_and_test(tmp_path, snap):
+    """A baseline's val and test dumps come from different training splits by design (TRAINED_ON)."""
+    run_dir, manifest = _score_both(snap, tmp_path / "dumps")
+    sources = {s: dumps.load_dump(run_dir, s, manifest)[2]["system"]["baseline_source"]["split"]
+               for s in ("val", "test")}
+    assert sources == {"val": "selection_train", "test": "final_train"}
+    rep = report.run_report(run_dir, "test", manifest)
+    assert rep["theta_source"] is not None and rep["variants"]["shipped"]["rows"]["val_selected"] is not None
+    assert report.compare([run_dir], [run_dir], "test", manifest, B=50, seed=0)["n"] == 7
+
+
+def test_local_run_id_includes_the_config_hash():
+    from pilot import pins
+    from pilot.weights import identity
+    assert dumps.run_id("laya", {"local": True, "model_sha256": "a" * 64, "config_sha256": "b" * 64}) == \
+        "laya-" + "a" * 12 + "-" + "b" * 8
+    assert dumps.run_id("laya", identity("multilingual")) == "laya-zeroshot-" + pins.LAYA["revision"][:8] == \
+        "laya-zeroshot-7b928d82"
+    assert dumps.run_id("majority") == "majority" and dumps.run_id("prior") == "prior"
+    for ident in ({"local": True, "model_sha256": "a" * 64}, {"local": True, "model_sha256": "a" * 64,
+                                                               "config_sha256": None}):
+        with pytest.raises(SystemExit, match="config_sha256"):
+            dumps.run_id("laya", ident)
+
+
+# --- a --n subset val dump reported on val: θ 0.5 rows, no θ source (03-REVIEW WR-04) ------------------------------
+
+def test_val_subset_report_has_no_theta_source(tmp_path, snap):
+    out_dir, manifest = snap
+    run_dir, split = score.main([os.path.join(out_dir, "splits", "val.jsonl"), "--model", "prior",
+                                 "--manifest", manifest, "--n", "2", "--out-root", str(tmp_path / "sub")])
+    rep = report.run_report(run_dir, split, manifest)
+    assert split == "val" and rep["theta_source"] is None and rep["subset"] is True
+    for v in rep["variants"].values():
+        assert v["rows"]["0.5"]["n"] == 2 and v["rows"]["val_selected"] is None
+        assert v["val_selected_reason"] == report.SUBSET_VAL_REASON
+    assert report.SUBSET_VAL_REASON == "val dump is a --n subset; θ is selected only on a full val dump"
+
+
 # --- report.py refuses every tampered dump (D-04) ----------------------------------------------------------------
 
 def _rewrite_npz(run_dir, **arrays):

@@ -49,7 +49,9 @@ def test_tiny_checkpoint_round_trips_through_score_and_report(tmp_path, tiny):
     test_jsonl = os.path.join(out_dir, "splits", "test.jsonl")
     run_dir, split = score.main([test_jsonl, "--model", "laya", "--checkpoint", ckpt, "--workers", "0",
                                  "--manifest", manifest, "--out-root", str(tmp_path / "dumps")])
-    assert os.path.basename(run_dir) == "laya-" + identity(ckpt)["model_sha256"][:12] and split == "test"
+    ident = identity(ckpt)
+    assert os.path.basename(run_dir) == "laya-%s-%s" % (ident["model_sha256"][:12], ident["config_sha256"][:8])
+    assert split == "test"
     cases = _split_cases(test_jsonl)
     z = np.load(os.path.join(run_dir, "test.npz"), allow_pickle=False)
     assert list(z["uids"]) == [c["uid"] for c in cases]
