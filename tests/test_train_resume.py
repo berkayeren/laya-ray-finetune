@@ -101,7 +101,8 @@ def test_killed_run_resumes_bitwise(prepared, full_run):
     assert rec["segments"][0]["resumed"] is False and rec["segments"][0]["resume_load_s"] is None
     assert rec["segments"][1]["resumed"] is True and rec["segments"][1]["resume_load_s"] > 0
     assert rec["segments"][1]["resume_peak_total_bytes"] > 0
-    assert rec["code_changed_on_resume"] is False
+    # same code in both segments; without git (an exported tree) the flag says it cannot tell (04-REVIEW IN-13)
+    assert rec["code_changed_on_resume"] is (rec["segments"][0]["git_sha"] is None)
     assert rec["train_state_bytes"] > 0 and rec["export_bytes"] > 0
     assert rec["exports"] == ["exports/epoch-001", "exports/epoch-002"]
     assert all(row["save_s"] > 0 for row in rec["epochs"])
