@@ -92,16 +92,26 @@ def _load_side(run_dirs, split, manifest_path):
     """[(run_dir, split dump, val dump)] of one system's per-seed run dirs, each dump verified by load_dump."""
     if not run_dirs:
         raise SystemExit("no seed dumps to average: each side of --compare needs at least one run dir")
-    runs = []
+    runs, seen = [], set()
     for d in run_dirs:
         if not (os.path.exists(os.path.join(d, "val.npz")) or os.path.exists(os.path.join(d, "val.json"))):
             raise SystemExit("compare needs a full val dump in every run dir; %s has none (score.py on val)" % d)
         pair = (dumps.load_dump(d, split, manifest_path), dumps.load_dump(d, "val", manifest_path))
-        for _, _, side, _ in pair:
-            if side["n_subset"] is not None:
-                raise SystemExit("%s: compare needs full dumps, not a --n subset; rescore without --n" % d)
+        rid = pair[0][2]["run_id"]                          # == the run dir name (load_dump checks it)
+        if os.path.realpath(d) in seen or rid in seen:
+            raise SystemExit("%s (run_id %s) is listed more than once on one side of --compare; each seed counts once"
+                             % (d, rid))
+        seen.update((os.path.realpath(d), rid))
         runs.append((d,) + pair)
     return runs
+
+
+def _check_full(runs):
+    """SystemExit on any --n subset dump: intervals and θ come only from full dumps."""
+    for r in runs:
+        for _, _, side, _ in r[1:]:
+            if side["n_subset"] is not None:
+                raise SystemExit("%s: compare needs full dumps, not a --n subset; rescore without --n" % r[0])
 
 
 def _check_paired(runs, k):
@@ -123,8 +133,9 @@ def compare(a_dirs, b_dirs, split="test", manifest_path=DEFAULT_MANIFEST, B=1000
     system's val-selected θ. Descriptive only: no decision label is produced (the rule is frozen in Phase 8)."""
     sides = {"a": _load_side(list(a_dirs), split, manifest_path), "b": _load_side(list(b_dirs), split, manifest_path)}
     every = sides["a"] + sides["b"]
-    _check_paired(every, 1)
+    _check_paired(every, 1)                                 # pairing first: a mismatch is named "unpaired"
     _check_paired(every, 2)
+    _check_full(every)
     _, uids, _, entry = every[0][1]
     _, val_uids, _, val_entry = every[0][2]
     Y = dumps.read_gold(entry, manifest_path, uids)
