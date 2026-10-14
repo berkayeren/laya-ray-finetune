@@ -626,3 +626,17 @@ def test_run_overhead_enters_every_laya_run():
     assert "run overhead" not in line(p0, "laya_selection")["formula"]
     assert "run overhead 25.0 s" in compute.render_markdown(compute.build_report(
         toy_meta(), with_, TOY_COUNTS, TOY_MATRIX, p1, toy_preflight()))
+
+
+def test_a_stalled_child_is_killed_at_the_probe_timeout():
+    """04-REVIEW IN-04: no child wait is unbounded; a child past --probe-timeout-s is killed (its whole tree)."""
+    import compute_checkpoint
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"], start_new_session=True)
+    out = compute_checkpoint.kill_after_registration(proc, lambda: False, 0, poll_s=0.05, timeout_s=0.5)
+    assert out["timed_out"] is True and out["missed"] is False and proc.returncode is not None
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"], start_new_session=True)
+    assert compute_checkpoint.wait_or_kill(proc, 0.5) is None and proc.returncode is not None
+    proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    assert compute_checkpoint.wait_or_kill(proc, 60) == 0
+    with pytest.raises(SystemExit):
+        compute_checkpoint.main(["--probe-timeout-s", "0"])

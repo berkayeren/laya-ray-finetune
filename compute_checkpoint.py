@@ -24,7 +24,9 @@ not demonstrated. An attempt that ends with the MPS out-of-memory line is follow
 the LAYA-03 ladder (pilot.runs.next_rung), each with its own run_id (compute.attempt_chain), except an out-of-memory
 after the last epoch (calibration, final save; pilot.runs.resume_oom), which ends the chain as failed; every attempt
 stays in the report, and an exhausted ladder is reported as status ladder_exhausted. Before any child, the disk under --storage
-must hold pilot.runs.disk_need_bytes for the run.
+must hold pilot.runs.disk_need_bytes for the run. Every child (the probe run, its resume, the BERTurk child, the scoring
+probe) is killed after --probe-timeout-s (default 3 h) and its attempt or probe recorded as failed or timeout, so a
+stalled Ray scheduler or an MPS hang never blocks the orchestrator.
 
 Measured BERTurk and scoring rates (RESEARCH Open Question 2): after the Laya probe, a BERTurk timing child
 (`--child berturk CONFIG`, a fresh process with the same MPS env) loads the pinned BERTurk weights, fetched and
@@ -77,6 +79,8 @@ VERSIONED = ("torch", "ray", "laya", "transformers", "psutil")
 NEG = 8
 TAIL_LINES = 40
 REAP_S = 120                # a killed tree's processes get this long to exit before they are SIGKILLed
+PROBE_TIMEOUT_S = 3 * 3600  # --probe-timeout-s default: a child (probe run, resume, BERTurk, scoring) running longer
+#                             is killed and its attempt recorded as failed (a stalled Ray scheduler or an MPS hang)
 RECOVER_S, RECOVER_POLL_S = 120, 5   # wait for available memory to recover after an interrupt, before the rerun
 # the BERTurk timing child (RESEARCH Open Question 2): real selection_train batches of 32 at max_len 128, AdamW, fp32
 BERTURK = {"batch": 32, "max_len": 128, "lr": 3e-5, "weight_decay": 0.01, "clip_grad_norm": 1.0, "warmup_steps": 3,
@@ -206,14 +210,18 @@ def kill_tree(proc):
     return len(alive)
 
 
-def kill_after_registration(proc, registered, delay_s, poll_s=1.0):
+def kill_after_registration(proc, registered, delay_s, poll_s=1.0, timeout_s=None):
     """Wait until registered() (epoch 1's checkpoint is in Ray's snapshot), then delay_s more into epoch 2, then kill
     the child's process tree (kill_tree). missed is True when the child exited first: it finished (or failed) before
-    the kill, so nothing was interrupted."""
+    the kill, so nothing was interrupted. A child still unregistered after timeout_s (a stalled scheduler or MPS hang)
+    is killed too and the result carries timed_out True (04-REVIEW IN-04)."""
     out = {"mode": "kill", "after_epoch": 1, "delay_s": delay_s, "missed": False, "leftover_processes": None}
+    deadline = None if timeout_s is None else time.monotonic() + timeout_s
     while not registered():
         if proc.poll() is not None:
             return dict(out, missed=True)
+        if deadline is not None and time.monotonic() >= deadline:
+            return dict(out, timed_out=True, leftover_processes=kill_tree(proc))
         time.sleep(poll_s)
     end = time.monotonic() + delay_s
     while time.monotonic() < end:
@@ -226,6 +234,27 @@ def kill_after_registration(proc, registered, delay_s, poll_s=1.0):
     # a child that exited on its own between the last poll and the SIGKILL was not interrupted
     out["missed"] = proc.returncode is not None and proc.returncode >= 0
     return out
+
+
+def wait_or_kill(proc, timeout_s):
+    """The return code of `proc` (started in its own session), or None after killing its process tree (kill_tree) when
+    it runs past timeout_s; Ctrl-C (which never reaches a child in its own session) kills the tree too."""
+    try:
+        return proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        kill_tree(proc)
+        return None
+    except BaseException:
+        if proc.poll() is None:
+            kill_tree(proc)
+        raise
+
+
+def timed_out(attempt, interrupt, a, log, what):
+    """The failed attempt of a probe child killed at --probe-timeout-s, with its log's last line."""
+    return dict(attempt, status="failed", interrupt=interrupt, timed_out=True,
+                reason="%s ran past --probe-timeout-s %.0f s and was killed: %s" % (what, a.probe_timeout_s,
+                                                                                    last_line(log) or "no output"))
 
 
 def wait_for_memory(min_available_gib, timeout_s=RECOVER_S, poll_s=RECOVER_POLL_S):
@@ -290,16 +319,19 @@ def launch_rung(rung, ctx):
         try:
             if a.interrupt == "kill":
                 interrupt = kill_after_registration(proc, lambda: compute.epoch_registered(storage, rid, 1),
-                                                    a.kill_delay_s)
+                                                    a.kill_delay_s, timeout_s=a.probe_timeout_s)
             else:
-                proc.wait()
                 interrupt = {"mode": a.interrupt, "after_epoch": 1 if a.interrupt == "fail" else None,
                              "delay_s": None, "missed": False, "leftover_processes": None}
+                if wait_or_kill(proc, a.probe_timeout_s) is None:
+                    interrupt["timed_out"] = True
         except BaseException:
             if proc.poll() is None:                         # Ctrl-C never reaches a child in its own session
                 kill_tree(proc)
             raise
     wall = time.monotonic() - t0                            # the measuring child's wall clock unless resumed below
+    if interrupt.get("timed_out"):
+        return timed_out(attempt, interrupt, a, log, "the probe run")
     oom = runs.failure_line(read_text(log))
     if oom:
         return oom_attempt(attempt, oom, interrupt)
@@ -316,13 +348,16 @@ def launch_rung(rung, ctx):
         print("interrupted after epoch 1 (%s); rerunning the same command to resume" % a.interrupt, flush=True)
         with open(log, "ab") as f:
             t0 = time.monotonic()
-            r = subprocess.run(cmd, cwd=REPO_ROOT, env=env, stdout=f, stderr=subprocess.STDOUT, shell=False)
+            rc = wait_or_kill(subprocess.Popen(cmd, cwd=REPO_ROOT, env=env, stdout=f, stderr=subprocess.STDOUT,
+                                               shell=False, start_new_session=True), a.probe_timeout_s)
             wall = time.monotonic() - t0
+        if rc is None:
+            return timed_out(attempt, interrupt, a, log, "the resumed run")
         oom = runs.failure_line(read_text(log))
         if oom:
             return oom_attempt(attempt, oom, interrupt)
-        if r.returncode != 0:
-            return dict(attempt, status="failed", returncode=r.returncode, interrupt=interrupt,
+        if rc != 0:
+            return dict(attempt, status="failed", returncode=rc, interrupt=interrupt,
                         reason="the resumed run failed: %s" % last_line(log))
     measured = compute.measured_from_checkpoint(ckpt)
     # the fixed cost every run pays outside its record's terms, from the child that wrote the checkpoint (IN-03)
@@ -470,8 +505,12 @@ def run_berturk(a, entry, berturk_dir, env):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False)
         print("BERTurk timing child (%s weights, %s)" % (a.berturk_source, a.device), flush=True)
-        r = subprocess.run([sys.executable, os.path.abspath(__file__), "--child", "berturk", path], cwd=REPO_ROOT,
-                           env=env, shell=False)
+        try:
+            r = subprocess.run([sys.executable, os.path.abspath(__file__), "--child", "berturk", path], cwd=REPO_ROOT,
+                               env=env, shell=False, timeout=a.probe_timeout_s)
+        except subprocess.TimeoutExpired:                   # run() has killed the child (no Ray, no grandchildren)
+            return {"status": "timeout", "reason": "ran past --probe-timeout-s %.0f s and was killed"
+                                                   % a.probe_timeout_s}
         if not os.path.isfile(cfg["out_json"]):
             return {"status": "crashed", "returncode": r.returncode}
         with open(cfg["out_json"], encoding="utf-8") as f:
@@ -493,7 +532,12 @@ def run_score_probe(a, base, env):
                "--device", a.device, "--workers", "0", "--cpus-per-worker", str(a.cpus), "--n", str(SCORE_PROBE_N),
                "--manifest", os.path.abspath(a.manifest), "--out-root", root]
         print("scoring probe: --n %d of val on %s" % (SCORE_PROBE_N, a.device), flush=True)
-        r = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True, shell=False)
+        try:
+            r = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True, shell=False,
+                               timeout=a.probe_timeout_s)
+        except subprocess.TimeoutExpired:                   # --workers 0: one process, killed by run()
+            return {"status": "timeout", "reason": "ran past --probe-timeout-s %.0f s and was killed"
+                                                   % a.probe_timeout_s}
         sidecars = glob.glob(os.path.join(root, "*", "val.json"))
         if r.returncode != 0 or len(sidecars) != 1:
             return {"status": "failed", "returncode": r.returncode,
@@ -548,6 +592,9 @@ def main(argv=None):
                          "CPU test); none: run once")
     ap.add_argument("--kill-delay-s", type=float, default=60.0,
                     help="seconds into epoch 2 (after epoch 1's checkpoint is registered) before the kill")
+    ap.add_argument("--probe-timeout-s", type=float, default=PROBE_TIMEOUT_S,
+                    help="kill a child (probe run, its resume, BERTurk, scoring) that runs longer than this and record "
+                         "why (default 3 h; one epoch of the real probe takes about 14 min)")
     ap.add_argument("--keep-run", action="store_true",
                     help="keep the probe's checkpoint and Ray storage instead of deleting them after the report")
     ap.add_argument("--spike-report", default=DEFAULT_SPIKE, help="the Phase 2 spike report holding verdict.chosen")
@@ -569,6 +616,8 @@ def main(argv=None):
         ap.error("--interrupt needs --epochs 2 or more (it interrupts after epoch 1); or pass --interrupt none")
     if not a.kill_delay_s >= 0:
         ap.error("--kill-delay-s must not be negative")
+    if not a.probe_timeout_s > 0:
+        ap.error("--probe-timeout-s must be positive")
     if a.cpus < 1:
         ap.error("--cpus must be at least 1")
     if not a.min_available_gib >= 0:
