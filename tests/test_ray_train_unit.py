@@ -382,15 +382,20 @@ def test_an_epoch_export_embeds_a_pre_save_snapshot():
 
 def test_code_state_dirty_flag_and_digest_read_the_same_files(tmp_path, monkeypatch):
     """04-REVIEW IN-08: a .planning/ edit leaves both clean; an untracked .py file or a code edit moves both."""
+    import os
     import subprocess
+    # 04-REVIEW IN-04: no global or system git config (commit.gpgsign, core.hooksPath, core.excludesFile) reaches the
+    # temp repo, here or in code_state's own git calls, which inherit this env
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     repo = tmp_path / "repo"
     (repo / ".planning").mkdir(parents=True)
     (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
     (repo / ".planning" / "STATE.md").write_text("one\n", encoding="utf-8")
 
     def git(*args):
-        subprocess.run(("git", "-c", "user.email=t@example.invalid", "-c", "user.name=t") + args, cwd=repo,
-                       check=True, capture_output=True)
+        subprocess.run(("git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+                        "-c", "core.hooksPath=%s" % os.devnull) + args, cwd=repo, check=True, capture_output=True)
     git("init", "-q")
     git("add", "-A")
     git("commit", "-q", "-m", "init")
