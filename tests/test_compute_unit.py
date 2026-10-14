@@ -322,11 +322,22 @@ def test_epoch_registered(tmp_path):
     run_dir = tmp_path / rid
     run_dir.mkdir()
     assert compute.epoch_registered(str(tmp_path), rid, 1) is False          # no snapshot yet
-    (run_dir / compute.SNAPSHOT).write_text('{"checkpoints": []}', encoding="utf-8")
+    snap = run_dir / compute.SNAPSHOT
+
+    def write(names, **extra):                                               # Ray 2.59's snapshot layout
+        snap.write_text(json.dumps(dict({"ray_version": compute.SNAPSHOT_RAY, "checkpoint_results": [
+            {"version": 0, "checkpoint_dir_name": n, "metrics": {"epoch": 1}} for n in names]}, **extra)),
+            encoding="utf-8")
+    write([])
     (run_dir / "epoch-001").mkdir()
     (run_dir / "epoch-001" / "train_state.pt").write_bytes(b"x")
     assert compute.epoch_registered(str(tmp_path), rid, 1) is False          # the snapshot does not name epoch-001
-    (run_dir / compute.SNAPSHOT).write_text('{"checkpoints": ["epoch-001"]}', encoding="utf-8")
+    write([], note="epoch-001")                                              # named, but not as a checkpoint entry
+    assert compute.epoch_registered(str(tmp_path), rid, 1) is False
+    write(["epoch-001"])
+    snap.write_text(snap.read_text(encoding="utf-8")[:40], encoding="utf-8")  # Ray rewrites it in place: half-written
+    assert compute.epoch_registered(str(tmp_path), rid, 1) is False
+    write(["epoch-001"])
     (run_dir / "epoch-001" / "train_state.pt").unlink()
     assert compute.epoch_registered(str(tmp_path), rid, 1) is False          # named, but no train_state.pt
     (run_dir / "epoch-001" / "train_state.pt").write_bytes(b"x")
@@ -640,3 +651,11 @@ def test_a_stalled_child_is_killed_at_the_probe_timeout():
     assert compute_checkpoint.wait_or_kill(proc, 60) == 0
     with pytest.raises(SystemExit):
         compute_checkpoint.main(["--probe-timeout-s", "0"])
+
+
+def test_the_snapshot_format_was_validated_for_the_locked_ray():
+    """04-REVIEW IN-07: epoch_registered reads Ray Train's private snapshot; a lock bump of ray must re-validate it."""
+    import importlib.metadata
+    assert importlib.metadata.version("ray") == compute.SNAPSHOT_RAY, (
+        "ray moved: check %s's layout (checkpoint_results[].checkpoint_dir_name) in the new ray, then bump "
+        "compute.SNAPSHOT_RAY" % compute.SNAPSHOT)

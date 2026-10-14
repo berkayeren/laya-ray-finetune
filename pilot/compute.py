@@ -119,19 +119,27 @@ def _largest(rows, key):
 
 # ---- the probe protocol: interrupt after epoch 1, resume, and the LAYA-03 ladder in fresh children ----
 
-SNAPSHOT = "checkpoint_manager_snapshot.json"               # Ray Train V2 writes it before deleting the previous one
+# Ray Train V2's internal checkpoint-manager snapshot (no public API; written before the previous checkpoint is
+# deleted, in place). Its format was read from ray SNAPSHOT_RAY: {"ray_version", "checkpoint_results":
+# [{"checkpoint_dir_name", "metrics", ...}], "latest_checkpoint_result", ...}; tests/test_compute_unit.py fails when the
+# lock moves ray, so a bump re-validates it (04-REVIEW IN-07)
+SNAPSHOT = "checkpoint_manager_snapshot.json"
+SNAPSHOT_RAY = "2.59.0"
 
 
 def epoch_registered(storage, run_id, epoch):
-    """True once Ray has registered the epoch checkpoint of `run_id`: its snapshot names epoch-NNN and that dir holds
-    train_state.pt, so a kill from here on resumes from it (ray_train.py's epoch checkpoints)."""
+    """True once Ray has registered the epoch checkpoint of `run_id`: an entry of the snapshot's checkpoint_results has
+    checkpoint_dir_name epoch-NNN and that dir holds train_state.pt, so a kill from here on resumes from it
+    (ray_train.py's epoch checkpoints). A missing or half-written snapshot reads as not registered."""
     run_dir, name = os.path.join(storage, run_id), "epoch-%03d" % epoch
     try:
         with open(os.path.join(run_dir, SNAPSHOT), encoding="utf-8") as f:
-            text = f.read()
-    except OSError:
+            snap = json.load(f)
+    except (OSError, ValueError):
         return False
-    return name in text and os.path.isfile(os.path.join(run_dir, name, "train_state.pt"))
+    results = snap.get("checkpoint_results") if isinstance(snap, dict) else None
+    names = {r.get("checkpoint_dir_name") for r in results or [] if isinstance(r, dict)}
+    return name in names and os.path.isfile(os.path.join(run_dir, name, "train_state.pt"))
 
 
 def attempt_chain(start_rung, launch):
