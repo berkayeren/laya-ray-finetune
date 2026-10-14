@@ -55,8 +55,9 @@ it never loads the optimizer, scheduler or scaler state (restore_optimizer), and
 resume stage too (pilot.runs.STAGE_RECALIBRATE_MOVE).
 
 Run identity (LAYA-04): the run_id is pilot.runs.run_id of the command's canonical config (pilot.runs.IDENTITY: split,
-data and base digests, laya version, the resolved device and precision choices, every hyperparameter and the seeds; never
-a path, a resource or the time), e.g. laya-selection_train-neg8-s0-1a2b3c4d. It is the Ray experiment name, so
+data and base digests (a local base's tokenizer/ and encoder/ files too), laya version, the resolved device and precision
+choices, every hyperparameter and the seeds; never a path, a resource or the time), e.g.
+laya-selection_train-neg8-s0-1a2b3c4d. It is the Ray experiment name, so
 storage/<run_id>/ is the run's only directory and the same command always lands in it; --print-run-id prints it after
 the split, base and pin checks and exits without starting Ray.
 
@@ -108,7 +109,7 @@ from ray.train import Checkpoint, CheckpointConfig, FailureConfig, RunConfig, Sc
 from ray.train.torch import TorchTrainer
 
 from pilot import laya_adapter as la
-from pilot import pins, runs, spike
+from pilot import dumps, pins, runs, spike
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file,
                         verify_split_file)
 from pilot.weights import checkpoint_digests, fetch, identity, verify_files
@@ -304,12 +305,17 @@ def epoch_config(cfg, max_len, head_max_len, ray_cfg, epoch):
 
 def identity_values(a, r, entry, base_name, base_ident):
     """The pilot.runs.IDENTITY values of a command: parsed args `a`, resolve(a) `r`, the verified split `entry` and the
-    base identity. Paths enter only as their verified digests, aliases (--gpu) only as their resolved value."""
+    base identity. Paths enter only as their verified digests, aliases (--gpu) only as their resolved value. A local
+    base also enters by the digest of its tokenizer/ and encoder/ files (the tokenizer builds every training item;
+    04-REVIEW WR-01); the pinned base's are fixed by the pin, so base_files_sha256 is None there and
+    pilot.runs.canonical leaves it out, which keeps every pinned run id unchanged."""
     return {"split": os.path.splitext(os.path.basename(entry["path"]))[0],
             "data_sha256": entry["sha256"], "data_role": entry["role"],
             "base_model_sha256": base_ident["model_sha256"],
             "base_config_sha256": (pins.LAYA["sha256"]["rl_agent_config.json"] if base_name == "multilingual"
                                    else base_ident["config_sha256"]),
+            "base_files_sha256": (None if base_name == "multilingual"
+                                  else dumps.files_digest(base_ident["files_sha256"])),
             "laya_version": la.LAYA_VERSION,
             "device": r["device"], "amp": r["amp"], "grad_checkpointing": r["grad_checkpointing"],
             "neg_seed": r["neg_seed"], "adamw_foreach": r["adamw_foreach"], "adamw_fused": r["adamw_fused"],

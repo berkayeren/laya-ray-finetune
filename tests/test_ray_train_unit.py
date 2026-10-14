@@ -1,6 +1,7 @@
 """ray_train.py helpers that run inside Ray workers, tested without starting Ray or loading a model."""
 import hashlib
 import json
+import re
 
 import pytest
 
@@ -100,6 +101,59 @@ def test_run_id_ignores_paths_and_resources_and_follows_the_seed():
         assert _rid(*(base + other)) != rid, other
     assert "-full-" in _rid(*(base + ["--neg", "0"]))
     assert _rid(*(base + ["--neg-seed", "0"])) == rid                        # --neg-seed defaults to --seed
+
+
+def test_the_pinned_base_keeps_the_committed_probe_run_id():
+    """04-REVIEW WR-01: base_files_sha256 is None for --base multilingual (the pin fixes its tokenizer/ and encoder/)
+    and canonical() leaves it out, so the committed compute checkpoint's probe command still names its run
+    laya-selection_train-neg8-s0-db11040d (offline: the committed manifest, report and the pin)."""
+    import os
+    from pilot import runs
+    from pilot.data import REPO_ROOT
+    from pilot.weights import identity
+    with open(os.path.join(REPO_ROOT, "results", "compute", "compute_checkpoint.json"), encoding="utf-8") as f:
+        meta = json.load(f)["meta"]
+    with open(os.path.join(REPO_ROOT, "data", "splits.json"), encoding="utf-8") as f:
+        entry = json.load(f)["splits"]["selection_train"]
+    assert entry["sha256"] == meta["split"]["sha256"]
+    p, start = meta["protocol"], meta["protocol"]["spike_start"]
+    a = ray_train.parser().parse_args([
+        "--data", "d.jsonl", "--out", "o", "--base", "multilingual", "--device", p["device"], "--workers", "1",
+        "--cpus-per-worker", str(p["cpus"]), "--epochs", str(p["epochs"]), "--micro-batch", str(start["micro_batch"]),
+        "--grad-accum", str(start["grad_accum"]), "--max-len", str(start["max_len"]), "--neg", str(p["neg"]),
+        "--seed", str(p["seed"])])
+    vals = ray_train.identity_values(a, ray_train.resolve(a), entry, "multilingual", identity("multilingual"))
+    assert vals["base_files_sha256"] is None and "base_files_sha256" not in runs.canonical(vals)
+    assert runs.run_id(runs.canonical(vals)) == p["run_id"] == "laya-selection_train-neg8-s0-db11040d"
+
+
+def test_a_local_base_names_the_run_by_its_tokenizer_and_encoder(tiny_run, tmp_path, capsys):
+    """04-REVIEW WR-01: two local bases with the same weights and rl_agent_config.json but another tokenizer/ or
+    encoder/ file get different --print-run-id output, so neither resumes nor returns the other's run."""
+    import shutil
+    from pilot import runs
+    from pilot.weights import identity
+    base = tiny_run[tiny_run.index("--base") + 1]
+
+    def rid(b):
+        argv = list(tiny_run)
+        argv[argv.index("--base") + 1] = str(b)
+        ray_train.main(argv + ["--print-run-id"])
+        return capsys.readouterr().out.strip()
+
+    first = rid(base)
+    assert first == rid(base)                                                 # stable for the same base
+    ids = {first}
+    for rel in ("tokenizer/tokenizer.json", "encoder/config.json"):
+        other = tmp_path / ("other-" + rel.split("/")[0])
+        shutil.copytree(base, other)
+        with open(other / rel, "a", encoding="utf-8") as f:
+            f.write("\n")                                                     # same JSON, other bytes
+        same, changed = identity(base), identity(str(other))
+        assert (same["model_sha256"], same["config_sha256"]) == (changed["model_sha256"], changed["config_sha256"])
+        ids.add(rid(other))
+    assert len(ids) == 3 and all(re.fullmatch(r"laya-selection_train-neg8-s0-[0-9a-f]{8}", i) for i in ids), ids
+    assert "base_files_sha256" in runs.IDENTITY and "base_files_sha256" in runs.DROPPED_WHEN_NONE
 
 
 def test_intermediate_checkpoint_config_is_marked_and_traceable():

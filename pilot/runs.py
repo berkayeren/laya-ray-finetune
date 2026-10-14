@@ -16,6 +16,9 @@ run_id() names the run by them (split, neg K, seed and the first 8 hex of the sh
 run_id is the Ray experiment name, so storage/<run_id>/ is the run's only resume directory: rerunning the same config
 resumes, another seed or config gets another dir. Every ray_train.py flag is in exactly one of IDENTITY (directly or
 through its resolved value) and NOT_IDENTITY (a test enforces it), so a new flag cannot silently drop out of the key.
+A local --base also enters by the digest of its tokenizer/ and encoder/ files (base_files_sha256, 04-REVIEW WR-01): the
+tokenizer builds every training item. canonical() leaves that key out when it is None (the pinned base, whose files the
+pin fixes), so a pinned run keeps the id it had before the key existed.
 check_state refuses a resume from another run's train state; disk_need_bytes is the driver's free-disk floor.
 
 usage: from pilot import runs; record = runs.read_record(ckpt_dir); [row["train_s"] for row in record["epochs"]]
@@ -33,9 +36,9 @@ from pilot.data import repo_relpath
 
 # every value that changes what a run trains: the split by name and bytes, the base model by digest, the laya version,
 # the resolved device and its precision / checkpointing / optimizer choices, every hyperparameter and the seeds
-IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_config_sha256", "laya_version", "device",
-            "workers", "epochs", "micro_batch", "grad_accum", "encoder_lr", "head_lr", "weight_decay", "clip_grad_norm",
-            "loss", "neg", "neg_seed", "freeze_encoder", "freeze_embeddings", "grad_checkpointing", "amp", "max_len",
+IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_config_sha256", "base_files_sha256",
+            "laya_version", "device", "workers", "epochs", "micro_batch", "grad_accum", "encoder_lr", "head_lr",
+            "weight_decay", "clip_grad_norm", "loss", "neg", "neg_seed", "freeze_encoder", "freeze_embeddings", "grad_checkpointing", "amp", "max_len",
             "head_max_len", "max_messages", "calib_max_messages", "calib_frac", "shuffle_options", "seed",
             "adamw_foreach", "adamw_fused")
 # ray_train.py flags that never change training, so never the run_id:
@@ -49,16 +52,21 @@ IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_conf
 #   export_epochs: whether per-epoch laya exports are written next to the run (outputs, not training)
 NOT_IDENTITY = ("data", "base", "out", "storage", "manifest", "cpus_per_worker", "object_store_gb", "calib_batch", "gpu",
                 "print_run_id", "fail_after_epoch", "export_epochs")
+# IDENTITY keys canonical() leaves out when their value is None. base_files_sha256 is the pilot.dumps.files_digest of a
+# local base's tokenizer/ and encoder/ files (04-REVIEW WR-01) and None for the pinned base, whose files the pin fixes,
+# so every pinned run id (the committed probe's laya-selection_train-neg8-s0-db11040d) is the one it had before
+DROPPED_WHEN_NONE = ("base_files_sha256",)
 
 
 def canonical(values):
-    """{key: values[key]} for exactly the IDENTITY keys; ValueError naming any missing or unexpected key."""
+    """{key: values[key]} for exactly the IDENTITY keys, without a DROPPED_WHEN_NONE key whose value is None; ValueError
+    naming any missing or unexpected key (a DROPPED_WHEN_NONE key must still be given, as None)."""
     missing = [k for k in IDENTITY if k not in values]
     extra = sorted(k for k in values if k not in IDENTITY)
     if missing or extra:
         raise ValueError("run identity: missing %s; unexpected %s" % (", ".join(missing) or "none",
                                                                     ", ".join(extra) or "none"))
-    return {k: values[k] for k in IDENTITY}
+    return {k: values[k] for k in IDENTITY if not (k in DROPPED_WHEN_NONE and values[k] is None)}
 
 
 def check_state(state, run_id, canonical):
