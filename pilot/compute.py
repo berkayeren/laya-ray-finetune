@@ -19,9 +19,10 @@ discloses each one left out (04-REVIEW IN-02).
 
 Transparency (T-04-17): every projection line names its basis and its source. basis is the weakest input of the line:
 "estimate" when any of its rates is an estimate (ESTIMATES, used only when the BERTurk timing child did not finish
-ok), "provisional" for the
-few-shot lines (their protocol is frozen only in Phase 8), "measured" otherwise. Every MATRIX value is provisional
-whatever the basis; assumptions() lists each one, with its source, for the user to confirm or trim at plan 04-08.
+ok), "provisional" for the few-shot lines (their protocol is frozen only in Phase 8), "measured (cpu, wall)" when a
+Laya scoring rate is the committed CPU zero-shot dump's wall clock per message (the scoring probe did not finish ok),
+"measured" otherwise. Every MATRIX value is provisional whatever the basis; assumptions() lists each one, with its
+source, for the user to confirm or trim at plan 04-08.
 
 usage: from pilot import compute; start = compute.spike_start("results/spike/mps_spike.json")
        measured = compute.measured_from_checkpoint(ckpt_dir); counts = compute.split_counts(manifest)
@@ -377,7 +378,8 @@ def _berturk_train_line(id_, phase, what, runs_, epochs, split, batch, rates, co
 
 def project(measured, counts, matrix):
     """{"lines": [...], "total_s", "total_h"}: one line per experiment-matrix item, each with its runs, epochs, units,
-    seconds per unit, basis (measured, estimate or provisional), source and formula; the total is their sum."""
+    seconds per unit, basis (measured, measured (cpu, wall), estimate or provisional), source and formula; the total is
+    their sum."""
     laya, ik, m = measured["laya"], _items_key(matrix), matrix
     s_msg, s_msg_basis, s_msg_source = laya_scoring_rate(measured)
     s_over = laya_scoring_overhead(measured)
@@ -661,8 +663,9 @@ def _probe_lines(measured):
 def _projection_lines(projection):
     lines = ["", "## Projection", "",
              "Basis is the weakest input of a line: estimate (a labelled estimate, not measured), provisional "
-             "(few-shot, protocol frozen only in Phase 8) or measured. Every matrix value is provisional; see "
-             "Assumptions to confirm.", "",
+             "(few-shot, protocol frozen only in Phase 8), measured (cpu, wall) (the committed CPU zero-shot "
+             "scoring rate, wall clock per message with Ray start and model loads, used when the scoring probe did "
+             "not finish ok) or measured. Every matrix value is provisional; see Assumptions to confirm.", "",
              "| line | phase | what | runs | epochs | units / epoch | unit | s / unit | basis | hours |",
              "|---|---|---|---|---|---|---|---|---|---|"]
     for l in projection["lines"]:

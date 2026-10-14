@@ -95,8 +95,9 @@ EPOCH_FIELDS = ("epoch", "loss", "train_s", "save_s", "optimizer_steps", "n_item
                 "peak_driver_bytes", "peak_rss_bytes", "current_allocated_bytes", "swap_delta_bytes", "segment",
                 "resumed")
 # one entry per run segment (segment 0 = the first start; every rerun after a kill adds one); git_diff_sha256 is the
-# sha256 of the segment's uncommitted tracked diff (ray_train.code_state), so an edit between a kill and its rerun shows
-# even when HEAD did not move; resume_load_s and resume_peak_total_bytes are None on a segment that started at epoch 0
+# sha256 of the segment's uncommitted code (ray_train.code_state: the tracked diff outside .planning/ plus each
+# untracked, unignored *.py file's name and bytes; git_dirty reads the same files), so an edit between a kill and its
+# rerun shows even when HEAD did not move; resume_load_s and resume_peak_total_bytes are None on a segment that started at epoch 0
 SEGMENT_FIELDS = ("segment", "start_epoch", "resumed", "git_sha", "git_dirty", "git_diff_sha256", "device",
                   "resume_load_s", "resume_peak_total_bytes")
 

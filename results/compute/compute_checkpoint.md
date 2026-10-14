@@ -51,7 +51,7 @@ Every probe attempt runs in a fresh process; an MPS out-of-memory attempt is fol
 
 ## Projection
 
-Basis is the weakest input of a line: estimate (a labelled estimate, not measured), provisional (few-shot, protocol frozen only in Phase 8) or measured. Every matrix value is provisional; see Assumptions to confirm.
+Basis is the weakest input of a line: estimate (a labelled estimate, not measured), provisional (few-shot, protocol frozen only in Phase 8), measured (cpu, wall) (the committed CPU zero-shot scoring rate, wall clock per message with Ray start and model loads, used when the scoring probe did not finish ok) or measured. Every matrix value is provisional; see Assumptions to confirm.
 
 | line | phase | what | runs | epochs | units / epoch | unit | s / unit | basis | hours |
 |---|---|---|---|---|---|---|---|---|---|

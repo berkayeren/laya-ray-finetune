@@ -150,8 +150,10 @@ Useful flags: `--neg K` (negatives kept per training message, default 8; 0 = all
 `--freeze-embeddings` / `--freeze-encoder` (the MPS out-of-memory fallback rungs; `--freeze-encoder`
 trains the head only and gains much less), `--max-messages N` (subsample for smoke tests),
 `--loss rlcd|soft-ce`. A training run records its device, memory, per-epoch wall clock and fallback rung
-in the checkpoint config (`training.ray_train.record`); an MPS out-of-memory error names the flags of the
-next rung.
+in the checkpoint config (`training.ray_train.record`). An MPS out-of-memory error during training names the
+flags of the next rung. After the last epoch (calibration, the final save, or the model move of a rerun that only
+recalibrates) every epoch is already saved, so that error says to rerun the same command instead: a rung flag would
+change the run id and retrain from epoch 0.
 
 ## Scoring path
 
