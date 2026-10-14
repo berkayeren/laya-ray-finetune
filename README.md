@@ -97,23 +97,35 @@ are hash-registered too, so later phases can trust the flag list.
 | `pilot/laya_adapter.py` | the only module that uses Laya's private API, pinned to laya 0.4.6 and contract-tested |
 | `pilot/dumps.py` | the logit dump format: writer, the one hard-failing reader, gold labels, run ids |
 | `pilot/metrics.py` | torch-free metrics, the val θ rule and the paired bootstrap, the same for every system |
-| `ray_train.py` | Ray Train `TorchTrainer` (DDP) fine-tune using Laya's own loss, calibration and checkpoint format |
+| `pilot/runs.py` | torch-free run-record schema of `ray_train.py`, the run id, the neg-K item count, the MPS fallback ladder |
+| `pilot/compute.py` | torch-free compute-checkpoint logic: projection, what-if table, disk budget, report and markdown |
+| `ray_train.py` | Ray Train `TorchTrainer` (DDP) fine-tune using Laya's own loss, calibration and checkpoint format; cpu, cuda or one MPS worker; resumes by rerunning |
 | `score.py` | the only place a model runs: one system on one val/test split → a logit dump (in-process or Ray Data actors) |
 | `report.py` | dumps → metrics (numpy only, no model); `--compare` paired bootstrap; `--table` results table |
 | `evaluate.py` | one-step wrapper: `score.py --model laya`, then `report.py`'s report of that dump |
-| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`) |
+| `mps_spike.py` | Phase 2 MPS feasibility spike (`results/spike/`) |
+| `compute_checkpoint.py` | Phase 4 compute checkpoint: a measured MPS fine-tune probe and the projected experiment-matrix runtime (`results/compute/`) |
+| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`) |
 | `tests/` | pytest suite (markers `unit`, `data`, `weights`, `ray`, `mps`) |
 
 ## Run
 
 ```bash
-# CPU smoke fine-tune (GPU: drop --freeze-encoder/--max-messages, add --gpu)
+# full-encoder fine-tune on the Apple GPU: one Ray worker, the Phase 2 spike's start config, neg8 items
+python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
+    --device mps --workers 1 --micro-batch 8 --grad-accum 4 --max-len 128
+python ray_train.py ... --print-run-id     # the run id: its Ray dir ray_results/<run_id>/ and resume key
+# after a kill or crash, rerun the identical command: it resumes from the last completed epoch
+
+# CPU smoke fine-tune (CUDA: drop --freeze-encoder/--max-messages, add --device cuda; --gpu is the same)
 python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
     --workers 2 --freeze-encoder --max-messages 100 --epochs 2
 
 # score one system on one split into a logit dump (--workers 0 runs in-process without Ray)
 python score.py data/splits/val.jsonl --model laya --checkpoint multilingual --workers 2 --cpus-per-worker 4
+python score.py data/splits/val.jsonl --model laya --checkpoint ./ckpt --device mps --workers 0   # fp32 on MPS
 python score.py data/splits/test.jsonl --model prior          # baselines: --model majority | prior
+# an existing dump is never overwritten: --force rescores it (results/dumps is the committed audit record)
 
 # dumps -> metrics, no model (add --out PATH to save the JSON)
 python report.py results/dumps/laya-zeroshot-7b928d82 --split test
@@ -121,7 +133,7 @@ python report.py results/dumps/laya-zeroshot-7b928d82 --split test
 # paired bootstrap of A - B on test (B = 10,000 replicates, seed 0)
 python report.py --compare results/dumps/laya-zeroshot-7b928d82 results/dumps/prior --split test
 
-# one-step wrapper: score.py --model laya, then report.py (--n N: a debug subset, written to a temp dir)
+# one-step wrapper: score.py --model laya, then report.py (dumps go to a temp dir unless --out-root is given)
 python evaluate.py data/splits/test.jsonl --checkpoint ./ckpt --workers 0 --n 20
 
 # Phase 3 baselines: rescore majority, prior and zero-shot Laya on val + test, rebuild results/reports/
@@ -134,8 +146,12 @@ sha256-verified Laya weights, or a local Laya checkpoint dir. Nothing downloads 
 revision. `ray_train.py --data` only accepts a registered split with role `train`; `score.py` only
 a registered `val` or `test` split.
 
-Useful flags: `--freeze-encoder` (head only, fits small CPUs/GPUs, gains much less),
-`--max-messages N` (subsample for smoke tests), `--loss rlcd|soft-ce`.
+Useful flags: `--neg K` (negatives kept per training message, default 8; 0 = all 48 labels),
+`--freeze-embeddings` / `--freeze-encoder` (the MPS out-of-memory fallback rungs; `--freeze-encoder`
+trains the head only and gains much less), `--max-messages N` (subsample for smoke tests),
+`--loss rlcd|soft-ce`. A training run records its device, memory, per-epoch wall clock and fallback rung
+in the checkpoint config (`training.ray_train.record`); an MPS out-of-memory error names the flags of the
+next rung.
 
 ## Scoring path
 
@@ -173,14 +189,50 @@ to load; there is no override.
 macOS arm64 (Apple silicon, MPS) is the primary platform. On Linux the lock installs the default
 PyPI `torch==2.14.1` wheel, which is built for CUDA 13. It needs an sm_75+ GPU (a T4 works, a P100
 does not) and a 580-series or newer driver. Disk: about 1.5 GB for `.venv`, about 1.1 GB for the
-weights in the Hugging Face cache, and a few MB for the data.
+weights in the Hugging Face cache, and a few MB for the data. A training run also needs room for its
+train state, per-epoch exports and final checkpoint under `ray_results/`; `ray_train.py` refuses to start
+when the free disk is too low.
+
+Training (`ray_train.py --device mps --workers 1`) and scoring (`score.py --device mps --workers 0`, fp32)
+run on the M4's GPU. Ray has no MPS device manager, so an MPS run is one Ray worker on an explicit
+`torch.device("mps")`, and every run asserts that its parameters landed on the requested device.
 
 The Phase 2 MPS feasibility spike (`results/spike/mps_spike.md`, raw numbers in
 `results/spike/mps_spike.json`) found that a full-encoder Laya fine-tune **fits** on a 16 GB M4: verdict FITS at
 micro-batch 8, max_len 128, grad-accum 4, no frozen layers and no CPU-fallback ops
 (`PYTORCH_ENABLE_MPS_FALLBACK=0`), with a projected 14.3 min per `selection_train` neg8 epoch and a peak of about
-8.8 GiB. Training starts from that config on MPS, so the Kaggle GPU contingency is not needed. To rerun the spike
-on a quiet Mac (about 20-40 min): `python mps_spike.py --out results/spike`.
+8.8 GiB. Training starts from that config on MPS, and the Phase 4 compute checkpoint below measured it on the
+real data, so the Kaggle GPU contingency stays unused. To rerun the spike on a quiet Mac (about 20-40 min):
+`python mps_spike.py --out results/spike`.
+
+## Compute checkpoint (Phase 4)
+
+`results/compute/compute_checkpoint.md` (raw numbers in `results/compute/compute_checkpoint.json`) is one real
+`compute_checkpoint.py` run on the 16 GB M4: a full-encoder Laya fine-tune of `selection_train` with neg8 items in
+one Ray worker on MPS, from the spike's start config (micro-batch 8, max_len 128, grad-accum 4, rung none, no
+fallback), with gradient checkpointing on, AMP off and `PYTORCH_ENABLE_MPS_FALLBACK=0`.
+
+| epoch | train min | s / optimizer step | optimizer steps | items | peak GiB (driver + RSS) | swap delta MiB |
+|---|---|---|---|---|---|---|
+| 1 | 13.8 | 1.835 | 452 | 14,439 | 8.63 | 0 |
+| 2 (resumed) | 13.8 | 1.827 | 452 | 14,439 | 9.09 | 423 |
+
+- **Resume:** the run was killed 60 s into epoch 2 and the identical command was rerun; it continued from the
+  epoch-1 checkpoint (resume load 3.6 s, peak 5.33 GiB while resuming).
+- **Swap:** swap grew by 423 MiB during the resumed epoch 2 (none in epoch 1; the idle preflight saw no growth). The
+  run was kept as the compute checkpoint by the user's decision, and the swap growth is stated here and in the
+  approval; the epoch-2 rate is no slower than epoch 1.
+- **Other rates:** BERTurk 0.396 s per optimizer step (batch 32, fp32, peak 5.01 GiB) and 0.0019 s per message for
+  inference; Laya scoring on MPS in fp32 0.321 s per message.
+- **Projection:** the whole experiment matrix (Laya selection, val scoring and final seeds, BERTurk selection and
+  final seeds, few-shot base, incremental and scoring, final scoring) is projected at **14.81 h** at the
+  provisional matrix (LR grid 3, epoch ceiling 4, 3 seeds); the what-if table ranges from 9.06 h (LR grid 1,
+  2 epochs) to 14.81 h, and the few-shot compute fallback (1 base run per model) gives 12.79 h. One training run
+  needs up to 13.79 GiB of disk; `ray_train.py` refuses to start below 14.79 GiB free.
+
+No experiment-matrix run (Laya selection or final seeds, BERTurk training, few-shot) starts before the user
+approves this budget. To rerun the checkpoint on a quiet Mac on AC power (about 45-55 min):
+`caffeinate -i python compute_checkpoint.py --out results/compute`.
 
 ## Why a custom Ray loop
 

@@ -26,9 +26,9 @@ The root `CLAUDE.md` is the authoritative description of commands and architectu
 
 ## Languages and Runtime
 
-- Python 3.12 (`requires-python = "==3.12.*"` in `pyproject.toml`), run directly as scripts with `argparse` CLIs: `prepare_data.py`, `ray_train.py`, `score.py`, `report.py`, `evaluate.py` (a thin wrapper over the two), plus `intents.py` and the `pilot/` package.
+- Python 3.12 (`requires-python = "==3.12.*"` in `pyproject.toml`), run directly as scripts with `argparse` CLIs: `prepare_data.py`, `ray_train.py`, `score.py`, `report.py`, `evaluate.py` (a thin wrapper over the two), `mps_spike.py` (Phase 2) and `compute_checkpoint.py` (Phase 4), plus `intents.py` and the `pilot/` package.
 - Dependencies are exact-pinned in `pyproject.toml` and hash-locked in `requirements.txt` (universal lock, binary wheels only). `make env` builds `.venv` with `pip install --require-hashes --only-binary :all:`; `make lock` / `make lock-check` regenerate and check the lock.
-- Ray on a single node: `ray_train.py` refuses a multi-node cluster (workers read driver-local paths); `score.py` scores with Ray Data actors, or in-process with `--workers 0` (`report.py` is numpy only and loads no model). Devices: CPU, or CUDA via `--gpu` / `--gpus-per-worker`. `ray_train.py` and `score.py` have no MPS path yet (Phase 4 adds `--device mps`); the Phase 2 spike `mps_spike.py` already trains on MPS in a 1-worker Ray Train worker and found the full fine-tune fits (`results/spike/mps_spike.md`).
+- Ray on a single node: `ray_train.py` refuses a multi-node cluster (workers read driver-local paths); `score.py` scores with Ray Data actors, or in-process with `--workers 0` (`report.py` is numpy only and loads no model). Devices: `ray_train.py --device cpu|cuda|mps` (`--gpu` is an alias for `--device cuda`; mps trains in one Ray worker on the Apple GPU) and `score.py --device cpu|mps|cuda` (mps in-process with `--workers 0`, fp32 on every device). The Phase 2 spike `mps_spike.py` found the full fine-tune fits (`results/spike/mps_spike.md`), and the Phase 4 `compute_checkpoint.py` measured it on the M4 (2 epochs with a kill and resume, BERTurk and scoring probes, the projected experiment-matrix runtime; `results/compute/compute_checkpoint.md`).
 
 ## Frameworks and Key Dependencies
 
@@ -38,7 +38,7 @@ The root `CLAUDE.md` is the authoritative description of commands and architectu
 
 ## Configuration
 
-- CLI flags only. `prepare_data.py`: `--data-dir --out --include-no-intent/--no-include-no-intent --rewrite-manifest`. `ray_train.py`: `--data --base --out --workers --gpu --epochs --micro-batch --grad-accum --encoder-lr --head-lr --loss --freeze-encoder --max-messages --calib-max-messages --calib-frac --storage --manifest --seed` etc. `score.py`: `SPLIT --model laya|majority|prior --checkpoint --workers --cpus-per-worker --gpus-per-worker --n --out-root --manifest`. `report.py`: `RUN_DIR --split --out --manifest`, `--compare A_DIRS B_DIRS --B --seed`, `--table PATH...`. `evaluate.py`: `--checkpoint --n --workers --cpus-per-worker --gpus-per-worker --out-root --out --manifest`. Make: `make baselines` (rescore majority, prior and zero-shot Laya on val + test) and `make baseline-reports` (rebuild `results/reports/` and the table from the committed dumps, no model).
+- CLI flags only. `prepare_data.py`: `--data-dir --out --include-no-intent/--no-include-no-intent --rewrite-manifest`. `ray_train.py`: `--data --base --out --workers --device cpu|cuda|mps --gpu --amp --grad-checkpointing --epochs --micro-batch --grad-accum --max-len --neg --neg-seed --encoder-lr --head-lr --loss --freeze-embeddings --freeze-encoder --max-messages --calib-max-messages --calib-frac --storage --manifest --seed --print-run-id --export-epochs` etc. `score.py`: `SPLIT --model laya|majority|prior --checkpoint --device --workers --cpus-per-worker --gpus-per-worker --n --out-root --force --manifest`. `report.py`: `RUN_DIR --split --out --manifest`, `--compare A_DIRS B_DIRS --B --seed`, `--table PATH...`. `evaluate.py`: `--checkpoint --n --workers --cpus-per-worker --gpus-per-worker --device --out-root --force --out --manifest`. `compute_checkpoint.py`: `--out --device --data --manifest --base --epochs --seed --cpus --storage --min-available-gib --interrupt kill|fail|none --kill-delay-s --keep-run --spike-report --berturk/--no-berturk --score-probe/--no-score-probe`. Make: `make baselines` (rescore majority, prior and zero-shot Laya on val + test) and `make baseline-reports` (rebuild `results/reports/` and the table from the committed dumps, no model).
 - Every pinned revision and sha256 (dataset, 40 raw folds, Laya, BERTurk, OOD tag subset) lives in `pilot/pins.py`. The code reads no environment variables; `HF_HUB_OFFLINE=1` reuses the hub cache after a first fetch.
 
 ## Platform Requirements
@@ -93,14 +93,17 @@ The root `CLAUDE.md` is the authoritative description of commands and architectu
 | Audit | Report-only duplicate audit, hash-registered in the manifest | `pilot/audit.py` |
 | Weights | Pinned, digest-verified fetch (`fetch`), provenance hashes (`identity`) | `pilot/weights.py` |
 | Data prep CLI | Pinned Multi3NLU++ -> `data/splits/*.jsonl`, `data/audit/`, `data/splits.json` | `prepare_data.py` |
-| Trainer | Single-node DDP fine-tuning on Ray Train, message-level calibration holdout, checkpoint | `ray_train.py` |
+| Trainer | Single-node DDP fine-tuning on Ray Train (cpu, cuda, or one MPS worker), neg-K items, message-level calibration holdout, fallback ladder, run id, per-epoch resume, run record | `ray_train.py` |
+| Run record | Torch-free run-record schema, run identity (`run_id`), neg-K item count, LAYA-03 fallback ladder | `pilot/runs.py` |
 | Laya adapter | The only module using Laya's private API, pinned to laya 0.4.6 and contract-tested | `pilot/laya_adapter.py` |
 | Dumps | Logit dump format: `write_dump`, `load_dump` (the only, hard-failing reader), `read_gold`, `run_id` | `pilot/dumps.py` |
 | Metrics | Torch-free metrics, the val θ rule (`select_theta`), `seed_average`, `paired_bootstrap` | `pilot/metrics.py` |
 | Scorer | The only place a model runs: one system (laya, majority, prior) on one val/test split -> logit dump | `score.py` |
 | Reporter | Dumps -> metrics at θ 0.5 and val-selected θ (shipped and T = 1), `--compare` bootstrap, `--table` | `report.py` |
 | Evaluator | Thin wrapper: `score.py --model laya` then `report.run_report` | `evaluate.py` |
-| Results | Committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`) | `results/` |
+| Compute checkpoint | 2-epoch MPS probe with a kill and resume, BERTurk and scoring probes, matrix projection -> `results/compute/` | `compute_checkpoint.py` |
+| Compute logic | Torch-free projection, what-if, disk budget, assumptions and markdown of the compute checkpoint | `pilot/compute.py` |
+| Results | Committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`) | `results/` |
 | Tests | Offline contracts and guards (`make test`); network tests via `make test-all` | `tests/` |
 
 ## Pattern Overview
