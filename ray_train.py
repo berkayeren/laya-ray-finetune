@@ -663,7 +663,6 @@ def train_loop_per_worker(c):
     # Calibrate on the held-out messages and publish the final checkpoint from rank 0.
     del opt, sched, scaler, params, groups                 # free optimizer state before the eval pass
     gc.collect()
-    record["code_changed_on_resume"] = len({s["git_sha"] for s in segments}) > 1
     if rank == 0:
         inner.eval()
         t_calib = time.perf_counter()
