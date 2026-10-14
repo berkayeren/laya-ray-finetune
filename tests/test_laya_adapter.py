@@ -7,8 +7,12 @@ adapter's logit route reproduces the public predict_batch probabilities.
 
 SIGNATURES is the laya 0.4.6 snapshot. Pins move only with `make lock`; re-snapshot only after reading laya's changelog.
 """
+import ast
 import inspect
 import json
+import os
+import subprocess
+import sys
 import types
 
 import numpy as np
@@ -62,6 +66,10 @@ SIGNATURES = {
                  "-> Union[laya.agent.Agent, ForwardRef('ONNXAgent')]",
 }
 TAGS = list(QUESTIONS)
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ADAPTER = "pilot/laya_adapter.py"
+PRIVATE = ("laya.train", "laya.common", "laya.calibrate", "laya.agent")
+INTERNALS = ("head_checkpointing", "gradient_checkpointing_enable", "tok_embeddings", "records_from_labeled")
 
 
 @pytest.fixture(scope="module")
@@ -161,3 +169,93 @@ def test_noul_logits_refuses_bad_records(tiny_agent, monkeypatch):
         monkeypatch.setattr(la, "_lcal", lambda b=bad: fake([good] * 47 + [b]))
         with pytest.raises(SystemExit, match="record 47 is not a 2-option noul"):
             la.noul_logits(tiny_agent, ["Evet."], QUESTIONS)
+
+
+# ---- D-13/D-14: no private laya use outside the adapter (tests included, no exceptions) ----
+
+def _private(name):
+    return any(name == m or name.startswith(m + ".") for m in PRIVATE)
+
+
+def _private_laya_uses(path, label=None):
+    """"path:line what" for every private laya import (any form), laya.<private> attribute chain, dynamic import of a
+    private module, or DecisionModel internal / logit-route attribute. Strings are not code: only the first argument
+    of importlib.import_module / __import__ is read as a module name."""
+    with open(path, encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=path)
+    bad = []
+    for node in ast.walk(tree):
+        what = None
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names if _private(a.name)]
+            what = "import %s" % ", ".join(names) if names else None
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            if _private(node.module):
+                what = "from %s import ..." % node.module
+            elif node.module == "laya":
+                names = [a.name for a in node.names if _private("laya." + a.name)]
+                what = "from laya import %s" % ", ".join(names) if names else None
+        elif isinstance(node, ast.Attribute):
+            if isinstance(node.value, ast.Name) and node.value.id == "laya" and _private("laya." + node.attr):
+                what = "laya.%s" % node.attr
+            elif node.attr in INTERNALS:
+                what = ".%s" % node.attr
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.id if isinstance(fn, ast.Name) else fn.attr if isinstance(fn, ast.Attribute) else None
+            arg = node.args[0] if node.args else None
+            if name in ("import_module", "__import__") and isinstance(arg, ast.Constant) \
+                    and isinstance(arg.value, str) and _private(arg.value):
+                what = "%s(%r)" % (name, arg.value)
+        if what:
+            bad.append("%s:%d %s" % (label or path, node.lineno, what))
+    return bad
+
+
+def test_no_private_laya_use_outside_adapter():
+    out = subprocess.run(["git", "ls-files", "*.py"], cwd=REPO, capture_output=True, text=True, check=True).stdout
+    files = [f for f in out.split() if f != ADAPTER]
+    assert ADAPTER in out.split() and {"ray_train.py", "mps_spike.py", "tests/test_spike_unit.py"} <= set(files)
+    bad = [b for f in files for b in _private_laya_uses(os.path.join(REPO, f), f)]
+    assert not bad, "private laya use outside %s (route it through the adapter):\n%s" % (ADAPTER, "\n".join(bad))
+
+
+def test_guard_catches_every_form(tmp_path):
+    p = tmp_path / "bad.py"
+    p.write_text("import laya.train\n"
+                 "import laya.common as c\n"
+                 "from laya.calibrate import fit_temperature_map\n"
+                 "from laya import train as lt\n"
+                 "from laya import agent\n"
+                 "x = laya.common.collate_items\n"
+                 "importlib.import_module(\"laya.train\")\n"
+                 "__import__(\"laya.calibrate\")\n"
+                 "m.head_checkpointing = True\n"
+                 "m.encoder.gradient_checkpointing_enable()\n"
+                 "m.encoder.embeddings.tok_embeddings\n"
+                 "c.records_from_labeled(a, p)\n", encoding="utf-8")
+    found = _private_laya_uses(str(p))
+    assert len(found) == 12 and sorted(int(b.split(":")[-1].split()[0]) for b in found) == list(range(1, 13)), found
+    q = tmp_path / "clean.py"
+    q.write_text("import laya\n"
+                 "laya.load(path)\n"
+                 "from pilot import laya_adapter as la\n"
+                 "la.forward(m, b, d, False, False)\n"
+                 "s = \"laya.train\"\n", encoding="utf-8")
+    assert _private_laya_uses(str(q)) == []
+
+
+def test_laya_internals_covered():
+    import mps_spike
+    missing = [n for n in mps_spike.LAYA_INTERNALS
+               if n not in la.COVERS or not callable(getattr(la, la.COVERS[n], None))]
+    assert not missing, missing
+
+
+def test_adapter_import_is_torch_free():
+    code = ("import sys, pilot.laya_adapter, mps_spike\n"
+            "print(sorted(m for m in ('torch', 'ray', 'laya.train', 'laya.common', 'laya.calibrate', 'laya.agent') "
+            "if m in sys.modules))")
+    r = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "[]", r.stdout
