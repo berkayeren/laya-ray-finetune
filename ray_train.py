@@ -439,14 +439,19 @@ def prune_exports(exports_dir, start_epoch):
     """Delete every export a dead segment left beyond the epoch this segment resumes from (and any partial .tmp);
     returns the names removed. An export is written before its epoch's train state registers, so a kill in between
     leaves an export of weights the resumed run never continues from (MPS is not bitwise deterministic); the rerun
-    retrains that epoch and writes it again. Rank 0 only, before training."""
+    retrains that epoch and writes it again. Rank 0 only, before training. A deletion that fails refuses the segment
+    before training (04-REVIEW IN-09): a half-deleted stale export must never be kept as the retrained epoch's."""
     if not os.path.isdir(exports_dir):
         return []
     gone = []
     for n in sorted(os.listdir(exports_dir)):
         keep = len(n) == 9 and n.startswith("epoch-") and n[6:].isdigit() and int(n[6:]) <= start_epoch
         if n.startswith("epoch-") and not keep:
-            shutil.rmtree(os.path.join(exports_dir, n), ignore_errors=True)
+            try:
+                shutil.rmtree(os.path.join(exports_dir, n))
+            except OSError as e:
+                raise SystemExit("cannot delete the stale export exports/%s of a killed segment (%s); delete it, then "
+                                 "rerun the same command to resume" % (n, e)) from None
             gone.append(n)
     return gone
 
@@ -462,15 +467,17 @@ def export_record(record, name):
 
 def write_export(inner, tok, ecfg, run_dir, name):
     """Rank 0's uncalibrated laya export of a completed epoch at run_dir/exports/<name>, outside Ray's checkpoint
-    rotation (Phase 5 picks the epoch on val without retraining); an existing export is kept (one this segment's start
-    kept, prune_exports, is on the resumed trajectory)."""
+    rotation (Phase 5 picks the epoch on val without retraining). The segment's start removed every export past the
+    resumed epoch (prune_exports), so an existing one here is a stale export that survived: refused, never kept."""
     final = os.path.join(run_dir, "exports", name)
-    if not os.path.isdir(final):
-        tmp = final + ".tmp"
-        shutil.rmtree(tmp, ignore_errors=True)               # a partial export of a killed save
-        os.makedirs(os.path.dirname(final), exist_ok=True)
-        la.save_checkpoint(inner, tok, ecfg, tmp)
-        os.rename(tmp, final)                                # whole or absent, never half-written
+    if os.path.lexists(final):
+        raise SystemExit("exports/%s already exists before its epoch was saved (a stale export of a killed segment); "
+                         "delete it, then rerun the same command to resume" % name)
+    tmp = final + ".tmp"
+    shutil.rmtree(tmp, ignore_errors=True)                   # a partial export of a killed save (pruned at the start)
+    os.makedirs(os.path.dirname(final), exist_ok=True)
+    la.save_checkpoint(inner, tok, ecfg, tmp)
+    os.rename(tmp, final)                                    # whole or absent, never half-written
     return final
 
 

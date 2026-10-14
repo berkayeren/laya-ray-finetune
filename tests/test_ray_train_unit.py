@@ -360,3 +360,18 @@ def test_code_state_dirty_flag_and_digest_read_the_same_files(tmp_path, monkeypa
     (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
     edited = ray_train.code_state()
     assert edited["git_dirty"] is True and edited["git_diff_sha256"] not in (empty, new["git_diff_sha256"])
+
+
+def test_a_stale_export_that_cannot_be_deleted_is_refused_not_kept(tmp_path, monkeypatch):
+    """04-REVIEW IN-09: a failed deletion refuses the segment; write_export never keeps an existing export."""
+    d = tmp_path / "exports"
+    (d / "epoch-002").mkdir(parents=True)
+
+    def fail(path, *a, **k):
+        raise PermissionError(13, "Permission denied", str(path))
+    monkeypatch.setattr(ray_train.shutil, "rmtree", fail)
+    with pytest.raises(SystemExit, match="cannot delete the stale export exports/epoch-002"):
+        ray_train.prune_exports(str(d), 1)
+    monkeypatch.undo()
+    with pytest.raises(SystemExit, match="exports/epoch-002 already exists"):
+        ray_train.write_export(None, None, {}, str(tmp_path), "epoch-002")
