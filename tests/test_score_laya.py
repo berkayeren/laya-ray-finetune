@@ -25,9 +25,15 @@ TINY_T = 1.3
 
 @pytest.fixture
 def tiny(tmp_path, synthetic_raw):
-    """(out_dir, manifest_path, checkpoint dir) of the synthetic snapshot and a tiny checkpoint with T = 1.3."""
+    """(out_dir, manifest_path, checkpoint dir) of the synthetic snapshot and a tiny checkpoint with T = 1.3.
+
+    Scoring sets torch's process-wide thread count; it is restored so later tests keep the session's setting.
+    """
+    import torch
+    threads = torch.get_num_threads()
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
-    return out_dir, manifest, tiny_checkpoint(tmp_path / "ckpt", temperature=TINY_T)
+    yield out_dir, manifest, tiny_checkpoint(tmp_path / "ckpt", temperature=TINY_T)
+    torch.set_num_threads(threads)
 
 
 def _split_cases(path):
@@ -60,3 +66,43 @@ def test_tiny_checkpoint_round_trips_through_score_and_report(tmp_path, tiny):
     assert side["system"]["checkpoint_identity"] == identity(ckpt)
     shipped = report.run_report(run_dir, "test", manifest)["variants"]["shipped"]
     assert shipped["temperature"] == TINY_T and shipped["rows"]["0.5"]["n"] == 7
+
+
+# --- Ray reassembly and the Predictor actor (one code path for in-process and Ray scoring) -------------------------
+
+def _rows(*uids):
+    return [{"uid": u, "logits": np.full(48, float(ord(u[-1])), dtype=np.float32)} for u in uids]
+
+
+def test_assemble_reorders_by_uid():
+    got = score.assemble(_rows("c", "a", "b"), ["a", "b", "c"])
+    assert got.dtype == np.float32 and got.shape == (3, 48)
+    assert list(got[:, 0]) == [float(ord("a")), float(ord("b")), float(ord("c"))]
+
+
+@pytest.mark.parametrize("rows,uids,match", [
+    (_rows("a", "a", "b"), ["a", "b"], "duplicate uid a"),
+    (_rows("a"), ["a", "b"], "uid b was not scored"),
+    (_rows("a", "b", "x"), ["a", "b"], "unexpected uid x"),
+], ids=["dup", "missing", "extra"])
+def test_assemble_refuses_duplicate_missing_and_extra(rows, uids, match):
+    with pytest.raises(SystemExit, match=match):
+        score.assemble(rows, uids)
+
+
+def test_predictor_returns_logits_and_state(tiny):
+    out_dir, _, ckpt = tiny
+    model_dir, expected = score.resolve_checkpoint(ckpt)
+    p = score.Predictor(model_dir, "cpu", expected, 1)
+    cases = _split_cases(os.path.join(out_dir, "splits", "test.jsonl"))[:3]
+    out = p({"uid": np.array([c["uid"] for c in cases]), "text": np.array([c["state"] for c in cases])})
+    assert list(out["uid"]) == [c["uid"] for c in cases]
+    assert out["logits"].dtype == np.float32 and out["logits"].shape == (3, 48)
+    assert list(out["temperature"]) == [TINY_T] * 3
+    states = {s for s in out["agent_state"]}
+    assert len(states) == 1
+    state = json.loads(states.pop())
+    assert state["device"] == "cpu" and state["dtype"] == "torch.float32" and state["amp_enabled"] is False
+    assert state["torch_threads"] == 1
+    secs = list(out["infer_secs"])
+    assert len(secs) == 3 and len(set(secs)) == 1 and secs[0] >= 0
