@@ -245,20 +245,29 @@ def fit_or_exit(trainer, run_dir=None, rung="none"):
 
 
 def code_state():
-    """{"git_sha", "git_dirty", "git_diff_sha256"} of the repo this script runs from (tracked files only); all None
-    without git. git_diff_sha256 is the sha256 of `git diff HEAD --binary` outside .planning/ (planning docs are not
-    code), so an uncommitted edit between a kill and its rerun changes it while HEAD stays put. Recorded per run
-    segment, never part of the run_id (a code fix must not orphan a long epoch's checkpoint)."""
+    """{"git_sha", "git_dirty", "git_diff_sha256"} of the repo this script runs from; all None without git. Both
+    git_dirty and git_diff_sha256 read the same files (04-REVIEW IN-08): tracked changes outside .planning/ (planning
+    docs are not code) plus untracked, unignored *.py files (a new module an import can pick up). git_diff_sha256 is
+    the sha256 of `git diff HEAD --binary` over them, then each untracked .py file's name and bytes, so it is the
+    sha256 of an empty diff exactly when git_dirty is False, and an uncommitted edit between a kill and its rerun
+    changes it while HEAD stays put. Recorded per run segment, never part of the run_id (a code fix must not orphan a
+    long epoch's checkpoint)."""
     def git(*args):
         r = subprocess.run(("git",) + args, cwd=REPO_ROOT, capture_output=True, timeout=60)
         if r.returncode:
             raise OSError(r.stderr.decode("utf-8", "replace"))
         return r.stdout
+    code = ("--", ".", ":(exclude).planning")
     try:
-        return {"git_sha": git("rev-parse", "HEAD").decode("ascii").strip(),
-                "git_dirty": bool(git("status", "--porcelain", "--untracked-files=no").strip()),
-                "git_diff_sha256": hashlib.sha256(git("diff", "HEAD", "--binary", "--", ".",
-                                                      ":(exclude).planning")).hexdigest()}
+        sha = git("rev-parse", "HEAD").decode("ascii").strip()
+        tracked = git("status", "--porcelain", "--untracked-files=no", *code).strip()
+        new = sorted(n for n in git("ls-files", "--others", "--exclude-standard", "-z", "--", "*.py",
+                                    ":(exclude).planning").split(b"\0") if n)
+        digest = hashlib.sha256(git("diff", "HEAD", "--binary", *code))
+        for n in new:
+            with open(os.path.join(REPO_ROOT, os.fsdecode(n)), "rb") as f:
+                digest.update(b"\0" + n + b"\0" + f.read())
+        return {"git_sha": sha, "git_dirty": bool(tracked or new), "git_diff_sha256": digest.hexdigest()}
     except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return {"git_sha": None, "git_dirty": None, "git_diff_sha256": None}
 

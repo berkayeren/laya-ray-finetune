@@ -331,3 +331,32 @@ def test_an_epoch_export_embeds_a_pre_save_snapshot():
     assert snap["train_state_bytes"] is None and snap["export_bytes"] is None and snap["rung"] == "none"
     assert snap["epochs"] == [{"epoch": 1, "save_s": 4.0}, {"epoch": 2, "save_s": None}]
     assert record["epochs"][1]["save_s"] == 0.0 and record["train_state_bytes"] == 123     # the live record is untouched
+
+
+def test_code_state_dirty_flag_and_digest_read_the_same_files(tmp_path, monkeypatch):
+    """04-REVIEW IN-08: a .planning/ edit leaves both clean; an untracked .py file or a code edit moves both."""
+    import subprocess
+    repo = tmp_path / "repo"
+    (repo / ".planning").mkdir(parents=True)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / ".planning" / "STATE.md").write_text("one\n", encoding="utf-8")
+
+    def git(*args):
+        subprocess.run(("git", "-c", "user.email=t@example.invalid", "-c", "user.name=t") + args, cwd=repo,
+                       check=True, capture_output=True)
+    git("init", "-q")
+    git("add", "-A")
+    git("commit", "-q", "-m", "init")
+    monkeypatch.setattr(ray_train, "REPO_ROOT", str(repo))
+    empty = hashlib.sha256(b"").hexdigest()
+    st = ray_train.code_state()
+    assert st["git_dirty"] is False and st["git_diff_sha256"] == empty and len(st["git_sha"]) == 40
+    (repo / ".planning" / "STATE.md").write_text("two\n", encoding="utf-8")       # planning docs are not code
+    assert ray_train.code_state() == st
+    (repo / "b.py").write_text("y = 2\n", encoding="utf-8")                       # a new module an import can see
+    new = ray_train.code_state()
+    assert new["git_dirty"] is True and new["git_diff_sha256"] != empty
+    (repo / "b.py").unlink()
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    edited = ray_train.code_state()
+    assert edited["git_dirty"] is True and edited["git_diff_sha256"] not in (empty, new["git_diff_sha256"])
