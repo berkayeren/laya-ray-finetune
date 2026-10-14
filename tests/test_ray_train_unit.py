@@ -200,6 +200,24 @@ def test_freeze_flags_conflict(capsys):
     assert e.value.code == 2 and "--neg must be 0" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("flags, msg", [
+    (["--micro-batch", "0"], "--micro-batch must be at least 1"),
+    (["--grad-accum", "-1"], "--grad-accum must be at least 1"),
+    (["--workers", "0"], "--workers must be at least 1"),
+    (["--calib-batch", "0"], "--calib-batch must be at least 1"),
+    (["--calib-max-messages", "0"], "--calib-max-messages must be at least 1"),
+    (["--cpus-per-worker", "0"], "--cpus-per-worker must be at least 1"),
+    (["--max-messages", "0"], "--max-messages must be at least 1"),
+    (["--calib-frac", "0"], "--calib-frac must be in (0, 1]"),
+    (["--calib-frac", "1.5"], "--calib-frac must be in (0, 1]"),
+])
+def test_bad_sizes_are_refused_before_ray(flags, msg, capsys):
+    """04-REVIEW WR-03: refused by argparse, before the split check, the fetch and ray.init (not in the worker)."""
+    with pytest.raises(SystemExit) as e:
+        ray_train.main(["--data", "d.jsonl", "--out", "o"] + flags)
+    assert e.value.code == 2 and msg in capsys.readouterr().err
+
+
 def test_mps_oom_becomes_the_rung_message():
     from pilot import runs
     with pytest.raises(RuntimeError) as e:

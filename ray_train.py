@@ -174,7 +174,8 @@ def resolve(a):
     return {"device": device,
             "amp": (device == "cuda") if a.amp is None else a.amp,
             "grad_checkpointing": bool(a.grad_checkpointing and not a.freeze_encoder),
-            "cpus_per_worker": a.cpus_per_worker or (4 if mps else 1),   # 4 = the spike's timing basis
+            # 4 = the spike's timing basis; an explicit value is never replaced (main refuses below 1)
+            "cpus_per_worker": a.cpus_per_worker if a.cpus_per_worker is not None else (4 if mps else 1),
             "neg_seed": a.seed if a.neg_seed is None else a.neg_seed,
             "adamw_foreach": False if mps else None,
             "adamw_fused": False if mps else None}
@@ -791,6 +792,14 @@ def main(argv=None):
         ap.error("--epochs must be at least 1")
     if a.neg < 0:
         ap.error("--neg must be 0 (all labels) or a positive count")
+    # here, not in the worker: a bad value there fails after ray.init, the run dir and the fetch, with resume advice
+    for flag, v in (("--workers", a.workers), ("--micro-batch", a.micro_batch), ("--grad-accum", a.grad_accum),
+                    ("--calib-batch", a.calib_batch), ("--calib-max-messages", a.calib_max_messages),
+                    ("--cpus-per-worker", a.cpus_per_worker), ("--max-messages", a.max_messages)):
+        if v is not None and v < 1:
+            ap.error("%s must be at least 1" % flag)
+    if not 0 < a.calib_frac <= 1:
+        ap.error("--calib-frac must be in (0, 1]")
     if a.freeze_embeddings and a.freeze_encoder:
         ap.error("--freeze-encoder already freezes the embeddings; pass one of them")
     try:
