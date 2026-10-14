@@ -33,6 +33,14 @@ message-level calibration holdout, every training message keeps all its positive
 all 48 labels (data_full). The calibration messages always keep all 48 labels. The record carries the items laya built
 and the torch-free count pilot.runs.neg_items gives, so the compute projection can count any split without a tokenizer.
 
+Fallback ladder (LAYA-03): every run starts from the Phase 2 spike's measured config (pilot.runs.SPIKE_START: micro-batch
+8, max_len 128, grad-accum 4, full encoder). The fallbacks are flags, never an in-process retry (the MPS allocator keeps a
+process-wide high-water mark): --freeze-embeddings (rung embeddings_frozen), then also --micro-batch 4 --grad-accum 8
+(rung embeddings_frozen+smaller_batch, effective batch 32 kept), then --freeze-encoder (rung encoder_frozen, head-only,
+weaker). pilot.runs.rung_label derives the rung from the resolved flags; the record carries rung, fallback, weaker,
+spike_departures and the trainable/total parameter counts. An MPS out-of-memory error ends the run with one line naming
+the epoch, micro-batch, rung and the flags of the next rung.
+
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
 (tampered, unregistered, val/test/probe) is refused before Ray starts. --base multilingual fetches the pinned,
 sha256-verified Laya weights (pilot.weights) before Ray starts; any other value must be a local checkpoint dir.
@@ -44,6 +52,7 @@ usage:
   python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
                       --workers 4 --device cuda    # 4 GPUs on one node (--gpu is the same)
   python ray_train.py ... --device mps --workers 1  # the full encoder on the Apple GPU
+  python ray_train.py ... --device mps --workers 1 --freeze-embeddings   # fallback rung 1 after an MPS OOM
   python ray_train.py ... --workers 2 --freeze-encoder --max-messages 100   # CPU smoke test
 """
 import argparse
@@ -55,7 +64,7 @@ import random
 import shutil
 import tempfile
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
 import psutil
 import ray
@@ -137,6 +146,30 @@ def resolve(a):
             "neg_seed": a.seed if a.neg_seed is None else a.neg_seed,
             "adamw_foreach": False if mps else None,
             "adamw_fused": False if mps else None}
+
+
+@contextmanager
+def mps_oom_exit(epoch, step, rung):
+    """Turn an MPS out-of-memory RuntimeError into the one-line rung message (pilot.runs.oom_message); no retry, since
+    the MPS allocator keeps a process-wide high-water mark. Any other error propagates unchanged."""
+    try:
+        yield
+    except RuntimeError as e:
+        if spike.is_mps_oom(str(e)):
+            raise RuntimeError(runs.oom_message(epoch, step, rung)) from e
+        raise
+
+
+def fit_or_exit(trainer):
+    """trainer.fit(); a worker's MPS out-of-memory exit reaches the driver inside Ray's TrainingFailedError and ends
+    the run with that one line (SystemExit); every other failure is re-raised as Ray gave it."""
+    try:
+        return trainer.fit()
+    except ray.train.TrainingFailedError as e:
+        line = runs.failure_line(str(e))
+        if line is None:
+            raise
+        raise SystemExit(line) from None
 
 
 def provenance(entry, manifest_path, base, base_dir, ident=None):
@@ -290,6 +323,13 @@ def train_loop_per_worker(c):
         la.freeze_encoder(model)
     elif c["grad_checkpointing"] and not la.enable_gradient_checkpointing(model):
         raise SystemExit("encoder has no gradient checkpointing; pass --no-grad-checkpointing to train without it")
+    if c["freeze_embeddings"]:                              # rung embeddings_frozen: after checkpointing, as the spike
+        la.freeze_embeddings(model)
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    if rank == 0:
+        print("rung %s%s | trainable params %d of %d" % (c["rung"], " (head-only, weaker)" if runs.weaker(c["rung"])
+                                                          else "", trainable_params, total_params), flush=True)
     amp = c["amp"]                                          # decoupled from checkpointing (02-REVIEW CR-01)
     model = ray.train.torch.prepare_model(model, move_to_device=device,
                                           parallel_strategy_kwargs={"find_unused_parameters": True})
@@ -326,6 +366,9 @@ def train_loop_per_worker(c):
               "grad_checkpointing": c["grad_checkpointing"], "amp": amp,
               "adamw_foreach": c["adamw_foreach"], "adamw_fused": c["adamw_fused"],
               "recommended_max_memory_bytes": torch.mps.recommended_max_memory() if device.type == "mps" else None,
+              "rung": c["rung"], "fallback": c["rung"] != "none", "weaker": runs.weaker(c["rung"]),
+              "spike_departures": runs.spike_departures(c, max_len),
+              "trainable_params": trainable_params, "total_params": total_params,
               "neg": c["neg"], "neg_seed": c["neg_seed"], "n_train_messages": len(train_rows),
               "n_train_items": len(train_items), "n_train_items_counted": counted, "items_skipped": skipped,
               "load_s": load_s, "calib_s": None, "final_save_s": None, "epochs": rows_out}
@@ -346,7 +389,7 @@ def train_loop_per_worker(c):
             step_now = (n + 1) % accum == 0 or s + mb >= len(order)
             # skip the gradient all-reduce on accumulation steps
             sync = nullcontext() if step_now or not hasattr(model, "no_sync") else model.no_sync()
-            with sync:
+            with mps_oom_exit(epoch + 1, n + 1, c["rung"]), sync:
                 logits = la.forward(model, batch, device, amp, c["freeze_encoder"])
                 mask, target = batch["marker_mask"].to(device), batch["target"].to(device)
                 if c["loss"] == "rlcd":
@@ -357,12 +400,13 @@ def train_loop_per_worker(c):
             mem_sample()
             n += 1
             if step_now:
-                if scaler:
-                    scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(params, 1.0)
-                (scaler.step(opt), scaler.update()) if scaler else opt.step()
-                sched.step()
-                opt.zero_grad(set_to_none=True)
+                with mps_oom_exit(epoch + 1, n, c["rung"]):   # the step closes micro-batch n
+                    if scaler:
+                        scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(params, 1.0)
+                    (scaler.step(opt), scaler.update()) if scaler else opt.step()
+                    sched.step()
+                    opt.zero_grad(set_to_none=True)
                 steps += 1
                 mem_sample()
             total += loss.item()
@@ -440,7 +484,10 @@ def parser():
     ap.add_argument("--encoder-lr", type=float, default=2.5e-5)
     ap.add_argument("--head-lr", type=float, default=1e-4)
     ap.add_argument("--loss", choices=("rlcd", "soft-ce"), default="rlcd")
-    ap.add_argument("--freeze-encoder", action="store_true")
+    ap.add_argument("--freeze-encoder", action="store_true",
+                    help="fallback rung 3: train the head only (labelled head-only, weaker)")
+    ap.add_argument("--freeze-embeddings", action="store_true",
+                    help="fallback rung 1: freeze only the token embeddings")
     ap.add_argument("--shuffle-options", action="store_true")
     ap.add_argument("--max-len", type=int, default=None)
     ap.add_argument("--head-max-len", type=int, default=None)
@@ -468,6 +515,8 @@ def main(argv=None):
         ap.error("--epochs must be at least 1")
     if a.neg < 0:
         ap.error("--neg must be 0 (all labels) or a positive count")
+    if a.freeze_embeddings and a.freeze_encoder:
+        ap.error("--freeze-encoder already freezes the embeddings; pass one of them")
     try:
         r = resolve(a)
     except ValueError as e:
@@ -512,18 +561,20 @@ def main(argv=None):
                 "base_sha256": base_sha256, "epochs": a.epochs,
                 "micro_batch": a.micro_batch, "grad_accum": a.grad_accum, "encoder_lr": a.encoder_lr,
                 "head_lr": a.head_lr, "loss": a.loss, "freeze_encoder": a.freeze_encoder,
+                "freeze_embeddings": a.freeze_embeddings,
                 "shuffle_options": a.shuffle_options, "max_len": a.max_len, "head_max_len": a.head_max_len,
                 "max_messages": a.max_messages, "neg": a.neg, "calib_max_messages": a.calib_max_messages,
                 "calib_frac": a.calib_frac, "calib_batch": a.calib_batch,
                 "seed": a.seed, "expect_env": env,
                 "provenance": provenance(entry, a.manifest, a.base, base_dir, base_ident)}, **r)
+    cfg["rung"] = runs.rung_label(cfg)                      # derived from the flags, into the record and the config
     trainer = TorchTrainer(
         train_loop_per_worker, train_loop_config=cfg,
         scaling_config=ScalingConfig(num_workers=a.workers, use_gpu=(device == "cuda"),
                                      resources_per_worker={"CPU": cpus}),
         run_config=RunConfig(name=run_name(entry, a.seed), storage_path=a.storage))
     t0 = time.time()
-    result = trainer.fit()
+    result = fit_or_exit(trainer)
     print("metrics:", json.dumps(result.metrics, default=str))
     if os.path.isdir(a.out) and not os.listdir(a.out):
         os.rmdir(a.out)                                     # an empty dir checked before training

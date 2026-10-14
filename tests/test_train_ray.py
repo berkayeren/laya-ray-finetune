@@ -137,4 +137,5 @@ def test_worker_oom_ends_the_driver_with_one_line(tmp_path):
     r = subprocess.run([sys.executable, "-c", OOM_DRIVER % str(tmp_path / "ray")], cwd=REPO, env=env,
                        capture_output=True, text=True, timeout=TIMEOUT)
     assert r.returncode == 1, r.stderr[-4000:]
-    assert r.stderr.rstrip().splitlines()[-1] == runs.oom_message(2, 17, "none"), r.stderr[-4000:]
+    # SystemExit prints the bare line; Ray's forwarded worker logs (prefixed, asynchronous) may follow it
+    assert runs.oom_message(2, 17, "none") in r.stderr.splitlines(), r.stderr[-4000:]
