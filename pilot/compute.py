@@ -650,7 +650,9 @@ def _attempt_lines(attempts, status):
              "of the LAYA-03 ladder. Chain status: **%s**." % status, "",
              "| # | rung | status | run id | detail |", "|---|---|---|---|---|"]
     for i, a in enumerate(attempts):
-        detail = a.get("line") or a.get("reason") or ("weaker: head-only" if runs.weaker(a["rung"]) else "")
+        # a failed attempt's reason wins over the child's line: after a resume-stage OOM the line says "rerun the
+        # same command to resume", which the orchestrator's deleted storage makes untrue (04-REVIEW IN-06)
+        detail = a.get("reason") or a.get("line") or ("weaker: head-only" if runs.weaker(a["rung"]) else "")
         lines.append("| %d | %s | %s | %s | %s |" % (i, a["rung"], a["status"], _dash(a.get("run_id")),
                                                      detail.replace("|", "/") or "-"))
     if status == "ladder_exhausted":

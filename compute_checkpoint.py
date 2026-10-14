@@ -22,7 +22,9 @@ epoch-001. --interrupt fail uses ray_train.py's hidden --fail-after-epoch 1 inst
 --interrupt none runs once. A kill that comes too late is recorded as missed, and the report then says the resume was
 not demonstrated. An attempt that ends with the MPS out-of-memory line is followed by a fresh child on the next rung of
 the LAYA-03 ladder (pilot.runs.next_rung), each with its own run_id (compute.attempt_chain), except an out-of-memory
-after the last epoch (calibration, final save; pilot.runs.resume_oom), which ends the chain as failed; every attempt
+after the last epoch (calibration, final save; pilot.runs.resume_oom), which ends the chain as failed with a reason
+that fits this orchestrator: the storage is deleted, so rerun compute_checkpoint.py (a fresh probe), or, with
+--keep-run, the console prints the ray_train.py command that resumes the kept run; every attempt
 stays in the report, and an exhausted ladder is reported as status ladder_exhausted. Before any child, the disk under --storage
 must hold pilot.runs.disk_need_bytes for the run. Every child (the probe run, its resume, the BERTurk child, the scoring
 probe) is killed after --probe-timeout-s (default 3 h) and its attempt or probe recorded as failed or timeout, so a
@@ -281,14 +283,22 @@ def drop_storage(storage, own_storage, rids):
             drop_run(storage, rid)
 
 
-def oom_attempt(attempt, line, interrupt):
+def oom_attempt(attempt, line, interrupt, keep_run=False):
     """The attempt of a child that ended in the MPS out-of-memory line: status oom (attempt_chain moves to the next
     rung), or failed for an OOM after the last epoch (runs.resume_oom): every epoch is saved there, and the next rung
-    would retrain under another run_id and record a fallback for a config that trained (04-REVIEW WR-01)."""
+    would retrain under another run_id and record a fallback for a config that trained (04-REVIEW WR-01).
+
+    The child's line (kept in `line`) says to rerun the same command to resume, which holds for ray_train.py but not
+    here: without --keep-run the orchestrator deletes the probe's Ray storage, and a rerun of compute_checkpoint.py
+    starts a fresh probe (04-REVIEW IN-06). The reason, which the report shows, says what does work."""
     line = spike.scrub(line)
     if runs.resume_oom(line):
+        then = ("--keep-run kept the probe's Ray storage, so the probe's ray_train.py command (printed on the console) "
+                "resumes it" if keep_run else "the probe's Ray storage is deleted, so rerun compute_checkpoint.py on "
+                "a quieter machine (the probe starts fresh)")
         return dict(attempt, status="failed", line=line, interrupt=interrupt,
-                    reason="out of memory after the last epoch, so the ladder is not walked: %s" % line)
+                    reason="%s: the probe trained every epoch but ran out of memory after the last one, so the ladder "
+                           "is not walked; %s" % (line.split("; ", 1)[0], then))
     return dict(attempt, status="oom", line=line, interrupt=interrupt)
 
 
@@ -309,6 +319,7 @@ def launch_rung(rung, ctx):
                          "--storage" % (storage, rid))
     ctx["rids"].append(rid)
     ctx["logs"].append(log)
+    ctx["cmds"].append(cmd)
     attempt = {"run_id": rid}
     print("probe run %s on rung %s, interrupt %s -> log %s (tail -f it)" % (rid, rung, a.interrupt, log), flush=True)
     first = cmd + (["--fail-after-epoch", "1"] if a.interrupt == "fail" else [])
@@ -334,7 +345,7 @@ def launch_rung(rung, ctx):
         return timed_out(attempt, interrupt, a, log, "the probe run")
     oom = runs.failure_line(read_text(log))
     if oom:
-        return oom_attempt(attempt, oom, interrupt)
+        return oom_attempt(attempt, oom, interrupt, a.keep_run)
     rc = proc.returncode
     if a.interrupt == "fail" and (rc == 0 or not compute.epoch_registered(storage, rid, 1)):
         return dict(attempt, status="failed", returncode=rc, interrupt=interrupt,
@@ -355,7 +366,7 @@ def launch_rung(rung, ctx):
             return timed_out(attempt, interrupt, a, log, "the resumed run")
         oom = runs.failure_line(read_text(log))
         if oom:
-            return oom_attempt(attempt, oom, interrupt)
+            return oom_attempt(attempt, oom, interrupt, a.keep_run)
         if rc != 0:
             return dict(attempt, status="failed", returncode=rc, interrupt=interrupt,
                         reason="the resumed run failed: %s" % last_line(log))
@@ -657,6 +668,7 @@ def main(argv=None):
     tmp = tempfile.mkdtemp(prefix="compute-probe-")
     env = dict(os.environ, **spike.spike_env("0", a.cpus))
     ctx = {"a": a, "start": start, "base": base, "storage": storage, "tmp": tmp, "env": env, "rids": [], "logs": [],
+           "cmds": [],
            "result": {}}
     try:
         attempts, status = compute.attempt_chain(start["rung"],
@@ -677,6 +689,10 @@ def main(argv=None):
                                           status=status)
             md = compute.write_report(a.out, report)
             keep_logs = True
+            if a.keep_run and runs.resume_oom(attempts[-1].get("line")) and ctx["cmds"]:
+                # console only: the command holds local paths, which never enter the report (IN-06)
+                print("every epoch of run %s is saved under %s; to resume it (recalibrate and save): %s"
+                      % (rid, storage, " ".join(ctx["cmds"][-1])), flush=True)
             raise SystemExit("probe %s after %d attempt(s) (last rung %s); report -> %s; logs kept in %s. Last %d "
                              "lines of %s:\n%s" % (status, len(attempts), attempts[-1]["rung"], md, tmp, TAIL_LINES,
                                                    ctx["logs"][-1], tail(ctx["logs"][-1])))

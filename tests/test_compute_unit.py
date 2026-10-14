@@ -383,7 +383,14 @@ def test_an_oom_after_the_last_epoch_does_not_walk_the_ladder():
     from pilot import runs
     calib = runs.oom_message(None, None, "none", runs.STAGE_CALIBRATE)
     a = cc.oom_attempt({"run_id": "laya-a"}, runs.failure_line("[Rank 0]\nRuntimeError: " + calib), {"mode": "kill"})
-    assert a["status"] == "failed" and a["line"] == calib and calib in a["reason"]
+    assert a["status"] == "failed" and a["line"] == calib
+    # 04-REVIEW IN-06: the report never advises a resume whose storage the orchestrator deletes
+    assert calib.split("; ")[0] in a["reason"] and "rerun the same command" not in a["reason"]
+    assert "rerun compute_checkpoint.py" in a["reason"]
+    md = "\n".join(compute._attempt_lines([dict(a, rung="none")], "failed"))
+    assert a["reason"] in md and "rerun the same command" not in md
+    kept = cc.oom_attempt({"run_id": "laya-a"}, calib, {"mode": "kill"}, keep_run=True)
+    assert "--keep-run kept" in kept["reason"] and "rerun the same command" not in kept["reason"]
     assert cc.oom_attempt({"run_id": "laya-a"}, runs.oom_message(2, 5, "none"), {})["status"] == "oom"
     launch, seen = _fake_launcher(["failed"])
     attempts, status = compute.attempt_chain("none", launch)
