@@ -135,6 +135,13 @@ PyPI `torch==2.14.1` wheel, which is built for CUDA 13. It needs an sm_75+ GPU (
 does not) and a 580-series or newer driver. Disk: about 1.5 GB for `.venv`, about 1.1 GB for the
 weights in the Hugging Face cache, and a few MB for the data.
 
+The Phase 2 MPS feasibility spike (`results/spike/mps_spike.md`, raw numbers in
+`results/spike/mps_spike.json`) found that a full-encoder Laya fine-tune **fits** on a 16 GB M4: verdict FITS at
+micro-batch 8, max_len 128, grad-accum 4, no frozen layers and no CPU-fallback ops
+(`PYTORCH_ENABLE_MPS_FALLBACK=0`), with a projected 14.3 min per `selection_train` neg8 epoch and a peak of about
+8.8 GiB. Training starts from that config on MPS, so the Kaggle GPU contingency is not needed. To rerun the spike
+on a quiet Mac (about 20-40 min): `python mps_spike.py --out results/spike`.
+
 ## Why a custom Ray loop
 
 `laya.train.finetune` / `laya-train` are single-device. `ray_train.py` reuses Laya's building

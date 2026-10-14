@@ -89,7 +89,7 @@ It is also a GO if Laya beats BERTurk by more than 3 points with a confidence in
 |----------|-----------|---------|
 | BERTurk (`dbmdz/bert-base-turkish-cased`) is the reference baseline | A well-known Turkish encoder with a standard multi-label head is the simplest credible alternative | — Pending |
 | Keep no-intent messages as all-negative rows and report their false-positive rate separately | The closest proxy for out-of-scope traffic. Dropping them gives optimistic scores. | — Pending |
-| Train on an M4 MPS with a 1-worker Ray Train, keeping the CUDA path intact | The only available hardware. Avoids DDP work while keeping the code portable. | — Pending |
+| Train on an M4 MPS with a 1-worker Ray Train, keeping the CUDA path intact | The only available hardware. Avoids DDP work while keeping the code portable. | ✓ Phase 2 spike FITS (results/spike/mps_spike.md): micro-batch 8, max_len 128, grad-accum 4, rung none, PYTORCH_ENABLE_MPS_FALLBACK=0; Phase 4 starts here |
 | 3 seeds per fine-tune and paired bootstrap CIs | GO criteria (a) and (b) need stability and significance | — Pending |
 | Calibration/abstention and few-shot new intent are the "Laya edge" tests | GO criterion (d). The data-efficiency curve was deferred. | — Pending |
 | Latency is reported only, budget TBD | Target serving hardware is unknown | ⚠️ Revisit |
@@ -103,7 +103,8 @@ It is also a GO if Laya beats BERTurk by more than 3 points with a confidence in
 | HOTELS out-of-domain probe added to v1 | Only 15 no-intent test messages, too few to measure false positives | — Pending |
 | Compute checkpoint after the first MPS epoch, waiting for user approval | Runtime on the laptop is unknown | — Pending |
 | Few-shot uses label masking, k-shot as short continued training, max 3 draws | Fair to both models and keeps compute bounded | — Pending |
-| Kaggle GPU training is a contingency only, used if the Phase 2 MPS feasibility spike shows a full Laya fine-tune does not fit in 16 GB. It would use the preserved CUDA `--gpu` path. | Kaggle is a hosted service, so this conflicts with the self-hosted constraint. It needs the user's explicit confirmation before any use. The exception is acceptable only because the work uses public Multi3NLU++ data and no bank data. | ⚠️ Revisit |
+| Kaggle GPU training is a contingency only, used if the Phase 2 MPS feasibility spike shows a full Laya fine-tune does not fit in 16 GB. It would use the preserved CUDA `--gpu` path. | Kaggle is a hosted service, so this conflicts with the self-hosted constraint. It needs the user's explicit confirmation before any use. The exception is acceptable only because the work uses public Multi3NLU++ data and no bank data. | — Not needed: Phase 2 spike FITS (2026-10-14) |
+| Phase 2 MPS feasibility spike verdict | results/spike/mps_spike.md (full protocol, quiet-machine preflight passed); run policy min_available_gib 7.0 / swap_rerun true / tie_tolerance 0.05 from meta.policy | ✓ FITS (2026-10-14): micro-batch 8, max_len 128, grad-accum 4, rung none, no fallback ops; projected neg8 epoch 14.3 min, peak 8.76 GiB. User reply: "accept-fits"; bank-name check: "no bank name" |
 
 ## Evolution
 
