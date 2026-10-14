@@ -164,6 +164,94 @@ def test_subset_never_under_results_dumps(snap):
         shutil.rmtree(os.path.dirname(run_dir))
 
 
+# --- the committed audit dumps are replaced only on purpose (03-REVIEW WR-03, IN-04) -------------------------------
+
+def test_existing_dump_is_not_overwritten_without_force(tmp_path, snap):
+    out_dir, manifest = snap
+    args = [os.path.join(out_dir, "splits", "test.jsonl"), "--model", "prior", "--manifest", manifest,
+            "--out-root", str(tmp_path / "dumps")]
+    run_dir, split = score.main(args)
+    with open(os.path.join(run_dir, "test.npz"), "rb") as f:
+        before = f.read()
+    with pytest.raises(SystemExit, match="pass --force to rescore it"):
+        score.main(args)
+    with open(os.path.join(run_dir, "test.npz"), "rb") as f:
+        assert f.read() == before                          # the refusal wrote nothing
+    assert score.main(args + ["--force"]) == (run_dir, split)
+    logits, uids, side, _ = dumps.load_dump(run_dir, split, manifest)
+    assert logits.shape == (7, 48) and side["n_subset"] is None
+
+
+def test_force_refusal_comes_before_any_model_load(tmp_path, snap, monkeypatch):
+    from pilot.weights import identity
+    from tiny_laya import tiny_checkpoint
+    out_dir, manifest = snap
+    ckpt = tiny_checkpoint(tmp_path / "ckpt")
+    run_dir = tmp_path / "dumps" / dumps.run_id("laya", identity(ckpt))
+    run_dir.mkdir(parents=True)
+    (run_dir / "test.json").write_text("{}", encoding="utf-8")     # an existing dump, even a partial one, blocks
+
+    def no_load(*a, **k):
+        raise AssertionError("loaded a model before the overwrite check")
+    monkeypatch.setattr(score, "load_agent", no_load)
+    monkeypatch.setattr(score, "resolve_checkpoint", no_load)
+    with pytest.raises(SystemExit) as e:
+        score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--checkpoint", ckpt, "--workers", "0",
+                    "--manifest", manifest, "--out-root", str(tmp_path / "dumps")])
+    assert "pass --force to rescore it" in str(e.value.code)
+    assert "ray" not in sys.modules or not sys.modules["ray"].is_initialized()
+
+
+def test_out_of_repo_dump_prints_its_real_path(snap, capsys):
+    out_dir, manifest = snap
+    run_dir, split = score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--model", "prior",
+                                 "--manifest", manifest, "--n", "1"])
+    try:
+        out = capsys.readouterr().out
+        want = os.path.join(os.path.abspath(run_dir), split + ".npz")
+        assert want in out and "<outside-repo>" not in out, out
+        assert os.path.isfile(want)
+    finally:
+        shutil.rmtree(os.path.dirname(run_dir))
+
+
+def test_evaluate_defaults_to_a_temp_out_root(tmp_path, monkeypatch):
+    import tempfile
+    import evaluate
+    calls = []
+
+    def fake_score(argv):
+        calls.append(list(argv))
+        return str(tmp_path / "run"), "test"
+    monkeypatch.setattr(score, "main", fake_score)
+    monkeypatch.setattr(report, "run_report", lambda *a, **k: {})
+    evaluate.main(["data/splits/test.jsonl", "--checkpoint", "x", "--workers", "0"])
+    argv = calls[-1]
+    assert "--out-root" in argv and "--force" not in argv and "--device" not in argv, argv
+    root = argv[argv.index("--out-root") + 1]
+    assert os.path.realpath(root).startswith(os.path.realpath(tempfile.gettempdir()) + os.sep), root
+    assert os.path.isdir(root) and not os.listdir(root)
+    os.rmdir(root)
+    evaluate.main(["data/splits/test.jsonl", "--checkpoint", "x", "--workers", "0", "--force", "--device", "mps",
+                   "--out-root", str(tmp_path / "given")])
+    argv = calls[-1]
+    assert "--force" in argv and argv[argv.index("--device") + 1] == "mps", argv
+    assert argv[argv.index("--out-root") + 1] == str(tmp_path / "given")
+
+
+def test_makefile_baselines_pass_force():
+    with open(os.path.join(REPO, "Makefile"), encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    start = lines.index("baselines:") + 1
+    recipe = []
+    for line in lines[start:]:
+        if not line.startswith("\t"):
+            break
+        recipe.append(line)
+    scored = [line for line in recipe if "score.py" in line]
+    assert len(scored) == 6 and all("--force" in line.split() for line in scored), scored
+
+
 # --- baselines come from the matching train split only -----------------------------------------------------------
 
 @pytest.mark.parametrize("role,source", [("test", "final_train"), ("val", "selection_train")])
