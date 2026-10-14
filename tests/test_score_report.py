@@ -410,6 +410,24 @@ def test_report_refuses_val_and_split_from_different_sources(tmp_path, snap, cas
     assert dotted in str(e.value.code) and "val dump" in str(e.value.code), e.value.code
 
 
+def test_a_moved_checkpoint_with_the_same_identity_is_the_same_source(tmp_path, snap):
+    """04-REVIEW IN-12: the path counts only when no checkpoint_identity binds the scored bytes."""
+    ident = {"local": True, "model_sha256": "a" * 64, "config_sha256": "b" * 64}
+    run_dir, manifest = _score_both(snap, tmp_path / "dumps")
+    for name, ckpt in (("val", "runs/ckpt"), ("test", "runs/ckpt-renamed")):
+        path = os.path.join(run_dir, "%s.json" % name)
+        with open(path, encoding="utf-8") as f:
+            side = json.load(f)
+        side["system"].update(checkpoint=ckpt, checkpoint_identity=ident)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(side, f)
+    rep = report.run_report(run_dir, "test", manifest)
+    assert rep["variants"]["shipped"]["rows"]["val_selected"] is not None
+    _edit_sidecar(run_dir, _set_key("system.checkpoint_identity", dict(ident, model_sha256="c" * 64)))
+    with pytest.raises(SystemExit, match=r"system\.checkpoint_identity"):
+        report.run_report(run_dir, "test", manifest)
+
+
 def test_compare_refuses_mixed_sources(tmp_path, snap):
     a, manifest = _score_both(snap, tmp_path / "a")
     b, _ = _score_both(snap, tmp_path / "b", model="majority")

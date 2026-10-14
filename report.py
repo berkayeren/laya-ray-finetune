@@ -10,8 +10,9 @@ same way, with no system-specific branch (D-10, D-12):
   the full val dump of the same run directory (run_id and uids_sha256 verified by load_dump), on that variant's
   val probabilities (shipped: the val sidecar's shipped T; raw: T = 1), and is then applied to the reported split.
   The test dump never shapes θ. The val dump must come from the same source as the reported dump: their sidecars
-  must agree on SAME_SOURCE_KEYS (system kind, checkpoint and identity, shipped T, scorer device, dtype and amp;
-  03-REVIEW WR-01), else the report is refused naming the key. A subset (--n) val dump next to a reported test dump
+  must agree on SAME_SOURCE_KEYS (system kind, checkpoint identity, shipped T, scorer device, dtype and amp; the
+  checkpoint path only when no identity binds the scored bytes; 03-REVIEW WR-01), else the report is refused naming
+  the key. A subset (--n) val dump next to a reported test dump
   is refused; without a val dump the val-selected row is null with a reason; on the val split itself the val-selected
   row is labelled in_sample, and a --n subset val dump reported on val gets its θ 0.5 rows with the val-selected row
   null and SUBSET_VAL_REASON (03-REVIEW WR-04)
@@ -59,12 +60,20 @@ SUBSET_VAL_REASON = "val dump is a --n subset; θ is selected only on a full val
 # is excluded on purpose: pilot.data.TRAINED_ON gives a baseline's val and test dumps different training splits.
 SAME_SOURCE_KEYS = (("system", "kind"), ("system", "checkpoint"), ("system", "checkpoint_identity"),
                     ("temperature", "shipped"), ("scorer", "device"), ("scorer", "dtype"), ("scorer", "amp_enabled"))
+# system.checkpoint, the repo-relative path, counts only when no checkpoint_identity binds the scored bytes: a local
+# checkpoint's run id is hash-based, so the same checkpoint scored from a renamed dir lands in the same run dir with the
+# same identity and is the same source (04-REVIEW IN-12)
+PATH_KEY = ("system", "checkpoint")
 
 
 def same_source(side, val_side, where):
     """SystemExit naming the first SAME_SOURCE_KEYS path on which the reported dump's sidecar and the val dump's
-    sidecar differ (a missing key reads as None on both sides)."""
+    sidecar differ (a missing key reads as None on both sides); PATH_KEY is skipped when the reported dump has a
+    checkpoint_identity (the identity key itself is compared)."""
+    bound = (side.get("system") or {}).get("checkpoint_identity") is not None
     for path in SAME_SOURCE_KEYS:
+        if path == PATH_KEY and bound:
+            continue
         a, b = side, val_side
         for k in path:
             a = a.get(k) if isinstance(a, dict) else None
