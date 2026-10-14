@@ -115,7 +115,7 @@ The root `CLAUDE.md` is the authoritative description of commands and architectu
 
 ## Architectural Constraints
 
-- **DDP invariants:** same seed and items on every rank, equal-sized shards (remainder dropped), `model.no_sync()` on non-step micro-batches, only rank 0 attaches checkpoints.
+- **DDP invariants:** same seed and items on every rank, equal-sized shards (remainder dropped), `model.no_sync()` on non-step micro-batches, every rank attaches its `rng-rank<r>.pt` to each epoch checkpoint (rank 0 adds `train_state.pt` and `save.json`; resume reads every rank's file), and only the final checkpoint (rank 0, `final.json`) is a calibrated laya checkpoint; uncalibrated epoch exports go to `exports/epoch-NNN`.
 - **Single node:** `ray_train.py` refuses a multi-node Ray cluster.
 - **Laya internals:** private API use is confined to `pilot/laya_adapter.py` (an AST guard in `tests/test_laya_adapter.py` fails on any other importer).
 - **Global state:** module-level constants only (`INTENTS`, `QUESTIONS`, `SPLITS`, `TRAINED_ON`, pins).
