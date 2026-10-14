@@ -25,6 +25,7 @@ usage: from pilot import runs; record = runs.read_record(ckpt_dir); [row["train_
 import hashlib
 import json
 import os
+import shutil
 
 from pilot.data import repo_relpath
 
@@ -112,6 +113,22 @@ def neg_items(rows, k):
         labels, pos = len(r["expected"]), sum(1 for v in r["expected"].values() if v)
         n += pos + min(k, labels - pos) if k else labels
     return n
+
+
+def last_line(text, default=None):
+    """The last non-empty line of a child's or Ray's failure text, stripped (the failing process's own exception line);
+    `default`, or the text itself, when it has none. The one copy ray_train.py and compute_checkpoint.py share."""
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    return lines[-1] if lines else (str(text) if default is None else default)
+
+
+def free_bytes(path):
+    """Free bytes on the volume of `path`, or of its nearest existing parent (a --storage not created yet); stops at
+    the filesystem root. The one copy ray_train.py and compute_checkpoint.py share."""
+    p = os.path.abspath(path)
+    while not os.path.exists(p) and os.path.dirname(p) != p:
+        p = os.path.dirname(p)
+    return shutil.disk_usage(p).free
 
 
 def env_strings(env):

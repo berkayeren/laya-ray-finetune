@@ -244,3 +244,11 @@ def test_disk_need_bytes():
 
 def test_fail_after_epoch_and_export_epochs_never_change_the_run_id():
     assert {"fail_after_epoch", "export_epochs"} <= set(runs.NOT_IDENTITY)
+
+
+def test_last_line_and_free_bytes(tmp_path):
+    """04-REVIEW IN-02: the one shared copy of the failure-text and free-disk helpers."""
+    assert runs.last_line("Traceback\n  File x\nValueError: bad\n\n") == "ValueError: bad"
+    assert runs.last_line("") == "" and runs.last_line("  \n", "none") == "none"
+    assert runs.free_bytes(str(tmp_path / "not" / "yet" / "made")) > 0         # the nearest existing parent's volume
+    assert runs.free_bytes(os.path.abspath(os.sep)) > 0

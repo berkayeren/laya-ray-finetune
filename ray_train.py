@@ -218,12 +218,6 @@ def _failure_text(e):
     return "\n".join(parts)
 
 
-def _last_line(text):
-    """The last non-empty line of a Ray failure text: the worker's own exception line (`RuntimeError: ...`)."""
-    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
-    return lines[-1] if lines else str(text)
-
-
 def fit_or_exit(trainer, run_dir=None, rung="none"):
     """trainer.fit(), with Ray's failures turned into one console line (SystemExit):
     - a worker's MPS out-of-memory exit: the rung line (pilot.runs.oom_message), which wins over the others; a raw MPS
@@ -247,7 +241,7 @@ def fit_or_exit(trainer, run_dir=None, rung="none"):
         if not failed:
             raise
         raise SystemExit("training failed (%s); rerun the same command to resume from the last epoch checkpoint in %s"
-                         % (_last_line(str(e)), run_dir)) from None
+                         % (runs.last_line(str(e)), run_dir)) from None
 
 
 def code_state():
@@ -278,14 +272,6 @@ def code_changed(segments):
     if any(s.get("git_sha") is None or s.get("git_diff_sha256") is None for s in segments):
         return True
     return len({(s["git_sha"], s["git_diff_sha256"]) for s in segments}) > 1
-
-
-def free_bytes(path):
-    """Free bytes on the volume of `path`, or of its nearest existing parent (the storage dir may not exist yet)."""
-    path = os.path.abspath(path)
-    while not os.path.exists(path):
-        path = os.path.dirname(path)
-    return shutil.disk_usage(path).free
 
 
 def provenance(entry, manifest_path, base, base_dir, ident=None):
@@ -857,7 +843,7 @@ def main(argv=None):
     run_dir = os.path.join(os.path.abspath(a.storage), rid)  # Ray's experiment dir: the resume key
     need = runs.disk_need_bytes(os.path.getsize(os.path.join(base_dir, "model.safetensors")), a.epochs,
                                 a.export_epochs)
-    free = free_bytes(a.storage)
+    free = runs.free_bytes(a.storage)
     if free < need:                                         # before ray.init: a full disk mid-save corrupts the run
         raise SystemExit("%.1f GiB free under --storage; this run needs about %.1f GiB (three train states during "
                          "checkpoint rotation, per-epoch exports, the final checkpoint); free disk or pass another "

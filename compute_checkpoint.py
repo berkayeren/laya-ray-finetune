@@ -143,9 +143,9 @@ def read_text(path):
 
 
 def last_text_line(text, default=""):
-    """The last non-empty line of a child's output, scrubbed for the report (the child's own SystemExit line)."""
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    return spike.scrub(lines[-1]) if lines else default
+    """The last non-empty line of a child's output (runs.last_line), scrubbed for the report (the child's own
+    SystemExit line)."""
+    return spike.scrub(runs.last_line(text, default))
 
 
 def last_line(path):
@@ -165,19 +165,11 @@ def protocol_complete(a, start):
             and {k: start[k] for k in runs.SPIKE_START} == runs.SPIKE_START and start["rung"] == "none")
 
 
-def nearest_existing(path):
-    """`path` or its nearest existing parent (the filesystem a not-yet-created --storage lands on)."""
-    p = os.path.abspath(path)
-    while not os.path.exists(p) and os.path.dirname(p) != p:
-        p = os.path.dirname(p)
-    return p
-
-
 def disk_preflight(storage, model_bytes, epochs):
     """Refuse before any child when the disk under --storage cannot hold the probe run (pilot.runs.disk_need_bytes
     with per-epoch exports on, the ray_train.py floor)."""
     need = runs.disk_need_bytes(model_bytes, epochs, True)
-    free = shutil.disk_usage(nearest_existing(storage)).free
+    free = runs.free_bytes(storage)
     if free < need:
         raise SystemExit("%.1f GiB free under --storage; the probe needs about %.1f GiB (three train states during "
                          "checkpoint rotation, per-epoch exports, the final checkpoint); free disk or pass another "
