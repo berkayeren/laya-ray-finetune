@@ -28,7 +28,7 @@ The root `CLAUDE.md` is the authoritative description of commands and architectu
 
 - Python 3.12 (`requires-python = "==3.12.*"` in `pyproject.toml`), run directly as scripts with `argparse` CLIs: `prepare_data.py`, `ray_train.py`, `evaluate.py`, plus `intents.py` and the `pilot/` package.
 - Dependencies are exact-pinned in `pyproject.toml` and hash-locked in `requirements.txt` (universal lock, binary wheels only). `make env` builds `.venv` with `pip install --require-hashes --only-binary :all:`; `make lock` / `make lock-check` regenerate and check the lock.
-- Ray on a single node: `ray_train.py` refuses a multi-node cluster (workers read driver-local paths); `evaluate.py` uses Ray Data actors, or runs in-process with `--workers 0`. Devices: CPU, or CUDA via `--gpu` / `--gpus-per-worker`. There is no MPS path yet (Phase 2 spike, Phase 4 `--device mps`).
+- Ray on a single node: `ray_train.py` refuses a multi-node cluster (workers read driver-local paths); `evaluate.py` uses Ray Data actors, or runs in-process with `--workers 0`. Devices: CPU, or CUDA via `--gpu` / `--gpus-per-worker`. `ray_train.py` and `evaluate.py` have no MPS path yet (Phase 4 adds `--device mps`); the Phase 2 spike `mps_spike.py` already trains on MPS in a 1-worker Ray Train worker and found the full fine-tune fits (`results/spike/mps_spike.md`).
 
 ## Frameworks and Key Dependencies
 

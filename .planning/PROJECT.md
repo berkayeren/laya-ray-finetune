@@ -23,6 +23,7 @@ A trustworthy, reproducible head-to-head comparison (fine-tuned Laya vs fine-tun
 - ✓ Frozen, hash-registered splits (`data/splits.json`): selection_train/val/final_train/test plus the HOTELS OOD probe; no-intent rows kept by default; tampered, unregistered or wrong-role files hard-fail. Phase 1.
 - ✓ Pinned, digest-verified Laya and BERTurk weights (safetensors only) via `pilot.weights.fetch`. Phase 1.
 - ✓ Local CPU test suite (`make test`, no hosted CI) with env-lock, single-`QUESTIONS`, split-contract and repo-hygiene guards. Phase 1.
+- ✓ MPS feasibility spike (`mps_spike.py`, `pilot/spike.py`, report in `results/spike/`): a full-encoder Laya fine-tune fits on the 16 GB M4 inside a 1-worker Ray Train worker (micro-batch 8, max_len 128, grad-accum 4, gradient checkpointing on, AMP off; 14.3 min projected neg8 epoch, 8.76 GiB peak, no CPU-fallback ops). Phase 2.
 
 ### Active
 
@@ -34,7 +35,7 @@ A trustworthy, reproducible head-to-head comparison (fine-tuned Laya vs fine-tun
 
 **2. Real fine-tune of Laya on Apple Silicon**
 - [ ] `--device` flag supporting `mps` (Apple GPU) with CPU fallback. Ray Train runs with 1 worker. The existing CUDA `--gpu`/DDP path must keep working.
-- [ ] Full encoder fine-tune of `laya-multilingual` on `data_neg8` within 16 GB unified memory: micro-batch 4–8, gradient accumulation, gradient checkpointing, max_len 128–256. Use `data_full` only if time allows.
+- [ ] Full encoder fine-tune of `laya-multilingual` on `data_neg8` within 16 GB unified memory: micro-batch 4–8, gradient accumulation, gradient checkpointing, max_len 128–256. Use `data_full` only if time allows. Phase 2 measured the start config: micro-batch 8, max_len 128, grad-accum 4, gradient checkpointing on (encoder + head) and AMP off. Phase 4 must enable checkpointing on MPS too (`ray_train.py` currently enables it only on CUDA).
 - [ ] Checkpoint every epoch, and long runs can resume
 - [ ] Validation split carved from train (never test). Per-tag or global decision thresholds are chosen on it.
 - [ ] Evaluate on all 398 test messages (plus the no-intent rows)
@@ -79,7 +80,7 @@ It is also a GO if Laya beats BERTurk by more than 3 points with a confidence in
 
 - **Hardware**: Apple M4 Mac with 16 GB unified memory, PyTorch MPS, no CUDA. Fall back to `--freeze-encoder` only if a full fine-tune OOMs, and label that run as weaker.
 - **Data**: no real customer data, and no bank name anywhere in the repo.
-- **Hosting**: everything runs self-hosted and locally. Hub downloads of public model weights are fine. Any exception needs the user's explicit confirmation. The only one under consideration is the Kaggle GPU training contingency (see Key Decisions, ⚠️ Revisit).
+- **Hosting**: everything runs self-hosted and locally. Hub downloads of public model weights are fine. Any exception needs the user's explicit confirmation. The Kaggle GPU training contingency is not needed: the Phase 2 spike showed a full fine-tune fits on the M4 (see Key Decisions).
 - **Reproducibility**: pinned dependencies, recorded seeds and configs, thresholds never tuned on test.
 - **Laya internals**: the private API usage must be confined to one adapter module.
 
@@ -104,7 +105,7 @@ It is also a GO if Laya beats BERTurk by more than 3 points with a confidence in
 | Compute checkpoint after the first MPS epoch, waiting for user approval | Runtime on the laptop is unknown | — Pending |
 | Few-shot uses label masking, k-shot as short continued training, max 3 draws | Fair to both models and keeps compute bounded | — Pending |
 | Kaggle GPU training is a contingency only, used if the Phase 2 MPS feasibility spike shows a full Laya fine-tune does not fit in 16 GB. It would use the preserved CUDA `--gpu` path. | Kaggle is a hosted service, so this conflicts with the self-hosted constraint. It needs the user's explicit confirmation before any use. The exception is acceptable only because the work uses public Multi3NLU++ data and no bank data. | — Not needed: Phase 2 spike FITS (2026-10-14) |
-| Phase 2 MPS feasibility spike verdict | results/spike/mps_spike.md (full protocol, quiet-machine preflight passed); run policy min_available_gib 7.0 / swap_rerun true / tie_tolerance 0.05 from meta.policy | ✓ FITS (2026-10-14): micro-batch 8, max_len 128, grad-accum 4, rung none, no fallback ops; projected neg8 epoch 14.3 min, peak 8.76 GiB. User reply: "accept-fits"; bank-name check: "no bank name" |
+| Phase 2 MPS feasibility spike verdict | results/spike/mps_spike.md (full protocol, quiet-machine preflight passed); run policy min_available_gib 7.0 / swap_rerun true / tie_tolerance 0.05 from meta.policy | ✓ FITS (2026-10-14): micro-batch 8, max_len 128, grad-accum 4, rung none, gradient checkpointing on, AMP off, no fallback ops; projected neg8 epoch 14.3 min, peak 8.76 GiB. User reply: "accept-fits"; bank-name check: "no bank name" |
 
 ## Evolution
 
@@ -124,4 +125,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-13 after Phase 1*
+*Last updated: 2026-10-14 after Phase 2*
