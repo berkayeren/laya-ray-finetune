@@ -1,5 +1,7 @@
 # Compute checkpoint (Phase 4, LAYA-07)
 
+**Swap grew during measured epoch(s) 2** (largest 423 MiB): the run was under memory pressure (the spike's D-01 gate); confirm the rate before approval.
+
 - Generated 2026-10-14T16:55:33Z
 - Split: `splits/selection_train.jsonl` sha256 `a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331` (1450 messages)
 - Manifest: `data/splits.json` sha256 `7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103` (committed: True)

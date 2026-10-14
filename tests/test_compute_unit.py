@@ -568,3 +568,21 @@ def test_protocol_complete_pins_the_timing_basis():
         assert cc.protocol_complete(argparse.Namespace(**dict(real, **{k: v})), start) is False, (k, v)
     md = compute.render_markdown(full_report(protocol_complete=False))
     assert "--cpus, --epochs or --seed other than cpus 4, epochs 2, seed 0" in md
+
+
+def test_swap_growth_in_a_measured_epoch_is_bannered():
+    """04-REVIEW WR-08: swap growth during a measured epoch (the spike's D-01 memory gate) gets a banner and an
+    assumption, not just a table cell; none without growth."""
+    quiet = full_report()
+    assert "Swap grew during measured epoch" not in compute.render_markdown(quiet)
+    assert not any("Swap grew" in x for x in quiet["assumptions"])
+    measured = toy_measured()
+    measured["epochs"][1]["swap_delta_bytes"] = 423 * 2**20
+    assert compute.swap_grew_epochs(measured) == [2]
+    p = compute.project(measured, TOY_COUNTS, TOY_MATRIX)
+    swapped = compute.build_report(toy_meta(), measured, TOY_COUNTS, TOY_MATRIX, p, toy_preflight(False),
+                                   assumptions=compute.assumptions(TOY_MATRIX, measured, TOY_COUNTS))
+    md = compute.render_markdown(swapped)
+    assert "**Swap grew during measured epoch(s) 2** (largest 423 MiB)" in md
+    assert md.index("Swap grew during measured epoch") < md.index("## Measured run")
+    assert any(x.startswith("Swap grew during measured epoch(s) 2 (largest 423 MiB)") for x in swapped["assumptions"])

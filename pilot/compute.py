@@ -416,6 +416,12 @@ def disk_budget(model_bytes, matrix, train_state_bytes=None):
             "laya_final_checkpoints_bytes": (matrix["lr_grid"] + matrix["final_seeds"]) * model_bytes}
 
 
+def swap_grew_epochs(measured):
+    """The measured epochs whose system swap grew (swap_delta_bytes > 0): the spike's D-01 memory gate counts any swap
+    growth during a measured step as memory pressure, so the report flags them (04-REVIEW WR-08)."""
+    return [r["epoch"] for r in (measured or {}).get("epochs") or [] if (r.get("swap_delta_bytes") or 0) > 0]
+
+
 def assumptions(matrix, measured=None, counts=None, interrupt=None):
     """What the user must confirm or trim at the compute checkpoint (plan 04-08), one sentence each."""
     measured = measured or {}
@@ -444,6 +450,12 @@ def assumptions(matrix, measured=None, counts=None, interrupt=None):
     else:
         out.append("Scoring time is measured on the pinned zero-shot weights (a --n %s val subset); a fine-tuned "
                    "checkpoint has the same architecture and forward cost" % sc.get("n"))
+    grew = swap_grew_epochs(measured)
+    if grew:
+        out.append("Swap grew during measured epoch(s) %s (largest %.0f MiB): the run was under memory pressure (the "
+                   "spike's D-01 gate), so the measured rate may be slower than on a quiet machine; confirm it before "
+                   "approval" % (", ".join(map(str, grew)),
+                                 max(r["swap_delta_bytes"] for r in measured["epochs"]) / 2**20))
     s_msg = berturk_rates(measured)[1]                     # the BERTurk scoring rate the projection uses
     out += ["Scoring runs in fp32 on MPS (la.force_fp32 turns laya's fp16 autocast off); the scoring rate assumes fp32",
             "Per-epoch laya exports stay on (--export-epochs) so Phase 5 picks the epoch on val without retraining; "
@@ -674,6 +686,12 @@ def render_markdown(report):
     if spike.busy_machine(report.get("preflight")):
         lines += ["**Busy-machine run:** the preflight was overridden or swap grew while idle; the measured rate may "
                   "be slower than on a quiet machine.", ""]
+    grew = swap_grew_epochs(report.get("measured"))
+    if grew:
+        lines += ["**Swap grew during measured epoch(s) %s** (largest %s MiB): the run was under memory pressure (the "
+                  "spike's D-01 gate); confirm the rate before approval."
+                  % (", ".join(map(str, grew)),
+                     _fmt(max(r["swap_delta_bytes"] for r in report["measured"]["epochs"]), 2**20, 0)), ""]
     lines += _provenance_lines(meta)
     pf = report.get("preflight")
     if pf:
