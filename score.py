@@ -1,7 +1,15 @@
 """Score one system on one registered split into a logit dump (EVAL-01): the only place a model runs.
 
 score.py turns a system into results/dumps/<run_id>/<split>.npz + <split>.json (pilot.dumps); report.py turns dumps
-into metrics with numpy alone (D-05). This plan's systems are the two trivial baselines (D-09, D-10):
+into metrics with numpy alone (D-05). Systems (--model, default laya):
+- laya: a Laya checkpoint (--checkpoint multilingual, the default, = zero-shot; or a local checkpoint dir). The driver
+  resolves it before laya is imported or Ray starts (multilingual: the pinned, digest-verified fetch; a dir: bound to
+  the digests of its recorded pilot.weights.identity), then checks the pinned laya version (la.check_version). Every
+  load is the public laya.load(model_dir, device=..., expected_sha256=...) (D-16); the raw noul margins and the
+  temperature laya.load serves come only through pilot.laya_adapter (la.noul_logits, la.noul_temperature; D-02,
+  D-11). A loaded agent on another device, or on CPU in another dtype than float32 or with autocast on (an inherited
+  LAYA_CPU_AMP would switch laya to bf16), is refused; the check reads the agent, not the environment.
+  run_id: laya-zeroshot-<revision[:8]> for the pinned checkpoint, laya-<model_sha256[:12]> for a local one.
 - prior: p_t = messages carrying tag t / all messages, no-intent rows counted, in the training split the scored
   role's models are trained on (pilot.data.TRAINED_ON: final_train for test, selection_train for val)
 - majority: p = 1 on the most frequent tag of that training split (ties -> the earlier INTENTS tag), 0 elsewhere
@@ -15,7 +23,9 @@ there; without --out-root it goes to a fresh temp dir) and its sidecar records n
 
 Module-level imports stay torch-, Ray- and laya-free.
 
-usage: python score.py data/splits/test.jsonl --model majority|prior [--n N] [--out-root DIR] [--manifest M]
+usage: python score.py data/splits/test.jsonl [--model laya|majority|prior] [--checkpoint multilingual|DIR]
+                       [--workers W] [--cpus-per-worker C] [--gpus-per-worker G] [--n N] [--out-root DIR]
+                       [--manifest M]
 """
 import argparse
 import json
@@ -26,13 +36,17 @@ import time
 
 import numpy as np
 
-from intents import INTENTS
+from intents import INTENTS, QUESTIONS
 from pilot import dumps
+from pilot import laya_adapter as la
 from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, manifest_is_committed, parse_jsonl, questions_sha256,
                         repo_relpath, sha256_file, verify_split_file)
 
 SUBSET_SEED = 0                                             # fixed shuffle before --n, so subsets are comparable
 TAGS = list(INTENTS)
+BATCH = 16                                                  # messages per scoring call (laya runs one per forward)
+BATCHING = "one message per forward (laya.calibrate.records_from_labeled via pilot.laya_adapter)"
+TEMPERATURE_SOURCE = "laya.load (clamped noul:2 temperature, what the public API serves)"
 
 
 def train_counts(manifest_path, role):
@@ -84,15 +98,98 @@ def sidecar_base(entry, split_name, manifest_path, n_subset):
             "logit": dumps.LOGIT_NOTE, "seed": None, "n_subset": n_subset, "subset_seed": SUBSET_SEED}
 
 
+def resolve_checkpoint(checkpoint, ident=None):
+    """On the driver, before Ray starts: (local checkpoint dir, {file: sha256} that laya.load must verify).
+
+    'multilingual' = the pinned hub weights, fetched and digest-checked here (ENV-02); anything else must be a local
+    checkpoint dir, bound to the digests in its recorded identity (ident, default identity(checkpoint)). Refusals and
+    digest mismatches surface here as the real message, not as a Ray actor death. laya is not imported here.
+    """
+    from pilot.weights import checkpoint_digests, fetch, identity
+    if checkpoint == "multilingual":
+        from pilot import pins
+        return fetch(pins.LAYA), checkpoint_digests(checkpoint, None)
+    if not os.path.isfile(os.path.join(checkpoint, "rl_agent_config.json")):
+        raise SystemExit("--checkpoint must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % checkpoint)
+    digests = checkpoint_digests(checkpoint, identity(checkpoint) if ident is None else ident)
+    return os.path.abspath(checkpoint), digests             # abspath: laya treats args with "/" as local
+
+
+def load_agent(model_dir, device, expected_sha256):
+    """laya.load of a dir resolved by resolve_checkpoint; laya re-checks expected_sha256 before parsing any weight."""
+    import laya
+    return laya.load(model_dir, device=device, expected_sha256=expected_sha256)
+
+
+def check_agent(agent, device):
+    """The loaded agent's {device, dtype, amp_enabled}; SystemExit unless it runs where and how scoring requires.
+
+    Reads the agent's state, not the environment: on CPU laya switches to bf16 autocast when LAYA_CPU_AMP is set, and
+    scoring is fp32 (D-06, RESEARCH Pitfall 5).
+    """
+    kind = getattr(agent.device, "type", agent.device)
+    if kind != device:
+        raise SystemExit("laya loaded on %s, requested %s; check --gpus-per-worker and the visible devices"
+                         % (kind, device))
+    if kind == "cpu" and (str(agent.dtype) != "torch.float32" or agent.amp_enabled is not False):
+        raise SystemExit("laya runs %s with autocast %s on CPU; scoring is fp32 (unset LAYA_CPU_AMP)"
+                         % (agent.dtype, agent.amp_enabled))
+    return {"device": str(kind), "dtype": str(agent.dtype), "amp_enabled": bool(agent.amp_enabled)}
+
+
+def laya_system(checkpoint, ident):
+    """The sidecar's system block for a Laya checkpoint: repo-relative path (or 'multilingual') and its identity."""
+    return {"kind": "laya", "checkpoint": "multilingual" if checkpoint == "multilingual" else repo_relpath(checkpoint),
+            "checkpoint_identity": ident, "baseline_source": None, "clip_eps": None}
+
+
 def _under(path, root):
     path, root = os.path.realpath(path), os.path.realpath(root)
     return path == root or path.startswith(root + os.sep)
 
 
+def score_laya(a, checkpoint, cases):
+    """(float32 [n, 48] margins in `cases` order, sidecar fields) of a Laya checkpoint; driver-side checks first."""
+    from pilot.weights import identity
+    ident = identity(checkpoint)                            # the scored bytes are bound to it (laya.load digests)
+    model_dir, expected = resolve_checkpoint(checkpoint, ident)   # refusal / pinned fetch before laya or Ray
+    la.check_version()
+    rid = dumps.run_id("laya", ident)
+    device = "cuda" if a.gpus_per_worker > 0 else "cpu"
+    texts = [c["state"] for c in cases]
+    t0 = time.time()
+    import laya
+    import torch
+    torch.set_num_threads(a.cpus_per_worker)
+    agent = load_agent(model_dir, device, expected)
+    state = check_agent(agent, device)
+    T = la.noul_temperature(agent)
+    infer = 0.0
+    parts = []
+    for i in range(0, len(texts), BATCH):
+        t = time.perf_counter()                             # scoring only: load/digest time is not per-message cost
+        parts.append(la.noul_logits(agent, texts[i:i + BATCH], QUESTIONS))
+        infer += time.perf_counter() - t
+    logits = np.concatenate(parts).astype(np.float32, copy=False)
+    secs = time.time() - t0
+    fields = {"run_id": rid, "system": laya_system(checkpoint, ident),
+              "temperature": {"shipped": T, "source": TEMPERATURE_SOURCE},
+              "scorer": dict(state, laya_version=laya.__version__, torch_version=torch.__version__,
+                             numpy_version=np.__version__, torch_threads=torch.get_num_threads(), workers=0,
+                             batching=BATCHING),
+              "timing": {"seconds": secs, "inference_seconds": infer, "sec_per_msg": infer / len(texts)}}
+    return logits, fields
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="score a system on a val/test split into a logit dump")
     ap.add_argument("split_jsonl")
-    ap.add_argument("--model", required=True, choices=("majority", "prior"))
+    ap.add_argument("--model", default="laya", choices=("laya", "majority", "prior"))
+    ap.add_argument("--checkpoint", default=None,
+                    help="--model laya only: multilingual (pinned hub weights; the default) or DIR (local checkpoint)")
+    ap.add_argument("--workers", type=int, default=1, help="Ray Data actors; 0 = in-process, no Ray")
+    ap.add_argument("--cpus-per-worker", type=int, default=2, help="CPUs and torch threads per actor (or in-process)")
+    ap.add_argument("--gpus-per-worker", type=float, default=0, help="> 0 scores on CUDA")
     ap.add_argument("--n", type=int, default=None, help="score a fixed random subset of N messages (debug only)")
     ap.add_argument("--out-root", default=None,
                     help="dump root (default results/dumps; with --n a fresh temp dir, never results/dumps)")
@@ -101,6 +198,12 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.n is not None and a.n <= 0:
         ap.error("--n must be a positive number of messages (omit it to score the whole split)")
+    if a.model != "laya" and a.checkpoint is not None:
+        ap.error("--checkpoint applies only to --model laya")
+    if a.workers < 0 or a.cpus_per_worker < 1 or a.gpus_per_worker < 0:
+        ap.error("--workers must be >= 0, --cpus-per-worker >= 1 and --gpus-per-worker >= 0")
+    if a.model == "laya" and a.workers > 0:
+        ap.error("--workers > 0 arrives with the Ray path")
     if a.n is not None and a.out_root is not None and _under(a.out_root, dumps.DUMP_ROOT):
         raise SystemExit("subset (--n) dumps never go under results/dumps; omit --out-root to write a temp dir")
     if not os.path.isfile(a.split_jsonl):
@@ -119,19 +222,23 @@ def main(argv=None):
     uids = [c["uid"] for c in cases]
     n_subset = None if a.n is None else len(cases)
 
-    t0 = time.time()
-    name, e_tr, counts, n_tr = train_counts(a.manifest, entry["role"])
-    row = baseline_logits(a.model, counts, n_tr)
-    logits = np.broadcast_to(row, (len(cases), len(TAGS))).copy()
-    rid = dumps.run_id(a.model)
-    sidecar = dict(sidecar_base(entry, split_name, a.manifest, n_subset), run_id=rid,
-                   system={"kind": a.model, "checkpoint": None, "checkpoint_identity": None,
-                           "baseline_source": {"split": name, "path": e_tr["path"], "sha256": e_tr["sha256"],
-                                               "n_messages": n_tr, "tag_counts": counts},
-                           "clip_eps": dumps.CLIP_EPS},
-                   temperature={"shipped": 1.0, "source": "baseline: logit of a train-split frequency (T = 1)"},
-                   scorer={"numpy_version": np.__version__, "workers": 0, "device": None},
-                   timing={"seconds": time.time() - t0})
+    if a.model == "laya":
+        logits, fields = score_laya(a, a.checkpoint or "multilingual", cases)
+    else:
+        t0 = time.time()
+        name, e_tr, counts, n_tr = train_counts(a.manifest, entry["role"])
+        row = baseline_logits(a.model, counts, n_tr)
+        logits = np.broadcast_to(row, (len(cases), len(TAGS))).copy()
+        fields = {"run_id": dumps.run_id(a.model),
+                  "system": {"kind": a.model, "checkpoint": None, "checkpoint_identity": None,
+                             "baseline_source": {"split": name, "path": e_tr["path"], "sha256": e_tr["sha256"],
+                                                 "n_messages": n_tr, "tag_counts": counts},
+                             "clip_eps": dumps.CLIP_EPS},
+                  "temperature": {"shipped": 1.0, "source": "baseline: logit of a train-split frequency (T = 1)"},
+                  "scorer": {"numpy_version": np.__version__, "workers": 0, "device": None},
+                  "timing": {"seconds": time.time() - t0}}
+    rid = fields["run_id"]
+    sidecar = dict(sidecar_base(entry, split_name, a.manifest, n_subset), **fields)
     if a.n is None:
         root = a.out_root or dumps.DUMP_ROOT
     else:
