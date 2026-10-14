@@ -764,7 +764,7 @@ def train_loop_per_worker(c):
     if rank == 0:
         inner.eval()
         t_calib = time.perf_counter()
-        with mps_oom_exit(None, None, c["rung"], "while calibrating after the last epoch"):
+        with mps_oom_exit(None, None, c["rung"], runs.STAGE_CALIBRATE):
             records = la.calibration_records(inner, tok, calib_items, device, max_len, head_max_len,
                                              batch_size=c["calib_batch"], parallel=parallel)
         fitted = la.fit_temperature_map(records)
@@ -779,7 +779,7 @@ def train_loop_per_worker(c):
                                    epoch=c["epochs"], calibrated=True, laya_train_calibration=calibration)
         with tempfile.TemporaryDirectory() as d:
             t_save = time.perf_counter()
-            with mps_oom_exit(None, None, c["rung"], "while saving the final checkpoint"):
+            with mps_oom_exit(None, None, c["rung"], runs.STAGE_FINAL_SAVE):
                 la.save_checkpoint(inner, tok, out_cfg, d)
             record["final_save_s"] = time.perf_counter() - t_save
             _rewrite_config(d, out_cfg)                      # the record now holds the final save time

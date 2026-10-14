@@ -162,6 +162,10 @@ RUNG_NEXT = {"none": "embeddings_frozen",
              "encoder_frozen": None}
 _SMALLER = ["--micro-batch", "4", "--grad-accum", "8"]
 OOM_MARK = "MPS out of memory"
+# the stage texts ray_train.py passes to mps_oom_exit after the last epoch; oom_message matches them exactly, so
+# ray_train.py uses these names, never a copy of the text (04-REVIEW IN-01)
+STAGE_CALIBRATE = "while calibrating after the last epoch"
+STAGE_FINAL_SAVE = "while saving the final checkpoint"
 # the model move of a rerun whose train state already holds the last epoch: it trains nothing, never loads the
 # optimizer state and only recalibrates (no rung flag shrinks the model it moves)
 STAGE_RECALIBRATE_MOVE = "while moving the model to the device to recalibrate"
@@ -169,9 +173,8 @@ STAGE_RECALIBRATE_MOVE = "while moving the model to the device to recalibrate"
 # (the optimizer state is freed and the MPS cache emptied first; a rerun that resumes there never loads it), so the
 # line says to rerun the same command, which resumes there; a rung flag would change the run_id and retrain from
 # epoch 0 (04-REVIEW WR-01). stage -> what the rerun does
-RESUME_STAGES = {"while calibrating after the last epoch": "it only recalibrates; a smaller --calib-batch keeps the "
-                                                           "run id",
-                 "while saving the final checkpoint": "it recalibrates and saves again",
+RESUME_STAGES = {STAGE_CALIBRATE: "it only recalibrates; a smaller --calib-batch keeps the run id",
+                 STAGE_FINAL_SAVE: "it recalibrates and saves again",
                  STAGE_RECALIBRATE_MOVE: "it only recalibrates"}
 RESUME_TODO = "every epoch is saved: rerun the same command to resume"
 

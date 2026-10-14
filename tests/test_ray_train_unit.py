@@ -305,6 +305,22 @@ def test_a_resume_with_no_epoch_left_never_loads_the_optimizer_state():
     assert runs.resume_oom(line) and "--freeze-embeddings" not in line
 
 
+def test_the_trainer_passes_the_resume_stages_by_name():
+    """04-REVIEW IN-01: oom_message matches a stage text exactly, so a reworded copy in ray_train.py would silently turn
+    a post-training OOM back into next-rung advice. The trainer names every resume stage through pilot.runs and holds
+    no copy of any stage text."""
+    import inspect
+    from pilot import runs
+    names = {"STAGE_CALIBRATE", "STAGE_FINAL_SAVE", "STAGE_RECALIBRATE_MOVE"}
+    assert set(runs.RESUME_STAGES) == {getattr(runs, n) for n in names}
+    loop = inspect.getsource(ray_train.train_loop_per_worker)
+    for n in names:
+        assert "runs.%s" % n in loop, n
+    src = inspect.getsource(ray_train)
+    for stage in runs.RESUME_STAGES:
+        assert stage not in src, stage
+
+
 def test_driver_names_the_dir_of_a_corrupted_snapshot():
     from ray.train import ControllerError
     from ray.train.v2._internal.exceptions import CheckpointManagerInitializationError

@@ -381,7 +381,7 @@ def test_an_oom_after_the_last_epoch_does_not_walk_the_ladder():
     rung that would retrain under another run_id and record a fallback; a training-step OOM still walks it."""
     import compute_checkpoint as cc
     from pilot import runs
-    calib = runs.oom_message(None, None, "none", "while calibrating after the last epoch")
+    calib = runs.oom_message(None, None, "none", runs.STAGE_CALIBRATE)
     a = cc.oom_attempt({"run_id": "laya-a"}, runs.failure_line("[Rank 0]\nRuntimeError: " + calib), {"mode": "kill"})
     assert a["status"] == "failed" and a["line"] == calib and calib in a["reason"]
     assert cc.oom_attempt({"run_id": "laya-a"}, runs.oom_message(2, 5, "none"), {})["status"] == "oom"
