@@ -34,7 +34,8 @@ Ray overhead (D-09a): after the verdict, the chosen config (or 4x128 as a labell
 in-process without Ray, in a fresh process with the same env and --cpus threads; the report gives both median step
 times per regime and their % delta. This run never changes the verdict.
 
-Laya internals used (the Phase 3 adapter list): lt.load_checkpoint, lt.items_from_rows, lt.encode_item, lt._forward,
+Laya internals used (reached through pilot/laya_adapter.py; LAYA_INTERNALS keeps the names the committed report
+records): lt.load_checkpoint, lt.items_from_rows, lt.encode_item, lt._forward,
 lt.rlcd_loss, laya.common.collate_items, laya.common.uses_parallel_layout, laya.common.DecisionModel,
 DecisionModel.head_checkpointing, encoder.gradient_checkpointing_enable, encoder.embeddings.tok_embeddings.
 
@@ -59,6 +60,7 @@ import tempfile
 import time
 import warnings
 
+from pilot import laya_adapter as la
 from pilot import pins, spike
 from pilot.data import DEFAULT_MANIFEST, REPO_ROOT, repo_relpath, sha256_file, verify_split_file, write_atomic
 from pilot.weights import fetch
@@ -93,10 +95,10 @@ def configure_model(model, rung):
     if rung not in ("none", "embeddings_frozen"):
         raise SystemExit("rung %r is not measured; use 'none' or 'embeddings_frozen' (a frozen encoder never FITS)"
                          % (rung,))
-    model.encoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-    model.head_checkpointing = True
+    if not la.enable_gradient_checkpointing(model):
+        raise SystemExit("encoder has no gradient checkpointing; the spike measures with checkpointing on")
     if rung == "embeddings_frozen":
-        model.encoder.embeddings.tok_embeddings.weight.requires_grad_(False)
+        la.freeze_embeddings(model)
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
@@ -113,19 +115,17 @@ def _pinned_source(c, max_len, mark):
 
     mark(stage) tags the warnings that follow with their stage (load = setup, item building = tokenize; D-11).
     """
-    from laya import train as lt
-    from laya.common import collate_items, uses_parallel_layout
     from pilot.weights import verify_files
     from ray_train import read_verified_rows
 
     # the worker re-checks the bytes the driver verified minutes ago (T-02-01)
     verify_files(c["base_dir"], c["base_sha256"], "base checkpoint")
-    model, tok, cfg = lt.load_checkpoint(c["base_dir"])
+    model, tok, cfg = la.load_checkpoint(c["base_dir"])
     head_max_len = cfg.get("head_max_len", 192)
-    parallel = uses_parallel_layout(cfg)
+    parallel = la.uses_parallel_layout(cfg)
     rows = read_verified_rows(c["data"], c["data_sha256"])
     mark("tokenize")
-    items, skipped = lt.items_from_rows(tok, spike.neg8_rows(rows, c["seed"]), max_len, head_max_len)
+    items, skipped = la.items_from_rows(tok, spike.neg8_rows(rows, c["seed"]), max_len, head_max_len)
     random.Random(c["seed"]).shuffle(items)
 
     def maker(pad):
@@ -135,8 +135,8 @@ def _pinned_source(c, max_len, mark):
             chunk = [next(pool) for _ in range(c["micro_batch"])]
             if pad:
                 chunk = [spike.pad_item_to(it, max_len) for it in chunk]
-            return collate_items([[lt.encode_item(tok, it, max_len, head_max_len, None, parallel) for it in chunk]],
-                                 tok.pad_token_id)
+            return la.collate_items([[la.encode_item(tok, it, max_len, head_max_len, None, parallel) for it in chunk]],
+                                    tok.pad_token_id)
         return make
     return model, maker(False), maker(True), len(items), skipped
 
@@ -158,25 +158,23 @@ def token_lengths(c):
     run, so its memory never overlaps the grid.
     """
     import torch
-    from laya import train as lt
-    from laya.common import uses_parallel_layout
     from pilot.weights import verify_files
     from ray_train import read_verified_rows
 
     torch.set_num_threads(c["cpus"])
     verify_files(c["base_dir"], c["base_sha256"], "base checkpoint")
-    model, tok, cfg = lt.load_checkpoint(c["base_dir"])
+    model, tok, cfg = la.load_checkpoint(c["base_dir"])
     del model
     gc.collect()
-    head_max_len, parallel = cfg.get("head_max_len", 192), uses_parallel_layout(cfg)
+    head_max_len, parallel = cfg.get("head_max_len", 192), la.uses_parallel_layout(cfg)
     rows = read_verified_rows(c["data"], c["data_sha256"])
     seqs, states = [], []
     for row in rows:
-        items = lt.items_from_rows(tok, [row], UNTRUNCATED, head_max_len)[0]
-        seqs.append([len(lt.encode_item(tok, it, UNTRUNCATED, head_max_len, None, parallel)["ids"]) for it in items])
+        items = la.items_from_rows(tok, [row], UNTRUNCATED, head_max_len)[0]
+        seqs.append([len(la.encode_item(tok, it, UNTRUNCATED, head_max_len, None, parallel)["ids"]) for it in items])
         if items:
             states.append(len(items[0]["state_ids"]))
-    n_neg8 = len(lt.items_from_rows(tok, spike.neg8_rows(rows, c["seed"]), 128, head_max_len)[0])
+    n_neg8 = len(la.items_from_rows(tok, spike.neg8_rows(rows, c["seed"]), 128, head_max_len)[0])
     return {"status": "ok", "token_stats": spike.token_stats(seqs, states), "n_neg8_items": n_neg8,
             "n_positives": sum(1 for r in rows for v in r["expected"].values() if v), "n_messages": len(rows)}
 
@@ -193,13 +191,12 @@ def check_neg8(configs, n_items):
 
 def tiny_model():
     """Tiny ModernBERT encoder + Laya head (random init, CPU, no download) for the offline self-tests."""
-    from laya.common import DecisionModel
     from transformers import ModernBertConfig, ModernBertModel
 
     cfg = ModernBertConfig(vocab_size=1000, hidden_size=64, intermediate_size=96, num_hidden_layers=4,
                            num_attention_heads=4, global_attn_every_n_layers=3, local_attention=16, pad_token_id=0,
                            bos_token_id=1, eos_token_id=2, cls_token_id=1, sep_token_id=2)
-    return DecisionModel(ModernBertModel(cfg), 2, 2)
+    return la.decision_model(ModernBertModel(cfg), 2, 2)
 
 
 def tiny_items(n, min_len, max_len, seed):
@@ -215,11 +212,9 @@ def tiny_items(n, min_len, max_len, seed):
 
 def _tiny_source(c, max_len, mark):
     """Offline self-test source used by tests/test_spike_*.py (the orchestrator always launches "pinned")."""
-    from laya.common import collate_items
-
     def maker(items):
         pool = itertools.cycle(items)
-        return lambda: collate_items([[next(pool) for _ in range(c["micro_batch"])]], 0)
+        return lambda: la.collate_items([[next(pool) for _ in range(c["micro_batch"])]], 0)
     model = tiny_model()
     mark("tokenize")
     real = maker(tiny_items(64, 8, min(24, max_len), c["seed"]))
@@ -273,7 +268,6 @@ def _steps(c, device, mark, got):
     """Load, configure, move and time one config; `got` collects what was measured so far (for a strict failure)."""
     import psutil
     import torch
-    from laya import train as lt
 
     torch.manual_seed(c["seed"])
     torch.set_num_threads(c["cpus"])
@@ -335,9 +329,9 @@ def _steps(c, device, mark, got):
         t0 = time.perf_counter()
         for _ in range(accum):
             batch = maker()
-            logits = lt._forward(model, batch, device, False, False)
-            loss = lt.rlcd_loss(logits, batch["target"].to(device), batch["marker_mask"].to(device),
-                                batch["qtype"].to(device), h["sigma"], 4, 0.75, 1.0)
+            logits = la.forward(model, batch, device, False, False)
+            loss = la.rlcd_loss(logits, batch["target"].to(device), batch["marker_mask"].to(device),
+                                batch["qtype"].to(device), h["sigma"])
             (loss / accum).backward()
             if measured:
                 sample()

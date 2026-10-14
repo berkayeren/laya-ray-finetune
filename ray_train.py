@@ -2,8 +2,9 @@
 
 `laya.train.finetune` / `laya-train` run on one device. This script keeps Laya's
 own building blocks -- item encoding, RLCD / soft-CE loss, temperature
-calibration and the checkpoint layout `laya.load` reads -- and runs the training
-loop under Ray's TorchTrainer, so it scales from 1 CPU worker to N GPUs on one
+calibration and the checkpoint layout `laya.load` reads, all reached through
+pilot/laya_adapter.py (the only private-API module, pinned to one laya version)
+-- and runs the training loop under Ray's TorchTrainer, so it scales from 1 CPU worker to N GPUs on one
 node with only --workers / --gpu changed. It is single-node: workers read the
 base weights and the split from driver-local paths, so it refuses a multi-node
 Ray cluster.
@@ -42,10 +43,7 @@ import torch
 from ray.train import Checkpoint, RunConfig, ScalingConfig
 from ray.train.torch import TorchTrainer
 
-from laya import train as lt
-from laya.calibrate import fit_temperature_map
-from laya.common import collate_items, uses_parallel_layout
-
+from pilot import laya_adapter as la
 from pilot import pins
 from pilot.data import (DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file,
                         verify_split_file)
@@ -111,7 +109,7 @@ def holdout_messages(rows, calib_max_messages, calib_frac, seed):
     training, so the encoder would have trained on the exact text it is calibrated on. laya's split_calibration is
     generic over a sequence and depends only on the seed and the length, so every rank holds out the same messages.
     """
-    return lt.split_calibration(rows, calib_max_messages, calib_frac, seed)
+    return la.split_calibration(rows, calib_max_messages, calib_frac, seed)
 
 
 def train_loop_per_worker(c):
@@ -123,10 +121,10 @@ def train_loop_per_worker(c):
 
     # the base must still be the bytes the driver recorded in provenance.base (load_checkpoint verifies nothing)
     verify_files(c["base_dir"], c["base_sha256"], "base checkpoint")
-    model, tok, cfg = lt.load_checkpoint(c["base_dir"])
+    model, tok, cfg = la.load_checkpoint(c["base_dir"])
     max_len = c["max_len"] or cfg.get("max_len", 512)
     head_max_len = c["head_max_len"] or cfg.get("head_max_len", 192)
-    parallel = uses_parallel_layout(cfg)
+    parallel = la.uses_parallel_layout(cfg)
 
     # Every rank builds the same items and the same message-level calibration split (fixed seed),
     # then takes its own shard of the training items.
@@ -135,8 +133,8 @@ def train_loop_per_worker(c):
         random.Random(c["seed"]).shuffle(rows)
         rows = rows[:c["max_messages"]]
     train_rows, calib_rows = holdout_messages(rows, c["calib_max_messages"], c["calib_frac"], c["seed"])
-    train_items, skipped = lt.items_from_rows(tok, train_rows, max_len, head_max_len)
-    calib_items, calib_skipped = lt.items_from_rows(tok, calib_rows, max_len, head_max_len)
+    train_items, skipped = la.items_from_rows(tok, train_rows, max_len, head_max_len)
+    calib_items, calib_skipped = la.items_from_rows(tok, calib_rows, max_len, head_max_len)
     if not calib_items:                                     # same rows on every rank, so every rank stops here
         raise SystemExit("no calibration items from %d messages (--calib-frac %s); use more messages"
                          % (len(rows), c["calib_frac"]))
@@ -158,11 +156,10 @@ def train_loop_per_worker(c):
 
     amp = device.type == "cuda"
     if c["freeze_encoder"]:
-        for p in model.encoder.parameters():
-            p.requires_grad_(False)
-    elif amp and hasattr(model.encoder, "gradient_checkpointing_enable"):
-        model.encoder.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-        model.head_checkpointing = True
+        la.freeze_encoder(model)
+    elif amp:
+        # checkpointing stays CUDA-only here (no-op when the encoder lacks it); Phase 4 decouples it from AMP (CR-01)
+        la.enable_gradient_checkpointing(model)
     model = ray.train.torch.prepare_model(model, parallel_strategy_kwargs={"find_unused_parameters": True})
     inner = model.module if hasattr(model, "module") else model
     inner.train()
@@ -188,23 +185,23 @@ def train_loop_per_worker(c):
         t0 = time.time()
         order = list(shard)
         random.Random(c["seed"] + 1000 * epoch + rank).shuffle(order)
-        sigma = lt.sigma_at(epoch, c["epochs"], 0.4, 0.1)
+        sigma = la.sigma_at(epoch, c["epochs"], 0.4, 0.1)
         total, n = 0.0, 0
         opt.zero_grad(set_to_none=True)
         for s in range(0, len(order), mb):
-            batch = collate_items([[lt.encode_item(tok, it, max_len, head_max_len,
-                                                   lt.draw_option_order(it, rng, shuffle), parallel)
-                                    for it in order[s:s + mb]]], tok.pad_token_id)
+            batch = la.collate_items([[la.encode_item(tok, it, max_len, head_max_len,
+                                                      la.draw_option_order(it, rng, shuffle), parallel)
+                                       for it in order[s:s + mb]]], tok.pad_token_id)
             step_now = (n + 1) % accum == 0 or s + mb >= len(order)
             # skip the gradient all-reduce on accumulation steps
             sync = nullcontext() if step_now or not hasattr(model, "no_sync") else model.no_sync()
             with sync:
-                logits = lt._forward(model, batch, device, amp, c["freeze_encoder"])
+                logits = la.forward(model, batch, device, amp, c["freeze_encoder"])
                 mask, target = batch["marker_mask"].to(device), batch["target"].to(device)
                 if c["loss"] == "rlcd":
-                    loss = lt.rlcd_loss(logits, target, mask, batch["qtype"].to(device), sigma, 4, 0.75, 1.0)
+                    loss = la.rlcd_loss(logits, target, mask, batch["qtype"].to(device), sigma)
                 else:
-                    loss = lt.soft_ce_loss(logits, target, mask)
+                    loss = la.soft_ce_loss(logits, target, mask)
                 (scaler.scale(loss / accum) if scaler else loss / accum).backward()
             n += 1
             if step_now:
@@ -219,7 +216,7 @@ def train_loop_per_worker(c):
         # every rank reports; only rank 0 attaches a checkpoint
         if rank == 0 and epoch < c["epochs"] - 1:
             with tempfile.TemporaryDirectory() as d:
-                lt.save_checkpoint(inner, tok, epoch_config(cfg, max_len, head_max_len, ray_cfg, epoch + 1), d)
+                la.save_checkpoint(inner, tok, epoch_config(cfg, max_len, head_max_len, ray_cfg, epoch + 1), d)
                 ray.train.report(metrics, checkpoint=Checkpoint.from_directory(d))
         elif epoch < c["epochs"] - 1:
             ray.train.report(metrics)
@@ -230,10 +227,10 @@ def train_loop_per_worker(c):
     import gc; gc.collect()
     if rank == 0:
         inner.eval()
-        records = lt.calibration_records(inner, tok, calib_items, device, max_len, head_max_len,
+        records = la.calibration_records(inner, tok, calib_items, device, max_len, head_max_len,
                                          batch_size=c["calib_batch"], parallel=parallel)
-        fitted = fit_temperature_map(records)
-        calibration = lt.calibration_report(records, fitted["temperature"])
+        fitted = la.fit_temperature_map(records)
+        calibration = la.calibration_report(records, fitted["temperature"])
         out_cfg = dict(cfg, max_len=max_len, head_max_len=head_max_len, fine_tuned=True,
                        temperature=fitted["temperature"])
         out_cfg.pop("temperature_by_options", None)       # inherited buckets would mask the new fit
@@ -242,7 +239,7 @@ def train_loop_per_worker(c):
         out_cfg["training"] = dict(out_cfg.get("training") or {}, ray_train=ray_cfg, epoch=c["epochs"],
                                    calibrated=True, laya_train_calibration=calibration)
         with tempfile.TemporaryDirectory() as d:
-            lt.save_checkpoint(inner, tok, out_cfg, d)
+            la.save_checkpoint(inner, tok, out_cfg, d)
             ray.train.report(dict(last, temperature=fitted["temperature"]), checkpoint=Checkpoint.from_directory(d))
     else:
         ray.train.report(last)
@@ -284,6 +281,7 @@ def main():
     if os.path.exists(a.out) and (not os.path.isdir(a.out) or os.listdir(a.out)):
         # copying over old files could leave a mixed checkpoint that laya.load still accepts
         raise SystemExit("--out %s exists and is not empty; choose a new dir" % a.out)
+    la.check_version()                                      # the adapter's laya pin, before the fetch and ray.init
     if a.base == "multilingual":                            # download once on the driver, pinned + verified (ENV-02)
         base_dir = fetch(pins.LAYA)
     elif os.path.isfile(os.path.join(a.base, "rl_agent_config.json")):
