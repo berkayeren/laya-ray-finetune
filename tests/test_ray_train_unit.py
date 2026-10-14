@@ -151,3 +151,43 @@ def test_cuda_unavailable_is_refused_before_ray(tiny_run, tmp_path, monkeypatch)
         with pytest.raises(SystemExit, match="CUDA is not available"):
             ray_train.main(tiny_run + flag)
     assert not (tmp_path / "ray").exists()
+
+
+def test_freeze_flags_conflict(capsys):
+    base = ["--data", "d.jsonl", "--out", "o"]
+    with pytest.raises(SystemExit) as e:
+        ray_train.main(base + ["--freeze-embeddings", "--freeze-encoder"])
+    assert e.value.code == 2 and "--freeze-encoder already freezes the embeddings" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as e:
+        ray_train.main(base + ["--neg", "-1"])
+    assert e.value.code == 2 and "--neg must be 0" in capsys.readouterr().err
+
+
+def test_mps_oom_becomes_the_rung_message():
+    from pilot import runs
+    with pytest.raises(RuntimeError) as e:
+        with ray_train.mps_oom_exit(2, 17, "none"):
+            raise RuntimeError("MPS backend out of memory (MPS allocated: 9.10 GiB, other allocations: 1 GiB)")
+    assert str(e.value) == runs.oom_message(2, 17, "none") and e.value.__cause__ is not None
+    with pytest.raises(RuntimeError, match="^shape mismatch$"):               # any other error propagates unchanged
+        with ray_train.mps_oom_exit(2, 17, "none"):
+            raise RuntimeError("shape mismatch")
+
+
+def test_driver_turns_the_worker_oom_into_one_line():
+    from ray.train import WorkerGroupError
+    from pilot import runs
+    msg = runs.oom_message(1, 5, "embeddings_frozen")
+
+    class Trainer:
+        def __init__(self, err):
+            self.err = err
+
+        def fit(self):
+            raise self.err
+    with pytest.raises(SystemExit) as e:
+        ray_train.fit_or_exit(Trainer(WorkerGroupError("[Rank 0]\nRuntimeError: %s\n" % msg, {})))
+    assert e.value.code == msg
+    other = WorkerGroupError("[Rank 0]\nValueError: bad batch\n", {})
+    with pytest.raises(WorkerGroupError):
+        ray_train.fit_or_exit(Trainer(other))

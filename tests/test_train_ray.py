@@ -32,18 +32,27 @@ def _run(*args):
 
 
 @pytest.fixture(scope="module")
-def cpu_run(tmp_path_factory):
-    """Checkpoint dir of a 2-epoch full-encoder ray_train.py run on --device cpu."""
+def tiny_train(tmp_path_factory):
+    """train(name, *flags) -> checkpoint dir of a full-encoder ray_train.py run of the tiny base on --device cpu."""
     d = tmp_path_factory.mktemp("train_cpu")
     root, raw_sha256 = make_raw(str(d / "raw"))
     out_dir = str(d / "data")
     pilot.data.prepare(root, out_dir, raw_sha256)
     base = tiny_checkpoint(d / "base")
-    ckpt = d / "ckpt"
-    _run("ray_train.py", "--data", os.path.join(out_dir, "splits", "selection_train.jsonl"),
-         "--manifest", os.path.join(out_dir, "splits.json"), "--base", base, "--out", ckpt, "--device", "cpu",
-         "--workers", "1", "--epochs", "2", "--max-messages", "12", "--calib-frac", "0.2", "--storage", d / "ray")
-    return str(ckpt)
+
+    def train(name, *flags):
+        ckpt = d / name
+        _run("ray_train.py", "--data", os.path.join(out_dir, "splits", "selection_train.jsonl"),
+             "--manifest", os.path.join(out_dir, "splits.json"), "--base", base, "--out", ckpt, "--device", "cpu",
+             "--workers", "1", "--max-messages", "12", "--calib-frac", "0.2", "--storage", d / "ray", *flags)
+        return str(ckpt)
+    return train
+
+
+@pytest.fixture(scope="module")
+def cpu_run(tiny_train):
+    """Checkpoint dir of a 2-epoch full-encoder run at the default flags (neg 8, rung none)."""
+    return tiny_train("ckpt", "--epochs", "2")
 
 
 @pytest.mark.timeout(600)
@@ -86,3 +95,46 @@ def test_neg_items_match_the_count(cpu_run):
     with open(os.path.join(cpu_run, "rl_agent_config.json"), encoding="utf-8") as f:
         holdout = json.load(f)["training"]["ray_train"]["calibration_holdout"]
     assert holdout["n_messages"] > 0 and holdout["n_items"] == 48 * holdout["n_messages"]
+
+
+@pytest.mark.timeout(600)
+def test_default_run_is_rung_none(cpu_run):
+    rec = runs.read_record(cpu_run)
+    assert rec["rung"] == "none" and rec["fallback"] is False and rec["weaker"] is False
+    assert 0 < rec["trainable_params"] == rec["total_params"]
+    # the tiny base keeps its own max_len, which the record names as a departure from the spike's 128
+    assert rec["spike_departures"] == {"max_len": 64}
+
+
+@pytest.mark.timeout(600)
+def test_embeddings_frozen_run_is_labelled(tiny_train):
+    rec = runs.read_record(tiny_train("ckpt_emb", "--epochs", "1", "--freeze-embeddings"))
+    assert rec["rung"] == "embeddings_frozen" and rec["fallback"] is True and rec["weaker"] is False
+    assert 0 < rec["trainable_params"] < rec["total_params"]
+
+
+OOM_DRIVER = """
+import ray, ray_train
+from ray.train import RunConfig, ScalingConfig
+from ray.train.torch import TorchTrainer
+
+
+def loop(c):
+    with ray_train.mps_oom_exit(2, 17, "none"):
+        raise RuntimeError("MPS backend out of memory (MPS allocated: 9.10 GiB, other allocations: 1.02 GiB)")
+
+
+ray.init(num_cpus=2, include_dashboard=False)
+ray_train.fit_or_exit(TorchTrainer(loop, scaling_config=ScalingConfig(num_workers=1),
+                                   run_config=RunConfig(name="oom", storage_path=%r)))
+"""
+
+
+@pytest.mark.timeout(600)
+def test_worker_oom_ends_the_driver_with_one_line(tmp_path):
+    """A worker MPS OOM crosses the Ray process boundary and ends the driver with the rung message, exit 1."""
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run([sys.executable, "-c", OOM_DRIVER % str(tmp_path / "ray")], cwd=REPO, env=env,
+                       capture_output=True, text=True, timeout=TIMEOUT)
+    assert r.returncode == 1, r.stderr[-4000:]
+    assert r.stderr.rstrip().splitlines()[-1] == runs.oom_message(2, 17, "none"), r.stderr[-4000:]
