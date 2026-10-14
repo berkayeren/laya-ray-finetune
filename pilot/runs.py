@@ -186,8 +186,11 @@ def spike_departures(cfg, max_len):
     return out
 
 
-def oom_message(epoch, step, label):
-    """One line for an MPS out-of-memory exit: where it happened, on which rung, and the command change to try next."""
+def oom_message(epoch, step, label, stage=None):
+    """One line for an MPS out-of-memory exit: where it happened, on which rung, and the command change to try next.
+
+    stage names an allocation outside the training step (e.g. "while moving the model to the device"); epoch is then
+    the epoch it happened in or after, or None when it is not known, and step is ignored."""
     nxt = next_rung(label)
     if nxt is None:
         todo = "no further rung: the fallback ladder is exhausted"
@@ -195,7 +198,11 @@ def oom_message(epoch, step, label):
         todo = "rerun with %s" % " ".join(rung_flags(nxt))
         if rung_flags(label):
             todo += " in place of %s" % " ".join(rung_flags(label))
-    return "%s at epoch %d micro-batch %d (rung %s); %s" % (OOM_MARK, epoch, step, label, todo)
+    if stage is None:
+        where = "at epoch %d micro-batch %d" % (epoch, step)
+    else:
+        where = stage if epoch is None else "%s at epoch %d" % (stage, epoch)
+    return "%s %s (rung %s); %s" % (OOM_MARK, where, label, todo)
 
 
 def failure_line(text):

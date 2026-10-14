@@ -234,6 +234,28 @@ def test_driver_turns_the_worker_oom_into_one_line():
         ray_train.fit_or_exit(Trainer(KeyError("x")), "ray/laya-x")
 
 
+def test_a_raw_mps_oom_outside_the_step_gets_the_rung_line_not_resume_advice():
+    """04-REVIEW WR-01: an MPS OOM no mps_oom_exit wrapped (model move, resume, save, calibration) must not say "rerun
+    to resume" (the rerun resumes into the same allocation); it gets the rung line the compute ladder walks on."""
+    from ray.train import WorkerGroupError
+    from pilot import runs
+
+    class Trainer:
+        def fit(self):
+            raise WorkerGroupError("[Rank 0]\nTraceback (most recent call last):\n  File \"x.py\"\nRuntimeError: MPS "
+                                   "backend out of memory (MPS allocated: 9.10 GiB, other allocations: 1 GiB)\n", {})
+    with pytest.raises(SystemExit) as e:
+        ray_train.fit_or_exit(Trainer(), "ray/laya-x", "embeddings_frozen")
+    line = runs.oom_message(None, None, "embeddings_frozen", "outside the training step")
+    assert e.value.code == line and runs.failure_line(line) == line
+    assert "rerun the same command" not in line and "--micro-batch 4" in line
+    with pytest.raises(RuntimeError) as e:                                   # a wrapped stage names itself
+        with ray_train.mps_oom_exit(3, None, "none", "while saving the checkpoint"):
+            raise RuntimeError("MPS backend out of memory (MPS allocated: 9.10 GiB)")
+    assert str(e.value) == runs.oom_message(3, None, "none", "while saving the checkpoint")
+    assert str(e.value).startswith(runs.OOM_MARK + " while saving the checkpoint at epoch 3 (rung none)")
+
+
 def test_driver_names_the_dir_of_a_corrupted_snapshot():
     from ray.train import ControllerError
     from ray.train.v2._internal.exceptions import CheckpointManagerInitializationError

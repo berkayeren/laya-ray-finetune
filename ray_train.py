@@ -43,7 +43,9 @@ process-wide high-water mark): --freeze-embeddings (rung embeddings_frozen), the
 (rung embeddings_frozen+smaller_batch, effective batch 32 kept), then --freeze-encoder (rung encoder_frozen, head-only,
 weaker). pilot.runs.rung_label derives the rung from the resolved flags; the record carries rung, fallback, weaker,
 spike_departures and the trainable/total parameter counts. An MPS out-of-memory error ends the run with one line naming
-the epoch, micro-batch, rung and the flags of the next rung.
+the epoch and micro-batch (or the stage outside the training step: model move, resume, checkpoint save, calibration),
+the rung and the flags of the next rung; the driver gives a raw MPS out-of-memory error from anywhere else the same rung
+line, never "rerun to resume" (the rerun would resume into the same allocation).
 
 Run identity (LAYA-04): the run_id is pilot.runs.run_id of the command's canonical config (pilot.runs.IDENTITY: split,
 data and base digests, laya version, the resolved device and precision choices, every hyperparameter and the seeds; never
@@ -179,15 +181,22 @@ def resolve(a):
 
 
 @contextmanager
-def mps_oom_exit(epoch, step, rung):
+def mps_oom_exit(epoch, step, rung, stage=None):
     """Turn an MPS out-of-memory RuntimeError into the one-line rung message (pilot.runs.oom_message); no retry, since
-    the MPS allocator keeps a process-wide high-water mark. Any other error propagates unchanged."""
+    the MPS allocator keeps a process-wide high-water mark. stage names an MPS allocation outside the training step
+    (model move, resume, epoch save, calibration). Any other error propagates unchanged."""
     try:
         yield
     except RuntimeError as e:
         if spike.is_mps_oom(str(e)):
-            raise RuntimeError(runs.oom_message(epoch, step, rung)) from e
+            raise RuntimeError(runs.oom_message(epoch, step, rung, stage)) from e
         raise
+
+
+def raw_mps_oom(text):
+    """True when a (multi-line) failure text holds the MPS allocator's own out-of-memory line (`RuntimeError: MPS
+    backend out of memory ...`), i.e. an MPS OOM that no mps_oom_exit turned into the rung message."""
+    return any(spike.is_mps_oom(ln.strip().split(": ", 1)[-1]) or spike.is_mps_oom(ln) for ln in str(text).splitlines())
 
 
 def _failure_text(e):
@@ -211,9 +220,11 @@ def _last_line(text):
     return lines[-1] if lines else str(text)
 
 
-def fit_or_exit(trainer, run_dir=None):
+def fit_or_exit(trainer, run_dir=None, rung="none"):
     """trainer.fit(), with Ray's failures turned into one console line (SystemExit):
-    - a worker's MPS out-of-memory exit: the rung line (pilot.runs.oom_message), which wins over the others;
+    - a worker's MPS out-of-memory exit: the rung line (pilot.runs.oom_message), which wins over the others; a raw MPS
+      out-of-memory error that no mps_oom_exit wrapped still gets the rung line of `rung` (rerunning would only resume
+      into the same allocation), so the compute orchestrator walks the ladder;
     - a snapshot under run_dir whose checkpoints are gone (CheckpointManagerInitializationError): name the dir to delete;
     - any other training failure: rerun the same command to resume from the last epoch checkpoint in run_dir.
     Exceptions that are not Ray training failures propagate unchanged."""
@@ -224,6 +235,8 @@ def fit_or_exit(trainer, run_dir=None):
         line = runs.failure_line(str(e)) if failed else None
         if line is not None:
             raise SystemExit(line) from None
+        if failed and raw_mps_oom("%s\n%s" % (e, _failure_text(e))):
+            raise SystemExit(runs.oom_message(None, None, rung, "outside the training step")) from None
         if "CheckpointManagerInitializationError" in _failure_text(e):
             raise SystemExit("%s holds a Ray snapshot whose checkpoints are gone; delete that dir to start the run "
                              "fresh" % run_dir) from None
@@ -497,13 +510,15 @@ def train_loop_per_worker(c):
     if rank == 0:
         print("rung %s%s | trainable params %d of %d" % (c["rung"], " (head-only, weaker)" if runs.weaker(c["rung"])
                                                           else "", trainable_params, total_params), flush=True)
-    if state is not None:                                   # fp32 weights into the CPU model: one copy on the device
-        t = time.perf_counter()
-        model.load_state_dict(state["model"])
-        resume_load_s += time.perf_counter() - t
+    # the model move (and a resume's weights) allocate on the device outside the training step (04-REVIEW WR-01)
+    with mps_oom_exit(None, None, c["rung"], "while moving the model to the device"):
+        if state is not None:                               # fp32 weights into the CPU model: one copy on the device
+            t = time.perf_counter()
+            model.load_state_dict(state["model"])
+            resume_load_s += time.perf_counter() - t
+        model = ray.train.torch.prepare_model(model, move_to_device=device,
+                                              parallel_strategy_kwargs={"find_unused_parameters": True})
     amp = c["amp"]                                          # decoupled from checkpointing (02-REVIEW CR-01)
-    model = ray.train.torch.prepare_model(model, move_to_device=device,
-                                          parallel_strategy_kwargs={"find_unused_parameters": True})
     gc.collect()                                            # drop the CPU copy before any memory sampling
     require_param_device(model, device.type)
     inner = model.module if hasattr(model, "module") else model
@@ -533,7 +548,8 @@ def train_loop_per_worker(c):
     if state is not None:
         # after the optimizer and scheduler exist (the scheduler's constructor sets the lr the saved state restores)
         t = time.perf_counter()
-        opt.load_state_dict(state["opt"])
+        with mps_oom_exit(None, None, c["rung"], "while restoring the optimizer state of epoch %d" % state["epoch"]):
+            opt.load_state_dict(state["opt"])               # moves the AdamW moments to the device
         sched.load_state_dict(state["sched"])
         if scaler is not None:
             scaler.load_state_dict(state["scaler"])
@@ -638,15 +654,16 @@ def train_loop_per_worker(c):
         with tempfile.TemporaryDirectory() as d:
             t_save = time.perf_counter()
             if rank == 0:
-                if c["export_epochs"]:
-                    ecfg = epoch_config(cfg, max_len, head_max_len, dict(ray_cfg, record=record), epoch + 1)
-                    write_export(inner, tok, ecfg, run_dir, name)
-                    note_exports()
-                path = os.path.join(d, "train_state.pt")
-                torch.save({"kind": "train_state", "run_id": c["run_id"], "canonical": c["canonical"],
-                            "epoch": epoch + 1, "model": inner.state_dict(), "opt": opt.state_dict(),
-                            "sched": sched.state_dict(), "scaler": scaler.state_dict() if scaler else None,
-                            "history": rows_out, "segments": segments}, path)
+                with mps_oom_exit(epoch + 1, None, c["rung"], "while saving the checkpoint"):
+                    if c["export_epochs"]:
+                        ecfg = epoch_config(cfg, max_len, head_max_len, dict(ray_cfg, record=record), epoch + 1)
+                        write_export(inner, tok, ecfg, run_dir, name)
+                        note_exports()
+                    path = os.path.join(d, "train_state.pt")
+                    torch.save({"kind": "train_state", "run_id": c["run_id"], "canonical": c["canonical"],
+                                "epoch": epoch + 1, "model": inner.state_dict(), "opt": opt.state_dict(),
+                                "sched": sched.state_dict(), "scaler": scaler.state_dict() if scaler else None,
+                                "history": rows_out, "segments": segments}, path)
                 record["train_state_bytes"] = os.path.getsize(path)
             torch.save({"torch": torch.get_rng_state(), "device": device_rng_state(device), "option": rng.getstate()},
                        os.path.join(d, "rng-rank%d.pt" % rank))
@@ -666,8 +683,9 @@ def train_loop_per_worker(c):
     if rank == 0:
         inner.eval()
         t_calib = time.perf_counter()
-        records = la.calibration_records(inner, tok, calib_items, device, max_len, head_max_len,
-                                         batch_size=c["calib_batch"], parallel=parallel)
+        with mps_oom_exit(None, None, c["rung"], "while calibrating after the last epoch"):
+            records = la.calibration_records(inner, tok, calib_items, device, max_len, head_max_len,
+                                             batch_size=c["calib_batch"], parallel=parallel)
         fitted = la.fit_temperature_map(records)
         record["calib_s"] = time.perf_counter() - t_calib
         calibration = la.calibration_report(records, fitted["temperature"])
@@ -680,7 +698,8 @@ def train_loop_per_worker(c):
                                    epoch=c["epochs"], calibrated=True, laya_train_calibration=calibration)
         with tempfile.TemporaryDirectory() as d:
             t_save = time.perf_counter()
-            la.save_checkpoint(inner, tok, out_cfg, d)
+            with mps_oom_exit(None, None, c["rung"], "while saving the final checkpoint"):
+                la.save_checkpoint(inner, tok, out_cfg, d)
             record["final_save_s"] = time.perf_counter() - t_save
             _rewrite_config(d, out_cfg)                      # the record now holds the final save time
             with open(os.path.join(d, FINAL_MARK), "w", encoding="utf-8") as f:
@@ -827,7 +846,7 @@ def main(argv=None):
                              checkpoint_config=CheckpointConfig(num_to_keep=1),
                              failure_config=FailureConfig(max_failures=0)))
     t0 = time.time()
-    result = fit_or_exit(trainer, run_dir)
+    result = fit_or_exit(trainer, run_dir, cfg["rung"])
     print("metrics:", json.dumps(result.metrics, default=str))
     if result.checkpoint is None:
         raise SystemExit("the run reported no checkpoint; rerun the same command to resume from %s" % run_dir)
