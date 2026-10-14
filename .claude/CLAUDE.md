@@ -26,19 +26,19 @@ The root `CLAUDE.md` is the authoritative description of commands and architectu
 
 ## Languages and Runtime
 
-- Python 3.12 (`requires-python = "==3.12.*"` in `pyproject.toml`), run directly as scripts with `argparse` CLIs: `prepare_data.py`, `ray_train.py`, `evaluate.py`, plus `intents.py` and the `pilot/` package.
+- Python 3.12 (`requires-python = "==3.12.*"` in `pyproject.toml`), run directly as scripts with `argparse` CLIs: `prepare_data.py`, `ray_train.py`, `score.py`, `report.py`, `evaluate.py` (a thin wrapper over the two), plus `intents.py` and the `pilot/` package.
 - Dependencies are exact-pinned in `pyproject.toml` and hash-locked in `requirements.txt` (universal lock, binary wheels only). `make env` builds `.venv` with `pip install --require-hashes --only-binary :all:`; `make lock` / `make lock-check` regenerate and check the lock.
-- Ray on a single node: `ray_train.py` refuses a multi-node cluster (workers read driver-local paths); `evaluate.py` uses Ray Data actors, or runs in-process with `--workers 0`. Devices: CPU, or CUDA via `--gpu` / `--gpus-per-worker`. `ray_train.py` and `evaluate.py` have no MPS path yet (Phase 4 adds `--device mps`); the Phase 2 spike `mps_spike.py` already trains on MPS in a 1-worker Ray Train worker and found the full fine-tune fits (`results/spike/mps_spike.md`).
+- Ray on a single node: `ray_train.py` refuses a multi-node cluster (workers read driver-local paths); `score.py` scores with Ray Data actors, or in-process with `--workers 0` (`report.py` is numpy only and loads no model). Devices: CPU, or CUDA via `--gpu` / `--gpus-per-worker`. `ray_train.py` and `score.py` have no MPS path yet (Phase 4 adds `--device mps`); the Phase 2 spike `mps_spike.py` already trains on MPS in a 1-worker Ray Train worker and found the full fine-tune fits (`results/spike/mps_spike.md`).
 
 ## Frameworks and Key Dependencies
 
-- `laya==0.4.6`: `evaluate.py` uses the public `laya.load(..., expected_sha256=...)`; `ray_train.py` uses private internals (`laya.train`: `load_checkpoint`, `items_from_rows`, `split_calibration`, `encode_item`, `_forward`, `rlcd_loss`/`soft_ce_loss`, `calibration_records`, `save_checkpoint`; `laya.calibrate.fit_temperature_map`; `laya.common`). Check them against the installed version when something breaks.
+- `laya==0.4.6`: `score.py` loads every checkpoint through the public `laya.load(..., expected_sha256=...)`. Private internals (`laya.train`: `load_checkpoint`, `items_from_rows`, `split_calibration`, `encode_item`, `_forward`, `rlcd_loss`/`soft_ce_loss`, `calibration_records`, `save_checkpoint`; `laya.calibrate.fit_temperature_map` and the noul logit route; `laya.common`) are confined to `pilot/laya_adapter.py`, used by `ray_train.py`, `mps_spike.py` and `score.py`. `tests/test_laya_adapter.py` is the version and signature contract (exact laya version, an `inspect.signature` snapshot of every wrapped symbol, a tiny-model round trip) and an AST guard that fails on a private laya import in any other file.
 - `ray[train,data]==2.59.0` (`TorchTrainer`, `ScalingConfig`, `RunConfig`, `Checkpoint`; Ray Data `map_batches`), `torch==2.14.1`, `transformers==5.19.0`, `huggingface-hub==2.2.0`, `safetensors==0.8.0`.
 - Dev: `pytest==9.1.1`, `pytest-timeout`, `torchmetrics`. No linter or formatter.
 
 ## Configuration
 
-- CLI flags only. `prepare_data.py`: `--data-dir --out --include-no-intent/--no-include-no-intent --rewrite-manifest`. `ray_train.py`: `--data --base --out --workers --gpu --epochs --micro-batch --grad-accum --encoder-lr --head-lr --loss --freeze-encoder --max-messages --calib-max-messages --calib-frac --storage --manifest --seed` etc. `evaluate.py`: `--checkpoint --n --workers --gpus-per-worker --out --manifest`.
+- CLI flags only. `prepare_data.py`: `--data-dir --out --include-no-intent/--no-include-no-intent --rewrite-manifest`. `ray_train.py`: `--data --base --out --workers --gpu --epochs --micro-batch --grad-accum --encoder-lr --head-lr --loss --freeze-encoder --max-messages --calib-max-messages --calib-frac --storage --manifest --seed` etc. `score.py`: `SPLIT --model laya|majority|prior --checkpoint --workers --cpus-per-worker --gpus-per-worker --n --out-root --manifest`. `report.py`: `RUN_DIR --split --out --manifest`, `--compare A_DIRS B_DIRS --B --seed`, `--table PATH...`. `evaluate.py`: `--checkpoint --n --workers --cpus-per-worker --gpus-per-worker --out-root --out --manifest`. Make: `make baselines` (rescore majority, prior and zero-shot Laya on val + test) and `make baseline-reports` (rebuild `results/reports/` and the table from the committed dumps, no model).
 - Every pinned revision and sha256 (dataset, 40 raw folds, Laya, BERTurk, OOD tag subset) lives in `pilot/pins.py`. The code reads no environment variables; `HF_HUB_OFFLINE=1` reuses the hub cache after a first fetch.
 
 ## Platform Requirements
@@ -56,14 +56,14 @@ The root `CLAUDE.md` is the authoritative description of commands and architectu
 
 - snake_case modules and functions, short verbs (`to_case`, `metrics`, `fetch`, `verify_split_file`); UPPER_CASE module constants (`INTENTS`, `QUESTIONS`, `SPLITS`, `TRAINED_ON`); Ray callback `train_loop_per_worker`.
 - Terse local names are normal: `a` (parsed args), `c` (train config), `cfg` (model config), `tok`, `mb`, `tp/fp/fn`, `g/p`.
-- No type hints. The only class is `Predictor` in `evaluate.py` (a Ray Data actor).
+- No type hints. The only class is `Predictor` in `score.py` (a Ray Data actor).
 - PEP 8-like, 4-space indent, double quotes, lines up to ~120 characters, hand-formatted. Compact style: tuple-unpack counters, conditional expressions.
 - `%`-style formatting for messages (`"%s: %d messages" % (...)`).
 
 ## Error Handling
 
 - Refusals are `raise SystemExit("<what is wrong>; <how to fix>")` with %-formatted messages, raised before any model load or `ray.init` where possible (tampered, unregistered, missing or wrong-role splits; stale manifests; unpinned or mismatched weights). Argument errors use `ap.error(...)`.
-- Zero-division is guarded with conditional expressions (`f1` in `evaluate.py`). try/except is rare (e.g. `write_atomic` cleans up its temp file and re-raises).
+- Zero-division is guarded with conditional expressions (`_prf` in `pilot/metrics.py`). try/except is rare (e.g. `write_atomic` cleans up its temp file and re-raises).
 
 ## Logging and Comments
 
@@ -74,7 +74,7 @@ The root `CLAUDE.md` is the authoritative description of commands and architectu
 
 - Open files with `with` and `encoding="utf-8"`; write JSON with `ensure_ascii=False`. Outputs are written atomically (`pilot.data.write_atomic`).
 - JSONL in Laya's training schema, one case per line; parse split bytes with `pilot.data.parse_jsonl` (splits on `\n` only).
-- Seeds are explicit (`random.Random(seed)`); `evaluate.py` shuffles with a fixed seed of 0 before `--n`.
+- Seeds are explicit (`random.Random(seed)`); `score.py` shuffles with a fixed seed of 0 before `--n`; the bootstrap seed defaults to 0.
 - Reports and checkpoints carry repo-relative paths and sha256s, never local paths (`pilot.data.repo_relpath`).
 
 <!-- GSD:conventions-end -->
@@ -94,8 +94,13 @@ The root `CLAUDE.md` is the authoritative description of commands and architectu
 | Weights | Pinned, digest-verified fetch (`fetch`), provenance hashes (`identity`) | `pilot/weights.py` |
 | Data prep CLI | Pinned Multi3NLU++ -> `data/splits/*.jsonl`, `data/audit/`, `data/splits.json` | `prepare_data.py` |
 | Trainer | Single-node DDP fine-tuning on Ray Train, message-level calibration holdout, checkpoint | `ray_train.py` |
-| Evaluator | Ray Data inference + multi-label metrics vs. a train-derived majority baseline | `evaluate.py` |
-| Reports | Saved evaluation JSON (the two existing files use the legacy protocol) | `results/` |
+| Laya adapter | The only module using Laya's private API, pinned to laya 0.4.6 and contract-tested | `pilot/laya_adapter.py` |
+| Dumps | Logit dump format: `write_dump`, `load_dump` (the only, hard-failing reader), `read_gold`, `run_id` | `pilot/dumps.py` |
+| Metrics | Torch-free metrics, the val θ rule (`select_theta`), `seed_average`, `paired_bootstrap` | `pilot/metrics.py` |
+| Scorer | The only place a model runs: one system (laya, majority, prior) on one val/test split -> logit dump | `score.py` |
+| Reporter | Dumps -> metrics at θ 0.5 and val-selected θ (shipped and T = 1), `--compare` bootstrap, `--table` | `report.py` |
+| Evaluator | Thin wrapper: `score.py --model laya` then `report.run_report` | `evaluate.py` |
+| Results | Committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`) | `results/` |
 | Tests | Offline contracts and guards (`make test`); network tests via `make test-all` | `tests/` |
 
 ## Pattern Overview
@@ -103,13 +108,13 @@ The root `CLAUDE.md` is the authoritative description of commands and architectu
 - Each of the 48 tags is one Laya `noul` question; one forward pass yields a probability per tag.
 - Splits: `selection_train` (folds 0-13), `val` (14-15), `final_train` (0-15), `test` (16-19), `hotels_probe` (HOTELS 0-19, out-of-domain). Fold boundaries live only in `pilot.data.SPLITS`.
 - The committed `data/splits.json` registers each split's path, role, folds and sha256. Consumers verify the exact bytes they parse; a `--manifest` may differ only in what `prepare()` varies, never in roles, paths or folds.
-- `evaluate.py` scores only `val`/`test`; `ray_train.py` trains only on role `train`. Thresholds are never tuned on test.
+- `score.py` scores only `val`/`test`; `ray_train.py` trains only on role `train`. θ is selected on val only (`report.py`), never tuned on test.
 
 ## Architectural Constraints
 
 - **DDP invariants:** same seed and items on every rank, equal-sized shards (remainder dropped), `model.no_sync()` on non-step micro-batches, only rank 0 attaches checkpoints.
 - **Single node:** `ray_train.py` refuses a multi-node Ray cluster.
-- **Laya internals:** private API use is confined to `ray_train.py`; Phase 3 moves it behind one adapter module.
+- **Laya internals:** private API use is confined to `pilot/laya_adapter.py` (an AST guard in `tests/test_laya_adapter.py` fails on any other importer).
 - **Global state:** module-level constants only (`INTENTS`, `QUESTIONS`, `SPLITS`, `TRAINED_ON`, pins).
 
 <!-- GSD:architecture-end -->

@@ -48,7 +48,7 @@ binary-only with hashes on Linux x86_64, Linux aarch64 and macOS arm64.
 | `hotels_probe` | hotels 0–19 | 1,009 | 274 (without hotel intents) | out-of-domain probe |
 
 **Hash-verified, no override.** `data/splits.json` records the sha256 of every split and audit
-file. `evaluate.py` and `ray_train.py` refuse any file whose sha256 differs from the manifest, or
+file. `score.py` (and its `evaluate.py` wrapper) and `ray_train.py` refuse any file whose sha256 differs from the manifest, or
 that the manifest does not register, before loading a model or starting Ray. There is no flag to
 skip this: if a split is missing or stale, regenerate it with `make data`. If a rebuilt manifest
 would differ from the committed one, `prepare_data.py` writes nothing. `--rewrite-manifest`
@@ -59,7 +59,7 @@ splits, so treat it as a protocol change, not a fix.
 default. `python prepare_data.py --no-include-no-intent --out OTHER_DIR` builds the variant without
 them (1,384 / 201 / 1,585 / 398 messages). Write it to a different `--out` dir, because prepare
 refuses to overwrite the committed manifest with a differing one. Consume it with
-`--manifest OTHER_DIR/splits.json` on `evaluate.py` and `ray_train.py`; the files are still
+`--manifest OTHER_DIR/splits.json` on `score.py`, `report.py`, `evaluate.py` and `ray_train.py`; the files are still
 hash-verified against that manifest, and the manifest must match the current code and pins. It
 cannot change which file is train, val, test or probe: every split's role, path and folds must equal
 `pilot.data.SPLITS`. Reports and checkpoints record `manifest_is_committed`.
@@ -94,8 +94,14 @@ are hash-registered too, so later phases can trust the flag list.
 | `pilot/data.py` | split producer and `verify_split_file`, the one verifier every consumer calls |
 | `pilot/audit.py` | duplicate audit (report-only) |
 | `pilot/weights.py` | pinned, digest-verified weight fetch (`make weights`) |
+| `pilot/laya_adapter.py` | the only module that uses Laya's private API, pinned to laya 0.4.6 and contract-tested |
+| `pilot/dumps.py` | the logit dump format: writer, the one hard-failing reader, gold labels, run ids |
+| `pilot/metrics.py` | torch-free metrics, the val θ rule and the paired bootstrap, the same for every system |
 | `ray_train.py` | Ray Train `TorchTrainer` (DDP) fine-tune using Laya's own loss, calibration and checkpoint format |
-| `evaluate.py` | Ray Data batch inference + micro/macro F1, top-1, exact match, per-tag F1 |
+| `score.py` | the only place a model runs: one system on one val/test split → a logit dump (in-process or Ray Data actors) |
+| `report.py` | dumps → metrics (numpy only, no model); `--compare` paired bootstrap; `--table` results table |
+| `evaluate.py` | one-step wrapper: `score.py --model laya`, then `report.py`'s report of that dump |
+| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`) |
 | `tests/` | pytest suite (markers `unit`, `data`, `weights`, `ray`, `mps`) |
 
 ## Run
@@ -105,19 +111,53 @@ are hash-registered too, so later phases can trust the flag list.
 python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
     --workers 2 --freeze-encoder --max-messages 100 --epochs 2
 
-# evaluate in-process on a 20-message subsample (--workers 0 runs without Ray)
-python evaluate.py data/splits/test.jsonl --checkpoint multilingual --workers 0 --n 20
+# score one system on one split into a logit dump (--workers 0 runs in-process without Ray)
+python score.py data/splits/val.jsonl --model laya --checkpoint multilingual --workers 2 --cpus-per-worker 4
+python score.py data/splits/test.jsonl --model prior          # baselines: --model majority | prior
 
-# evaluate with 4 GPU workers
-python evaluate.py data/splits/test.jsonl --checkpoint ./ckpt --workers 4 --gpus-per-worker 1 --out results/x.json
+# dumps -> metrics, no model (add --out PATH to save the JSON)
+python report.py results/dumps/laya-zeroshot-7b928d82 --split test
+
+# paired bootstrap of A - B on test (B = 10,000 replicates, seed 0)
+python report.py --compare results/dumps/laya-zeroshot-7b928d82 results/dumps/prior --split test
+
+# one-step wrapper: score.py --model laya, then report.py (--n N: a debug subset, written to a temp dir)
+python evaluate.py data/splits/test.jsonl --checkpoint ./ckpt --workers 0 --n 20
+
+# Phase 3 baselines: rescore majority, prior and zero-shot Laya on val + test, rebuild results/reports/
+make baselines              # needs make data and the pinned weights; about 5 minutes on the M4
+make baseline-reports       # rebuild the reports and print the results table from the committed dumps, no model
 ```
 
-`--checkpoint` (evaluate) and `--base` (train) accept `multilingual`, which loads the pinned,
+`--checkpoint` (score, evaluate) and `--base` (train) accept `multilingual`, which loads the pinned,
 sha256-verified Laya weights, or a local Laya checkpoint dir. Nothing downloads an unpinned
-revision. `ray_train.py --data` only accepts a registered split with role `train`.
+revision. `ray_train.py --data` only accepts a registered split with role `train`; `score.py` only
+a registered `val` or `test` split.
 
 Useful flags: `--freeze-encoder` (head only, fits small CPUs/GPUs, gains much less),
 `--max-messages N` (subsample for smoke tests), `--loss rlcd|soft-ce`.
+
+## Scoring path
+
+Every system (majority, label prior, zero-shot Laya, later the fine-tuned models) goes through the
+same two steps. `score.py` writes `results/dumps/RUN_ID/SPLIT.npz` (float32 logits [n, 48] in
+`INTENTS` order plus the message uids; no text) and a sidecar `SPLIT.json` (split, manifest,
+question and tag-order hashes, system identity, the shipped temperature, `dump_sha256`).
+`report.py` recomputes every number from verified dumps with numpy alone, so anyone with the repo
+and `make data` can rebuild a report without the weights. A tampered, renamed or stale dump fails
+to load; there is no override.
+
+- **Temperatures:** each report has a `shipped` variant (the checkpoint's served temperature; the
+  headline) and a `raw` variant (T = 1). P(tag) = sigmoid(logit / T).
+- **Thresholds:** each variant has a row at θ 0.5 and a row at the val-selected θ. The global θ
+  maximises val micro-F1 over 0.05..0.95 in 0.01 steps; a tag gets its own θ only with 10 or more
+  val positives; ties go to the θ closest to 0.5. θ is chosen on the same run's full val dump and
+  never on test, and the report discloses it.
+- **Baselines** come from the training split matching the scored role (`final_train` for test,
+  `selection_train` for val), never from the labels being scored.
+- **Comparisons** (`--compare`) are a paired, message-level bootstrap: one resample of the test
+  messages is shared by both systems, per-seed probabilities are averaged before thresholding, and
+  the 95% percentile interval of A − B is reported. They are descriptive only.
 
 ## Pinned artifacts
 
@@ -151,17 +191,69 @@ blocks (`items_from_rows`, `encode_item`, `soft_ce_loss` / `rlcd_loss`, `calibra
 reported to Ray, and temperature calibration on whole messages held out before training (rank 0;
 `--calib-max-messages`, default 40, capped at `--calib-frac` of the messages).
 The output loads with `laya.load(path)`. It does not reproduce `laya-train`'s before/after report
-or abstention-threshold fitting — use `evaluate.py` for held-out metrics.
+or abstention-threshold fitting — use `score.py` + `report.py` for held-out metrics. The Laya
+internals it uses are reached through `pilot/laya_adapter.py`, the only module allowed to touch
+Laya's private API.
 
-## Results so far (legacy protocol, CPU sandbox, 2 vCPU / 7 GB)
+## Results (Phase 3: baselines and zero-shot, full test split)
 
-**Legacy protocol:** these numbers predate the frozen splits. They used the old test split
-without no-intent rows and only 100 test messages, so they are not comparable to results on
-`data/splits/test.jsonl`. The metric definitions changed too: the majority row used a
-test-derived tag and the old top-1 denominator; current reports take the tag from the matching
-training split and compute top-1 over messages with gold tags. The two reports are kept for provenance
-in `results/legacy/`, whose [README](results/legacy/README.md) labels them as the legacy protocol; the full-test
-results table arrives with the Phase 3 reports under `results/reports/`.
+Majority (the most frequent `final_train` tag), the label prior (each tag's `final_train`
+frequency) and zero-shot `laya-multilingual` (pinned revision `7b928d82`) are scored on the full
+test split: 413 messages, including the 15 no-intent rows. θ is selected on the full val split
+(208 messages) of the same run and never on test; the "val-θ" columns use it, the "@0.5" columns
+use θ 0.5. Every number below is generated by `python report.py --table results/reports` from the
+committed reports, which `make baseline-reports` rebuilds from the committed dumps under
+`results/dumps/` without loading a model (a test fails if this block differs). The second table is
+the paired bootstrap (B = 10,000 resamples of the test messages): zero-shot Laya minus the label
+prior, and zero-shot Laya minus itself, which must be exactly zero.
+
+<!-- results-table:start -->
+| system | run_id | temperature | θ global (val) | per-tag θ | micro-F1 @0.5 | micro-F1 @val-θ | macro-F1 @0.5 | macro-F1 @val-θ | exact match @0.5 | exact match @val-θ | top-1 | split, n (no-intent) |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| laya (multilingual) | laya-zeroshot-7b928d82 | shipped, T = 1.00 | 0.32 | 13 | 0.197 | 0.205 | 0.201 | 0.216 | 0.007 | 0.007 | 0.214 | test, 413 (15) |
+| laya (multilingual) | laya-zeroshot-7b928d82 | raw, T = 1.00 | 0.32 | 13 | 0.197 | 0.205 | 0.201 | 0.216 | 0.007 | 0.007 | 0.214 | test, 413 (15) |
+| majority (train: final_train) | majority | shipped, T = 1.00 | 0.50 | 13 | 0.138 | 0.138 | 0.008 | 0.008 | 0.005 | 0.005 | 0.231 | test, 413 (15) |
+| majority (train: final_train) | majority | raw, T = 1.00 | 0.50 | 13 | 0.138 | 0.138 | 0.008 | 0.008 | 0.005 | 0.005 | 0.231 | test, 413 (15) |
+| prior (train: final_train) | prior | shipped, T = 1.00 | 0.12 | 13 | 0.000 | 0.184 | 0.000 | 0.048 | 0.036 | 0.000 | 0.231 | test, 413 (15) |
+| prior (train: final_train) | prior | raw, T = 1.00 | 0.12 | 13 | 0.000 | 0.184 | 0.000 | 0.048 | 0.036 | 0.000 | 0.231 | test, 413 (15) |
+
+| A | B | θ | metric | delta (A - B) | 95% CI | replicates |
+|---|---|---|---|---|---|---|
+| laya-zeroshot-7b928d82 | prior | 0.5 | micro_f1 | +0.197 | [0.180, 0.214] | 10000 |
+| laya-zeroshot-7b928d82 | prior | 0.5 | macro_f1 | +0.201 | [0.172, 0.221] | 10000 |
+| laya-zeroshot-7b928d82 | prior | 0.5 | exact_match | -0.029 | [-0.048, -0.012] | 10000 |
+| laya-zeroshot-7b928d82 | prior | 0.5 | top1_hit | -0.018 | [-0.074, 0.042] | 10000 |
+| laya-zeroshot-7b928d82 | prior | val-selected | micro_f1 | +0.021 | [0.005, 0.037] | 10000 |
+| laya-zeroshot-7b928d82 | prior | val-selected | macro_f1 | +0.168 | [0.142, 0.186] | 10000 |
+| laya-zeroshot-7b928d82 | prior | val-selected | exact_match | +0.007 | [0.000, 0.017] | 10000 |
+| laya-zeroshot-7b928d82 | prior | val-selected | top1_hit | -0.018 | [-0.074, 0.042] | 10000 |
+| laya-zeroshot-7b928d82 | laya-zeroshot-7b928d82 | 0.5 | micro_f1 | +0.000 | [0.000, 0.000] | 10000 |
+| laya-zeroshot-7b928d82 | laya-zeroshot-7b928d82 | 0.5 | macro_f1 | +0.000 | [0.000, 0.000] | 10000 |
+| laya-zeroshot-7b928d82 | laya-zeroshot-7b928d82 | 0.5 | exact_match | +0.000 | [0.000, 0.000] | 10000 |
+| laya-zeroshot-7b928d82 | laya-zeroshot-7b928d82 | 0.5 | top1_hit | +0.000 | [0.000, 0.000] | 10000 |
+| laya-zeroshot-7b928d82 | laya-zeroshot-7b928d82 | val-selected | micro_f1 | +0.000 | [0.000, 0.000] | 10000 |
+| laya-zeroshot-7b928d82 | laya-zeroshot-7b928d82 | val-selected | macro_f1 | +0.000 | [0.000, 0.000] | 10000 |
+| laya-zeroshot-7b928d82 | laya-zeroshot-7b928d82 | val-selected | exact_match | +0.000 | [0.000, 0.000] | 10000 |
+| laya-zeroshot-7b928d82 | laya-zeroshot-7b928d82 | val-selected | top1_hit | +0.000 | [0.000, 0.000] | 10000 |
+
+- laya-zeroshot-7b928d82: shipped temperature is 1.0, so the T = 1 rows equal the headline rows.
+- majority: shipped temperature is 1.0, so the T = 1 rows equal the headline rows.
+- prior: shipped temperature is 1.0, so the T = 1 rows equal the headline rows.
+<!-- results-table:end -->
+
+The label prior predicts no tag at θ 0.5 by construction: every `final_train` prior is below
+0.26, so at 0.5 it scores micro-F1 0 and gets only the 15 no-intent messages exactly right
+(15/413). These intervals are descriptive; the go/no-go decision rule and its thresholds are frozen
+in Phase 8.
+
+### Legacy protocol (not comparable)
+
+These numbers predate the frozen splits and were run in a CPU sandbox (2 vCPU / 7 GB). They used
+the old test split without no-intent rows and only 100 test messages, so they are not comparable to
+the table above. The metric definitions changed too: the majority row used a test-derived tag and
+the old top-1 denominator; current reports take the tag from the matching training split and
+compute top-1 over messages with gold tags. The two reports are kept for provenance in
+`results/legacy/`, whose [README](results/legacy/README.md) labels them as the legacy protocol.
 
 | run (100 test messages) | micro-F1 @0.5 | macro-F1 @0.5 | top-1 hit | tags predicted / gold |
 |---|---|---|---|---|
