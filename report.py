@@ -63,15 +63,20 @@ SAME_SOURCE_KEYS = (("system", "kind"), ("system", "checkpoint"), ("system", "ch
 # system.checkpoint, the repo-relative path, counts only when no checkpoint_identity binds every file laya.load reads:
 # a local checkpoint's run id is hash-based, so the same checkpoint scored from a renamed dir lands in the same run dir
 # with the same identity and is the same source (04-REVIEW IN-12). Bound means the pin (revision), or a local identity
-# with files_sha256 (weights, config, tokenizer/ and encoder/; 04-REVIEW IN-05); an older local identity (weights and
-# config only) still compares the path
+# with files_sha256 (weights, config, tokenizer/ and encoder/; 04-REVIEW IN-05) that holds dumps.LOCAL_REQUIRED_FILES
+# (04-REVIEW WR-02); an older local identity (weights and config only) or an incomplete one still compares the path
 PATH_KEY = ("system", "checkpoint")
 
 
 def binds_every_file(ident):
     """True for a checkpoint_identity that pins every file laya.load reads: the pinned checkpoint's (its revision) or a
-    local one with files_sha256 (pilot.weights.identity)."""
-    return isinstance(ident, dict) and (bool(ident.get("revision")) or ident.get("files_sha256") is not None)
+    local one whose files_sha256 (pilot.weights.identity) holds every dumps.LOCAL_REQUIRED_FILES file; without
+    tokenizer/ or encoder/ laya.load reads them unpinned from the Hub (04-REVIEW WR-02)."""
+    if not isinstance(ident, dict):
+        return False
+    files = ident.get("files_sha256")
+    return bool(ident.get("revision")) or (isinstance(files, dict)
+                                           and all(k in files for k in dumps.LOCAL_REQUIRED_FILES))
 
 
 def same_source(side, val_side, where):

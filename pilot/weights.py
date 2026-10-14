@@ -11,7 +11,9 @@ weights, rl_agent_config.json, and every file under tokenizer/ and encoder/ (fil
 tokenizer/tokenizer_config.json in place on the first load of a checkpoint transformers saved (laya 0.4.6
 laya.agent._fix_tokenizer_config), so that one file is bound by the sha256 of its normalized JSON (NORMALIZED_KEY),
 which the rewrite does not change; checkpoint_digests hands laya.load the raw-file digests and verify_files checks
-the normalized one.
+the normalized one. checkpoint_digests refuses a local checkpoint without tokenizer/tokenizer_config.json or
+encoder/config.json (pilot.dumps.LOCAL_REQUIRED_FILES): laya 0.4.6 would read them from the Hub by the config's encoder
+name, unpinned (04-REVIEW WR-02).
 
 usage: python -m pilot.weights        # fetch and verify both pinned checkpoints, print sizes and free disk
 """
@@ -24,6 +26,7 @@ from huggingface_hub import snapshot_download
 
 from pilot import pins
 from pilot.data import sha256_file
+from pilot.dumps import LOCAL_REQUIRED_FILES
 
 
 COMPONENT_DIRS = ("tokenizer", "encoder")                  # read by laya.load next to the weights and the config
@@ -56,7 +59,11 @@ def verify_files(d, sha256, what):
 def checkpoint_digests(checkpoint, ident):
     """{file: sha256} a load of `checkpoint` must match: the Laya pin for 'multilingual', else every file hashed into
     `ident` (identity(checkpoint): weights, config, tokenizer/ and encoder/), so the bytes loaded are the bytes the
-    provenance records. A NORMALIZED_KEY entry is for verify_files only: pass laya.load laya_digests() of this."""
+    provenance records. A NORMALIZED_KEY entry is for verify_files only: pass laya.load laya_digests() of this.
+
+    A local checkpoint without the weights, the config or a LOCAL_REQUIRED_FILES file is refused here, on the driver
+    before any load or ray.init: without tokenizer/ or encoder/ laya.load and laya.train.load_checkpoint would read
+    the tokenizer or the encoder config from the Hub by the config's encoder name, unpinned (04-REVIEW WR-02)."""
     if checkpoint == "multilingual":
         return dict(pins.LAYA["sha256"])
     name = os.path.basename(os.path.normpath(checkpoint))
@@ -66,8 +73,12 @@ def checkpoint_digests(checkpoint, ident):
     out = dict(ident["files_sha256"], **{"model.safetensors": ident["model_sha256"],
                                          "rl_agent_config.json": ident["config_sha256"]})
     missing = sorted(rel for rel, h in out.items() if h is None)
+    missing += [TOKENIZER_CONFIG if rel == NORMALIZED_KEY else rel for rel in LOCAL_REQUIRED_FILES if rel not in out]
     if missing:
-        raise SystemExit("checkpoint %s lacks %s" % (name, ", ".join(missing)))
+        raise SystemExit("checkpoint %s lacks %s (laya.load would fail, or read a missing tokenizer/ or encoder/ "
+                         "unpinned from the Hub); use a complete checkpoint dir: model.safetensors, "
+                         "rl_agent_config.json, tokenizer/ and encoder/, as laya.train.save_checkpoint writes it"
+                         % (name, ", ".join(missing)))
     return out
 
 

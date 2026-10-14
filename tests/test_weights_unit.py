@@ -195,11 +195,26 @@ def test_identity_of_the_pinned_checkpoint_is_the_pin():
     assert got["revision"] == pins.LAYA["revision"] and got["model_sha256"] == pins.LAYA["sha256"]["model.safetensors"]
 
 
+TOKENIZER_CONFIG = b'{"tokenizer_class": "PreTrainedTokenizerFast"}'           # already as laya.load leaves it
+
+
+def _components(d):
+    """Write the tokenizer/ and encoder/ files every local checkpoint must hold (dumps.LOCAL_REQUIRED_FILES)."""
+    (d / "tokenizer").mkdir()
+    (d / "encoder").mkdir()
+    (d / "tokenizer" / "tokenizer_config.json").write_bytes(TOKENIZER_CONFIG)
+    (d / "encoder" / "config.json").write_bytes(b"{}")
+
+
 def test_identity_of_a_local_checkpoint_hashes_its_files(tmp_path):
     (tmp_path / "model.safetensors").write_bytes(b"weights")
     got = pilot.weights.identity(str(tmp_path))
     assert got == {"local": True, "model_sha256": hashlib.sha256(b"weights").hexdigest(), "config_sha256": None,
                    "files_sha256": {}}
+    # identity only hashes; a load of a dir without tokenizer/ and encoder/ is refused (04-REVIEW WR-02)
+    (tmp_path / "rl_agent_config.json").write_bytes(b"{}")
+    with pytest.raises(SystemExit, match="lacks encoder/config.json, tokenizer/tokenizer_config.json .*Hub"):
+        pilot.weights.checkpoint_digests(str(tmp_path), pilot.weights.identity(str(tmp_path)))
 
 
 def test_identity_binds_the_tokenizer_and_encoder_files(tmp_path):
@@ -308,13 +323,27 @@ def test_resolve_checkpoint_runs_the_pinned_fetch_on_the_driver(tmp_path, monkey
 def test_checkpoint_digests_bind_a_local_load_to_its_recorded_identity(tmp_path):
     (tmp_path / "model.safetensors").write_bytes(b"weights")
     (tmp_path / "rl_agent_config.json").write_bytes(b"{}")
+    _components(tmp_path)
     ident = pilot.weights.identity(str(tmp_path))
+    normalized = pilot.weights.tokenizer_config_sha256(str(tmp_path / "tokenizer" / "tokenizer_config.json"))
     assert pilot.weights.checkpoint_digests(str(tmp_path), ident) == {
         "model.safetensors": hashlib.sha256(b"weights").hexdigest(),
-        "rl_agent_config.json": hashlib.sha256(b"{}").hexdigest()}
+        "rl_agent_config.json": hashlib.sha256(b"{}").hexdigest(),
+        "encoder/config.json": hashlib.sha256(b"{}").hexdigest(), pilot.weights.NORMALIZED_KEY: normalized}
     with pytest.raises(SystemExit, match="files_sha256"):               # an identity from before IN-05
         pilot.weights.checkpoint_digests(str(tmp_path), {k: v for k, v in ident.items() if k != "files_sha256"})
     assert pilot.weights.checkpoint_digests("multilingual", None) == pins.LAYA["sha256"]
+    # 04-REVIEW WR-02: an empty or partial files_sha256 is refused (laya.load would read the rest from the Hub)
+    for drop in (list(ident["files_sha256"]), ["encoder/config.json"], [pilot.weights.NORMALIZED_KEY]):
+        partial = dict(ident, files_sha256={k: v for k, v in ident["files_sha256"].items() if k not in drop})
+        shown = ["tokenizer/tokenizer_config.json" if k == pilot.weights.NORMALIZED_KEY else k for k in sorted(drop)]
+        with pytest.raises(SystemExit, match="lacks %s .*Hub" % ", ".join(shown)):
+            pilot.weights.checkpoint_digests(str(tmp_path), partial)
+    for rel in ("encoder/config.json", "tokenizer/tokenizer_config.json"):
+        (tmp_path / rel).rename(tmp_path / (rel + ".gone"))
+        with pytest.raises(SystemExit, match="lacks %s " % rel):
+            pilot.weights.checkpoint_digests(str(tmp_path), pilot.weights.identity(str(tmp_path)))
+        (tmp_path / (rel + ".gone")).rename(tmp_path / rel)
     (tmp_path / "model.safetensors").unlink()
     with pytest.raises(SystemExit, match="lacks model.safetensors"):
         pilot.weights.checkpoint_digests(str(tmp_path), pilot.weights.identity(str(tmp_path)))
@@ -324,6 +353,7 @@ def test_score_load_is_refused_when_the_checkpoint_changed_after_its_identity(tm
     import score
     (tmp_path / "model.safetensors").write_bytes(b"weights")
     (tmp_path / "rl_agent_config.json").write_bytes(b"{}")
+    _components(tmp_path)
     model_dir, expected = score.resolve_checkpoint(str(tmp_path))
     assert expected["model.safetensors"] == hashlib.sha256(b"weights").hexdigest()
     (tmp_path / "model.safetensors").write_bytes(b"swapped")              # changed between identity and load

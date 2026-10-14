@@ -442,6 +442,11 @@ def test_a_moved_checkpoint_with_the_same_identity_is_the_same_source(tmp_path, 
         report.run_report(run_dir, "test", manifest)
     assert report.binds_every_file({"revision": "7b928d82", "model_sha256": "a" * 64})
     assert not report.binds_every_file(None) and not report.binds_every_file({"local": True})
+    # 04-REVIEW WR-02: a local identity without tokenizer/ or encoder/ does not bind what laya.load reads
+    assert report.binds_every_file(ident)
+    for rel in dumps.LOCAL_REQUIRED_FILES:
+        assert not report.binds_every_file(dict(ident, files_sha256={k: v for k, v in files.items() if k != rel}))
+    assert not report.binds_every_file(dict(ident, files_sha256={}))
 
 
 def test_compare_refuses_mixed_sources(tmp_path, snap):

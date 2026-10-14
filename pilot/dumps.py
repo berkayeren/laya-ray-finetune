@@ -50,6 +50,13 @@ def uids_sha256(uids):
     return sha256_bytes("\n".join(uids).encode("utf-8"))
 
 
+# the files_sha256 keys every local checkpoint identity must hold (pilot.weights.checkpoint_digests refuses one without
+# them, report.binds_every_file does not count it as bound): without tokenizer/tokenizer_config.json or
+# encoder/config.json laya 0.4.6 reads the tokenizer or the encoder config from the Hub by the config's encoder name,
+# unpinned (04-REVIEW WR-02). The tokenizer config is bound by its normalized JSON (pilot.weights.NORMALIZED_KEY).
+LOCAL_REQUIRED_FILES = ("encoder/config.json", "tokenizer/tokenizer_config.json#normalized")
+
+
 def files_digest(files_sha256):
     """sha256 of the sorted, compact JSON of a local identity's files_sha256 (tokenizer/ and encoder/ digests)."""
     blob = json.dumps(files_sha256, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
