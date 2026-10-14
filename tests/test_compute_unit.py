@@ -21,9 +21,18 @@ TOY_LAYA = {"s_per_step": 2.0, "s_per_step_epoch1": 2.0, "epochs_measured": 2, "
             "swap_delta_bytes": 0, "rung": "none", "fallback": False, "weaker": False, "device": "mps",
             "param_device": "mps", "grad_checkpointing": True, "amp": False,
             "env": ["OMP_NUM_THREADS=4", "PYTORCH_ENABLE_MPS_FALLBACK=0"], "train_state_bytes": 6 * 2**30}
-TOY_COUNTS = {"selection_train": {"n_messages": 1450, "n_items_neg8": 14854},
-              "final_train": {"n_messages": 1658, "n_items_neg8": 17001}}
-TOY_MATRIX = {"lr_grid": 3, "max_epochs": 4, "final_seeds": 3}
+TOY_COUNTS = {"selection_train": {"n_messages": 1450, "n_items_neg8": 14854, "n_items_full": 69600},
+              "val": {"n_messages": 208, "n_items_neg8": 2147, "n_items_full": 9984},
+              "final_train": {"n_messages": 1658, "n_items_neg8": 17001, "n_items_full": 79584},
+              "test": {"n_messages": 413, "n_items_neg8": 4228, "n_items_full": 19824},
+              "hotels_probe": {"n_messages": 1009, "n_items_neg8": 8072, "n_items_full": 48432}}
+TOY_MATRIX = {"lr_grid": 3, "max_epochs": 4, "final_seeds": 3, "neg": 8, "effective_batch": 32, "berturk_epochs": 10,
+              "berturk_batch": 32, "fewshot_tags": 6, "fewshot_k": [5, 10], "fewshot_draws": 3,
+              "fewshot_neg_per_pos": 4, "fewshot_replay": 200, "fewshot_epochs": 10, "fewshot_base_runs": 3,
+              "eval_seeds": 3}
+LINE_IDS = ["laya_selection", "laya_val_scoring", "laya_final", "berturk_selection", "berturk_final", "fewshot_base",
+            "fewshot_incremental", "fewshot_scoring", "final_scoring"]
+ZEROSHOT_VAL = os.path.join(REPO_ROOT, "results", "dumps", "laya-zeroshot-7b928d82", "val.json")
 
 
 def toy_rows():
@@ -136,3 +145,169 @@ def test_markdown_banners_and_round_trip(tmp_path):
         parsed = json.load(f)
     with open(path, encoding="utf-8") as f:
         assert f.read() == compute.render_markdown(parsed)
+
+
+# ---- Task 2: the whole experiment matrix, what-if, disk, assumptions, path-free report ----
+
+def full_report(protocol_complete=True, override=False):
+    measured = toy_measured()
+    p = compute.project(measured, TOY_COUNTS, TOY_MATRIX)
+    return compute.build_report(toy_meta(protocol_complete), measured, TOY_COUNTS, TOY_MATRIX, p,
+                                toy_preflight(override), what_if=compute.what_if(measured, TOY_COUNTS, TOY_MATRIX),
+                                disk=compute.disk_budget(2**30, TOY_MATRIX),
+                                assumptions=compute.assumptions(TOY_MATRIX, measured))
+
+
+def test_matrix_lines_and_total():
+    p = compute.project(toy_measured(), TOY_COUNTS, TOY_MATRIX)
+    assert [l["id"] for l in p["lines"]] == LINE_IDS
+    for l in p["lines"]:
+        assert l["basis"] in ("measured", "estimate", "provisional"), l["id"]
+        assert l["formula"] and l["source"] and l["seconds"] > 0, l["id"]
+        assert l["hours"] == pytest.approx(l["seconds"] / 3600)
+    assert p["total_s"] == pytest.approx(sum(l["seconds"] for l in p["lines"]))
+    assert p["total_h"] == pytest.approx(p["total_s"] / 3600)
+    for id_ in ("berturk_selection", "berturk_final"):
+        l = line(p, id_)
+        assert l["basis"] == "estimate" and l["s_per_unit"] == compute.ESTIMATES["berturk_s_per_step"]
+    # 3 LRs x 10 epochs x ceil(1450 / 32) = 46 steps x the estimated s/step
+    est = compute.ESTIMATES["berturk_s_per_step"]
+    assert line(p, "berturk_selection")["seconds"] == pytest.approx(3 * 10 * 46 * est)
+    assert line(p, "berturk_final")["seconds"] == pytest.approx(3 * 10 * 52 * est)
+    assert line(p, "laya_selection")["basis"] == "measured"
+    # few-shot depends on a protocol Phase 8 freezes, and its BERTurk part on the estimate
+    assert line(p, "fewshot_incremental")["basis"] in ("estimate", "provisional")
+
+
+def test_fewshot_line_counts():
+    matrix = dict(TOY_MATRIX, fewshot_tags=6, fewshot_k=[5, 10], fewshot_neg_per_pos=4, fewshot_replay=200,
+                  fewshot_draws=3, fewshot_epochs=10)
+    p = compute.project(toy_measured(), TOY_COUNTS, matrix)
+    inc = line(p, "fewshot_incremental")
+    msgs = {(part["model"], part["k"]): part["messages"] for part in inc["parts"]}
+    assert msgs == {("laya", 5): 350, ("laya", 10): 500, ("berturk", 5): 350, ("berturk", 10): 500}
+    for part in inc["parts"]:
+        assert part["runs"] == 3 and part["epochs"] == 10
+    laya5 = next(part for part in inc["parts"] if part["model"] == "laya" and part["k"] == 5)
+    items = -(-350 * 14854 // 1450)                         # ceil(350 x selection_train neg8 items per message)
+    assert laya5["seconds"] == pytest.approx(3 * compute.laya_run_s(items, 10, TOY_LAYA))
+    assert inc["seconds"] == pytest.approx(sum(part["seconds"] for part in inc["parts"]))
+    base = line(p, "fewshot_base")
+    assert {part["model"]: part["runs"] for part in base["parts"]} == {"laya": 3, "berturk": 3}
+    scoring = line(p, "fewshot_scoring")
+    assert {part["model"]: part["runs"] for part in scoring["parts"]} == {"laya": 6, "berturk": 6}
+    assert all(part["units_per_epoch"] == 413 for part in scoring["parts"])
+
+
+def test_scoring_rate_falls_back_to_the_committed_cpu_rate():
+    with open(ZEROSHOT_VAL, encoding="utf-8") as f:
+        side = json.load(f)
+    rate = side["timing"]["seconds"] / side["split"]["n_messages"]
+    p = compute.project(toy_measured(), TOY_COUNTS, TOY_MATRIX)
+    val = line(p, "laya_val_scoring")
+    assert val["s_per_unit"] == pytest.approx(rate) and val["basis"] == "measured"
+    assert "cpu" in val["source"] and "2 Ray actors" in val["source"]
+    assert val["runs"] == 12 and val["units_per_epoch"] == 208 and val["unit"] == "message"
+    assert val["seconds"] == pytest.approx(12 * 208 * rate)
+    final = line(p, "final_scoring")
+    laya = next(part for part in final["parts"] if part["model"] == "laya")
+    assert laya["s_per_unit"] == pytest.approx(rate) and laya["units_per_epoch"] == 208 + 413 + 1009
+    assert laya["runs"] == 3
+
+
+def test_what_if_table():
+    rows = compute.what_if(toy_measured(), TOY_COUNTS, TOY_MATRIX)
+    assert len(rows) == 10
+    grid = [(r["lr_grid"], r["max_epochs"]) for r in rows if r["fewshot_base_runs"] == TOY_MATRIX["fewshot_base_runs"]]
+    assert sorted(grid) == [(g, e) for g in (1, 2, 3) for e in (2, 3, 4)]
+    fallback = [r for r in rows if r["fewshot_base_runs"] == 1]
+    assert len(fallback) == 1 and "fallback" in fallback[0]["label"]
+    assert all(r["total_h"] == pytest.approx(r["total_s"] / 3600) for r in rows)
+    same = next(r for r in rows if r["lr_grid"] == 3 and r["max_epochs"] == 4 and r["fewshot_base_runs"] == 3)
+    assert same["total_s"] == pytest.approx(compute.project(toy_measured(), TOY_COUNTS, TOY_MATRIX)["total_s"])
+    assert fallback[0]["total_s"] < same["total_s"]
+
+
+def test_disk_budget():
+    m = 600 * 2**20
+    d = compute.disk_budget(model_bytes=m, matrix=TOY_MATRIX)
+    assert d["model_bytes"] == m and d["train_state_bytes"] == 6 * m
+    assert d["per_run_peak_bytes"] == 3 * 6 * m + 4 * m + m
+    assert d["selection_exports_bytes"] == 3 * 4 * m
+    assert compute.disk_budget(m, TOY_MATRIX, train_state_bytes=5 * m)["train_state_bytes"] == 5 * m
+
+
+def test_report_is_path_and_text_free():
+    import re
+    from test_repo_hygiene import text_problems
+    report = full_report()
+    parsed = json.loads(json.dumps(report, ensure_ascii=False))
+    home = os.path.expanduser("~").rstrip("/")
+    assert text_problems(parsed, home, {"1", "3", "40", "nan"}) == []
+    number_like = re.compile(r"^[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$|^(nan|inf|-inf)$", re.I)
+
+    def strings(obj):
+        if isinstance(obj, dict):
+            for v in obj.values():
+                yield from strings(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                yield from strings(v)
+        elif isinstance(obj, str):
+            yield obj
+    assert [s for s in strings(parsed) if number_like.match(s.strip())] == []
+    assert all(re.match(r"^[A-Z_]+=", e) for e in parsed["measured"]["laya"]["env"])
+    for key in ("what_if", "disk", "assumptions"):
+        assert parsed[key], key
+
+
+def test_markdown_lists_everything():
+    report = full_report(protocol_complete=True)
+    md = compute.render_markdown(report)
+    for l in report["projection"]["lines"]:
+        assert l["what"] in md, l["id"]
+    for text in ("Total", "What-if", "Disk", "Assumptions to confirm"):
+        assert text in md, text
+    for a in report["assumptions"]:
+        assert a in md
+    assert "SMOKE RUN" not in md
+    assert "SMOKE RUN" in compute.render_markdown(full_report(protocol_complete=False))
+
+
+def _synthetic(tmp_path):
+    from conftest import make_raw
+    import pilot.data
+    root, raw_sha256 = make_raw(str(tmp_path / "raw"))
+    out = str(tmp_path / "data")
+    pilot.data.prepare(root, out, raw_sha256)
+    return out
+
+
+def test_split_counts_on_synthetic_splits(tmp_path):
+    from pilot import runs
+    from pilot.data import parse_jsonl
+    out = _synthetic(tmp_path)
+    counts = compute.split_counts(os.path.join(out, "splits.json"))
+    assert sorted(counts) == sorted(["selection_train", "val", "final_train", "test", "hotels_probe"])
+    for name, c in counts.items():
+        with open(os.path.join(out, "splits", name + ".jsonl"), "rb") as f:
+            rows = parse_jsonl(f.read())
+        assert c == {"n_messages": len(rows), "n_items_neg8": runs.neg_items(rows, 8),
+                     "n_items_full": runs.neg_items(rows, 0)}, name
+
+
+def test_split_counts_refuse_a_tampered_split(tmp_path):
+    out = _synthetic(tmp_path)
+    with open(os.path.join(out, "splits", "test.jsonl"), "ab") as f:
+        f.write(b"\n")
+    with pytest.raises(SystemExit, match="sha256"):
+        compute.split_counts(os.path.join(out, "splits.json"))
+
+
+@pytest.mark.data
+def test_split_counts_on_the_committed_splits():
+    counts = compute.split_counts(os.path.join(REPO_ROOT, "data", "splits.json"))
+    assert {k: v["n_items_neg8"] for k, v in counts.items()} == {
+        "selection_train": 14854, "final_train": 17001, "val": 2147, "test": 4228, "hotels_probe": 8072}
+    assert {k: v["n_messages"] for k, v in counts.items()} == {
+        "selection_train": 1450, "final_train": 1658, "val": 208, "test": 413, "hotels_probe": 1009}
