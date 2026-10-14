@@ -9,6 +9,7 @@ import os
 import pytest
 
 import mps_spike
+from pilot import laya_adapter as la
 from pilot import pins, spike
 from pilot.data import parse_jsonl, verify_split_file
 
@@ -52,18 +53,15 @@ def test_stats_child_on_real_split(laya_dir):
 @pytest.mark.data
 @pytest.mark.weights
 def test_padded_batch_is_exactly_mb_by_max_len(laya_dir):
-    from laya import train as lt
-    from laya.common import collate_items, uses_parallel_layout
-
     _, rows = _rows()
-    model, tok, cfg = lt.load_checkpoint(laya_dir)
+    model, tok, cfg = la.load_checkpoint(laya_dir)
     del model
-    head_max_len, parallel = cfg.get("head_max_len", 192), uses_parallel_layout(cfg)
+    head_max_len, parallel = cfg.get("head_max_len", 192), la.uses_parallel_layout(cfg)
     for max_len in (128, 256):
-        items = lt.items_from_rows(tok, spike.neg8_rows(rows[:2], 0), max_len, head_max_len)[0][:4]
+        items = la.items_from_rows(tok, spike.neg8_rows(rows[:2], 0), max_len, head_max_len)[0][:4]
         assert len(items) == 4
-        batch = collate_items([[lt.encode_item(tok, spike.pad_item_to(it, max_len), max_len, head_max_len, None,
-                                               parallel) for it in items]], tok.pad_token_id)
+        batch = la.collate_items([[la.encode_item(tok, spike.pad_item_to(it, max_len), max_len, head_max_len, None,
+                                                  parallel) for it in items]], tok.pad_token_id)
         assert tuple(batch["input_ids"].shape) == (4, max_len), (max_len, tuple(batch["input_ids"].shape))
         assert bool(batch["attention_mask"].all())
         assert os.path.isdir(laya_dir)

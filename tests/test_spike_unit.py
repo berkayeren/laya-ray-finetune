@@ -10,7 +10,7 @@ import sys
 import pytest
 
 import mps_spike
-from pilot import spike
+from pilot import laya_adapter, spike
 
 pytestmark = pytest.mark.unit
 
@@ -41,7 +41,7 @@ def test_configure_model_enables_checkpointing_and_freezes_only_embeddings():
     model = mps_spike.tiny_model()
     full = mps_spike.configure_model(model, "none")
     assert all(layer.gradient_checkpointing for layer in model.encoder.layers)
-    assert model.head_checkpointing is True
+    assert laya_adapter.head_checkpointing_on(model) is True
     frozen_model = mps_spike.tiny_model()
     frozen = mps_spike.configure_model(frozen_model, "embeddings_frozen")
     assert full - frozen == 1000 * 64
@@ -52,14 +52,13 @@ def test_configure_model_enables_checkpointing_and_freezes_only_embeddings():
 
 
 def test_worker_step_keeps_checkpointing_on_and_amp_off(monkeypatch):
-    from laya import train as lt
-    calls, real = [], lt._forward
+    calls, real = [], laya_adapter.forward
 
     def recording(model, batch, device, amp, detach_encoder):
-        calls.append((amp, detach_encoder, model.head_checkpointing, model.training))
+        calls.append((amp, detach_encoder, laya_adapter.head_checkpointing_on(model), model.training))
         return real(model, batch, device, amp, detach_encoder)
 
-    monkeypatch.setattr(lt, "_forward", recording)
+    monkeypatch.setattr(laya_adapter, "forward", recording)
     payload = mps_spike.spike_worker(worker_cfg())
     assert payload["status"] == "ok", payload
     # (1 warm-up + 2 measured) x 2 regimes x grad_accum 2
@@ -140,11 +139,10 @@ def chosen(v):
 
 
 def test_projection_465_steps_for_both_micro_batches():
-    from laya import train as lt
     assert spike.optimizer_steps(14854, 8, 4) == spike.optimizer_steps(14854, 4, 8) == 465
     assert spike.optimizer_steps(10, 4, 2) == 2
     for n, mb, accum in ((14854, 8, 4), (14854, 4, 8), (14854, 4, 2), (10, 4, 2), (1, 8, 4), (33, 4, 8)):
-        assert spike.optimizer_steps(n, mb, accum) == lt.optimizer_updates(n, mb, accum, 1), (n, mb, accum)
+        assert spike.optimizer_steps(n, mb, accum) == laya_adapter.optimizer_updates(n, mb, accum, 1), (n, mb, accum)
     with pytest.raises(ValueError):
         spike.optimizer_steps(0, 4, 2)
 
@@ -316,8 +314,7 @@ def test_summarize_median_p90():
 # ---- verdict wiring (plan 02-02 task 2): OOM / error capture in the worker, markdown verdict line ----
 
 def test_worker_records_mps_oom_as_an_attempt(monkeypatch):
-    from laya import train as lt
-    calls, real = [], lt._forward
+    calls, real = [], laya_adapter.forward
 
     def oom_on_fourth(*args):
         calls.append(1)
@@ -325,7 +322,7 @@ def test_worker_records_mps_oom_as_an_attempt(monkeypatch):
             raise RuntimeError(OOM_TEXT)
         return real(*args)
 
-    monkeypatch.setattr(lt, "_forward", oom_on_fourth)
+    monkeypatch.setattr(laya_adapter, "forward", oom_on_fourth)
     payload = mps_spike.spike_worker(worker_cfg())
     assert payload["status"] == "oom", payload
     assert payload["oom"]["regime"] == "padded" and payload["oom"]["stage"] == "measured"
@@ -338,12 +335,11 @@ def test_worker_records_mps_oom_as_an_attempt(monkeypatch):
 
 
 def test_worker_records_unexpected_error_and_reraises_nothing(monkeypatch):
-    from laya import train as lt
 
     def boom(*args):
         raise RuntimeError("something else broke")
 
-    monkeypatch.setattr(lt, "_forward", boom)
+    monkeypatch.setattr(laya_adapter, "forward", boom)
     payload = mps_spike.spike_worker(worker_cfg())
     assert payload["status"] == "error" and payload["error"] == "RuntimeError: something else broke", payload
     assert payload["micro_batch"] == 2 and payload["transport"] == "return"
@@ -504,8 +500,7 @@ def test_verdict_reads_last_attempt_as_standing():
 
 def test_worker_tags_fallback_warnings_by_stage(monkeypatch):
     import warnings
-    from laya import train as lt
-    real_items, real_configure, real_forward = mps_spike.tiny_items, mps_spike.configure_model, lt._forward
+    real_items, real_configure, real_forward = mps_spike.tiny_items, mps_spike.configure_model, laya_adapter.forward
 
     def items(*args):
         warnings.warn(fallback_warning("aten::tok"))
@@ -522,7 +517,7 @@ def test_worker_tags_fallback_warnings_by_stage(monkeypatch):
 
     monkeypatch.setattr(mps_spike, "tiny_items", items)
     monkeypatch.setattr(mps_spike, "configure_model", configure)
-    monkeypatch.setattr(lt, "_forward", forward)
+    monkeypatch.setattr(laya_adapter, "forward", forward)
     payload = mps_spike.spike_worker(worker_cfg())
     assert payload["status"] == "ok", payload
     assert payload["fallback_ops"] == [{"op": "aten::tok", "stage": "tokenize"}, {"op": "aten::cfg", "stage": "setup"},
@@ -532,8 +527,7 @@ def test_worker_tags_fallback_warnings_by_stage(monkeypatch):
 
 def test_worker_records_not_implemented_as_an_attempt(monkeypatch):
     import warnings
-    from laya import train as lt
-    calls, real = [], lt._forward
+    calls, real = [], laya_adapter.forward
 
     def strict_on_third(*args):
         calls.append(1)
@@ -542,7 +536,7 @@ def test_worker_records_not_implemented_as_an_attempt(monkeypatch):
             raise NotImplementedError(STRICT_TEXT)
         return real(*args)
 
-    monkeypatch.setattr(lt, "_forward", strict_on_third)
+    monkeypatch.setattr(laya_adapter, "forward", strict_on_third)
     payload = mps_spike.spike_worker(worker_cfg())
     assert payload["status"] == "not_implemented", payload
     assert payload["error_op"]["op"] == "aten::linalg_eig" and payload["error_op"]["stage"] == "step"

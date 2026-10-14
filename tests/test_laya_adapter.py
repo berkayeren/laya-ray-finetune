@@ -212,7 +212,7 @@ def _private_laya_uses(path, label=None):
     return bad
 
 
-def test_no_private_laya_use_outside_adapter():
+def test_guard_no_private_laya_use_outside_adapter():
     out = subprocess.run(["git", "ls-files", "*.py"], cwd=REPO, capture_output=True, text=True, check=True).stdout
     files = [f for f in out.split() if f != ADAPTER]
     assert ADAPTER in out.split() and {"ray_train.py", "mps_spike.py", "tests/test_spike_unit.py"} <= set(files)
