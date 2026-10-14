@@ -30,11 +30,17 @@ hotels_probe are refused, before any work). A full dump keeps split-file order. 
 (shuffled with seed 0, as evaluate.py did) for debugging only: a subset dump never lands under results/dumps (refused
 there; without --out-root it goes to a fresh temp dir) and its sidecar records n_subset.
 
+An existing dump is never replaced by default (03-REVIEW WR-03): results/dumps is the committed audit record, so a dump
+whose <run_id>/<split>.npz or .json already exists under the chosen root is refused, before any checkpoint fetch,
+model load or Ray start, unless --force is passed (`make baselines` passes it). The run id is computed from hashes
+alone (pilot.weights.identity) for that check. A dump written outside the repo prints its absolute path on the console
+(03-REVIEW IN-04) so a --n or temp dump can be found; sidecars and reports still record only repo-relative paths.
+
 Module-level imports stay torch-, Ray- and laya-free.
 
 usage: python score.py data/splits/test.jsonl [--model laya|majority|prior] [--checkpoint multilingual|DIR]
                        [--device cpu|mps|cuda] [--workers W] [--cpus-per-worker C] [--gpus-per-worker G] [--n N]
-                       [--out-root DIR] [--manifest M]
+                       [--out-root DIR] [--force] [--manifest M]
 """
 import argparse
 import json
@@ -107,6 +113,12 @@ def sidecar_base(entry, split_name, manifest_path, n_subset):
             "logit": dumps.LOGIT_NOTE, "seed": None, "n_subset": n_subset, "subset_seed": SUBSET_SEED}
 
 
+def check_checkpoint_arg(checkpoint):
+    """SystemExit unless --checkpoint is 'multilingual' or a dir holding rl_agent_config.json; no hashing or fetch."""
+    if checkpoint != "multilingual" and not os.path.isfile(os.path.join(checkpoint, "rl_agent_config.json")):
+        raise SystemExit("--checkpoint must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % checkpoint)
+
+
 def resolve_checkpoint(checkpoint, ident=None):
     """On the driver, before Ray starts: (local checkpoint dir, {file: sha256} that laya.load must verify).
 
@@ -115,11 +127,10 @@ def resolve_checkpoint(checkpoint, ident=None):
     digest mismatches surface here as the real message, not as a Ray actor death. laya is not imported here.
     """
     from pilot.weights import checkpoint_digests, fetch, identity
+    check_checkpoint_arg(checkpoint)
     if checkpoint == "multilingual":
         from pilot import pins
         return fetch(pins.LAYA), checkpoint_digests(checkpoint, None)
-    if not os.path.isfile(os.path.join(checkpoint, "rl_agent_config.json")):
-        raise SystemExit("--checkpoint must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % checkpoint)
     digests = checkpoint_digests(checkpoint, identity(checkpoint) if ident is None else ident)
     return os.path.abspath(checkpoint), digests             # abspath: laya treats args with "/" as local
 
@@ -156,6 +167,13 @@ def laya_system(checkpoint, ident):
     """The sidecar's system block for a Laya checkpoint: repo-relative path (or 'multilingual') and its identity."""
     return {"kind": "laya", "checkpoint": "multilingual" if checkpoint == "multilingual" else repo_relpath(checkpoint),
             "checkpoint_identity": ident, "baseline_source": None, "clip_eps": None}
+
+
+def _shown(path):
+    """Console form of a written path: repo-relative inside the repo, else absolute (IN-04: a temp dump stays
+    findable). Console only; sidecars and reports keep repo_relpath."""
+    rel = repo_relpath(path)
+    return os.path.abspath(path) if rel.startswith("<outside-repo>/") else rel
 
 
 def _under(path, root):
@@ -218,11 +236,10 @@ def _rows(out):
     return [{k: out[k][i] for k in out} for i in range(len(out["uid"]))]
 
 
-def score_laya(a, checkpoint, cases, device):
+def score_laya(a, checkpoint, cases, device, ident):
     """(float32 [n, 48] margins in `cases` order, sidecar fields) of a Laya checkpoint on `device` (resolved by main);
-    driver-side checks first."""
-    from pilot.weights import identity
-    ident = identity(checkpoint)                            # the scored bytes are bound to it (laya.load digests)
+    driver-side checks first. ident is main's pilot.weights.identity(checkpoint): the scored bytes are bound to it
+    (laya.load digests) and it names the run."""
     model_dir, expected = resolve_checkpoint(checkpoint, ident)   # refusal / pinned fetch before laya or Ray
     la.check_version()
     if device == "mps":
@@ -279,6 +296,8 @@ def main(argv=None):
     ap.add_argument("--n", type=int, default=None, help="score a fixed random subset of N messages (debug only)")
     ap.add_argument("--out-root", default=None,
                     help="dump root (default results/dumps; with --n a fresh temp dir, never results/dumps)")
+    ap.add_argument("--force", action="store_true",
+                    help="rescore over an existing dump; results/dumps is the committed audit record")
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST,
                     help="splits.json to verify against (default: the committed data/splits.json)")
     a = ap.parse_args(argv)
@@ -315,8 +334,28 @@ def main(argv=None):
     uids = [c["uid"] for c in cases]
     n_subset = None if a.n is None else len(cases)
 
+    # the run id from hashes alone, so an existing dump is refused before any fetch, model load or Ray start (WR-03)
+    checkpoint = a.checkpoint or "multilingual"
     if a.model == "laya":
-        logits, fields = score_laya(a, a.checkpoint or "multilingual", cases, device)
+        from pilot.weights import identity
+        check_checkpoint_arg(checkpoint)
+        ident = identity(checkpoint)
+        rid = dumps.run_id("laya", ident)
+    else:
+        rid = dumps.run_id(a.model)
+    if a.n is None:
+        root = a.out_root or dumps.DUMP_ROOT
+    else:
+        root = a.out_root or tempfile.mkdtemp(prefix="score-subset-")
+    run_dir = os.path.join(root, rid)
+    for ext in (".npz", ".json"):
+        dst = os.path.join(run_dir, split_name + ext)
+        if os.path.exists(dst) and not a.force:
+            raise SystemExit("%s already exists; pass --force to rescore it (results/dumps is the committed audit "
+                             "record), or --out-root DIR to write elsewhere" % _shown(dst))
+
+    if a.model == "laya":
+        logits, fields = score_laya(a, checkpoint, cases, device, ident)
     else:
         t0 = time.time()
         name, e_tr, counts, n_tr = train_counts(a.manifest, entry["role"])
@@ -330,15 +369,9 @@ def main(argv=None):
                   "temperature": {"shipped": 1.0, "source": "baseline: logit of a train-split frequency (T = 1)"},
                   "scorer": {"numpy_version": np.__version__, "workers": 0, "device": None},
                   "timing": {"seconds": time.time() - t0}}
-    rid = fields["run_id"]
     sidecar = dict(sidecar_base(entry, split_name, a.manifest, n_subset), **fields)
-    if a.n is None:
-        root = a.out_root or dumps.DUMP_ROOT
-    else:
-        root = a.out_root or tempfile.mkdtemp(prefix="score-subset-")
-    run_dir = os.path.join(root, rid)
     path = dumps.write_dump(run_dir, split_name, logits, uids, sidecar)
-    print("%s dump -> %s" % (rid, repo_relpath(path)))
+    print("%s dump -> %s" % (rid, _shown(path)))
     return run_dir, split_name
 
 

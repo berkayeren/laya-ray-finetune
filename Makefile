@@ -5,7 +5,8 @@
 #   make test        offline pytest in the ACTIVE interpreter (no venv management, no downloads)
 #   make test-all    also the network tests: pinned dataset (data) and ~1.1 GB pinned weights (weights)
 #   make baselines   score majority, label prior and zero-shot Laya on val and test, then rebuild the reports
-#                    (needs `make data` and the pinned weights; about 5 minutes on the M4)
+#                    (needs `make data` and the pinned weights; about 5 minutes on the M4). It passes --force,
+#                    because score.py refuses to overwrite an existing dump in results/dumps (the committed record)
 #   make baseline-reports  rebuild the reports and print the results table from the committed dumps (no model)
 PYTHON ?= python
 UV ?= uv
@@ -50,12 +51,12 @@ test-unit:
 	$(PYTHON) -m pytest -m unit -q
 
 baselines:
-	$(PYTHON) score.py data/splits/val.jsonl --model majority
-	$(PYTHON) score.py data/splits/test.jsonl --model majority
-	$(PYTHON) score.py data/splits/val.jsonl --model prior
-	$(PYTHON) score.py data/splits/test.jsonl --model prior
-	$(PYTHON) score.py data/splits/val.jsonl --model laya --workers $(SCORE_WORKERS) --cpus-per-worker $(SCORE_CPUS)
-	$(PYTHON) score.py data/splits/test.jsonl --model laya --workers $(SCORE_WORKERS) --cpus-per-worker $(SCORE_CPUS)
+	$(PYTHON) score.py data/splits/val.jsonl --model majority --force
+	$(PYTHON) score.py data/splits/test.jsonl --model majority --force
+	$(PYTHON) score.py data/splits/val.jsonl --model prior --force
+	$(PYTHON) score.py data/splits/test.jsonl --model prior --force
+	$(PYTHON) score.py data/splits/val.jsonl --model laya --workers $(SCORE_WORKERS) --cpus-per-worker $(SCORE_CPUS) --force
+	$(PYTHON) score.py data/splits/test.jsonl --model laya --workers $(SCORE_WORKERS) --cpus-per-worker $(SCORE_CPUS) --force
 	$(MAKE) baseline-reports PYTHON="$(PYTHON)"
 
 baseline-reports:

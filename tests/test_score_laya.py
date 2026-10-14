@@ -191,7 +191,7 @@ def test_device_resolution(tmp_path, synthetic_raw, monkeypatch, args, want):
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     seen = []
 
-    def stop(a, checkpoint, cases, device):
+    def stop(a, checkpoint, cases, device, ident):
         seen.append(device)
         raise SystemExit("stub")
     monkeypatch.setattr(score, "score_laya", stop)
