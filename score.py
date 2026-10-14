@@ -12,7 +12,8 @@ into metrics with numpy alone (D-05). Systems (--model, default laya):
   off and the sidecar records laya's load-time default (laya_default_amp, laya_default_dtype). check_agent then
   refuses an agent on another device, in another dtype than float32, with autocast on, or after a laya GPU-to-CPU
   out-of-memory fallback, and runs again after every scored batch; it reads the agent, not the environment.
-  run_id: laya-zeroshot-<revision[:8]> for the pinned checkpoint, laya-<model_sha256[:12]> for a local one.
+  run_id: laya-zeroshot-<revision[:8]> for the pinned checkpoint, laya-<model_sha256[:12]>-<config_sha256[:8]> for a
+  local one (weights and config, so checkpoints that share weights but not configs never share a dump dir).
   --device cpu|mps|cuda picks the scoring device (default: cuda when --gpus-per-worker > 0, else cpu). mps scores
   in-process only (--workers 0; Ray has no MPS device manager) and is refused before any load when MPS is not
   available. --workers 0 scores in-process; --workers N > 0 scores with N Ray Data actors (one checkpoint load each,

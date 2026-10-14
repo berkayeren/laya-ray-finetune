@@ -50,14 +50,20 @@ def uids_sha256(uids):
 
 
 def run_id(kind, ident=None):
-    """Stable, config-derived run id: majority, prior, laya-zeroshot-<revision[:8]> or laya-<model_sha256[:12]>."""
+    """Stable, config-derived run id: majority, prior, laya-zeroshot-<revision[:8]> (the pinned checkpoint) or
+    laya-<model_sha256[:12]>-<config_sha256[:8]> (a local checkpoint: weights and rl_agent_config.json, which carries
+    the served temperature, max_len and calibration, so two checkpoints sharing weights never share a dump dir;
+    03-REVIEW WR-01). SystemExit on a local identity without config_sha256."""
     if kind in ("majority", "prior"):
         return kind
     if kind == "laya" and isinstance(ident, dict):
         if ident.get("revision"):
             return "laya-zeroshot-" + ident["revision"][:8]
         if ident.get("local") and ident.get("model_sha256"):
-            return "laya-" + ident["model_sha256"][:12]
+            if not ident.get("config_sha256"):
+                raise SystemExit("local checkpoint identity has no config_sha256 (rl_agent_config.json missing?); "
+                                 "a local run id names both the weights and the config")
+            return "laya-%s-%s" % (ident["model_sha256"][:12], ident["config_sha256"][:8])
     raise SystemExit("unknown system %r; expected majority, prior or laya" % (kind,))
 
 

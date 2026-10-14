@@ -9,14 +9,19 @@ same way, with no system-specific branch (D-10, D-12):
 - each variant has a row at θ = 0.5 and a row at the val-selected θ (pilot.metrics.select_theta). θ is chosen only on
   the full val dump of the same run directory (run_id and uids_sha256 verified by load_dump), on that variant's
   val probabilities (shipped: the val sidecar's shipped T; raw: T = 1), and is then applied to the reported split.
-  The test dump never shapes θ. A subset (--n) val dump is refused; without a val dump the val-selected row is null
-  with a reason; on the val split itself the val-selected row is labelled in_sample
+  The test dump never shapes θ. The val dump must come from the same source as the reported dump: their sidecars
+  must agree on SAME_SOURCE_KEYS (system kind, checkpoint and identity, shipped T, scorer device, dtype and amp;
+  03-REVIEW WR-01), else the report is refused naming the key. A subset (--n) val dump next to a reported test dump
+  is refused; without a val dump the val-selected row is null with a reason; on the val split itself the val-selected
+  row is labelled in_sample, and a --n subset val dump reported on val gets its θ 0.5 rows with the val-selected row
+  null and SUBSET_VAL_REASON (03-REVIEW WR-04)
 - the full θ (global, per tag, eligible tags, grid, objective, tie rule) and its val dump's hashes are disclosed
 The report holds no timestamps or timings and no rounded value.
 
 --compare A_DIRS B_DIRS (EVAL-07): a paired, message-level bootstrap between two systems, each side a comma-separated
-list of per-seed run dirs. Every dir needs a full split dump and a full val dump (subset dumps are refused), and every
-dump of both sides must score the same uids in the same order (else "unpaired"). Per side, sigmoid(logit / T_shipped)
+list of per-seed run dirs. Every dir needs a full split dump and a full val dump of the same source (SAME_SOURCE_KEYS;
+subset dumps are refused), and every dump of both sides must score the same uids in the same order (else "unpaired").
+Per side, sigmoid(logit / T_shipped)
 is averaged over seeds per message and tag (pilot.metrics.seed_average), θ is chosen by D-12 on the seed-averaged val
 probabilities (provisional: Phase 8 freezes the θ rule for seed-averaged systems in protocol.json), and
 pilot.metrics.paired_bootstrap resamples the split's messages with one index draw shared by both systems, at θ 0.5 and
@@ -47,6 +52,27 @@ COMPARE_PROCEDURE = ("EVAL-07: per-seed probabilities averaged per message and t
 COMPARE_THETA_RULE = ("D-12 applied to the seed-averaged val probabilities; Phase 8 freezes the rule for seed-averaged "
                       "systems in protocol.json")
 COMPARE_NOTE = "descriptive intervals only; the decision rule and its thresholds are frozen in protocol.json in Phase 8"
+NO_VAL_REASON = "no val dump in run dir"
+SUBSET_VAL_REASON = "val dump is a --n subset; θ is selected only on a full val dump"
+# Sidecar keys the θ-source val dump and the reported dump must share (03-REVIEW WR-01): θ chosen on one checkpoint's,
+# temperature's or device's / precision's val probabilities is never applied to another's dump. system.baseline_source
+# is excluded on purpose: pilot.data.TRAINED_ON gives a baseline's val and test dumps different training splits.
+SAME_SOURCE_KEYS = (("system", "kind"), ("system", "checkpoint"), ("system", "checkpoint_identity"),
+                    ("temperature", "shipped"), ("scorer", "device"), ("scorer", "dtype"), ("scorer", "amp_enabled"))
+
+
+def same_source(side, val_side, where):
+    """SystemExit naming the first SAME_SOURCE_KEYS path on which the reported dump's sidecar and the val dump's
+    sidecar differ (a missing key reads as None on both sides)."""
+    for path in SAME_SOURCE_KEYS:
+        a, b = side, val_side
+        for k in path:
+            a = a.get(k) if isinstance(a, dict) else None
+            b = b.get(k) if isinstance(b, dict) else None
+        if a != b:
+            raise SystemExit("%s: the val dump (θ source) and the %s dump differ in %s (%r vs %r); rescore both with "
+                             "the same checkpoint, device and precision"
+                             % (where, (side.get("split") or {}).get("name"), ".".join(path), b, a))
 
 
 def theta_source(run_dir, manifest_path):
@@ -54,6 +80,7 @@ def theta_source(run_dir, manifest_path):
 
     load_dump proves the dump is untampered, belongs to this run (run_id == run dir name) and, for a full dump, covers
     the registered val split in order (uids_sha256). A subset val dump is refused: θ is never chosen on part of val.
+    run_report does not call it when the reported dump is itself a subset val dump (SUBSET_VAL_REASON).
     """
     npz = os.path.join(run_dir, "val.npz")
     if not (os.path.exists(npz) or os.path.exists(os.path.join(run_dir, "val.json"))):
@@ -67,10 +94,20 @@ def theta_source(run_dir, manifest_path):
 
 
 def run_report(run_dir, split="test", manifest_path=DEFAULT_MANIFEST):
-    """The report dict of one verified dump: shipped and raw variants, rows at 0.5 and at the val-selected θ."""
+    """The report dict of one verified dump: shipped and raw variants, rows at 0.5 and at the val-selected θ.
+
+    The val-selected row is null with a reason in two cases: the run dir has no val dump (NO_VAL_REASON), or the
+    reported dump is a --n subset val dump (SUBSET_VAL_REASON; it is reported at θ 0.5 only). A θ-source val dump
+    from another source than the reported dump (same_source) is refused.
+    """
     logits, uids, side, entry = dumps.load_dump(run_dir, split, manifest_path)
     Y = dumps.read_gold(entry, manifest_path, uids)
-    src = theta_source(run_dir, manifest_path)              # reads only val: the reported split never shapes θ
+    if split == "val" and side["n_subset"] is not None:     # the reported dump is that subset val dump: no θ source
+        src, reason = None, SUBSET_VAL_REASON
+    else:
+        src, reason = theta_source(run_dir, manifest_path), NO_VAL_REASON   # reads only val: the split never shapes θ
+    if src is not None and split != "val":
+        same_source(side, src[2], run_dir)
     val_logits, Y_val, val_side, disclosed = src if src is not None else (None, None, None, None)
     variants = {}
     for name, T, T_val in (("shipped", side["temperature"]["shipped"],
@@ -81,7 +118,7 @@ def run_report(run_dir, split="test", manifest_path=DEFAULT_MANIFEST):
         v = {"temperature": T, "rows": rows}
         if src is None:
             rows["val_selected"] = None
-            v["val_selected_reason"] = "no val dump in run dir"
+            v["val_selected_reason"] = reason
         else:                                               # θ on this variant's val probabilities (after T)
             sel = metrics.select_theta(Y_val, metrics.probabilities(val_logits, T_val))
             rows["val_selected"] = dict(metrics.metrics(Y, P, metrics.theta_vector(sel)), theta=sel,
@@ -104,6 +141,7 @@ def _load_side(run_dirs, split, manifest_path):
         if not (os.path.exists(os.path.join(d, "val.npz")) or os.path.exists(os.path.join(d, "val.json"))):
             raise SystemExit("compare needs a full val dump in every run dir; %s has none (score.py on val)" % d)
         pair = (dumps.load_dump(d, split, manifest_path), dumps.load_dump(d, "val", manifest_path))
+        same_source(pair[0][2], pair[1][2], d)
         rid = pair[0][2]["run_id"]                          # == the run dir name (load_dump checks it)
         if os.path.realpath(d) in seen or rid in seen:
             raise SystemExit("%s (run_id %s) is listed more than once on one side of --compare; each seed counts once"
