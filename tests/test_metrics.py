@@ -168,6 +168,23 @@ def test_pick_equidistant_takes_lower():
     assert metrics.pick(_scores(0.45, 0.55)) == 0.45
 
 
+@pytest.mark.parametrize("k", range(1, 46))
+def test_pick_equidistant_takes_lower_every_pair(k):
+    assert metrics.pick(_scores((50 - k) / 100, (50 + k) / 100)) == (50 - k) / 100
+
+
+def test_select_theta_tie_takes_lower_global_and_per_tag():
+    # card's F1 (and so micro-F1) is 2/3 at exactly 0.30 and 0.70 and lower at every other grid point; the global and
+    # the per-tag θ both go through pick, so both must take the lower of the two equally close points
+    Y, P = np.zeros((21, 48), dtype=bool), np.zeros((21, 48))
+    j = TAGS.index("card")
+    Y[:10, j] = True
+    P[:5, j], P[5:10, j], P[10:20, j], P[20, j] = 0.30, 0.70, 0.69, 0.29
+    sel = metrics.select_theta(Y, P)
+    assert sel["eligible_tags"] == ["card"]
+    assert sel["global"] == 0.30 and sel["per_tag"] == {"card": 0.30}
+
+
 def test_pick_all_zero_scores_returns_half():
     assert metrics.pick(np.zeros(91)) == 0.5
 
