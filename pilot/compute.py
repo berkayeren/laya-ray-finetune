@@ -375,7 +375,7 @@ def assumptions(matrix, measured=None, counts=None):
     if not measured.get("scoring"):
         out.append("The Laya scoring rate is the committed CPU zero-shot rate (%s) until an MPS scoring probe "
                    "measures it" % repo_relpath(SCORING_DUMP))
-    s_msg = ESTIMATES["berturk_s_per_msg"] if not (b and b.get("status") == "ok") else b["s_per_msg_infer"]
+    s_msg = berturk_rates(measured)[1]                     # the BERTurk scoring rate the projection uses
     out += ["Scoring runs in fp32 on MPS (la.force_fp32 turns laya's fp16 autocast off); the scoring rate assumes fp32",
             "Per-epoch laya exports stay on (--export-epochs) so Phase 5 picks the epoch on val without retraining; "
             "Phase 5 prunes them after val scoring (see Disk)",
