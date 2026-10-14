@@ -19,15 +19,17 @@ A trustworthy, reproducible head-to-head comparison (fine-tuned Laya vs fine-tun
 - ✓ Ray Train `TorchTrainer` fine-tune loop using Laya's own loss (`rlcd`/`soft-ce`), temperature calibration on a held-out slice, and a checkpoint loadable with `laya.load` (`ray_train.py`). Existing. CPU smoke run proven.
 - ✓ Ray Data distributed evaluation: top-1 vs majority baseline, micro-F1 and exact match at 0.3/0.5/0.7/0.9, macro-F1, best/worst per-tag F1, JSON reports (`evaluate.py`). Existing.
 - ✓ Zero-shot `laya-multilingual` baseline on 100 test messages (micro-F1 0.186) (`results/zeroshot_multilingual.json`). Existing.
+- ✓ Pinned, hash-locked dependencies (`pyproject.toml` + `requirements.txt`, Python 3.12, binary wheels only, `make env`). Phase 1.
+- ✓ Frozen, hash-registered splits (`data/splits.json`): selection_train/val/final_train/test plus the HOTELS OOD probe; no-intent rows kept by default; tampered, unregistered or wrong-role files hard-fail. Phase 1.
+- ✓ Pinned, digest-verified Laya and BERTurk weights (safetensors only) via `pilot.weights.fetch`. Phase 1.
+- ✓ Local CPU test suite (`make test`, no hosted CI) with env-lock, single-`QUESTIONS`, split-contract and repo-hygiene guards. Phase 1.
 
 ### Active
 
 **1. Trustworthy pipeline (first, small)**
-- [ ] Pin dependencies (laya, ray, torch, transformers) in `requirements.txt`/`pyproject.toml`
-- [ ] Keep the 88 no-intent messages as all-negative rows in both splits (behind a flag, default on). Include them in the main metrics and also report the false-positive rate on no-intent messages separately.
+- [ ] Include the no-intent rows in the main metrics and also report the false-positive rate on no-intent messages separately (rows are kept in the splits since Phase 1)
 - [ ] Isolate private `laya.train` internals behind one adapter module. Add a test that fails loudly if their signatures change.
 - [ ] Tests: data conversion (counts, splits, labels), metric functions on toy inputs, and a tiny CPU smoke run of ray_train + evaluate (few messages, 1 epoch, frozen encoder)
-- [ ] A local script/target runs the test suite on CPU (no hosted CI)
 - [ ] One command reproduces data prep → training → evaluation from `pip install -r requirements.txt`
 
 **2. Real fine-tune of Laya on Apple Silicon**
@@ -51,7 +53,7 @@ A trustworthy, reproducible head-to-head comparison (fine-tuned Laya vs fine-tun
 GO if fine-tuned Laya meets all of the following:
 - (a) It is within 2 points of BERTurk on micro-F1 and within 3 points on macro-F1 (paired bootstrap on the test set).
 - (b) It is stable across 3 seeds with no collapsed run.
-- (c) It meets the latency budget on the target hardware. The budget is TBD, so for now latency is reported only.
+- (c) It meets the latency budget on the target hardware. **In v1 latency is reported, not gated**, because the budget is deferred.
 - (d) It is clearly better on at least one of: calibration or precision at fixed coverage (abstention), or few-shot new-intent learning.
 
 It is also a GO if Laya beats BERTurk by more than 3 points with a confidence interval that excludes zero. Otherwise it is a NO-GO, because BERTurk is simpler. All numbers are reported either way so humans can override the call.
@@ -77,7 +79,7 @@ It is also a GO if Laya beats BERTurk by more than 3 points with a confidence in
 
 - **Hardware**: Apple M4 Mac with 16 GB unified memory, PyTorch MPS, no CUDA. Fall back to `--freeze-encoder` only if a full fine-tune OOMs, and label that run as weaker.
 - **Data**: no real customer data, and no bank name anywhere in the repo.
-- **Hosting**: everything runs self-hosted and locally. Hub downloads of public model weights are fine.
+- **Hosting**: everything runs self-hosted and locally. Hub downloads of public model weights are fine. Any exception needs the user's explicit confirmation. The only one under consideration is the Kaggle GPU training contingency (see Key Decisions, ⚠️ Revisit).
 - **Reproducibility**: pinned dependencies, recorded seeds and configs, thresholds never tuned on test.
 - **Laya internals**: the private API usage must be confined to one adapter module.
 
@@ -93,6 +95,15 @@ It is also a GO if Laya beats BERTurk by more than 3 points with a confidence in
 | Latency is reported only, budget TBD | Target serving hardware is unknown | ⚠️ Revisit |
 | Use `data_neg8` first and `data_full` only if time allows | 4.6× cheaper on laptop hardware | — Pending |
 | Local test script instead of hosted CI | Self-hosted constraint, single developer | — Pending |
+| Val = folds 14–15 for selecting epochs, thresholds and temperature. Final models are retrained on folds 0–15 with those settings fixed, and test is scored once. | Avoids tuning on test while still using all training data for the final models. Changes the Validated split, which was folds 0–15 train. | — Pending |
+| Per-tag thresholds only where val has ≥10 positives, otherwise one global threshold | Per-tag thresholds on small val support are noise | — Pending |
+| GO (a) read as non-inferiority plus an INCONCLUSIVE outcome (counts as NO-GO) | With ~413 test messages the CIs can't resolve a 3-point macro-F1 margin | — Pending |
+| Bootstrap uses seed-averaged probabilities per message, with paired resampling over messages | One frozen procedure. Avoids picking among seeds. | — Pending |
+| BERTurk is trained with the HF Trainer, not the Ray harness | A standard recipe makes the baseline credible. Fairness comes from the shared split, scorer, val-only postfit and metrics. | — Pending |
+| HOTELS out-of-domain probe added to v1 | Only 15 no-intent test messages, too few to measure false positives | — Pending |
+| Compute checkpoint after the first MPS epoch, waiting for user approval | Runtime on the laptop is unknown | — Pending |
+| Few-shot uses label masking, k-shot as short continued training, max 3 draws | Fair to both models and keeps compute bounded | — Pending |
+| Kaggle GPU training is a contingency only, used if the Phase 2 MPS feasibility spike shows a full Laya fine-tune does not fit in 16 GB. It would use the preserved CUDA `--gpu` path. | Kaggle is a hosted service, so this conflicts with the self-hosted constraint. It needs the user's explicit confirmation before any use. The exception is acceptable only because the work uses public Multi3NLU++ data and no bank data. | ⚠️ Revisit |
 
 ## Evolution
 
@@ -112,4 +123,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-10-13 after initialization*
+*Last updated: 2026-10-13 after Phase 1*
