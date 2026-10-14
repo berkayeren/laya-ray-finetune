@@ -110,6 +110,59 @@ def _largest(rows, key):
     return max(vals) if vals else None
 
 
+# ---- the probe protocol: interrupt after epoch 1, resume, and the LAYA-03 ladder in fresh children ----
+
+SNAPSHOT = "checkpoint_manager_snapshot.json"               # Ray Train V2 writes it before deleting the previous one
+
+
+def epoch_registered(storage, run_id, epoch):
+    """True once Ray has registered the epoch checkpoint of `run_id`: its snapshot names epoch-NNN and that dir holds
+    train_state.pt, so a kill from here on resumes from it (ray_train.py's epoch checkpoints)."""
+    run_dir, name = os.path.join(storage, run_id), "epoch-%03d" % epoch
+    try:
+        with open(os.path.join(run_dir, SNAPSHOT), encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return False
+    return name in text and os.path.isfile(os.path.join(run_dir, name, "train_state.pt"))
+
+
+def attempt_chain(start_rung, launch):
+    """(attempts, status): launch(rung) runs one fresh child on `rung` and returns its attempt ({status: ok, oom or
+    failed, ...}); an oom moves to pilot.runs.next_rung (LAYA-03), ok and failed stop the chain, and an oom on the
+    last rung ends it as ladder_exhausted. Each attempt carries the rung it was launched on."""
+    attempts, rung = [], start_rung
+    while True:
+        attempt = dict(launch(rung), rung=rung)
+        attempts.append(attempt)
+        if attempt["status"] == "ok":
+            return attempts, "ok"
+        if attempt["status"] != "oom":
+            return attempts, "failed"
+        rung = runs.next_rung(rung)
+        if rung is None:
+            return attempts, "ladder_exhausted"
+
+
+def resume_summary(record):
+    """{segments, resume_load_s, resume_peak_total_bytes, resume_demonstrated} of a run record (LAYA-04).
+
+    resume_demonstrated: two or more segments, epoch rows numbered 1..E without a gap, and resumed flags that start
+    False and turn True (the rows a resumed segment trained). The load seconds and peak memory are the largest over
+    the resumed segments (None when no segment resumed)."""
+    segments, rows = record.get("segments") or [], record.get("epochs") or []
+    resumed = [s for s in segments if s.get("resumed")]
+    flags = [bool(r.get("resumed")) for r in rows]
+    numbered = [r.get("epoch") for r in rows] == list(range(1, len(rows) + 1))
+    turns = bool(flags) and not flags[0] and flags[-1] and flags == sorted(flags)
+    seg_flags = [bool(s.get("resumed")) for s in segments]
+    return {"segments": len(segments),
+            "resume_load_s": _largest(resumed, "resume_load_s"),
+            "resume_peak_total_bytes": _largest(resumed, "resume_peak_total_bytes"),
+            "resume_demonstrated": bool(len(segments) >= 2 and numbered and turns and seg_flags[0] is False
+                                        and all(seg_flags[1:]))}
+
+
 def measured_from_checkpoint(ckpt_dir):
     """The probe run's measured inputs from a ray_train.py checkpoint dir: {"laya": rates, overheads, memory and run
     config, "epochs": the record's epoch rows unchanged (LAYA-06)}."""
@@ -356,9 +409,10 @@ def disk_budget(model_bytes, matrix, train_state_bytes=None):
             "laya_final_checkpoints_bytes": (matrix["lr_grid"] + matrix["final_seeds"]) * model_bytes}
 
 
-def assumptions(matrix, measured=None, counts=None):
+def assumptions(matrix, measured=None, counts=None, interrupt=None):
     """What the user must confirm or trim at the compute checkpoint (plan 04-08), one sentence each."""
     measured = measured or {}
+    interrupted = bool(interrupt) and interrupt.get("mode") != "none" and not interrupt.get("missed")
     out = ["Matrix value %s = %s is provisional (RESEARCH A2): %s"
            % (k, ", ".join(str(x) for x in v) if isinstance(v, list) else v, MATRIX_SOURCES[k])
            for k, v in matrix.items()]
@@ -379,8 +433,10 @@ def assumptions(matrix, measured=None, counts=None):
     out += ["Scoring runs in fp32 on MPS (la.force_fp32 turns laya's fp16 autocast off); the scoring rate assumes fp32",
             "Per-epoch laya exports stay on (--export-epochs) so Phase 5 picks the epoch on val without retraining; "
             "Phase 5 prunes them after val scoring (see Disk)",
-            "The measurement probe trains %s epoch(s) and plan 04-06 adds a kill and resume; the projection uses the "
-            "slowest measured epoch" % ((measured.get("laya") or {}).get("epochs_measured", "-")),
+            "The measurement probe trains %s epoch(s)%s; the projection uses the slowest measured epoch"
+            % ((measured.get("laya") or {}).get("epochs_measured", "-"),
+               ", interrupted after epoch 1 and resumed by rerunning the same command (see Interruption and resume), "
+               "so the resumed process's warm-up is in the rate" if interrupted else ", not interrupted"),
             "Every split is counted over all its messages, without the 40-message calibration holdout, because Phase 5 "
             "calibrates on val (LAYA-05); slightly conservative",
             "BERTurk's per-epoch val evaluation for its epoch choice is not a separate line (lr_grid x berturk_epochs "
@@ -390,9 +446,13 @@ def assumptions(matrix, measured=None, counts=None):
     return out
 
 
-def build_report(meta, measured, counts, matrix, projection, preflight, what_if=None, disk=None, assumptions=None):
-    return {"schema": SCHEMA, "meta": meta, "preflight": preflight, "measured": measured, "counts": counts,
-            "matrix": matrix, "projection": projection, "what_if": what_if, "disk": disk, "assumptions": assumptions}
+def build_report(meta, measured, counts, matrix, projection, preflight, what_if=None, disk=None, assumptions=None,
+                 attempts=None, status="ok", interrupt=None, resume=None):
+    """The report dict. status other than ok (failed, ladder_exhausted) comes with measured and projection None: the
+    attempts are the whole result."""
+    return {"schema": SCHEMA, "meta": meta, "status": status, "preflight": preflight, "attempts": attempts,
+            "interrupt": interrupt, "resume": resume, "measured": measured, "counts": counts, "matrix": matrix,
+            "projection": projection, "what_if": what_if, "disk": disk, "assumptions": assumptions}
 
 
 # ---- markdown ----
@@ -485,6 +545,47 @@ def _disk_lines(d):
             "%s GiB" % (_fmt(d["selection_exports_bytes"], g, 2), _fmt(d["laya_final_checkpoints_bytes"], g, 2))]
 
 
+def _attempt_lines(attempts, status):
+    lines = ["", "## Attempts", "",
+             "Every probe attempt runs in a fresh process; an MPS out-of-memory attempt is followed by the next rung of "
+             "the LAYA-03 ladder. Chain status: **%s**." % status, "",
+             "| # | rung | status | run id | detail |", "|---|---|---|---|---|"]
+    for i, a in enumerate(attempts):
+        detail = a.get("line") or a.get("reason") or ("weaker: head-only" if runs.weaker(a["rung"]) else "")
+        lines.append("| %d | %s | %s | %s | %s |" % (i, a["rung"], a["status"], _dash(a.get("run_id")),
+                                                     detail.replace("|", "/") or "-"))
+    if status == "ladder_exhausted":
+        lines += ["", "**The fallback ladder is exhausted: no rung fit in memory, nothing was measured.**"]
+    elif status != "ok":
+        lines += ["", "**The probe failed (status %s): nothing was measured.**" % status]
+    return lines
+
+
+def _resume_lines(interrupt, resume):
+    lines = ["", "## Interruption and resume", ""]
+    if not interrupt or interrupt.get("mode") == "none":
+        lines.append("- No interruption (--interrupt none).")
+    else:
+        lines.append("- Mode %s after epoch %s%s; missed: %s; leftover processes after the kill: %s; available memory "
+                     "before the rerun: %s GiB" % (interrupt["mode"], interrupt["after_epoch"],
+                                                   "" if interrupt.get("delay_s") is None
+                                                   else ", %.0f s into the next epoch" % interrupt["delay_s"],
+                                                   interrupt["missed"], _dash(interrupt.get("leftover_processes")),
+                                                   _fmt(interrupt.get("post_interrupt_available_gib"), digits=2)))
+        if interrupt.get("missed"):
+            lines.append("- **The kill came too late: the run finished before it, so it was not interrupted.**")
+    if resume:
+        lines.append("- Segments %d; resume load %s s; peak memory while resuming %s GiB" % (
+            resume["segments"], _fmt(resume["resume_load_s"], digits=1),
+            _fmt(resume["resume_peak_total_bytes"], 2**30, 2)))
+        if not resume["resume_demonstrated"]:
+            lines.append("- **The resume was not demonstrated** (it needs two or more segments, epoch rows 1..E and "
+                         "resumed flags False then True).")
+        else:
+            lines.append("- Resume demonstrated: the rerun of the same command continued from the epoch-1 checkpoint.")
+    return lines
+
+
 def _provenance_lines(meta):
     split, man, model, versions, plat, proto = (meta["split"], meta["manifest"], meta["model"], meta["versions"],
                                                 meta["platform"], meta["protocol"])
@@ -513,6 +614,9 @@ def render_markdown(report):
         lines += ["**SMOKE RUN: not a compute checkpoint.** The run left the protocol (not mps, not the pinned "
                   "weights, not the committed selection_train, a start config other than the spike's, or a test "
                   "hook); its numbers must not be used for the approval.", ""]
+    if report.get("status", "ok") != "ok":
+        lines += ["**No measurement (status %s):** see Attempts; there is no projection to approve."
+                  % report["status"], ""]
     if spike.busy_machine(report.get("preflight")):
         lines += ["**Busy-machine run:** the preflight was overridden or swap grew while idle; the measured rate may "
                   "be slower than on a quiet machine.", ""]
@@ -522,8 +626,13 @@ def render_markdown(report):
         lines.append("- Preflight: %.2f GiB available (threshold %s%s), swap grew while idle: %s"
                      % (pf["available_gib"], pf["min_available_gib"], ", overridden" if pf["override"] else "",
                         pf["swap_grew_while_idle"]))
-    lines += _measured_lines(report["measured"])
-    lines += _projection_lines(report["projection"])
+    if report.get("attempts"):
+        lines += _attempt_lines(report["attempts"], report.get("status", "ok"))
+    if report.get("measured"):
+        lines += _resume_lines(report.get("interrupt"), report.get("resume"))
+        lines += _measured_lines(report["measured"])
+    if report.get("projection"):
+        lines += _projection_lines(report["projection"])
     if report.get("what_if"):
         lines += _what_if_lines(report["what_if"])
     if report.get("disk"):

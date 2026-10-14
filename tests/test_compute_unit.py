@@ -311,3 +311,126 @@ def test_split_counts_on_the_committed_splits():
         "selection_train": 14854, "final_train": 17001, "val": 2147, "test": 4228, "hotels_probe": 8072}
     assert {k: v["n_messages"] for k, v in counts.items()} == {
         "selection_train": 1450, "final_train": 1658, "val": 208, "test": 413, "hotels_probe": 1009}
+
+
+# ---- plan 04-06 Task 1: the probe protocol (registration, ladder chain, resume summary, kill and reap) ----
+
+def test_epoch_registered(tmp_path):
+    rid = "laya-selection_train-neg8-s0-12345678"
+    run_dir = tmp_path / rid
+    run_dir.mkdir()
+    assert compute.epoch_registered(str(tmp_path), rid, 1) is False          # no snapshot yet
+    (run_dir / compute.SNAPSHOT).write_text('{"checkpoints": []}', encoding="utf-8")
+    (run_dir / "epoch-001").mkdir()
+    (run_dir / "epoch-001" / "train_state.pt").write_bytes(b"x")
+    assert compute.epoch_registered(str(tmp_path), rid, 1) is False          # the snapshot does not name epoch-001
+    (run_dir / compute.SNAPSHOT).write_text('{"checkpoints": ["epoch-001"]}', encoding="utf-8")
+    (run_dir / "epoch-001" / "train_state.pt").unlink()
+    assert compute.epoch_registered(str(tmp_path), rid, 1) is False          # named, but no train_state.pt
+    (run_dir / "epoch-001" / "train_state.pt").write_bytes(b"x")
+    assert compute.epoch_registered(str(tmp_path), rid, 1) is True
+    assert compute.epoch_registered(str(tmp_path), rid, 2) is False
+
+
+def _fake_launcher(statuses):
+    seen, todo = [], list(statuses)
+
+    def launch(rung):
+        seen.append(rung)
+        return {"status": todo.pop(0), "run_id": "laya-%d" % len(seen)}
+    return launch, seen
+
+
+def test_attempt_chain_walks_the_ladder_on_oom():
+    launch, seen = _fake_launcher(["oom", "ok"])
+    attempts, status = compute.attempt_chain("none", launch)
+    assert status == "ok" and seen == ["none", "embeddings_frozen"]
+    assert [a["rung"] for a in attempts] == ["none", "embeddings_frozen"]
+    assert [a["status"] for a in attempts] == ["oom", "ok"]
+
+
+def test_attempt_chain_ladder_exhausted():
+    launch, seen = _fake_launcher(["oom"] * 4)
+    attempts, status = compute.attempt_chain("none", launch)
+    assert status == "ladder_exhausted"
+    assert [a["rung"] for a in attempts] == ["none", "embeddings_frozen", "embeddings_frozen+smaller_batch",
+                                             "encoder_frozen"]
+
+
+def test_attempt_chain_stops_on_failure():
+    launch, seen = _fake_launcher(["failed", "ok"])
+    attempts, status = compute.attempt_chain("none", launch)
+    assert status == "failed" and seen == ["none"] and attempts[0]["rung"] == "none"
+
+
+def _segment(i, start, load=None, peak=None):
+    return {"segment": i, "start_epoch": start, "resumed": start > 0, "git_sha": "a" * 40, "git_dirty": False,
+            "device": "mps", "resume_load_s": load, "resume_peak_total_bytes": peak}
+
+
+def test_resume_summary_two_segments():
+    rows = toy_rows()
+    rows[1].update(segment=1, resumed=True)
+    record = {"segments": [_segment(0, 0), _segment(1, 1, 42.5, 9 * 2**30)], "epochs": rows}
+    s = compute.resume_summary(record)
+    assert s == {"segments": 2, "resume_load_s": 42.5, "resume_peak_total_bytes": 9 * 2**30,
+                 "resume_demonstrated": True}
+
+
+def test_resume_summary_one_segment_is_not_a_resume():
+    record = {"segments": [_segment(0, 0)], "epochs": toy_rows()}
+    s = compute.resume_summary(record)
+    assert s["segments"] == 1 and s["resume_demonstrated"] is False and s["resume_load_s"] is None
+    gap = toy_rows()
+    gap[1].update(epoch=3, segment=1, resumed=True)                          # rows 1, 3: a gap
+    s = compute.resume_summary({"segments": [_segment(0, 0), _segment(1, 1, 1.0, 1)], "epochs": gap})
+    assert s["resume_demonstrated"] is False
+
+
+def test_markdown_shows_attempts_and_a_missed_kill():
+    measured = toy_measured()
+    p = compute.project(measured, TOY_COUNTS, TOY_MATRIX)
+    attempts = [{"rung": "none", "status": "oom", "run_id": "laya-a", "line": "MPS out of memory at epoch 1"},
+                {"rung": "embeddings_frozen", "status": "ok", "run_id": "laya-b"}]
+    interrupt = {"mode": "kill", "after_epoch": 1, "delay_s": 60.0, "missed": True, "leftover_processes": None}
+    resume = {"segments": 1, "resume_load_s": None, "resume_peak_total_bytes": None, "resume_demonstrated": False}
+    report = compute.build_report(toy_meta(), measured, TOY_COUNTS, TOY_MATRIX, p, toy_preflight(),
+                                  attempts=attempts, status="ok", interrupt=interrupt, resume=resume)
+    md = compute.render_markdown(report)
+    assert "Interruption and resume" in md and "embeddings_frozen" in md and "MPS out of memory" in md
+    assert "kill came too late" in md and "resume was not demonstrated" in md
+    failed = compute.build_report(toy_meta(), None, None, TOY_MATRIX, None, toy_preflight(),
+                                  attempts=[dict(a, status="oom") for a in attempts], status="ladder_exhausted")
+    md = compute.render_markdown(failed)
+    assert "ladder is exhausted" in md and "## Projection" not in md
+
+
+def test_kill_after_registration_reaps_the_tree(tmp_path):
+    import time
+    import psutil
+    import compute_checkpoint
+    pidfile = tmp_path / "grandchild.pid"
+    code = ("import subprocess, sys, time\n"
+            "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)'])\n"
+            "open(sys.argv[1], 'w').write(str(g.pid))\n"
+            "time.sleep(300)\n")
+    proc = subprocess.Popen([sys.executable, "-c", code, str(pidfile)], start_new_session=True)
+    t0 = time.monotonic()
+
+    def registered():
+        return pidfile.exists() and pidfile.read_text() != "" and time.monotonic() - t0 > 1.0
+    out = compute_checkpoint.kill_after_registration(proc, registered, 0, poll_s=0.1)
+    grandchild = int(pidfile.read_text())
+    assert out["mode"] == "kill" and out["after_epoch"] == 1 and out["missed"] is False
+    assert out["leftover_processes"] == 0
+    deadline = time.monotonic() + 10
+    while psutil.pid_exists(grandchild) and time.monotonic() < deadline:     # reparented zombies are reaped by init
+        time.sleep(0.1)
+    assert not psutil.pid_exists(proc.pid) and not psutil.pid_exists(grandchild)
+
+
+def test_kill_after_registration_records_a_missed_kill():
+    import compute_checkpoint
+    proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    out = compute_checkpoint.kill_after_registration(proc, lambda: False, 0, poll_s=0.05)
+    assert out["missed"] is True and out["leftover_processes"] is None and proc.returncode == 0

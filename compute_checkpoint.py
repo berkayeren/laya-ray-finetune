@@ -12,26 +12,43 @@ the whole experiment matrix (s_per_step = the largest train_s / optimizer_steps 
 of all five verified splits), a what-if table, a disk budget and the assumptions to confirm, and writes
 compute_checkpoint.json and compute_checkpoint.md. The probe's checkpoint and Ray storage are deleted afterwards unless --keep-run.
 
+Probe protocol (RESEARCH Open Question 1): a 2-epoch probe that is interrupted and resumed (LAYA-04 on the real
+hardware). The orchestrator learns the run_id from `ray_train.py ... --print-run-id`, starts the child in its own
+session, waits until storage/<run_id> registers the epoch-001 checkpoint (compute.epoch_registered), waits
+--kill-delay-s into epoch 2, SIGKILLs the child's process group, reaps the captured process tree (survivors get a
+SIGKILL after 120 s), waits for available memory to recover and reruns the identical command, which resumes from
+epoch-001. --interrupt fail uses ray_train.py's hidden --fail-after-epoch 1 instead (deterministic; the CPU test);
+--interrupt none runs once. A kill that comes too late is recorded as missed, and the report then says the resume was
+not demonstrated. An attempt that ends with the MPS out-of-memory line is followed by a fresh child on the next rung of
+the LAYA-03 ladder (pilot.runs.next_rung), each with its own run_id (compute.attempt_chain); every attempt stays in the
+report, and an exhausted ladder is reported as status ladder_exhausted. Before any child, the disk under --storage
+must hold pilot.runs.disk_need_bytes for the run.
+
 A run off the protocol (not mps, not the pinned weights, not the committed selection_train under the committed
-manifest, a start config other than the spike's at rung none, or a test hook) is bannered SMOKE RUN with
+manifest, a start config other than the spike's at rung none, an interrupt other than kill, or a test hook) is
+bannered SMOKE RUN with
 meta.protocol.protocol_complete false; a busy-machine preflight is bannered too. Neither is a compute checkpoint.
 
 Run it on AC power, after quitting heavy apps, under `caffeinate -i` (the machine must not sleep mid-epoch).
 
 usage:
   caffeinate -i python compute_checkpoint.py --out results/compute
-  python compute_checkpoint.py --device cpu --base CKPT --data SPLIT --manifest M --epochs 1 --min-available-gib 0 \
-      --out /tmp/compute   # smoke (bannered SMOKE RUN)
+  python compute_checkpoint.py --device cpu --base CKPT --data SPLIT --manifest M --interrupt fail \
+      --min-available-gib 0 --out /tmp/compute   # smoke (bannered SMOKE RUN)
 """
 import argparse
+import functools
 import importlib.metadata
 import os
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+
+import psutil
 
 from pilot import compute, pins, runs, spike
 from pilot import laya_adapter as la
@@ -44,12 +61,13 @@ DEFAULT_OUT = os.path.join(REPO_ROOT, "results", "compute")
 VERSIONED = ("torch", "ray", "laya", "transformers", "psutil")
 NEG = 8
 TAIL_LINES = 40
+REAP_S = 120                # a killed tree's processes get this long to exit before they are SIGKILLed
+RECOVER_S, RECOVER_POLL_S = 120, 5   # wait for available memory to recover after an interrupt, before the rerun
 
 
 def preflight(min_available_gib):
     """The spike's quiet-machine preflight (mps_spike.main): refuse below --min-available-gib, sample swap twice 5 s
     apart while idle; 0 records an override (a busy-machine run)."""
-    import psutil
     refuse = ("%.1f GiB available, below --min-available-gib %.1f: quit heavy apps (browsers, IDE indexers, Docker, "
               "other Python processes), connect AC power and run under `caffeinate -i`, then retry; or pass "
               "--min-available-gib 0 to record a busy-machine run")
@@ -98,13 +116,210 @@ def tail(path, n=TAIL_LINES):
         return "".join(f.readlines()[-n:])
 
 
+def read_text(path):
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def last_line(path):
+    """The last non-empty line of a child log, scrubbed for the report (the child's own SystemExit line)."""
+    lines = [ln.strip() for ln in read_text(path).splitlines() if ln.strip()]
+    return spike.scrub(lines[-1]) if lines else ""
+
+
 def protocol_complete(a, start):
     """True only for the real compute checkpoint: mps, the pinned weights, the committed selection_train under the
-    committed manifest, no test hook, and the spike's start config at rung none."""
+    committed manifest, no test hook (--max-messages, --calib-frac, --interrupt fail), a kill-and-resume probe, and the
+    spike's start config at rung none."""
     return (a.device == "mps" and a.base == "multilingual"
             and os.path.realpath(a.data) == os.path.realpath(DEFAULT_DATA) and manifest_is_committed(a.manifest)
-            and a.max_messages is None and a.calib_frac is None
+            and a.max_messages is None and a.calib_frac is None and a.interrupt == "kill"
             and {k: start[k] for k in runs.SPIKE_START} == runs.SPIKE_START and start["rung"] == "none")
+
+
+def nearest_existing(path):
+    """`path` or its nearest existing parent (the filesystem a not-yet-created --storage lands on)."""
+    p = os.path.abspath(path)
+    while not os.path.exists(p) and os.path.dirname(p) != p:
+        p = os.path.dirname(p)
+    return p
+
+
+def disk_preflight(storage, model_bytes, epochs):
+    """Refuse before any child when the disk under --storage cannot hold the probe run (pilot.runs.disk_need_bytes
+    with per-epoch exports on, the ray_train.py floor)."""
+    need = runs.disk_need_bytes(model_bytes, epochs, True)
+    free = shutil.disk_usage(nearest_existing(storage)).free
+    if free < need:
+        raise SystemExit("%.1f GiB free under --storage; the probe needs about %.1f GiB (three train states during "
+                         "checkpoint rotation, per-epoch exports, the final checkpoint); free disk or pass another "
+                         "--storage" % (free / 2**30, need / 2**30))
+    return {"need_bytes": need, "free_bytes": free}
+
+
+# ---- the interrupt: kill the probe's whole process tree once epoch 1 is registered ----
+
+def kill_tree(proc):
+    """SIGKILL the process group of `proc` (started with start_new_session=True), reap `proc`, then wait up to REAP_S
+    for every process of its captured tree and SIGKILL the survivors (T-04-19: no Ray worker may keep holding MPS
+    memory into the resumed run). Returns the number of survivors that needed the extra SIGKILL."""
+    try:
+        children = psutil.Process(proc.pid).children(recursive=True)
+    except psutil.NoSuchProcess:
+        children = []
+    try:
+        pgid = os.getpgid(proc.pid)
+        if pgid == os.getpgrp():                            # never our own group: the child must have its own session
+            raise SystemExit("the probe child shares the orchestrator's process group; refusing to kill it")
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass                                                # it exited (and its group with it) in the meantime
+    proc.wait()
+    _, alive = psutil.wait_procs(children, timeout=REAP_S)
+    for p in alive:
+        try:
+            p.kill()
+        except psutil.NoSuchProcess:
+            pass
+    psutil.wait_procs(alive, timeout=10)
+    return len(alive)
+
+
+def kill_after_registration(proc, registered, delay_s, poll_s=1.0):
+    """Wait until registered() (epoch 1's checkpoint is in Ray's snapshot), then delay_s more into epoch 2, then kill
+    the child's process tree (kill_tree). missed is True when the child exited first: it finished (or failed) before
+    the kill, so nothing was interrupted."""
+    out = {"mode": "kill", "after_epoch": 1, "delay_s": delay_s, "missed": False, "leftover_processes": None}
+    while not registered():
+        if proc.poll() is not None:
+            return dict(out, missed=True)
+        time.sleep(poll_s)
+    end = time.monotonic() + delay_s
+    while time.monotonic() < end:
+        if proc.poll() is not None:
+            return dict(out, missed=True)
+        time.sleep(max(0.0, min(poll_s, end - time.monotonic())))
+    if proc.poll() is not None:
+        return dict(out, missed=True)
+    out["leftover_processes"] = kill_tree(proc)
+    # a child that exited on its own between the last poll and the SIGKILL was not interrupted
+    out["missed"] = proc.returncode is not None and proc.returncode >= 0
+    return out
+
+
+def wait_for_memory(min_available_gib, timeout_s=RECOVER_S, poll_s=RECOVER_POLL_S):
+    """Available GiB once it is back at --min-available-gib, or after timeout_s (the rerun then starts anyway and the
+    report shows the number)."""
+    end = time.monotonic() + timeout_s
+    while True:
+        available = psutil.virtual_memory().available / 2**30
+        if available >= min_available_gib or time.monotonic() >= end:
+            return available
+        time.sleep(poll_s)
+
+
+def drop_run(storage, rid):
+    shutil.rmtree(os.path.join(storage, rid), ignore_errors=True)
+
+
+def drop_storage(storage, own_storage, rids):
+    """Delete the probe's Ray storage: the whole dir the orchestrator created, else only the probe's run dirs."""
+    if own_storage:
+        shutil.rmtree(storage, ignore_errors=True)
+    else:
+        for rid in rids:
+            drop_run(storage, rid)
+
+
+def launch_rung(rung, ctx):
+    """One probe attempt on `rung` in fresh children: the first launch (its own session) interrupted per --interrupt,
+    then, after an interrupt that landed, the identical command again, which resumes from epoch 1. Returns the attempt
+    ({run_id, status ok|oom|failed, interrupt, resume | line | reason}); an ok attempt leaves its measurement in
+    ctx["result"]."""
+    a, storage, env = ctx["a"], ctx["storage"], ctx["env"]
+    d = os.path.join(ctx["tmp"], "attempt-%d" % len(ctx["rids"]))
+    os.makedirs(d)
+    ckpt, log = os.path.join(d, "ckpt"), os.path.join(d, "probe.log")
+    cmd = child_command(a, dict(ctx["start"], rung=rung), ctx["base"], ckpt, storage)
+    rid = run_id_of(cmd, env)
+    if os.path.exists(os.path.join(storage, rid)):
+        # the probe must train from scratch: an existing dir would resume (or return) another measurement
+        raise SystemExit("%s already holds run %s; the probe must start fresh: delete that dir or choose another "
+                         "--storage" % (storage, rid))
+    ctx["rids"].append(rid)
+    ctx["logs"].append(log)
+    attempt = {"run_id": rid}
+    print("probe run %s on rung %s, interrupt %s -> log %s (tail -f it)" % (rid, rung, a.interrupt, log), flush=True)
+    first = cmd + (["--fail-after-epoch", "1"] if a.interrupt == "fail" else [])
+    with open(log, "wb") as f:
+        proc = subprocess.Popen(first, cwd=REPO_ROOT, env=env, stdout=f, stderr=subprocess.STDOUT, shell=False,
+                                start_new_session=True)
+        try:
+            if a.interrupt == "kill":
+                interrupt = kill_after_registration(proc, lambda: compute.epoch_registered(storage, rid, 1),
+                                                    a.kill_delay_s)
+            else:
+                proc.wait()
+                interrupt = {"mode": a.interrupt, "after_epoch": 1 if a.interrupt == "fail" else None,
+                             "delay_s": None, "missed": False, "leftover_processes": None}
+        except BaseException:
+            if proc.poll() is None:                         # Ctrl-C never reaches a child in its own session
+                kill_tree(proc)
+            raise
+    oom = runs.failure_line(read_text(log))
+    if oom:
+        return dict(attempt, status="oom", line=spike.scrub(oom), interrupt=interrupt)
+    rc = proc.returncode
+    if a.interrupt == "fail" and (rc == 0 or not compute.epoch_registered(storage, rid, 1)):
+        return dict(attempt, status="failed", returncode=rc, interrupt=interrupt,
+                    reason="--fail-after-epoch 1 did not leave a registered epoch-1 checkpoint (exit %d): %s"
+                           % (rc, last_line(log)))
+    landed = a.interrupt != "none" and not interrupt["missed"]
+    if not landed and rc != 0:
+        return dict(attempt, status="failed", returncode=rc, interrupt=interrupt, reason=last_line(log))
+    if landed:
+        interrupt["post_interrupt_available_gib"] = wait_for_memory(a.min_available_gib)
+        print("interrupted after epoch 1 (%s); rerunning the same command to resume" % a.interrupt, flush=True)
+        with open(log, "ab") as f:
+            r = subprocess.run(cmd, cwd=REPO_ROOT, env=env, stdout=f, stderr=subprocess.STDOUT, shell=False)
+        oom = runs.failure_line(read_text(log))
+        if oom:
+            return dict(attempt, status="oom", line=spike.scrub(oom), interrupt=interrupt)
+        if r.returncode != 0:
+            return dict(attempt, status="failed", returncode=r.returncode, interrupt=interrupt,
+                        reason="the resumed run failed: %s" % last_line(log))
+    measured = compute.measured_from_checkpoint(ckpt)
+    ctx["result"] = {"measured": measured, "ckpt": ckpt, "rid": rid}
+    return dict(attempt, status="ok", interrupt=interrupt, resume=compute.resume_summary(runs.read_record(ckpt)))
+
+
+def oom_dropping(launch, ctx):
+    """launch, but an oom attempt's Ray run dir is deleted at once (unless --keep-run), so the next rung has the disk
+    the preflight checked for one run."""
+    def run(rung):
+        attempt = launch(rung)
+        if attempt["status"] == "oom" and not ctx["a"].keep_run:
+            drop_run(ctx["storage"], attempt["run_id"])
+        return attempt
+    return run
+
+
+def build_meta(a, entry, start, model, rid):
+    return {"generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "split": {"path": entry["path"], "sha256": entry["sha256"], "n_messages": entry["n_messages"]},
+            "manifest": {"path": repo_relpath(a.manifest), "sha256": sha256_file(a.manifest),
+                         "is_committed": manifest_is_committed(a.manifest)},
+            "spike_report": {"path": repo_relpath(a.spike_report), "sha256": sha256_file(a.spike_report)},
+            # the pin (or the local checkpoint's hashes) identifies the weights; no local path enters the report
+            "model": model,
+            "versions": dict({k: importlib.metadata.version(k) for k in VERSIONED}, python=platform.python_version()),
+            "platform": {"macos": platform.mac_ver()[0], "machine": platform.machine(),
+                         "total_memory_bytes": psutil.virtual_memory().total},
+            "protocol": {"device": a.device, "epochs": a.epochs, "seed": a.seed, "cpus": a.cpus, "neg": NEG,
+                         "spike_start": start, "run_id": rid,
+                         "interrupt": {"mode": a.interrupt, "kill_delay_s": a.kill_delay_s},
+                         "test_hooks": {"max_messages": a.max_messages, "calib_frac": a.calib_frac},
+                         "protocol_complete": protocol_complete(a, start)}}
 
 
 def main(argv=None):
@@ -122,6 +337,12 @@ def main(argv=None):
     ap.add_argument("--min-available-gib", type=float, default=7.0,
                     help="refuse to measure below this much available memory (the Phase 2 run policy); 0 records a "
                          "busy-machine run")
+    ap.add_argument("--interrupt", choices=("kill", "fail", "none"), default="kill",
+                    help="kill (default): SIGKILL the probe's process tree --kill-delay-s into epoch 2 and rerun the "
+                         "same command to resume; fail: ray_train.py's --fail-after-epoch 1 (deterministic, for the "
+                         "CPU test); none: run once")
+    ap.add_argument("--kill-delay-s", type=float, default=60.0,
+                    help="seconds into epoch 2 (after epoch 1's checkpoint is registered) before the kill")
     ap.add_argument("--keep-run", action="store_true",
                     help="keep the probe's checkpoint and Ray storage instead of deleting them after the report")
     ap.add_argument("--spike-report", default=DEFAULT_SPIKE, help="the Phase 2 spike report holding verdict.chosen")
@@ -130,6 +351,10 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.epochs < 1:
         ap.error("--epochs must be at least 1")
+    if a.interrupt != "none" and a.epochs < 2:
+        ap.error("--interrupt needs --epochs 2 or more (it interrupts after epoch 1); or pass --interrupt none")
+    if not a.kill_delay_s >= 0:
+        ap.error("--kill-delay-s must not be negative")
     if a.cpus < 1:
         ap.error("--cpus must be at least 1")
     if not a.min_available_gib >= 0:
@@ -153,67 +378,58 @@ def main(argv=None):
         model = identity(base)                              # hashes only: no local path enters the report
     else:
         raise SystemExit("--base must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % a.base)
+    model_bytes = os.path.getsize(os.path.join(base_dir, "model.safetensors"))
 
     own_storage = a.storage is None
+    ray_results = os.path.join(REPO_ROOT, "ray_results")
+    disk_preflight(ray_results if own_storage else a.storage, model_bytes, a.epochs)   # before any child
     if own_storage:
-        os.makedirs(os.path.join(REPO_ROOT, "ray_results"), exist_ok=True)
-        storage = tempfile.mkdtemp(prefix="compute-", dir=os.path.join(REPO_ROOT, "ray_results"))
+        os.makedirs(ray_results, exist_ok=True)
+        storage = tempfile.mkdtemp(prefix="compute-", dir=ray_results)
     else:
         storage = os.path.abspath(a.storage)
     tmp = tempfile.mkdtemp(prefix="compute-probe-")
-    ckpt, log = os.path.join(tmp, "ckpt"), os.path.join(tmp, "probe.log")
-    cmd = child_command(a, start, base, ckpt, storage)
     env = dict(os.environ, **spike.spike_env("0", a.cpus))
+    ctx = {"a": a, "start": start, "base": base, "storage": storage, "tmp": tmp, "env": env, "rids": [], "logs": [],
+           "result": {}}
     try:
-        rid = run_id_of(cmd, env)
-        if os.path.exists(os.path.join(storage, rid)):
-            # the probe must train from scratch: an existing dir would resume (or return) another measurement
-            raise SystemExit("%s already holds run %s; the probe must start fresh: delete that dir or choose another "
-                             "--storage" % (storage, rid))
-    except SystemExit:
+        attempts, status = compute.attempt_chain(start["rung"],
+                                                 oom_dropping(functools.partial(launch_rung, ctx=ctx), ctx))
+    except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
-        if own_storage:
-            shutil.rmtree(storage, ignore_errors=True)
+        drop_storage(storage, own_storage, ctx["rids"])
         raise
-    print("probe run %s -> log %s (tail -f it)" % (rid, log), flush=True)
-    with open(log, "wb") as f:
-        r = subprocess.run(cmd, cwd=REPO_ROOT, env=env, stdout=f, stderr=subprocess.STDOUT, shell=False)
-    if r.returncode != 0:
-        raise SystemExit("ray_train.py exited %d; the probe dir %s is kept. Last %d lines of %s:\n%s"
-                         % (r.returncode, tmp, TAIL_LINES, log, tail(log)))
 
-    measured = compute.measured_from_checkpoint(ckpt)
+    rid = attempts[-1]["run_id"]
+    meta = build_meta(a, entry, start, model, rid)
+    if status != "ok":
+        report = compute.build_report(meta, None, None, compute.MATRIX, None, pf, attempts=attempts, status=status)
+        md = compute.write_report(a.out, report)
+        if not a.keep_run:
+            drop_storage(storage, own_storage, ctx["rids"])
+        raise SystemExit("probe %s after %d attempt(s) (last rung %s); report -> %s; logs kept in %s. Last %d lines "
+                         "of %s:\n%s" % (status, len(attempts), attempts[-1]["rung"], md, tmp, TAIL_LINES,
+                                          ctx["logs"][-1], tail(ctx["logs"][-1])))
+
+    ok = attempts[-1]
+    measured, ckpt = ctx["result"]["measured"], ctx["result"]["ckpt"]
     counts = compute.split_counts(a.manifest)              # all five registered splits, verified bytes
     projection = compute.project(measured, counts, compute.MATRIX)
-    model_bytes = os.path.getsize(os.path.join(base_dir, "model.safetensors"))
-    import psutil
-    meta = {"generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "split": {"path": entry["path"], "sha256": entry["sha256"], "n_messages": entry["n_messages"]},
-            "manifest": {"path": repo_relpath(a.manifest), "sha256": sha256_file(a.manifest),
-                         "is_committed": manifest_is_committed(a.manifest)},
-            "spike_report": {"path": repo_relpath(a.spike_report), "sha256": sha256_file(a.spike_report)},
-            # the pin (or the local checkpoint's hashes) identifies the weights; no local path enters the report
-            "model": model,
-            "versions": dict({k: importlib.metadata.version(k) for k in VERSIONED}, python=platform.python_version()),
-            "platform": {"macos": platform.mac_ver()[0], "machine": platform.machine(),
-                         "total_memory_bytes": psutil.virtual_memory().total},
-            "protocol": {"device": a.device, "epochs": a.epochs, "seed": a.seed, "cpus": a.cpus, "neg": NEG,
-                         "spike_start": start, "run_id": rid,
-                         "test_hooks": {"max_messages": a.max_messages, "calib_frac": a.calib_frac},
-                         "protocol_complete": protocol_complete(a, start)}}
     report = compute.build_report(meta, measured, counts, compute.MATRIX, projection, pf,
                                   what_if=compute.what_if(measured, counts, compute.MATRIX),
                                   disk=compute.disk_budget(model_bytes, compute.MATRIX,
                                                            measured["laya"]["train_state_bytes"]),
-                                  assumptions=compute.assumptions(compute.MATRIX, measured, counts))
+                                  assumptions=compute.assumptions(compute.MATRIX, measured, counts, ok["interrupt"]),
+                                  attempts=attempts, status=status, interrupt=ok["interrupt"], resume=ok["resume"])
     md = compute.write_report(a.out, report)
     print("report -> %s" % md)
-    print("projected total: %.2f h over %d lines" % (projection["total_h"], len(projection["lines"])), flush=True)
+    print("projected total: %.2f h over %d lines; resume demonstrated: %s"
+          % (projection["total_h"], len(projection["lines"]), ok["resume"]["resume_demonstrated"]), flush=True)
     if a.keep_run:
-        print("kept: probe checkpoint %s, Ray run dir %s" % (ckpt, os.path.join(storage, rid)))
+        print("kept: probe checkpoint %s, Ray run dir(s) under %s" % (ckpt, storage))
     else:
         shutil.rmtree(tmp, ignore_errors=True)
-        shutil.rmtree(storage if own_storage else os.path.join(storage, rid), ignore_errors=True)
+        drop_storage(storage, own_storage, ctx["rids"])
 
 
 if __name__ == "__main__":
