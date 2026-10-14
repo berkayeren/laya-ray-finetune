@@ -140,12 +140,15 @@ def resolve_checkpoint(checkpoint, ident=None):
 def load_agent(model_dir, device, expected_sha256):
     """laya.load of a dir resolved by resolve_checkpoint; laya re-checks expected_sha256 before parsing any weight.
     The normalized tokenizer-config digest (pilot.weights.NORMALIZED_KEY, a local checkpoint's; laya rewrites that
-    file on load) is checked here first, laya.load gets the raw-file digests."""
+    file on load) is checked here first, laya.load gets the raw-file digests; a rewrite laya could not make (it only
+    warns) is refused after the load (pilot.weights.check_tokenizer_config_rewritten; 04-REVIEW IN-01)."""
     import laya
-    from pilot.weights import NORMALIZED_KEY, laya_digests, verify_files
+    from pilot.weights import NORMALIZED_KEY, check_tokenizer_config_rewritten, laya_digests, verify_files
     if NORMALIZED_KEY in expected_sha256:
         verify_files(model_dir, {NORMALIZED_KEY: expected_sha256[NORMALIZED_KEY]}, "checkpoint")
-    return laya.load(model_dir, device=device, expected_sha256=laya_digests(expected_sha256))
+    agent = laya.load(model_dir, device=device, expected_sha256=laya_digests(expected_sha256))
+    check_tokenizer_config_rewritten(model_dir, "checkpoint")
+    return agent
 
 
 def check_agent(agent, device):

@@ -44,6 +44,28 @@ def _split_cases(path):
         return pilot.data.parse_jsonl(f.read())
 
 
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
+def test_a_tokenizer_config_laya_could_not_rewrite_is_refused(tiny):
+    """04-REVIEW IN-01: on a read-only tokenizer/ laya.load only warns and loads the un-normalized config, which the
+    identity (bound by the normalized view) does not tell apart from the rewritten one; score.load_agent refuses."""
+    import warnings
+    _, _, ckpt = tiny
+    model_dir, expected = score.resolve_checkpoint(ckpt)
+    before = identity(ckpt)
+    tok_dir = os.path.join(ckpt, "tokenizer")
+    os.chmod(tok_dir, 0o555)
+    try:
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            with pytest.raises(SystemExit, match="checkpoint: laya could not rewrite tokenizer/tokenizer_config.json"):
+                score.load_agent(model_dir, "cpu", expected)
+        assert any("could not patch" in str(w.message) for w in seen)
+    finally:
+        os.chmod(tok_dir, 0o755)
+    score.load_agent(model_dir, "cpu", expected)                     # writable: laya rewrites it and the load passes
+    assert identity(ckpt) == before                                  # the rewrite keeps the identity (IN-05)
+
+
 def test_tiny_checkpoint_round_trips_through_score_and_report(tmp_path, tiny):
     import laya
     out_dir, manifest, ckpt = tiny

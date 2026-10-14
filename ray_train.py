@@ -112,7 +112,7 @@ from pilot import laya_adapter as la
 from pilot import dumps, pins, runs, spike
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file,
                         verify_split_file)
-from pilot.weights import checkpoint_digests, fetch, identity, verify_files
+from pilot.weights import check_tokenizer_config_rewritten, checkpoint_digests, fetch, identity, verify_files
 
 WEIGHT_DECAY = 0.01                                         # AdamW weight decay (part of the run identity)
 CLIP_GRAD_NORM = 1.0                                        # gradient-norm clip per optimizer step (same)
@@ -536,6 +536,7 @@ def train_loop_per_worker(c):
     t_load = time.perf_counter()
     verify_files(c["base_dir"], c["base_sha256"], "base checkpoint")
     model, tok, cfg = la.load_checkpoint(c["base_dir"])
+    check_tokenizer_config_rewritten(c["base_dir"], "base checkpoint")    # laya only warns (04-REVIEW IN-01)
     load_s = time.perf_counter() - t_load
     max_len = c["max_len"] or cfg.get("max_len", 512)
     head_max_len = c["head_max_len"] or cfg.get("head_max_len", 192)

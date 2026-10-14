@@ -156,6 +156,16 @@ def test_a_local_base_names_the_run_by_its_tokenizer_and_encoder(tiny_run, tmp_p
     assert "base_files_sha256" in runs.IDENTITY and "base_files_sha256" in runs.DROPPED_WHEN_NONE
 
 
+def test_the_worker_checks_the_tokenizer_config_rewrite_after_the_base_load():
+    """04-REVIEW IN-01: laya.train.load_checkpoint only warns when its tokenizer_config.json rewrite fails, so the
+    worker refuses an un-normalized file right after the load (tests/test_laya_adapter.py runs the refusal)."""
+    import inspect
+    src = inspect.getsource(ray_train.train_loop_per_worker)
+    load = src.index('la.load_checkpoint(c["base_dir"])')
+    assert load < src.index('check_tokenizer_config_rewritten(c["base_dir"], "base checkpoint")') < src.index(
+        "load_s = time.perf_counter() - t_load")
+
+
 def test_intermediate_checkpoint_config_is_marked_and_traceable():
     base = {"encoder": "x", "temperature": 1.3, "training": {"base_run": 1}}
     ray_cfg = {"provenance": {"data": "splits/selection_train.jsonl"}, "calibration_holdout": {"n_messages": 4}}

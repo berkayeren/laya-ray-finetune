@@ -13,7 +13,8 @@ laya.agent._fix_tokenizer_config), so that one file is bound by the sha256 of it
 which the rewrite does not change; checkpoint_digests hands laya.load the raw-file digests and verify_files checks
 the normalized one. checkpoint_digests refuses a local checkpoint without tokenizer/tokenizer_config.json or
 encoder/config.json (pilot.dumps.LOCAL_REQUIRED_FILES): laya 0.4.6 would read them from the Hub by the config's encoder
-name, unpinned (04-REVIEW WR-02).
+name, unpinned (04-REVIEW WR-02). laya only warns when it cannot rewrite tokenizer_config.json, so
+check_tokenizer_config_rewritten refuses, after the load, a file it left un-normalized (04-REVIEW IN-01).
 
 usage: python -m pilot.weights        # fetch and verify both pinned checkpoints, print sizes and free disk
 """
@@ -118,6 +119,26 @@ def tokenizer_config_sha256(path):
         return hashlib.sha256(raw).hexdigest()
     blob = json.dumps(normalized_tokenizer_config(tcfg), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def check_tokenizer_config_rewritten(d, what):
+    """SystemExit unless d's tokenizer/tokenizer_config.json, read after laya.load or laya.train.load_checkpoint, is a
+    JSON object equal to its normalized_tokenizer_config view (04-REVIEW IN-01). laya 0.4.6's rewrite catches every
+    error, only warns ("could not patch", e.g. on a read-only checkpoint dir) and loads the raw file; the identity binds
+    the normalized view, so after a failed rewrite two raw configs one identity does not tell apart would load
+    differently. A missing file is checkpoint_digests' refusal, not this one."""
+    path = os.path.join(d, TOKENIZER_CONFIG)
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            tcfg = json.load(f)
+    except ValueError:
+        tcfg = None
+    if not isinstance(tcfg, dict) or normalized_tokenizer_config(tcfg) != tcfg:
+        raise SystemExit("%s: laya could not rewrite %s on load (a read-only dir, or not a JSON object), so the "
+                         "tokenizer it loaded is not the one the identity binds; make the checkpoint dir writable "
+                         "(or copy it) and rerun" % (what, TOKENIZER_CONFIG))
 
 
 def component_digests(checkpoint):

@@ -349,6 +349,25 @@ def test_checkpoint_digests_bind_a_local_load_to_its_recorded_identity(tmp_path)
         pilot.weights.checkpoint_digests(str(tmp_path), pilot.weights.identity(str(tmp_path)))
 
 
+def test_check_tokenizer_config_rewritten_refuses_a_file_laya_left_unnormalized(tmp_path):
+    """04-REVIEW IN-01: after a load the file must be its own normalized view (laya rewrote it, or it needed none)."""
+    check = pilot.weights.check_tokenizer_config_rewritten
+    check(str(tmp_path), "checkpoint")                                     # no file: checkpoint_digests' refusal
+    (tmp_path / "tokenizer").mkdir()
+    path = tmp_path / "tokenizer" / "tokenizer_config.json"
+    for ok in ({"tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {"extra_0": "<a>"}},
+               {"tokenizer_class": "BertTokenizer", "backend": "x"}):
+        path.write_text(json.dumps(ok), encoding="utf-8")
+        check(str(tmp_path), "checkpoint")
+    for bad in (json.dumps({"tokenizer_class": "TokenizersBackend", "backend": "tokenizers"}),
+                json.dumps({"pad_token": "[PAD]"}),
+                json.dumps({"tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": ["<a>"]}),
+                "[]", "not json"):
+        path.write_text(bad, encoding="utf-8")
+        with pytest.raises(SystemExit, match="checkpoint: laya could not rewrite .*writable"):
+            check(str(tmp_path), "checkpoint")
+
+
 def test_score_load_is_refused_when_the_checkpoint_changed_after_its_identity(tmp_path):
     import score
     (tmp_path / "model.safetensors").write_bytes(b"weights")

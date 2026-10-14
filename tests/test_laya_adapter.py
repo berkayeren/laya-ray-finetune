@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import types
+import warnings
 
 import numpy as np
 import pytest
@@ -320,3 +321,25 @@ def test_the_tokenizer_config_mirror_matches_laya(tmp_path, tcfg):
     assert weights.normalized_tokenizer_config(tcfg) == written
     assert weights.normalized_tokenizer_config(written) == written
     assert weights.tokenizer_config_sha256(str(path)) == before
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
+def test_a_tokenizer_config_rewrite_laya_could_not_make_is_refused(tmp_path):
+    """04-REVIEW IN-01: laya only warns when it cannot rewrite tokenizer_config.json (here a read-only tokenizer/) and
+    loads the raw file. pilot.weights.check_tokenizer_config_rewritten, which ray_train's worker runs after
+    la.load_checkpoint and score.load_agent after laya.load, refuses that file, and passes once the rewrite is made."""
+    from pilot import weights
+    ckpt = tiny_checkpoint(tmp_path / "base")                 # transformers saves tokenizer_class TokenizersBackend
+    tok_dir = os.path.join(ckpt, "tokenizer")
+    os.chmod(tok_dir, 0o555)
+    try:
+        with warnings.catch_warnings(record=True) as seen:
+            warnings.simplefilter("always")
+            la.load_checkpoint(ckpt)
+        assert any("could not patch" in str(w.message) for w in seen), [str(w.message) for w in seen]
+        with pytest.raises(SystemExit, match="base checkpoint: laya could not rewrite tokenizer/tokenizer_config.json"):
+            weights.check_tokenizer_config_rewritten(ckpt, "base checkpoint")
+    finally:
+        os.chmod(tok_dir, 0o755)
+    la.load_checkpoint(ckpt)
+    weights.check_tokenizer_config_rewritten(ckpt, "base checkpoint")
