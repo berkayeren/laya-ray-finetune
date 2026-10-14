@@ -318,6 +318,26 @@ def test_driver_turns_the_worker_oom_into_one_line():
         ray_train.fit_or_exit(Trainer(KeyError("x")), "ray/laya-x")
 
 
+def test_a_worker_refusal_is_shown_as_is_not_as_resume_advice():
+    """04-REVIEW CR-01: a SystemExit in the worker (e.g. the tokenizer-config backstop after the base load) names its own
+    fix; "rerun the same command to resume" would only refuse again. The text is Ray 2.59's WorkerGroupError form."""
+    from ray.train import WorkerGroupError
+    msg = ("base checkpoint: laya could not rewrite tokenizer/tokenizer_config.json on load (a read-only dir, or not a "
+           "JSON object), so the tokenizer it loaded is not the one the identity binds; make the checkpoint dir "
+           "writable (or copy it) and rerun")
+
+    class Trainer:
+        def fit(self):
+            raise WorkerGroupError("Training failed due to worker errors:\n[Rank 0 Error Snippet]:\nTraceback (most "
+                                   "recent call last):\n  File \"ray_train.py\", line 540, in train_loop_per_worker\n"
+                                   "    check_tokenizer_config_rewritten(c[\"base_dir\"], \"base checkpoint\")\n"
+                                   "SystemExit: %s\n" % msg, {})
+    with pytest.raises(SystemExit) as e:
+        ray_train.fit_or_exit(Trainer(), "ray/laya-x")
+    assert e.value.code == msg and "rerun the same command" not in e.value.code
+    assert ray_train.worker_refusal("ValueError: bad batch\nSystemExit: \n") is None
+
+
 def test_a_raw_mps_oom_outside_the_step_gets_the_rung_line_not_resume_advice():
     """04-REVIEW WR-01: an MPS OOM no mps_oom_exit wrapped (model move, resume, save, calibration) must not say "rerun
     to resume" (the rerun resumes into the same allocation); it gets the rung line the compute ladder walks on."""

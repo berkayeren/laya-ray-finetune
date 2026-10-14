@@ -72,7 +72,8 @@ checkpoint carries final.json, so its rerun copies that checkpoint to the new --
 each epoch's uncalibrated laya export to storage/<run_id>/exports/epoch-NNN, outside the rotation (--no-export-epochs
 skips them), for Phase 5 to pick the epoch on val. Before ray.init the driver refuses when the free disk under --storage
 is below pilot.runs.disk_need_bytes. A failed run ends in one line: the MPS OOM rung message, the snapshot dir to delete
-when Ray's snapshot points at deleted checkpoints, or "rerun the same command to resume".
+when Ray's snapshot points at deleted checkpoints, a worker's refusal (SystemExit) as is, or "rerun the same command to
+resume".
 
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
 (tampered, unregistered, val/test/probe) is refused before Ray starts. --base multilingual fetches the pinned,
@@ -227,12 +228,24 @@ def _failure_text(e):
     return "\n".join(parts)
 
 
+def worker_refusal(text):
+    """The message of a worker's SystemExit in a (multi-line) Ray failure text (Ray Train reports it as a
+    `SystemExit: <message>` line), or None."""
+    for line in reversed(str(text).splitlines()):
+        line = line.strip()
+        if line.startswith("SystemExit: ") and line[len("SystemExit: "):].strip():
+            return line[len("SystemExit: "):].strip()
+    return None
+
+
 def fit_or_exit(trainer, run_dir=None, rung="none"):
     """trainer.fit(), with Ray's failures turned into one console line (SystemExit):
     - a worker's MPS out-of-memory exit: the rung line (pilot.runs.oom_message), which wins over the others; a raw MPS
       out-of-memory error that no mps_oom_exit wrapped still gets the rung line of `rung` (rerunning would only resume
       into the same allocation), so the compute orchestrator walks the ladder;
     - a snapshot under run_dir whose checkpoints are gone (CheckpointManagerInitializationError): name the dir to delete;
+    - a worker's refusal (a SystemExit in train_loop_per_worker, e.g. the tokenizer-config backstop or check_env):
+      its own message, which names its own fix, never resume advice (04-REVIEW CR-01);
     - any other training failure: rerun the same command to resume from the last epoch checkpoint in run_dir.
     Exceptions that are not Ray training failures propagate unchanged."""
     try:
@@ -249,6 +262,9 @@ def fit_or_exit(trainer, run_dir=None, rung="none"):
                              "fresh" % run_dir) from None
         if not failed:
             raise
+        refusal = worker_refusal(_failure_text(e))
+        if refusal is not None:                             # it names its own fix; a rerun would refuse again
+            raise SystemExit(refusal) from None
         raise SystemExit("training failed (%s); rerun the same command to resume from the last epoch checkpoint in %s"
                          % (runs.last_line(str(e)), run_dir)) from None
 

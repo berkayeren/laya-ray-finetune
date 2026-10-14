@@ -191,6 +191,31 @@ def test_a_read_only_base_tokenizer_dir_is_refused_before_ray(prepared, tmp_path
     assert not (tmp_path / "s").exists() and not (tmp_path / "o").exists()
 
 
+@pytest.mark.timeout(300)
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
+def test_a_worker_refusal_ends_the_run_without_resume_advice(prepared, tmp_path):
+    """04-REVIEW CR-01: with the driver preflight switched off, the worker's post-load backstop refuses the read-only
+    base after ray.init; fit_or_exit shows that refusal as is, never "training failed ...; rerun the same command"."""
+    d, args = prepared
+    base = tiny_checkpoint(tmp_path / "base")
+    args = [str(x) for x in args]
+    args[args.index("--base") + 1] = base
+    code = ("import sys\nimport ray_train\n"
+            "ray_train.check_tokenizer_config_rewritable = lambda d, what: None\nray_train.main(sys.argv[1:])\n")
+    tok_dir = os.path.join(base, "tokenizer")
+    os.chmod(tok_dir, 0o555)
+    try:
+        r = _run("-c", code, *args, "--out", tmp_path / "o", "--storage", tmp_path / "s", ok=False)
+    finally:
+        os.chmod(tok_dir, 0o755)
+    # the driver's own line; Ray's asynchronous worker logs may print after it
+    exits = [ln for ln in r.stderr.splitlines() if ln.startswith("base checkpoint: laya could not rewrite "
+                                                                  "tokenizer/tokenizer_config.json on load")]
+    assert r.returncode == 1 and len(exits) == 1, r.stderr[-4000:]
+    assert "training failed" not in r.stderr and "rerun the same command" not in r.stderr, r.stderr[-4000:]
+    assert not (tmp_path / "o").exists()
+
+
 @pytest.mark.timeout(600)
 def test_low_disk_is_refused_before_ray(prepared, tmp_path, monkeypatch):
     import collections
