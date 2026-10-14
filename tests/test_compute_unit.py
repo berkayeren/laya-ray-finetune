@@ -516,3 +516,39 @@ def test_markdown_and_assumptions_label_the_measured_probes():
         toy_meta(), failed, TOY_COUNTS, TOY_MATRIX, compute.project(failed, TOY_COUNTS, TOY_MATRIX), toy_preflight()))
     assert "## BERTurk timing probe" in md and "keep the estimate" in md
     assert any("BERTurk rates are estimates" in x for x in compute.assumptions(TOY_MATRIX, failed, TOY_COUNTS))
+
+
+def test_probe_storage_is_dropped_when_a_step_after_the_chain_raises(tmp_path, monkeypatch):
+    """04-REVIEW WR-06: a failure after a successful probe (here the split count) still deletes the probe's Ray run dir
+    and temp checkpoint unless --keep-run."""
+    import compute_checkpoint as cc
+    base, storage, seen = tmp_path / "base", tmp_path / "storage", {}
+    base.mkdir()
+    (base / "rl_agent_config.json").write_text("{}", encoding="utf-8")
+    (base / "model.safetensors").write_bytes(b"x")
+    monkeypatch.setattr(cc, "preflight", lambda g: {"passed": True})
+    monkeypatch.setattr(cc, "verify_split_file", lambda *a, **k: {"path": "p", "sha256": "0" * 64, "n_messages": 1})
+    monkeypatch.setattr(cc.compute, "spike_start", lambda p: {"micro_batch": 8, "max_len": 128, "grad_accum": 4,
+                                                                "rung": "none", "fallback": 0})
+    monkeypatch.setattr(cc.la, "check_version", lambda: None)
+    monkeypatch.setattr(cc, "identity", lambda b: {"model_sha256": "0" * 64})
+    monkeypatch.setattr(cc, "disk_preflight", lambda *a: None)
+    monkeypatch.setattr(cc, "build_meta", lambda *a: {})
+
+    def launch(rung, ctx):
+        os.makedirs(os.path.join(ctx["storage"], "laya-x", "epoch-002"))
+        ckpt = os.path.join(ctx["tmp"], "attempt-0", "ckpt")
+        os.makedirs(ckpt)
+        ctx["rids"].append("laya-x")
+        ctx["result"] = {"measured": {"laya": {}}, "ckpt": ckpt, "rid": "laya-x"}
+        seen["tmp"] = ctx["tmp"]
+        return {"run_id": "laya-x", "status": "ok", "interrupt": {}, "resume": {}}
+
+    def boom(manifest):
+        raise RuntimeError("split count failed")
+    monkeypatch.setattr(cc, "launch_rung", launch)
+    monkeypatch.setattr(cc.compute, "split_counts", boom)
+    with pytest.raises(RuntimeError, match="split count failed"):
+        cc.main(["--base", str(base), "--storage", str(storage), "--no-berturk", "--no-score-probe",
+                 "--min-available-gib", "0", "--out", str(tmp_path / "out")])
+    assert not (storage / "laya-x").exists() and not os.path.exists(seen["tmp"])

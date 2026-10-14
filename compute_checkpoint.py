@@ -603,47 +603,56 @@ def main(argv=None):
         drop_storage(storage, own_storage, ctx["rids"])
         raise
 
-    rid = attempts[-1]["run_id"]
-    meta = build_meta(a, entry, start, model, rid)
-    if status != "ok":
-        report = compute.build_report(meta, None, None, compute.MATRIX, None, pf, attempts=attempts, status=status)
-        md = compute.write_report(a.out, report)
-        if not a.keep_run:
-            drop_storage(storage, own_storage, ctx["rids"])
-        raise SystemExit("probe %s after %d attempt(s) (last rung %s); report -> %s; logs kept in %s. Last %d lines "
-                         "of %s:\n%s" % (status, len(attempts), attempts[-1]["rung"], md, tmp, TAIL_LINES,
-                                          ctx["logs"][-1], tail(ctx["logs"][-1])))
+    # everything after the chain under one finally: the probe's Ray storage and temp checkpoint (GBs) go even when a
+    # later step raises or is interrupted (04-REVIEW WR-06); a failed chain keeps only its logs (tmp) for the user
+    keep_logs = False
+    try:
+        rid = attempts[-1]["run_id"]
+        meta = build_meta(a, entry, start, model, rid)
+        if status != "ok":
+            report = compute.build_report(meta, None, None, compute.MATRIX, None, pf, attempts=attempts,
+                                          status=status)
+            md = compute.write_report(a.out, report)
+            keep_logs = True
+            raise SystemExit("probe %s after %d attempt(s) (last rung %s); report -> %s; logs kept in %s. Last %d "
+                             "lines of %s:\n%s" % (status, len(attempts), attempts[-1]["rung"], md, tmp, TAIL_LINES,
+                                                   ctx["logs"][-1], tail(ctx["logs"][-1])))
 
-    ok = attempts[-1]
-    measured, ckpt = ctx["result"]["measured"], ctx["result"]["ckpt"]
-    if a.berturk or a.score_probe:
-        wait_for_memory(a.min_available_gib)               # the Laya probe's memory is back before the next child
-    if a.berturk:
-        measured["berturk"] = run_berturk(a, entry, berturk_dir, env)
-        if measured["berturk"].get("status") != "ok":
-            print("BERTurk timing child: %s; the BERTurk lines keep the estimate" % measured["berturk"], flush=True)
-    if a.score_probe:
-        measured["scoring"] = run_score_probe(a, base, env)
-        if measured["scoring"].get("status") != "ok":
-            print("scoring probe: %s; the Laya scoring lines keep the committed CPU rate" % measured["scoring"],
-                  flush=True)
-    counts = compute.split_counts(a.manifest)              # all five registered splits, verified bytes
-    projection = compute.project(measured, counts, compute.MATRIX)
-    report = compute.build_report(meta, measured, counts, compute.MATRIX, projection, pf,
-                                  what_if=compute.what_if(measured, counts, compute.MATRIX),
-                                  disk=compute.disk_budget(model_bytes, compute.MATRIX,
-                                                           measured["laya"]["train_state_bytes"]),
-                                  assumptions=compute.assumptions(compute.MATRIX, measured, counts, ok["interrupt"]),
-                                  attempts=attempts, status=status, interrupt=ok["interrupt"], resume=ok["resume"])
-    md = compute.write_report(a.out, report)
-    print("report -> %s" % md)
-    print("projected total: %.2f h over %d lines; resume demonstrated: %s"
-          % (projection["total_h"], len(projection["lines"]), ok["resume"]["resume_demonstrated"]), flush=True)
-    if a.keep_run:
-        print("kept: probe checkpoint %s, Ray run dir(s) under %s" % (ckpt, storage))
-    else:
-        shutil.rmtree(tmp, ignore_errors=True)
-        drop_storage(storage, own_storage, ctx["rids"])
+        ok = attempts[-1]
+        measured, ckpt = ctx["result"]["measured"], ctx["result"]["ckpt"]
+        if a.berturk or a.score_probe:
+            wait_for_memory(a.min_available_gib)           # the Laya probe's memory is back before the next child
+        if a.berturk:
+            measured["berturk"] = run_berturk(a, entry, berturk_dir, env)
+            if measured["berturk"].get("status") != "ok":
+                print("BERTurk timing child: %s; the BERTurk lines keep the estimate" % measured["berturk"],
+                      flush=True)
+        if a.score_probe:
+            measured["scoring"] = run_score_probe(a, base, env)
+            if measured["scoring"].get("status") != "ok":
+                print("scoring probe: %s; the Laya scoring lines keep the committed CPU rate" % measured["scoring"],
+                      flush=True)
+        counts = compute.split_counts(a.manifest)          # all five registered splits, verified bytes
+        projection = compute.project(measured, counts, compute.MATRIX)
+        report = compute.build_report(meta, measured, counts, compute.MATRIX, projection, pf,
+                                      what_if=compute.what_if(measured, counts, compute.MATRIX),
+                                      disk=compute.disk_budget(model_bytes, compute.MATRIX,
+                                                               measured["laya"]["train_state_bytes"]),
+                                      assumptions=compute.assumptions(compute.MATRIX, measured, counts,
+                                                                      ok["interrupt"]),
+                                      attempts=attempts, status=status, interrupt=ok["interrupt"],
+                                      resume=ok["resume"])
+        md = compute.write_report(a.out, report)
+        print("report -> %s" % md)
+        print("projected total: %.2f h over %d lines; resume demonstrated: %s"
+              % (projection["total_h"], len(projection["lines"]), ok["resume"]["resume_demonstrated"]), flush=True)
+        if a.keep_run:
+            print("kept: probe checkpoint %s, Ray run dir(s) under %s" % (ckpt, storage))
+    finally:
+        if not a.keep_run:
+            if not keep_logs:
+                shutil.rmtree(tmp, ignore_errors=True)
+            drop_storage(storage, own_storage, ctx["rids"])
 
 
 if __name__ == "__main__":
