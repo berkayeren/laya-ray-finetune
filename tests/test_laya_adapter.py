@@ -70,7 +70,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTER = "pilot/laya_adapter.py"
 PRIVATE = ("laya.train", "laya.common", "laya.calibrate", "laya.agent")
 INTERNALS = ("head_checkpointing", "gradient_checkpointing_enable", "tok_embeddings", "records_from_labeled")
-AUTOCAST = ("amp_enabled",)                         # writable only through la.force_fp32; reads stay allowed
+# an agent's autocast switch and dtype (laya's autocast reads both): writable only through la.force_fp32, as an
+# attribute store or a setattr with the constant name; reads stay allowed. AUTOCAST_WRITERS may write them: this file
+# sets laya's non-fp32 load-time defaults to test force_fp32 (an explicit entry, not a bypass)
+AUTOCAST = ("amp_enabled", "dtype")
+AUTOCAST_WRITERS = ("tests/test_laya_adapter.py",)
 
 
 @pytest.fixture(scope="module")
@@ -165,7 +169,7 @@ def test_force_fp32_turns_autocast_off(tmp_path, tiny_agent):
     import laya
     import torch
     agent = laya.load(tiny_checkpoint(tmp_path / "c", temperature=1.3), device="cpu")
-    setattr(agent, "amp_enabled", True)                     # setattr: the guard bans `.amp_enabled =` here
+    agent.amp_enabled = True                                # allowed here only (AUTOCAST_WRITERS)
     agent.dtype = torch.bfloat16                            # laya's cuda default on sm_80+; LAYA_CPU_AMP's on cpu
     before = la.force_fp32(agent)
     assert before == {"amp_enabled": True, "dtype": "torch.bfloat16"}
@@ -195,11 +199,12 @@ def _private(name):
     return any(name == m or name.startswith(m + ".") for m in PRIVATE)
 
 
-def _private_laya_uses(path, label=None):
+def _private_laya_uses(path, label=None, autocast_ok=False):
     """"path:line what" for every private laya import (any form), laya.<private> attribute chain, dynamic import of a
-    private module, DecisionModel internal / logit-route attribute, or write to an agent's autocast switch
-    (`x.amp_enabled = ...`; reads are fine). Strings are not code: only the first argument of
-    importlib.import_module / __import__ is read as a module name."""
+    private module, DecisionModel internal / logit-route attribute, or write to an agent's autocast switch or dtype
+    (`x.amp_enabled = ...`, `setattr(x, "dtype", ...)`; reads are fine; autocast_ok skips only these writes). Strings
+    are not code: only the first argument of importlib.import_module / __import__ and the second of setattr are
+    read."""
     with open(path, encoding="utf-8") as f:
         tree = ast.parse(f.read(), filename=path)
     bad = []
@@ -219,7 +224,7 @@ def _private_laya_uses(path, label=None):
                 what = "laya.%s" % node.attr
             elif node.attr in INTERNALS:
                 what = ".%s" % node.attr
-            elif node.attr in AUTOCAST and isinstance(node.ctx, ast.Store):
+            elif node.attr in AUTOCAST and isinstance(node.ctx, ast.Store) and not autocast_ok:
                 what = ".%s = (write)" % node.attr
         elif isinstance(node, ast.Call):
             fn = node.func
@@ -228,6 +233,9 @@ def _private_laya_uses(path, label=None):
             if name in ("import_module", "__import__") and isinstance(arg, ast.Constant) \
                     and isinstance(arg.value, str) and _private(arg.value):
                 what = "%s(%r)" % (name, arg.value)
+            elif name == "setattr" and len(node.args) > 1 and isinstance(node.args[1], ast.Constant) \
+                    and node.args[1].value in AUTOCAST and not autocast_ok:
+                what = "setattr(..., %r) (write)" % node.args[1].value
         if what:
             bad.append("%s:%d %s" % (label or path, node.lineno, what))
     return bad
@@ -237,7 +245,7 @@ def test_guard_no_private_laya_use_outside_adapter():
     out = subprocess.run(["git", "ls-files", "*.py"], cwd=REPO, capture_output=True, text=True, check=True).stdout
     files = [f for f in out.split() if f != ADAPTER]
     assert ADAPTER in out.split() and {"ray_train.py", "mps_spike.py", "tests/test_spike_unit.py"} <= set(files)
-    bad = [b for f in files for b in _private_laya_uses(os.path.join(REPO, f), f)]
+    bad = [b for f in files for b in _private_laya_uses(os.path.join(REPO, f), f, f in AUTOCAST_WRITERS)]
     assert not bad, "private laya use outside %s (route it through the adapter):\n%s" % (ADAPTER, "\n".join(bad))
 
 
@@ -255,9 +263,13 @@ def test_guard_catches_every_form(tmp_path):
                  "m.encoder.gradient_checkpointing_enable()\n"
                  "m.encoder.embeddings.tok_embeddings\n"
                  "c.records_from_labeled(a, p)\n"
-                 "agent.amp_enabled = False\n", encoding="utf-8")
+                 "agent.amp_enabled = False\n"
+                 "agent.dtype = torch.bfloat16\n"
+                 "setattr(agent, \"amp_enabled\", True)\n"
+                 "setattr(agent, \"dtype\", torch.float16)\n", encoding="utf-8")
     found = _private_laya_uses(str(p))
-    assert len(found) == 13 and sorted(int(b.split(":")[-1].split()[0]) for b in found) == list(range(1, 14)), found
+    assert len(found) == 16 and sorted(int(b.split(":")[-1].split()[0]) for b in found) == list(range(1, 17)), found
+    assert len(_private_laya_uses(str(p), autocast_ok=True)) == 12                # the allow-list skips only writes
     q = tmp_path / "clean.py"
     q.write_text("import laya\n"
                  "laya.load(path)\n"
@@ -265,6 +277,8 @@ def test_guard_catches_every_form(tmp_path):
                  "la.forward(m, b, d, False, False)\n"
                  "s = \"laya.train\"\n"
                  "ok = agent.amp_enabled is False\n"
+                 "d = agent.dtype\n"
+                 "setattr(agent, \"temperature\", 1.0)\n"
                  "la.force_fp32(agent)\n", encoding="utf-8")
     assert _private_laya_uses(str(q)) == []
 
