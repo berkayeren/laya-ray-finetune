@@ -453,10 +453,20 @@ def main(argv=None):
         r = resolve(a)
     except ValueError as e:
         ap.error(str(e))
+    if r["device"] == "mps" and a.workers != 1:
+        ap.error("--device mps trains on one Ray worker (one GPU, no MPS collective backend); use --workers 1")
+    if a.amp and r["device"] in ("mps", "cpu"):
+        ap.error("--amp is CUDA-only (the MPS fine-tune is measured with AMP off); drop --amp")
     entry = verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))   # before ray.init (D-03)
     if os.path.exists(a.out) and (not os.path.isdir(a.out) or os.listdir(a.out)):
         # copying over old files could leave a mixed checkpoint that laya.load still accepts
         raise SystemExit("--out %s exists and is not empty; choose a new dir" % a.out)
+    # the device must exist here before any pin check, fetch or ray.init (LAYA-02)
+    if r["device"] == "mps" and not torch.backends.mps.is_available():
+        raise SystemExit("--device mps, but MPS is not available here; use --device cpu, or run on Apple silicon with "
+                         "the locked torch build")
+    if r["device"] == "cuda" and not torch.cuda.is_available():
+        raise SystemExit("--device cuda (or --gpu), but CUDA is not available here; use --device cpu or mps")
     la.check_version()                                      # the adapter's laya pin, before the fetch and ray.init
     if a.base == "multilingual":                            # download once on the driver, pinned + verified (ENV-02)
         base_dir = fetch(pins.LAYA)

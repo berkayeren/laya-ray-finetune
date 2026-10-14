@@ -77,16 +77,6 @@ LAYA_INTERNALS = ["lt.load_checkpoint", "lt.items_from_rows", "lt.encode_item", 
 VERSIONED = ("torch", "ray", "laya", "transformers", "psutil")
 
 
-def check_env(expected):
-    """{name: value seen} for the expected env vars; refuses on the first one the worker did not get."""
-    seen = {k: os.environ.get(k) for k in expected}
-    for k in sorted(expected):
-        if seen[k] != expected[k]:
-            raise SystemExit("worker env %s=%r, expected %r; env vars must reach the worker through "
-                             "ray.init(runtime_env)" % (k, seen[k], expected[k]))
-    return seen
-
-
 def configure_model(model, rung):
     """Gradient checkpointing on (encoder and head, whatever the device) and the D-08 rung; returns trainable params.
 
@@ -100,14 +90,6 @@ def configure_model(model, rung):
     if rung == "embeddings_frozen":
         la.freeze_embeddings(model)
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def require_param_device(model, device_type):
-    """Refuse unless every model parameter sits on `device_type` (LAYA-09 criterion 1; no silent CPU timing)."""
-    have = {p.device.type for p in model.parameters()}
-    if have != {device_type}:
-        raise SystemExit("model parameters on %s, expected %s; the spike refuses to time a silent CPU run"
-                         % (", ".join(sorted(have)), device_type))
 
 
 def _pinned_source(c, max_len, mark):
@@ -229,10 +211,11 @@ def _identity(c):
 
 def _measure(c):
     import torch
+    # one definition each, in ray_train.py (imported here, never in the torch-free orchestrator)
+    from ray_train import check_env, require_driver_node
 
     if c["transport"] == "checkpoint":
         import ray
-        from ray_train import require_driver_node
         require_driver_node(ray.get_runtime_context().get_node_id(), c["driver_node_id"])
     env_seen = check_env(c["expect_env"])
     device = torch.device(c["device"])
@@ -268,6 +251,7 @@ def _steps(c, device, mark, got):
     """Load, configure, move and time one config; `got` collects what was measured so far (for a strict failure)."""
     import psutil
     import torch
+    from ray_train import require_param_device
 
     torch.manual_seed(c["seed"])
     torch.set_num_threads(c["cpus"])
@@ -596,6 +580,7 @@ def main():
 
     # D-05: the main checkout's locked venv, the hash-verified split and the pinned weights, before any child runs
     entry = verify_split_file(SPLIT, roles=("train",))
+    la.check_version()                                      # the adapter's laya pin, before the fetch (IN-05)
     base_dir = fetch(pins.LAYA)
     # D-09b: token lengths and the neg8 item count, in a CPU child that exits before the first measured run
     stats = launch(stats_cfg(base_dir, entry["sha256"], a.seed, a.cpus), "stats")
