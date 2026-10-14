@@ -442,6 +442,15 @@ def prune_exports(exports_dir, start_epoch):
     return gone
 
 
+def export_record(record, name):
+    """The run record an epoch export embeds: a pre-save snapshot (04-REVIEW IN-06). It is written before the epoch's
+    train state, so the export already lists itself in exports, while what only the save measures (this epoch's save_s,
+    train_state_bytes, export_bytes) is None, never the previous epoch's value. Phase 5 reads these exports."""
+    rows = record["epochs"]
+    return dict(record, exports=sorted(set(record["exports"]) | {"exports/" + name}), train_state_bytes=None,
+                export_bytes=None, epochs=rows[:-1] + [dict(rows[-1], save_s=None)] if rows else [])
+
+
 def write_export(inner, tok, ecfg, run_dir, name):
     """Rank 0's uncalibrated laya export of a completed epoch at run_dir/exports/<name>, outside Ray's checkpoint
     rotation (Phase 5 picks the epoch on val without retraining); an existing export is kept (one this segment's start
@@ -684,7 +693,8 @@ def train_loop_per_worker(c):
             if rank == 0:
                 with mps_oom_exit(epoch + 1, None, c["rung"], "while saving the checkpoint"):
                     if c["export_epochs"]:
-                        ecfg = epoch_config(cfg, max_len, head_max_len, dict(ray_cfg, record=record), epoch + 1)
+                        ecfg = epoch_config(cfg, max_len, head_max_len,
+                                            dict(ray_cfg, record=export_record(record, name)), epoch + 1)
                         write_export(inner, tok, ecfg, run_dir, name)
                         note_exports()
                     path = os.path.join(d, "train_state.pt")

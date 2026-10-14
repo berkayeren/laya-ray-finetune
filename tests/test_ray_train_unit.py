@@ -319,3 +319,15 @@ def test_code_changed_on_resume_sees_uncommitted_edits():
     assert ray_train.code_changed([seg(sha=None, diff=None), seg(sha=None, diff=None)]) is True   # no git: unknown
     old = {"git_sha": "a" * 40, "git_dirty": False}                          # an older train state's segment
     assert ray_train.code_changed([old, seg()]) is True
+
+
+def test_an_epoch_export_embeds_a_pre_save_snapshot():
+    """04-REVIEW IN-06: the export lists itself, and the values only its save measures are None, not stale."""
+    rows = [{"epoch": 1, "save_s": 4.0}, {"epoch": 2, "save_s": 0.0}]
+    record = {"exports": ["exports/epoch-001"], "train_state_bytes": 123, "export_bytes": 45, "epochs": rows,
+              "rung": "none"}
+    snap = ray_train.export_record(record, "epoch-002")
+    assert snap["exports"] == ["exports/epoch-001", "exports/epoch-002"]
+    assert snap["train_state_bytes"] is None and snap["export_bytes"] is None and snap["rung"] == "none"
+    assert snap["epochs"] == [{"epoch": 1, "save_s": 4.0}, {"epoch": 2, "save_s": None}]
+    assert record["epochs"][1]["save_s"] == 0.0 and record["train_state_bytes"] == 123     # the live record is untouched

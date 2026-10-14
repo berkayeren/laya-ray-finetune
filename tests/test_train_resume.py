@@ -107,6 +107,9 @@ def test_killed_run_resumes_bitwise(prepared, full_run):
     assert all(row["save_s"] > 0 for row in rec["epochs"])
     assert rec["run_id"] == rid
     assert sorted(p.name for p in (run_dir / "exports").iterdir()) == ["epoch-001", "epoch-002"]
+    ex = runs.read_record(str(run_dir / "exports" / "epoch-002"))                # a pre-save snapshot (IN-06)
+    assert ex["exports"] == ["exports/epoch-001", "exports/epoch-002"] and ex["epochs"][-1]["save_s"] is None
+    assert ex["epochs"][0]["save_s"] > 0 and ex["train_state_bytes"] is None
     assert not (run_dir / "epoch-001").exists()                                  # num_to_keep=1 rotated it out
     full_rec = runs.read_record(str(full))
     assert [row["loss"] for row in rec["epochs"]] == [row["loss"] for row in full_rec["epochs"]]
