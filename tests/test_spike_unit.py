@@ -32,12 +32,26 @@ def test_worker_refuses_missing_env(monkeypatch):
     assert "SPIKE_CANARY" in payload["reason"], payload
 
 
-def test_mps_spike_checks_the_laya_pin_before_the_fetch():
-    """IN-05: like every other adapter consumer, the spike refuses a wrong laya before the pinned download."""
-    import inspect
-    src = inspect.getsource(mps_spike.main)
-    assert "la.check_version()" in src and "fetch(pins.LAYA)" in src
-    assert src.index("la.check_version()") < src.index("fetch(pins.LAYA)")
+def test_mps_spike_checks_the_laya_pin_before_the_fetch(monkeypatch):
+    """IN-05: like every other adapter consumer, the spike refuses a wrong laya before the pinned download. Behavioural
+    (04-REVIEW IN-05): main runs with a failing version check and a fetch that must not be reached."""
+    calls = []
+
+    def bad_version():
+        calls.append("check_version")
+        raise SystemExit("laya 9.9.9 is installed; the adapter is pinned to 0.4.6")
+
+    def fetch(pin):
+        calls.append("fetch")
+        pytest.fail("the pinned weights were fetched before the laya version check")
+    monkeypatch.setattr(sys, "argv", ["mps_spike.py", "--min-available-gib", "0", "--out", "unused"])
+    monkeypatch.setattr(mps_spike.time, "sleep", lambda s: None)              # the 5 s idle swap sample
+    monkeypatch.setattr(mps_spike, "verify_split_file", lambda *a, **k: {"sha256": "0" * 64})
+    monkeypatch.setattr(mps_spike.la, "check_version", bad_version)
+    monkeypatch.setattr(mps_spike, "fetch", fetch)
+    with pytest.raises(SystemExit, match="pinned to 0.4.6"):
+        mps_spike.main()
+    assert calls == ["check_version"]
 
 
 def test_configure_model_enables_checkpointing_and_freezes_only_embeddings():
