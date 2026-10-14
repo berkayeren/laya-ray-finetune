@@ -226,5 +226,28 @@ def test_driver_turns_the_worker_oom_into_one_line():
         ray_train.fit_or_exit(Trainer(WorkerGroupError("[Rank 0]\nRuntimeError: %s\n" % msg, {})))
     assert e.value.code == msg
     other = WorkerGroupError("[Rank 0]\nValueError: bad batch\n", {})
-    with pytest.raises(WorkerGroupError):
-        ray_train.fit_or_exit(Trainer(other))
+    with pytest.raises(SystemExit) as e:
+        ray_train.fit_or_exit(Trainer(other), "ray/laya-x")
+    assert e.value.code == ("training failed (ValueError: bad batch); rerun the same command to resume from the last "
+                            "epoch checkpoint in ray/laya-x")
+    with pytest.raises(KeyError):                                            # not a Ray failure: unchanged
+        ray_train.fit_or_exit(Trainer(KeyError("x")), "ray/laya-x")
+
+
+def test_driver_names_the_dir_of_a_corrupted_snapshot():
+    from ray.train import ControllerError
+    from ray.train.v2._internal.exceptions import CheckpointManagerInitializationError
+
+    class Trainer:
+        def fit(self):
+            raise ControllerError(CheckpointManagerInitializationError("snapshot references a missing checkpoint"))
+    with pytest.raises(SystemExit) as e:
+        ray_train.fit_or_exit(Trainer(), "ray/laya-x")
+    assert e.value.code == ("ray/laya-x holds a Ray snapshot whose checkpoints are gone; delete that dir to start the "
+                            "run fresh")
+
+
+def test_code_state_reads_git():
+    st = ray_train.code_state()
+    assert set(st) == {"git_sha", "git_dirty"}
+    assert st["git_sha"] is None or len(st["git_sha"]) == 40

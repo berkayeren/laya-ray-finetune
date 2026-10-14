@@ -70,3 +70,82 @@ def test_print_run_id_names_the_storage_dir(prepared, full_run):
     s1 = _run("ray_train.py", *args, "--seed", "1", "--out", d / "x", "--storage", d / "p",
               "--print-run-id").stdout.strip()
     assert s1 != rid and "-s1-" in s1
+
+
+def _sha256(path):
+    import hashlib
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+@pytest.mark.timeout(600)
+def test_killed_run_resumes_bitwise(prepared, full_run):
+    """Killed after epoch 1 and rerun with the same command: the result is byte-identical to an uninterrupted run."""
+    d, args = prepared
+    rid, full = full_run
+    r = _run("ray_train.py", *args, "--storage", d / "b", "--out", d / "res", "--fail-after-epoch", "1", ok=False)
+    assert r.returncode != 0 and "rerun the same command" in r.stderr, r.stderr[-4000:]
+    run_dir = d / "b" / rid
+    assert (run_dir / "epoch-001" / "train_state.pt").is_file() and (run_dir / "epoch-001" / "rng-rank0.pt").is_file()
+    assert (run_dir / "exports" / "epoch-001" / "model.safetensors").is_file()
+    assert not (d / "res").exists()
+    _run("ray_train.py", *args, "--storage", d / "b", "--out", d / "res")       # the same command resumes
+    assert _sha256(d / "res" / "model.safetensors") == _sha256(full / "model.safetensors")
+    rec = runs.read_record(str(d / "res"))
+    assert [row["epoch"] for row in rec["epochs"]] == [1, 2]
+    assert [row["segment"] for row in rec["epochs"]] == [0, 1]
+    assert [row["resumed"] for row in rec["epochs"]] == [False, True]
+    assert [s["segment"] for s in rec["segments"]] == [0, 1] and [s["start_epoch"] for s in rec["segments"]] == [0, 1]
+    for s in rec["segments"]:
+        assert tuple(s) == runs.SEGMENT_FIELDS, s
+    assert rec["segments"][0]["resumed"] is False and rec["segments"][0]["resume_load_s"] is None
+    assert rec["segments"][1]["resumed"] is True and rec["segments"][1]["resume_load_s"] > 0
+    assert rec["segments"][1]["resume_peak_total_bytes"] > 0
+    assert rec["code_changed_on_resume"] is False
+    assert rec["train_state_bytes"] > 0 and rec["export_bytes"] > 0
+    assert rec["exports"] == ["exports/epoch-001", "exports/epoch-002"]
+    assert all(row["save_s"] > 0 for row in rec["epochs"])
+    assert rec["run_id"] == rid
+    assert sorted(p.name for p in (run_dir / "exports").iterdir()) == ["epoch-001", "epoch-002"]
+    assert not (run_dir / "epoch-001").exists()                                  # num_to_keep=1 rotated it out
+    full_rec = runs.read_record(str(full))
+    assert [row["loss"] for row in rec["epochs"]] == [row["loss"] for row in full_rec["epochs"]]
+
+
+@pytest.mark.timeout(600)
+def test_finished_run_reruns_without_training(prepared, full_run):
+    d, args = prepared
+    rid, full = full_run
+    r = _run("ray_train.py", *args, "--storage", d / "a", "--out", d / "full2")
+    assert "epoch 1/2" not in r.stdout + r.stderr
+    assert _sha256(d / "full2" / "model.safetensors") == _sha256(full / "model.safetensors")
+    assert os.path.isfile(d / "full2" / "final.json")
+
+
+@pytest.mark.timeout(600)
+def test_snapshot_with_deleted_checkpoints_names_the_dir(prepared, full_run, tmp_path):
+    import shutil
+    d, args = prepared
+    rid, full = full_run
+    shutil.copytree(d / "a" / rid, tmp_path / "s" / rid)
+    shutil.rmtree(tmp_path / "s" / rid / "final")                               # the snapshot still points at it
+    r = _run("ray_train.py", *args, "--storage", tmp_path / "s", "--out", tmp_path / "o", ok=False)
+    assert r.returncode != 0
+    assert "holds a Ray snapshot whose checkpoints are gone; delete that dir" in r.stderr, r.stderr[-4000:]
+    assert os.path.join(str(tmp_path / "s"), rid) in r.stderr
+
+
+@pytest.mark.timeout(600)
+def test_low_disk_is_refused_before_ray(prepared, tmp_path, monkeypatch):
+    import collections
+    import ray_train
+    d, args = prepared
+
+    def no_ray(*a, **kw):
+        raise AssertionError("ray.init reached; the disk refusal must come first")
+    usage = collections.namedtuple("usage", "total used free")
+    monkeypatch.setattr(ray_train.ray, "init", no_ray)
+    monkeypatch.setattr(ray_train.shutil, "disk_usage", lambda path: usage(2**40, 2**40 - 2**20, 2**20))
+    with pytest.raises(SystemExit, match="GiB free under --storage"):
+        ray_train.main(args + ["--out", str(tmp_path / "o"), "--storage", str(tmp_path / "s")])
+    assert not (tmp_path / "s").exists() and not (tmp_path / "o").exists()

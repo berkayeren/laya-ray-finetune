@@ -69,7 +69,9 @@ def test_cpu_record(cpu_run):
         assert row["peak_rss_bytes"] > 0 and row["peak_total_bytes"] == row["peak_rss_bytes"]
         assert row["peak_driver_bytes"] is None and row["current_allocated_bytes"] is None
         assert isinstance(row["swap_delta_bytes"], int)
-    assert rec["epochs"][0]["save_s"] > 0 and rec["epochs"][1]["save_s"] == 0.0   # the last epoch saves after calib
+    # every epoch saves its train state (and export), the last one too; the final checkpoint saves after calibration
+    assert all(row["save_s"] > 0 for row in rec["epochs"])
+    assert [row["segment"] for row in rec["epochs"]] == [0, 0] and not any(row["resumed"] for row in rec["epochs"])
     assert rec["load_s"] > 0 and rec["calib_s"] > 0 and rec["final_save_s"] > 0
 
 

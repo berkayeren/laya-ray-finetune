@@ -26,10 +26,16 @@ def _ckpt(tmp_path, training):
     return str(d)
 
 
-def test_epoch_fields_are_the_eleven_record_columns():
+def test_epoch_fields_are_the_thirteen_record_columns():
     assert runs.EPOCH_FIELDS == ("epoch", "loss", "train_s", "save_s", "optimizer_steps", "n_items",
                                  "peak_total_bytes", "peak_driver_bytes", "peak_rss_bytes", "current_allocated_bytes",
-                                 "swap_delta_bytes")
+                                 "swap_delta_bytes", "segment", "resumed")
+
+
+def test_epoch_fields_cover_segments():
+    assert "segment" in runs.EPOCH_FIELDS and "resumed" in runs.EPOCH_FIELDS
+    assert runs.SEGMENT_FIELDS == ("segment", "start_epoch", "resumed", "git_sha", "git_dirty", "device",
+                                   "resume_load_s", "resume_peak_total_bytes")
 
 
 def test_env_strings_are_sorted_key_value_pairs():
@@ -201,3 +207,26 @@ def test_run_id_does_not_depend_on_key_order():
     reordered = dict(reversed(list(vals.items())))
     assert list(reordered) != list(vals)
     assert runs.run_id(reordered) == runs.run_id(vals) == runs.run_id(runs.canonical(reordered))
+
+
+def test_check_state_refuses_foreign_state():
+    canon = runs.canonical(_identity())
+    rid = runs.run_id(canon)
+    state = {"kind": "train_state", "run_id": rid, "canonical": dict(canon), "epoch": 1}
+    runs.check_state(state, rid, canon)                                     # the matching state passes
+    for key, bad in (("kind", "final"), ("run_id", "laya-other"), ("canonical", dict(canon, seed=1))):
+        with pytest.raises(SystemExit, match="another run \\(%s differs\\)" % key):
+            runs.check_state(dict(state, **{key: bad}), rid, canon)
+    with pytest.raises(SystemExit, match="kind differs"):
+        runs.check_state({}, rid, canon)
+
+
+def test_disk_need_bytes():
+    m = 614 * 2**20
+    assert runs.disk_need_bytes(m, 2, True) == 18 * m + 2 * m + m + 2**30
+    assert runs.disk_need_bytes(m, 2, False) == 18 * m + m + 2**30
+    assert runs.disk_need_bytes(m, 4, True) - runs.disk_need_bytes(m, 4, False) == 4 * m
+
+
+def test_fail_after_epoch_and_export_epochs_never_change_the_run_id():
+    assert {"fail_after_epoch", "export_epochs"} <= set(runs.NOT_IDENTITY)

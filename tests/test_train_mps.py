@@ -59,3 +59,35 @@ def test_mps_record(tmp_path):
     import laya
     agent = laya.load(str(ckpt), device="cpu")
     assert agent is not None
+
+
+def _run_fail(*args):
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run([sys.executable] + [str(x) for x in args], cwd=REPO, env=env, capture_output=True, text=True,
+                       timeout=TIMEOUT)
+    assert r.returncode != 0, "%s should have failed:\n%s" % (args[0], r.stdout[-4000:])
+    return r
+
+
+@pytest.mark.timeout(600)
+def test_resume_on_mps(tmp_path):
+    """Killed after epoch 1 and rerun: the MPS run resumes at epoch 2 (MPS is not bitwise deterministic, so only the
+    resume mechanics are checked, RESEARCH Pitfall 3)."""
+    import math
+    root, raw_sha256 = make_raw(str(tmp_path / "raw"))
+    out_dir = str(tmp_path / "data")
+    pilot.data.prepare(root, out_dir, raw_sha256)
+    base = tiny_checkpoint(tmp_path / "base")
+    args = ["ray_train.py", "--data", os.path.join(out_dir, "splits", "selection_train.jsonl"),
+            "--manifest", os.path.join(out_dir, "splits.json"), "--base", base, "--out", tmp_path / "ckpt",
+            "--device", "mps", "--workers", "1", "--cpus-per-worker", "2", "--epochs", "2", "--max-messages", "12",
+            "--calib-frac", "0.2", "--storage", tmp_path / "ray"]
+    r = _run_fail(*args, "--fail-after-epoch", "1")
+    assert "rerun the same command" in r.stderr, r.stderr[-4000:]
+    _run(*args)
+    rec = runs.read_record(str(tmp_path / "ckpt"))
+    assert rec["param_device"] == "mps"
+    assert [row["epoch"] for row in rec["epochs"]] == [1, 2]
+    assert [row["resumed"] for row in rec["epochs"]] == [False, True]
+    assert all(math.isfinite(row["loss"]) for row in rec["epochs"])
+    assert rec["segments"][1]["resume_load_s"] > 0 and rec["segments"][1]["device"] == "mps"
