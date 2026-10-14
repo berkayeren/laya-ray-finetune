@@ -410,10 +410,7 @@ def test_report_refuses_val_and_split_from_different_sources(tmp_path, snap, cas
     assert dotted in str(e.value.code) and "val dump" in str(e.value.code), e.value.code
 
 
-def test_a_moved_checkpoint_with_the_same_identity_is_the_same_source(tmp_path, snap):
-    """04-REVIEW IN-12: the path counts only when no checkpoint_identity binds the scored bytes."""
-    ident = {"local": True, "model_sha256": "a" * 64, "config_sha256": "b" * 64}
-    run_dir, manifest = _score_both(snap, tmp_path / "dumps")
+def _rename_checkpoint(run_dir, ident):
     for name, ckpt in (("val", "runs/ckpt"), ("test", "runs/ckpt-renamed")):
         path = os.path.join(run_dir, "%s.json" % name)
         with open(path, encoding="utf-8") as f:
@@ -421,11 +418,30 @@ def test_a_moved_checkpoint_with_the_same_identity_is_the_same_source(tmp_path, 
         side["system"].update(checkpoint=ckpt, checkpoint_identity=ident)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(side, f)
+
+
+def test_a_moved_checkpoint_with_the_same_identity_is_the_same_source(tmp_path, snap):
+    """04-REVIEW IN-12, IN-05: the path counts only when no checkpoint_identity binds every file laya.load reads
+    (weights, config, tokenizer/ and encoder/); then a change in any of them is a change of the identity."""
+    files = {"encoder/config.json": "e" * 64, "tokenizer/tokenizer.json": "f" * 64,
+             "tokenizer/tokenizer_config.json#normalized": "0" * 64}
+    ident = {"local": True, "model_sha256": "a" * 64, "config_sha256": "b" * 64, "files_sha256": files}
+    run_dir, manifest = _score_both(snap, tmp_path / "dumps")
+    _rename_checkpoint(run_dir, ident)
     rep = report.run_report(run_dir, "test", manifest)
     assert rep["variants"]["shipped"]["rows"]["val_selected"] is not None
-    _edit_sidecar(run_dir, _set_key("system.checkpoint_identity", dict(ident, model_sha256="c" * 64)))
-    with pytest.raises(SystemExit, match=r"system\.checkpoint_identity"):
+    for changed in (dict(ident, model_sha256="c" * 64),
+                    dict(ident, files_sha256=dict(files, **{"tokenizer/tokenizer.json": "1" * 64}))):
+        _rename_checkpoint(run_dir, ident)
+        _edit_sidecar(run_dir, _set_key("system.checkpoint_identity", changed))
+        with pytest.raises(SystemExit, match=r"system\.checkpoint_identity"):
+            report.run_report(run_dir, "test", manifest)
+    # an identity from before IN-05 binds weights and config only: a renamed dir is still refused on the path
+    _rename_checkpoint(run_dir, {"local": True, "model_sha256": "a" * 64, "config_sha256": "b" * 64})
+    with pytest.raises(SystemExit, match=r"system\.checkpoint "):
         report.run_report(run_dir, "test", manifest)
+    assert report.binds_every_file({"revision": "7b928d82", "model_sha256": "a" * 64})
+    assert not report.binds_every_file(None) and not report.binds_every_file({"local": True})
 
 
 def test_compare_refuses_mixed_sources(tmp_path, snap):
@@ -452,8 +468,15 @@ def test_baseline_source_may_differ_between_val_and_test(tmp_path, snap):
 def test_local_run_id_includes_the_config_hash():
     from pilot import pins
     from pilot.weights import identity
-    assert dumps.run_id("laya", {"local": True, "model_sha256": "a" * 64, "config_sha256": "b" * 64}) == \
-        "laya-" + "a" * 12 + "-" + "b" * 8
+    files = {"encoder/config.json": "c" * 64}
+    rid = dumps.run_id("laya", {"local": True, "model_sha256": "a" * 64, "config_sha256": "b" * 64,
+                                "files_sha256": files})
+    assert rid == "laya-" + "a" * 12 + "-" + "b" * 8 + "-" + dumps.files_digest(files)[:8]
+    # 04-REVIEW IN-05: tokenizer/ and encoder/ name the run too
+    assert dumps.run_id("laya", {"local": True, "model_sha256": "a" * 64, "config_sha256": "b" * 64,
+                                 "files_sha256": {"encoder/config.json": "d" * 64}}) != rid
+    with pytest.raises(SystemExit, match="files_sha256"):
+        dumps.run_id("laya", {"local": True, "model_sha256": "a" * 64, "config_sha256": "b" * 64})
     assert dumps.run_id("laya", identity("multilingual")) == "laya-zeroshot-" + pins.LAYA["revision"][:8] == \
         "laya-zeroshot-7b928d82"
     assert dumps.run_id("majority") == "majority" and dumps.run_id("prior") == "prior"

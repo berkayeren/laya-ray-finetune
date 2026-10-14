@@ -12,8 +12,9 @@ into metrics with numpy alone (D-05). Systems (--model, default laya):
   off and the sidecar records laya's load-time default (laya_default_amp, laya_default_dtype). check_agent then
   refuses an agent on another device, in another dtype than float32, with autocast on, or after a laya GPU-to-CPU
   out-of-memory fallback, and runs again after every scored batch; it reads the agent, not the environment.
-  run_id: laya-zeroshot-<revision[:8]> for the pinned checkpoint, laya-<model_sha256[:12]>-<config_sha256[:8]> for a
-  local one (weights and config, so checkpoints that share weights but not configs never share a dump dir).
+  run_id: laya-zeroshot-<revision[:8]> for the pinned checkpoint, laya-<model_sha256[:12]>-<config_sha256[:8]>-<files
+  digest[:8]> for a local one (weights, config, tokenizer/ and encoder/: pilot.weights.identity, so checkpoints that
+  differ in any file laya.load reads never share a dump dir).
   --device cpu|mps|cuda picks the scoring device (default: cuda when --gpus-per-worker > 0, else cpu). mps scores
   in-process only (--workers 0; Ray has no MPS device manager) and is refused before any load when MPS is not
   available. --workers 0 scores in-process; --workers N > 0 scores with N Ray Data actors (one checkpoint load each,
@@ -137,9 +138,14 @@ def resolve_checkpoint(checkpoint, ident=None):
 
 
 def load_agent(model_dir, device, expected_sha256):
-    """laya.load of a dir resolved by resolve_checkpoint; laya re-checks expected_sha256 before parsing any weight."""
+    """laya.load of a dir resolved by resolve_checkpoint; laya re-checks expected_sha256 before parsing any weight.
+    The normalized tokenizer-config digest (pilot.weights.NORMALIZED_KEY, a local checkpoint's; laya rewrites that
+    file on load) is checked here first, laya.load gets the raw-file digests."""
     import laya
-    return laya.load(model_dir, device=device, expected_sha256=expected_sha256)
+    from pilot.weights import NORMALIZED_KEY, laya_digests, verify_files
+    if NORMALIZED_KEY in expected_sha256:
+        verify_files(model_dir, {NORMALIZED_KEY: expected_sha256[NORMALIZED_KEY]}, "checkpoint")
+    return laya.load(model_dir, device=device, expected_sha256=laya_digests(expected_sha256))
 
 
 def check_agent(agent, device):

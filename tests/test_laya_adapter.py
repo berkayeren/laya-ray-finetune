@@ -54,6 +54,7 @@ SIGNATURES = {
     "laya.calibrate.fit_temperature_map": "(records: Iterable, compute_ece: bool = False, seed: int = 0) "
                                           "-> Dict[str, Any]",
     "laya.calibrate.records_from_labeled": "(agent, pairs: Sequence) -> List[Tuple[int, Any, Any, int]]",
+    "laya.agent._fix_tokenizer_config": "(path: str)",
     "laya.load": "(model_id_or_path: str = 'convaiinnovations/laya', device: Optional[str] = None, "
                  "token: Optional[str] = None, subfolder: Optional[str] = None, fast: bool = False, "
                  "compile: bool = False, revision: Optional[str] = None, "
@@ -297,3 +298,25 @@ def test_adapter_import_is_torch_free():
     r = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "[]", r.stdout
+
+
+@pytest.mark.parametrize("tcfg", [
+    {"backend": "tokenizers", "is_local": True, "tokenizer_class": "TokenizersBackend", "pad_token": "[PAD]"},
+    {"pad_token": "[PAD]", "model_max_length": 128},                          # no tokenizer_class
+    {"tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": ["<a>", "<b>"]},
+    {"tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {"extra_0": "<a>"}, "backend": "x"},
+    {"tokenizer_class": "BertTokenizer", "do_lower_case": False},
+])
+def test_the_tokenizer_config_mirror_matches_laya(tmp_path, tcfg):
+    """04-REVIEW IN-05: a local identity binds tokenizer_config.json by pilot.weights.normalized_tokenizer_config, a
+    mirror of the rewrite laya.load makes; it must equal what laya writes, and laya's output must be a fixed point."""
+    from pilot import weights
+    path = tmp_path / "tokenizer" / "tokenizer_config.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps(tcfg), encoding="utf-8")
+    before = weights.tokenizer_config_sha256(str(path))
+    la.fix_tokenizer_config(str(tmp_path))
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert weights.normalized_tokenizer_config(tcfg) == written
+    assert weights.normalized_tokenizer_config(written) == written
+    assert weights.tokenizer_config_sha256(str(path)) == before

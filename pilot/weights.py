@@ -6,8 +6,17 @@ SHA, and sha256-checks every pinned file before returning the local dir. check_r
 downloading, which commit each pinned file resolves to and refuses any other commit (e.g. a moving ref like "main").
 After a first fetch, HF_HUB_OFFLINE=1 reuses the cache by SHA.
 
+identity(checkpoint) names a local checkpoint by the sha256 of every file laya.load reads (04-REVIEW IN-05): the
+weights, rl_agent_config.json, and every file under tokenizer/ and encoder/ (files_sha256). laya.load rewrites
+tokenizer/tokenizer_config.json in place on the first load of a checkpoint transformers saved (laya 0.4.6
+laya.agent._fix_tokenizer_config), so that one file is bound by the sha256 of its normalized JSON (NORMALIZED_KEY),
+which the rewrite does not change; checkpoint_digests hands laya.load the raw-file digests and verify_files checks
+the normalized one.
+
 usage: python -m pilot.weights        # fetch and verify both pinned checkpoints, print sizes and free disk
 """
+import hashlib
+import json
 import os
 import shutil
 
@@ -15,6 +24,11 @@ from huggingface_hub import snapshot_download
 
 from pilot import pins
 from pilot.data import sha256_file
+
+
+COMPONENT_DIRS = ("tokenizer", "encoder")                  # read by laya.load next to the weights and the config
+TOKENIZER_CONFIG = "tokenizer/tokenizer_config.json"       # rewritten in place by laya.load
+NORMALIZED_KEY = TOKENIZER_CONFIG + "#normalized"           # its digest key: not a path, so laya.load never sees it
 
 
 def fetch(pin):
@@ -28,32 +42,97 @@ def fetch(pin):
 
 
 def verify_files(d, sha256, what):
-    """Hard-fail unless every {path relative to d: sha256} file exists under d with that digest."""
+    """Hard-fail unless every {path relative to d: sha256} file exists under d with that digest; NORMALIZED_KEY is
+    checked against the normalized tokenizer config (tokenizer_config_sha256)."""
     for rel in sorted(sha256):
-        path = os.path.join(d, rel)
+        path = os.path.join(d, TOKENIZER_CONFIG if rel == NORMALIZED_KEY else rel)
         if not os.path.isfile(path):
             raise SystemExit("%s: %s missing" % (what, rel))
-        have = sha256_file(path)
+        have = tokenizer_config_sha256(path) if rel == NORMALIZED_KEY else sha256_file(path)
         if have != sha256[rel]:
             raise SystemExit("%s: %s sha256 %s != expected %s" % (what, rel, have, sha256[rel]))
 
 
 def checkpoint_digests(checkpoint, ident):
-    """{file: sha256} a load of `checkpoint` must match: the Laya pin for 'multilingual', else the weights and config
-    hashed into `ident` (identity(checkpoint)), so the bytes loaded are the bytes the provenance records."""
+    """{file: sha256} a load of `checkpoint` must match: the Laya pin for 'multilingual', else every file hashed into
+    `ident` (identity(checkpoint): weights, config, tokenizer/ and encoder/), so the bytes loaded are the bytes the
+    provenance records. A NORMALIZED_KEY entry is for verify_files only: pass laya.load laya_digests() of this."""
     if checkpoint == "multilingual":
         return dict(pins.LAYA["sha256"])
-    out = {"model.safetensors": ident["model_sha256"], "rl_agent_config.json": ident["config_sha256"]}
+    name = os.path.basename(os.path.normpath(checkpoint))
+    if ident.get("files_sha256") is None:
+        raise SystemExit("the identity of checkpoint %s has no files_sha256 (tokenizer/ and encoder/); recompute it "
+                         "with this pilot.weights.identity" % name)
+    out = dict(ident["files_sha256"], **{"model.safetensors": ident["model_sha256"],
+                                         "rl_agent_config.json": ident["config_sha256"]})
     missing = sorted(rel for rel, h in out.items() if h is None)
     if missing:
-        raise SystemExit("checkpoint %s lacks %s"
-                         % (os.path.basename(os.path.normpath(checkpoint)), ", ".join(missing)))
+        raise SystemExit("checkpoint %s lacks %s" % (name, ", ".join(missing)))
     return out
+
+
+def laya_digests(digests):
+    """The expected_sha256 laya.load verifies itself: every raw-file digest of checkpoint_digests, without
+    NORMALIZED_KEY (laya rewrites that file, so verify_files checks its normalized digest instead)."""
+    return {rel: h for rel, h in digests.items() if rel != NORMALIZED_KEY}
+
+
+def normalized_tokenizer_config(tcfg):
+    """A tokenizer_config.json dict as laya.load leaves it, mirroring laya 0.4.6 laya.agent._fix_tokenizer_config so
+    this module stays laya- and torch-free (tests/test_laya_adapter.py checks the mirror against laya): a missing or
+    TokenizersBackend tokenizer_class becomes PreTrainedTokenizerFast without backend and is_local, and a list of
+    extra_special_tokens becomes {"extra_<i>": token}. Idempotent, so the file before and after laya's rewrite has one
+    normalized view."""
+    t = dict(tcfg)
+    if t.get("tokenizer_class") in (None, "TokenizersBackend"):
+        t["tokenizer_class"] = "PreTrainedTokenizerFast"
+        t.pop("backend", None)
+        t.pop("is_local", None)
+    extra = t.get("extra_special_tokens")
+    if isinstance(extra, list):
+        t["extra_special_tokens"] = {"extra_%d" % i: tok for i, tok in enumerate(extra)}
+    return t
+
+
+def tokenizer_config_sha256(path):
+    """sha256 of the sorted, compact JSON of normalized_tokenizer_config(the file at `path`); of the raw bytes when it
+    is not a JSON object (laya leaves such a file alone)."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    try:
+        tcfg = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        tcfg = None
+    if not isinstance(tcfg, dict):
+        return hashlib.sha256(raw).hexdigest()
+    blob = json.dumps(normalized_tokenizer_config(tcfg), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def component_digests(checkpoint):
+    """{path relative to `checkpoint`: sha256} of every file under its tokenizer/ and encoder/ dirs (sorted, "/"
+    separators; dotfiles such as a laya rewrite's temp file skipped), with TOKENIZER_CONFIG under NORMALIZED_KEY."""
+    out = {}
+    for sub in COMPONENT_DIRS:
+        for root, dirs, files in os.walk(os.path.join(checkpoint, sub)):
+            dirs.sort()
+            for name in sorted(files):
+                if name.startswith("."):
+                    continue
+                path = os.path.join(root, name)
+                rel = os.path.relpath(path, checkpoint).replace(os.sep, "/")
+                if rel == TOKENIZER_CONFIG:
+                    out[NORMALIZED_KEY] = tokenizer_config_sha256(path)
+                elif os.path.isfile(path):
+                    out[rel] = sha256_file(path)
+    return dict(sorted(out.items()))
 
 
 def identity(checkpoint):
     """Provenance of a model for reports: the Laya pin for 'multilingual', else the sha256 of a local checkpoint dir's
-    weights and config (None for a file the dir lacks). Hashes only; never downloads or loads anything."""
+    weights and config (None for a file the dir lacks) and files_sha256, the component_digests of its tokenizer/ and
+    encoder/ (04-REVIEW IN-05), so every file laya.load reads is bound. Hashes only; never downloads or loads
+    anything."""
     if checkpoint == "multilingual":
         return {"repo": pins.LAYA["repo"], "subfolder": pins.LAYA["subfolder"], "revision": pins.LAYA["revision"],
                 "model_sha256": pins.LAYA["sha256"]["model.safetensors"]}
@@ -61,6 +140,7 @@ def identity(checkpoint):
     for key, rel in (("model_sha256", "model.safetensors"), ("config_sha256", "rl_agent_config.json")):
         path = os.path.join(checkpoint, rel)
         out[key] = sha256_file(path) if os.path.isfile(path) else None
+    out["files_sha256"] = component_digests(checkpoint)
     return out
 
 

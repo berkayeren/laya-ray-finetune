@@ -91,7 +91,7 @@ The root `CLAUDE.md` is the authoritative description of commands and architectu
 | Pins | Every pinned revision and sha256 | `pilot/pins.py` |
 | Splits | Producer (`prepare`, `SPLITS`, `TRAINED_ON`) and the only verifier (`verify_split_file`) | `pilot/data.py` |
 | Audit | Report-only duplicate audit, hash-registered in the manifest | `pilot/audit.py` |
-| Weights | Pinned, digest-verified fetch (`fetch`), provenance hashes (`identity`) | `pilot/weights.py` |
+| Weights | Pinned, digest-verified fetch (`fetch`), provenance hashes (`identity`: every file `laya.load` reads) | `pilot/weights.py` |
 | Data prep CLI | Pinned Multi3NLU++ -> `data/splits/*.jsonl`, `data/audit/`, `data/splits.json` | `prepare_data.py` |
 | Trainer | Single-node DDP fine-tuning on Ray Train (cpu, cuda, or one MPS worker), neg-K items, message-level calibration holdout, fallback ladder, run id, per-epoch resume, run record | `ray_train.py` |
 | Run record | Torch-free run-record schema, run identity (`run_id`), neg-K item count, LAYA-03 fallback ladder | `pilot/runs.py` |

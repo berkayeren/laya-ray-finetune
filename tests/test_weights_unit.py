@@ -198,7 +198,47 @@ def test_identity_of_the_pinned_checkpoint_is_the_pin():
 def test_identity_of_a_local_checkpoint_hashes_its_files(tmp_path):
     (tmp_path / "model.safetensors").write_bytes(b"weights")
     got = pilot.weights.identity(str(tmp_path))
-    assert got == {"local": True, "model_sha256": hashlib.sha256(b"weights").hexdigest(), "config_sha256": None}
+    assert got == {"local": True, "model_sha256": hashlib.sha256(b"weights").hexdigest(), "config_sha256": None,
+                   "files_sha256": {}}
+
+
+def test_identity_binds_the_tokenizer_and_encoder_files(tmp_path):
+    """04-REVIEW IN-05: every file laya.load reads is in a local identity; tokenizer_config.json, which laya rewrites
+    on the first load, by its normalized JSON, so the identity before and after that rewrite is the same."""
+    (tmp_path / "model.safetensors").write_bytes(b"weights")
+    (tmp_path / "rl_agent_config.json").write_bytes(b"{}")
+    (tmp_path / "tokenizer").mkdir()
+    (tmp_path / "encoder").mkdir()
+    (tmp_path / "tokenizer" / "tokenizer.json").write_bytes(b"vocab")
+    (tmp_path / "encoder" / "config.json").write_bytes(b"{\"hidden_size\": 64}")
+    tcfg = tmp_path / "tokenizer" / "tokenizer_config.json"
+    tcfg.write_text(json.dumps({"backend": "tokenizers", "tokenizer_class": "TokenizersBackend",
+                                "extra_special_tokens": ["<a>"], "pad_token": "[PAD]"}), encoding="utf-8")
+    (tmp_path / "tokenizer" / ".tokenizer_config.x.tmp").write_bytes(b"partial")      # a rewrite's temp file
+    ident = pilot.weights.identity(str(tmp_path))
+    assert sorted(ident["files_sha256"]) == sorted(["encoder/config.json", pilot.weights.NORMALIZED_KEY,
+                                                    "tokenizer/tokenizer.json"])
+    assert ident["files_sha256"]["tokenizer/tokenizer.json"] == hashlib.sha256(b"vocab").hexdigest()
+    tcfg.write_text(json.dumps({"tokenizer_class": "PreTrainedTokenizerFast", "pad_token": "[PAD]",
+                                "extra_special_tokens": {"extra_0": "<a>"}}, indent=2), encoding="utf-8")
+    assert pilot.weights.identity(str(tmp_path)) == ident                   # laya's rewrite keeps the identity
+    digests = pilot.weights.checkpoint_digests(str(tmp_path), ident)
+    pilot.weights.verify_files(str(tmp_path), digests, "checkpoint")
+    assert pilot.weights.NORMALIZED_KEY not in pilot.weights.laya_digests(digests)
+    assert set(pilot.weights.laya_digests(digests)) == {"model.safetensors", "rl_agent_config.json",
+                                                        "tokenizer/tokenizer.json", "encoder/config.json"}
+    for rel, data in (("tokenizer/tokenizer.json", b"other vocab"), ("encoder/config.json", b"{}"),
+                      ("tokenizer/tokenizer_config.json", b'{"pad_token": "[UNK]"}'), ("tokenizer/added.json", b"x")):
+        before = (tmp_path / rel).read_bytes() if (tmp_path / rel).exists() else None
+        (tmp_path / rel).write_bytes(data)
+        assert pilot.weights.identity(str(tmp_path)) != ident, rel             # any scored file moves the identity
+        if before is None:
+            (tmp_path / rel).unlink()
+        else:
+            (tmp_path / rel).write_bytes(before)
+    (tmp_path / "tokenizer" / "tokenizer_config.json").write_bytes(b'{"pad_token": "[UNK]"}')
+    with pytest.raises(SystemExit, match="normalized sha256"):
+        pilot.weights.verify_files(str(tmp_path), digests, "checkpoint")
 
 
 def test_repo_relpath_never_returns_a_local_path(tmp_path, monkeypatch):
@@ -272,6 +312,8 @@ def test_checkpoint_digests_bind_a_local_load_to_its_recorded_identity(tmp_path)
     assert pilot.weights.checkpoint_digests(str(tmp_path), ident) == {
         "model.safetensors": hashlib.sha256(b"weights").hexdigest(),
         "rl_agent_config.json": hashlib.sha256(b"{}").hexdigest()}
+    with pytest.raises(SystemExit, match="files_sha256"):               # an identity from before IN-05
+        pilot.weights.checkpoint_digests(str(tmp_path), {k: v for k, v in ident.items() if k != "files_sha256"})
     assert pilot.weights.checkpoint_digests("multilingual", None) == pins.LAYA["sha256"]
     (tmp_path / "model.safetensors").unlink()
     with pytest.raises(SystemExit, match="lacks model.safetensors"):

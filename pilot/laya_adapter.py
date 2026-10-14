@@ -51,6 +51,11 @@ def _lcal():
     return calibrate
 
 
+def _lag():
+    from laya import agent
+    return agent
+
+
 def check_version():
     """Refuse unless the installed laya is exactly LAYA_VERSION (0.4.60, 0.4.6.post1 and 0.4.5 are all refused)."""
     import laya
@@ -66,6 +71,7 @@ def wrapped():
     out = {"laya.train." + n: getattr(lt, n) for n in _TRAIN}
     out.update({"laya.common." + n: getattr(lc, n) for n in _COMMON})
     out.update({"laya.calibrate." + n: getattr(lcal, n) for n in _CALIBRATE})
+    out["laya.agent._fix_tokenizer_config"] = _lag()._fix_tokenizer_config
     out["laya.load"] = laya.load
     return out
 
@@ -149,6 +155,15 @@ def decision_model(encoder, head_layers=2, n_act=2):
 
 def fit_temperature_map(records):
     return _lcal().fit_temperature_map(records)
+
+
+# ---- laya.agent ----
+
+def fix_tokenizer_config(model_dir):
+    """laya.load's in-place rewrite of model_dir/tokenizer/tokenizer_config.json (laya.agent._fix_tokenizer_config).
+    pilot.weights mirrors it (normalized_tokenizer_config) to bind that file in a local checkpoint's identity without
+    importing laya; tests/test_laya_adapter.py checks the mirror against this (04-REVIEW IN-05)."""
+    return _lag()._fix_tokenizer_config(model_dir)
 
 
 # ---- DecisionModel internals ----

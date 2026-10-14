@@ -16,6 +16,7 @@ import report
 import score
 from conftest import prepared
 from intents import QUESTIONS
+from pilot import dumps
 from pilot import laya_adapter as la
 from pilot.weights import identity
 from tiny_laya import tiny_checkpoint
@@ -47,10 +48,15 @@ def test_tiny_checkpoint_round_trips_through_score_and_report(tmp_path, tiny):
     import laya
     out_dir, manifest, ckpt = tiny
     test_jsonl = os.path.join(out_dir, "splits", "test.jsonl")
+    before = identity(ckpt)
     run_dir, split = score.main([test_jsonl, "--model", "laya", "--checkpoint", ckpt, "--workers", "0",
                                  "--manifest", manifest, "--out-root", str(tmp_path / "dumps")])
     ident = identity(ckpt)
-    assert os.path.basename(run_dir) == "laya-%s-%s" % (ident["model_sha256"][:12], ident["config_sha256"][:8])
+    assert ident == before                  # laya's tokenizer_config.json rewrite on load keeps it (04-REVIEW IN-05)
+    assert sorted(ident["files_sha256"]) == ["encoder/config.json", "tokenizer/tokenizer.json",
+                                             "tokenizer/tokenizer_config.json#normalized"]
+    assert os.path.basename(run_dir) == "laya-%s-%s-%s" % (ident["model_sha256"][:12], ident["config_sha256"][:8],
+                                                           dumps.files_digest(ident["files_sha256"])[:8])
     assert split == "test"
     cases = _split_cases(test_jsonl)
     z = np.load(os.path.join(run_dir, "test.npz"), allow_pickle=False)

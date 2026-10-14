@@ -20,6 +20,7 @@ Numpy and stdlib only: no torch, Ray or laya.
 
 usage: written by score.py (write_dump), read by report.py (load_dump, read_gold)
 """
+import hashlib
 import io
 import json
 import os
@@ -49,11 +50,18 @@ def uids_sha256(uids):
     return sha256_bytes("\n".join(uids).encode("utf-8"))
 
 
+def files_digest(files_sha256):
+    """sha256 of the sorted, compact JSON of a local identity's files_sha256 (tokenizer/ and encoder/ digests)."""
+    blob = json.dumps(files_sha256, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 def run_id(kind, ident=None):
     """Stable, config-derived run id: majority, prior, laya-zeroshot-<revision[:8]> (the pinned checkpoint) or
-    laya-<model_sha256[:12]>-<config_sha256[:8]> (a local checkpoint: weights and rl_agent_config.json, which carries
-    the served temperature, max_len and calibration, so two checkpoints sharing weights never share a dump dir;
-    03-REVIEW WR-01). SystemExit on a local identity without config_sha256."""
+    laya-<model_sha256[:12]>-<config_sha256[:8]>-<files_digest(files_sha256)[:8]> (a local checkpoint: weights,
+    rl_agent_config.json, which carries the served temperature, max_len and calibration, and tokenizer/ and encoder/,
+    so two checkpoints that differ in any file laya.load reads never share a dump dir; 03-REVIEW WR-01, 04-REVIEW
+    IN-05). SystemExit on a local identity without config_sha256 or files_sha256."""
     if kind in ("majority", "prior"):
         return kind
     if kind == "laya" and isinstance(ident, dict):
@@ -63,7 +71,11 @@ def run_id(kind, ident=None):
             if not ident.get("config_sha256"):
                 raise SystemExit("local checkpoint identity has no config_sha256 (rl_agent_config.json missing?); "
                                  "a local run id names both the weights and the config")
-            return "laya-%s-%s" % (ident["model_sha256"][:12], ident["config_sha256"][:8])
+            if ident.get("files_sha256") is None:
+                raise SystemExit("local checkpoint identity has no files_sha256 (tokenizer/ and encoder/); recompute "
+                                 "it with this pilot.weights.identity")
+            return "laya-%s-%s-%s" % (ident["model_sha256"][:12], ident["config_sha256"][:8],
+                                      files_digest(ident["files_sha256"])[:8])
     raise SystemExit("unknown system %r; expected majority, prior or laya" % (kind,))
 
 
