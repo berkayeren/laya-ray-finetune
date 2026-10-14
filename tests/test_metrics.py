@@ -158,6 +158,9 @@ def test_grid_is_exact():
     assert g[0] == 0.05 and g[-1] == 0.95 and g[2] == 0.07 and g[35] == 0.40
     assert np.abs(np.diff(g) - 0.01).max() < 1e-12
     assert all(g[i] == float("0.%02d" % (i + 5)) for i in range(91))   # every point equals its decimal literal
+    c = metrics.GRID_CENTI
+    assert c.dtype.kind == "i" and c.tolist() == list(range(5, 96))   # exact integer hundredths, 91 values
+    assert (g == c / 100.0).all()
 
 
 def test_pick_prefers_closest_to_half():

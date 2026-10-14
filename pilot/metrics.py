@@ -15,14 +15,16 @@ Semantics (ported from the legacy evaluate.metrics):
   INTENTS tag; None when no row has a gold tag
 
 Val-selected thresholds (EVAL-02, D-12), one rule for every system, chosen on val only and never on test:
-- GRID: 0.05..0.95 in steps of 0.01 (91 points), built as integers 5..95 divided by 100 so each point equals its
-  decimal literal; no rounding call
+- GRID: 0.05..0.95 in steps of 0.01 (91 points), GRID_CENTI (the integers 5..95) divided by 100, so each point
+  equals its decimal literal; no rounding call
 - global θ: maximises val micro-F1 over GRID
 - per-tag θ: only for tags with at least MIN_VAL_POSITIVES (10) val positives, maximising that tag's val F1 over the
   same grid; every other tag uses the global θ (theta_vector)
 - ties (global and per-tag alike): the θ closest to 0.5; between two equally close points, the lower θ; when every
-  point scores 0 that is 0.5. The per-tag objective and this tie rule are research assumption A2, confirmed by the
-  user on 2026-10-14 (the alternative, breaking per-tag ties toward the global θ, was rejected)
+  point scores 0 that is 0.5. The distance to 0.5 is measured in integer hundredths (GRID_CENTI), so two equally
+  close points tie exactly and the lower θ wins (CR-01: a float distance picked the higher θ on 9 of 45 pairs).
+  The per-tag objective and this tie rule are research assumption A2, confirmed by the user on 2026-10-14 (the
+  alternative, breaking per-tag ties toward the global θ, was rejected)
 - θ is selected on the probabilities a system reports, i.e. after its temperature (the caller passes them)
 
 Paired bootstrap (EVAL-07), the one interval procedure for every comparison:
@@ -46,7 +48,8 @@ from intents import INTENTS
 
 TAGS = list(INTENTS)
 N_RANKED = 5                                                # tags listed in best_tags / worst_tags
-GRID = np.arange(5, 96) / 100.0                             # 0.05..0.95, 91 points, each equal to its decimal literal
+GRID_CENTI = np.arange(5, 96)                               # θ grid in integer hundredths 5..95, exact
+GRID = GRID_CENTI / 100.0                                   # 0.05..0.95, 91 points, each equal to its decimal literal
 MIN_VAL_POSITIVES = 10                                      # val positives a tag needs for its own θ
 TIE_RULE = "closest to 0.5; between two equally close points, the lower θ"
 BOOT_METRICS = ("micro_f1", "macro_f1", "exact_match", "top1_hit")
@@ -129,8 +132,9 @@ def pick(scores):
     scores = np.asarray(scores, dtype=np.float64)
     if scores.shape != GRID.shape:
         raise SystemExit("%d scores for a %d-point θ grid" % (scores.size, GRID.size))
-    cand = np.flatnonzero(scores == scores.max())
-    return float(GRID[cand[np.argmin(np.abs(GRID[cand] - 0.5))]])   # argmin keeps the first (lower) on a tie
+    cand = np.flatnonzero(scores == scores.max())           # ascending, so the lower θ comes first
+    # the distance to 0.5 is exact in integer hundredths: equally close points tie exactly and argmin keeps the lower
+    return float(GRID[cand[np.argmin(np.abs(GRID_CENTI[cand] - 50))]])
 
 
 def _f1_counts(tp, fp, fn):
