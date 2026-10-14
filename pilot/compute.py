@@ -12,7 +12,8 @@ of E epochs on n items costs E x (optimizer_steps(n) x s_per_step + save_s_per_e
 final_save_s, every term measured by the probe run.
 
 Transparency (T-04-17): every projection line names its basis and its source. basis is the weakest input of the line:
-"estimate" when any of its rates is an estimate (ESTIMATES, until plan 04-06 measures BERTurk), "provisional" for the
+"estimate" when any of its rates is an estimate (ESTIMATES, used only when the BERTurk timing child did not finish
+ok), "provisional" for the
 few-shot lines (their protocol is frozen only in Phase 8), "measured" otherwise. Every MATRIX value is provisional
 whatever the basis; assumptions() lists each one, with its source, for the user to confirm or trim at plan 04-08.
 
@@ -58,14 +59,15 @@ MATRIX_SOURCES = {
                          "compute fallback is 1",
     "eval_seeds": "ROADMAP Phase 8: 3 seeds x 2 models scored once on val, test and HOTELS",
 }
-# labelled estimates until measured (plan 04-06 replaces both with its BERTurk timing probe)
+# labelled estimates, used only when compute_checkpoint.py's BERTurk timing child (measured["berturk"]) did not
+# finish ok
 ESTIMATES = {"berturk_s_per_step": 1.3, "berturk_s_per_msg": 0.01}
 ESTIMATE_SOURCES = {
     "berturk_s_per_step": "about 30-60 s per BERTurk epoch of 46 batches of 32 on MPS, upper end [ASSUMED, RESEARCH "
                           "Open Question 2]",
     "berturk_s_per_msg": "a 110M-parameter encoder scoring one message at max_len 128 on MPS [ASSUMED]",
 }
-# the committed CPU zero-shot scoring timing, the Laya scoring rate until a scoring probe measures it
+# the committed CPU zero-shot scoring timing, the Laya scoring rate when no scoring probe (measured["scoring"]) ran ok
 SCORING_DUMP = os.path.join(REPO_ROOT, "results", "dumps", "laya-zeroshot-7b928d82", "val.json")
 SPLIT_NAMES = tuple(s["name"] for s in SPLITS)
 SCORED = ("val", "test", "hotels_probe")
@@ -201,8 +203,9 @@ def laya_scoring_rate(measured):
     """(s per message, basis, source) of Laya scoring: measured["scoring"] when present, else the committed CPU
     zero-shot val timing (wall seconds / messages)."""
     s = measured.get("scoring")
-    if s:
-        return s["s_per_msg"], "measured", "scoring probe on %s" % s.get("device")
+    if s and s.get("status", "ok") == "ok":
+        return s["s_per_msg"], "measured", ("scoring probe on %s: %s, %d messages"
+                                            % (s.get("device"), s.get("basis") or "measured", s.get("n") or 0))
     with open(SCORING_DUMP, encoding="utf-8") as f:
         side = json.load(f)
     n, sec, sc = side["split"]["n_messages"], side["timing"]["seconds"], side["scorer"]
@@ -217,7 +220,8 @@ def berturk_rates(measured):
     finished ok, else ESTIMATES."""
     b = measured.get("berturk")
     if b and b.get("status") == "ok":
-        return b["s_per_step"], b["s_per_msg_infer"], "measured", "BERTurk timing probe on %s" % b.get("device")
+        return b["s_per_step"], b["s_per_msg_infer"], "measured", ("BERTurk timing probe on %s: %s"
+                                                                   % (b.get("device"), b.get("basis") or "measured"))
     return (ESTIMATES["berturk_s_per_step"], ESTIMATES["berturk_s_per_msg"], "estimate",
             "ESTIMATES: %s; %s" % (ESTIMATE_SOURCES["berturk_s_per_step"], ESTIMATE_SOURCES["berturk_s_per_msg"]))
 
@@ -422,13 +426,21 @@ def assumptions(matrix, measured=None, counts=None, interrupt=None):
             "change is flagged code_changed_on_resume, not refused"]
     b = measured.get("berturk")
     if not (b and b.get("status") == "ok"):
-        out.append("BERTurk rates are estimates until plan 04-06's BERTurk timing probe measures them: %.2f s per "
-                   "optimizer step (%s) and %.3f s per scored message (%s)"
+        out.append("BERTurk rates are estimates (the BERTurk timing child did not finish ok or did not run): %.2f s "
+                   "per optimizer step (%s) and %.3f s per scored message (%s)"
                    % (ESTIMATES["berturk_s_per_step"], ESTIMATE_SOURCES["berturk_s_per_step"],
                       ESTIMATES["berturk_s_per_msg"], ESTIMATE_SOURCES["berturk_s_per_msg"]))
-    if not measured.get("scoring"):
+    else:
+        out.append("BERTurk is timed with a plain PyTorch loop (fp32, AdamW, batch 32, max_len 128), not the HF "
+                   "Trainer Phase 6 trains with; the Trainer's own overhead (data collation, logging, per-epoch "
+                   "evaluation hooks) is assumed small")
+    sc = measured.get("scoring")
+    if not (sc and sc.get("status", "ok") == "ok"):
         out.append("The Laya scoring rate is the committed CPU zero-shot rate (%s) until an MPS scoring probe "
                    "measures it" % repo_relpath(SCORING_DUMP))
+    else:
+        out.append("Scoring time is measured on the pinned zero-shot weights (a --n %s val subset); a fine-tuned "
+                   "checkpoint has the same architecture and forward cost" % sc.get("n"))
     s_msg = berturk_rates(measured)[1]                     # the BERTurk scoring rate the projection uses
     out += ["Scoring runs in fp32 on MPS (la.force_fp32 turns laya's fp16 autocast off); the scoring rate assumes fp32",
             "Per-epoch laya exports stay on (--export-epochs) so Phase 5 picks the epoch on val without retraining; "
@@ -493,6 +505,44 @@ def _measured_lines(measured):
     return lines
 
 
+def _probe_lines(measured):
+    """The BERTurk timing probe and the scoring probe, when they ran: their numbers, or why a line keeps its
+    estimate."""
+    lines, g = [], 2**30
+    b = measured.get("berturk")
+    if b is not None:
+        lines += ["", "## BERTurk timing probe", ""]
+        if b.get("status") == "ok":
+            lines += ["- %s" % b["basis"],
+                      "- Device %s (parameters on %s), %s, %d torch threads, %s parameters" % (
+                          b["device"], b["param_device"], b.get("dtype", "-"), b.get("torch_threads", 0),
+                          b.get("n_params", "-")),
+                      "- %s s per optimizer step (median of %d measured steps after %s warm-up; p90 %s s); %s s per "
+                      "message for inference (%s messages, one batch)" % (
+                          _fmt(b["s_per_step"], digits=4), b["n_steps"], _dash(b.get("warmup_steps")),
+                          _fmt(b.get("p90_s"), digits=4), _fmt(b["s_per_msg_infer"], digits=4),
+                          _dash(b.get("infer_msgs"))),
+                      "- Peak memory %s GiB (driver %s GiB, RSS %s GiB)" % (
+                          _fmt(b.get("peak_total_bytes"), g, 2), _fmt(b.get("peak_driver_bytes"), g, 2),
+                          _fmt(b.get("peak_rss_bytes"), g, 2))]
+        else:
+            lines.append("- **Status %s** (%s): the BERTurk lines keep the estimate (%.2f s per step, %.3f s per "
+                         "message)" % (b.get("status"), b.get("reason") or "returncode %s" % b.get("returncode"),
+                                       ESTIMATES["berturk_s_per_step"], ESTIMATES["berturk_s_per_msg"]))
+    sc = measured.get("scoring")
+    if sc is not None:
+        lines += ["", "## Scoring probe", ""]
+        if sc.get("status", "ok") == "ok":
+            lines += ["- %s" % sc["basis"],
+                      "- Device %s, %s, autocast %s: %s s per message over %d messages (inference time, the sidecar's "
+                      "inference_seconds / n)" % (sc["device"], sc["dtype"], "on" if sc["amp_enabled"] else "off",
+                                                  _fmt(sc["s_per_msg"], digits=4), sc["n"])]
+        else:
+            lines.append("- **Status %s** (%s): the Laya scoring lines keep the committed CPU rate"
+                         % (sc.get("status"), sc.get("reason")))
+    return lines
+
+
 def _projection_lines(projection):
     lines = ["", "## Projection", "",
              "Basis is the weakest input of a line: estimate (a labelled estimate, not measured), provisional "
@@ -547,8 +597,8 @@ def _disk_lines(d):
 
 def _attempt_lines(attempts, status):
     lines = ["", "## Attempts", "",
-             "Every probe attempt runs in a fresh process; an MPS out-of-memory attempt is followed by the next rung of "
-             "the LAYA-03 ladder. Chain status: **%s**." % status, "",
+             "Every probe attempt runs in a fresh process; an MPS out-of-memory attempt is followed by the next rung "
+             "of the LAYA-03 ladder. Chain status: **%s**." % status, "",
              "| # | rung | status | run id | detail |", "|---|---|---|---|---|"]
     for i, a in enumerate(attempts):
         detail = a.get("line") or a.get("reason") or ("weaker: head-only" if runs.weaker(a["rung"]) else "")
@@ -631,6 +681,7 @@ def render_markdown(report):
     if report.get("measured"):
         lines += _resume_lines(report.get("interrupt"), report.get("resume"))
         lines += _measured_lines(report["measured"])
+        lines += _probe_lines(report["measured"])
     if report.get("projection"):
         lines += _projection_lines(report["projection"])
     if report.get("what_if"):

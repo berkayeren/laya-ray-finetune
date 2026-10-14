@@ -24,9 +24,18 @@ the LAYA-03 ladder (pilot.runs.next_rung), each with its own run_id (compute.att
 report, and an exhausted ladder is reported as status ladder_exhausted. Before any child, the disk under --storage
 must hold pilot.runs.disk_need_bytes for the run.
 
+Measured BERTurk and scoring rates (RESEARCH Open Question 2): after the Laya probe, a BERTurk timing child
+(`--child berturk CONFIG`, a fresh process with the same MPS env) loads the pinned BERTurk weights, fetched and
+verified on the driver and re-verified (sha256) in the child before any load, and times 3 warm-up + 20 AdamW optimizer
+steps on real selection_train batches of 32 at max_len 128 in fp32, plus a 64-message inference pass. A scoring probe
+runs `score.py <val> --model laya --checkpoint <--base> --device <device> --workers 0 --n 32` into a temp out-root that
+is deleted afterwards and reads only the sidecar's timing (never test, HOTELS or a fine-tuned checkpoint, never a
+metric). Both replace the estimates in the projection (basis measured); a probe that fails leaves its lines on the
+estimate and the report says why. --no-berturk / --no-score-probe skip them.
+
 A run off the protocol (not mps, not the pinned weights, not the committed selection_train under the committed
-manifest, a start config other than the spike's at rung none, an interrupt other than kill, or a test hook) is
-bannered SMOKE RUN with
+manifest, a start config other than the spike's at rung none, an interrupt other than kill, BERTurk weights other than
+the pinned ones, or a test hook) is bannered SMOKE RUN with
 meta.protocol.protocol_complete false; a busy-machine preflight is bannered too. Neither is a compute checkpoint.
 
 Run it on AC power, after quitting heavy apps, under `caffeinate -i` (the machine must not sleep mid-epoch).
@@ -38,7 +47,9 @@ usage:
 """
 import argparse
 import functools
+import glob
 import importlib.metadata
+import json
 import os
 import platform
 import shutil
@@ -52,8 +63,9 @@ import psutil
 
 from pilot import compute, pins, runs, spike
 from pilot import laya_adapter as la
-from pilot.data import DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, repo_relpath, sha256_file, verify_split_file
-from pilot.weights import fetch, identity
+from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, repo_relpath, sha256_file,
+                        verify_split_file, write_atomic)
+from pilot.weights import fetch, identity, verify_files
 
 DEFAULT_DATA = os.path.join(REPO_ROOT, "data", "splits", "selection_train.jsonl")
 DEFAULT_SPIKE = os.path.join(REPO_ROOT, "results", "spike", "mps_spike.json")
@@ -63,6 +75,13 @@ NEG = 8
 TAIL_LINES = 40
 REAP_S = 120                # a killed tree's processes get this long to exit before they are SIGKILLed
 RECOVER_S, RECOVER_POLL_S = 120, 5   # wait for available memory to recover after an interrupt, before the rerun
+# the BERTurk timing child (RESEARCH Open Question 2): real selection_train batches of 32 at max_len 128, AdamW, fp32
+BERTURK = {"batch": 32, "max_len": 128, "lr": 3e-5, "weight_decay": 0.01, "clip_grad_norm": 1.0, "warmup_steps": 3,
+           "measured_steps": 20, "infer_msgs": 64}
+BERTURK_BASIS = "plain PyTorch loop, fp32, AdamW, batch 32, max_len 128; Phase 6 trains with the HF Trainer"
+SCORE_PROBE_N = 32
+SCORING_BASIS = ("--n 32 val subset of the --base weights (the pinned zero-shot model in the real run; same "
+                 "architecture as a fine-tuned checkpoint), in-process, fp32")
 
 
 def preflight(min_available_gib):
@@ -134,6 +153,7 @@ def protocol_complete(a, start):
     return (a.device == "mps" and a.base == "multilingual"
             and os.path.realpath(a.data) == os.path.realpath(DEFAULT_DATA) and manifest_is_committed(a.manifest)
             and a.max_messages is None and a.calib_frac is None and a.interrupt == "kill"
+            and (not a.berturk or a.berturk_source == "pinned")
             and {k: start[k] for k in runs.SPIKE_START} == runs.SPIKE_START and start["rung"] == "none")
 
 
@@ -304,6 +324,172 @@ def oom_dropping(launch, ctx):
     return run
 
 
+# ---- the BERTurk timing child and the scoring probe (measured inputs of the projection, LAYA-07) ----
+
+def berturk_child(cfg):
+    """Time BERTurk fine-tuning and inference in this (fresh) process: warm-up + measured AdamW optimizer steps on
+    batches of 32 at max_len 128 (forward with labels -> loss -> backward -> clip -> step), then one no_grad pass over
+    infer_msgs messages, each timed with a device sync, memory sampled after every backward and step as in the trainer.
+
+    source "pinned": the weights in cfg["dir"] are checked against pins.BERTURK before any load, the 48-label head is
+    trained on real selection_train messages (verified bytes, labels in INTENTS order); source "tiny": a tiny random
+    BERT on random ids (the offline test). torch and transformers are imported here only (the orchestrator stays
+    torch-free)."""
+    if cfg["source"] == "pinned":
+        verify_files(cfg["dir"], pins.BERTURK["sha256"], "BERTurk at the pinned revision")   # before any load
+    elif cfg["source"] != "tiny":
+        raise SystemExit("unknown BERTurk source %r" % (cfg["source"],))
+    import random
+
+    import torch
+    import transformers
+
+    from intents import INTENTS
+    from ray_train import memory_sampler, read_verified_rows, require_param_device
+
+    torch.manual_seed(cfg["seed"])
+    torch.set_num_threads(cfg["cpus"])
+    device = torch.device(cfg["device"])
+    if device.type == "mps" and not torch.backends.mps.is_available():
+        raise SystemExit("MPS is not available in this process; the BERTurk timing child cannot run")
+    batch_n, max_len = BERTURK["batch"], BERTURK["max_len"]
+    if cfg["source"] == "pinned":
+        tok = transformers.AutoTokenizer.from_pretrained(cfg["dir"])
+        model = transformers.AutoModelForSequenceClassification.from_pretrained(
+            cfg["dir"], num_labels=len(INTENTS), problem_type="multi_label_classification", dtype=torch.float32)
+        rows = read_verified_rows(cfg["data"], cfg["data_sha256"])
+        random.Random(cfg["seed"]).shuffle(rows)
+        labels = torch.tensor([[1.0 if r["expected"][t] else 0.0 for t in INTENTS] for r in rows])
+
+        def make(i, n, with_labels=True):
+            idx = [(i * n + j) % len(rows) for j in range(n)]
+            enc = dict(tok([rows[k]["state"] for k in idx], padding="longest", truncation=True, max_length=max_len,
+                           return_tensors="pt"))
+            return dict(enc, labels=labels[idx]) if with_labels else enc
+    else:
+        model = transformers.BertForSequenceClassification(transformers.BertConfig(
+            vocab_size=128, hidden_size=32, num_hidden_layers=2, num_attention_heads=2, intermediate_size=64,
+            num_labels=len(INTENTS), problem_type="multi_label_classification"))
+        gen = torch.Generator().manual_seed(cfg["seed"])
+
+        def make(i, n, with_labels=True):
+            ids = torch.randint(0, 128, (n, 24), generator=gen)
+            out = {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
+            return dict(out, labels=(torch.rand(n, len(INTENTS), generator=gen) > 0.9).float()) if with_labels \
+                else out
+    model = model.to(device=device, dtype=torch.float32)
+    require_param_device(model, device.type)
+    opt = torch.optim.AdamW(model.parameters(), lr=BERTURK["lr"], weight_decay=BERTURK["weight_decay"],
+                            foreach=False, fused=False)
+    _, sync, sample, _, peak = memory_sampler(device)
+    model.train()
+
+    def step(i):
+        b = make(i, batch_n)
+        sync()
+        t0 = time.perf_counter()
+        b = {k: v.to(device) for k, v in b.items()}
+        loss = model(**b).loss
+        loss.backward()
+        sample()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), BERTURK["clip_grad_norm"])
+        opt.step()
+        opt.zero_grad(set_to_none=True)
+        sync()
+        dt = time.perf_counter() - t0
+        sample()
+        return dt
+
+    for i in range(cfg["warmup_steps"]):
+        step(i)
+    times = [step(cfg["warmup_steps"] + i) for i in range(cfg["measured_steps"])]
+    model.eval()
+    b = make(0, cfg["infer_msgs"], with_labels=False)
+    with torch.no_grad():
+        sync()
+        t0 = time.perf_counter()
+        model(**{k: v.to(device) for k, v in b.items()})
+        sync()
+        infer_s = time.perf_counter() - t0
+    sample()
+    s = spike.summarize(times)
+    return {"status": "ok", "source": cfg["source"], "device": device.type,
+            "param_device": ",".join(sorted({p.device.type for p in model.parameters()})),
+            "dtype": str(next(model.parameters()).dtype), "n_params": sum(p.numel() for p in model.parameters()),
+            "torch_threads": torch.get_num_threads(), "batch": batch_n, "max_len": max_len,
+            "warmup_steps": cfg["warmup_steps"], "s_per_step": s["median_s"], "p90_s": s["p90_s"], "n_steps": s["n"],
+            "infer_msgs": cfg["infer_msgs"], "infer_s": infer_s, "s_per_msg_infer": infer_s / cfg["infer_msgs"],
+            "peak_total_bytes": peak["total"], "peak_driver_bytes": peak["driver"], "peak_rss_bytes": peak["rss"],
+            "basis": BERTURK_BASIS}
+
+
+def run_child(mode, path):
+    """--child entry point: run the BERTurk timing child and write its payload to cfg["out_json"]; a refusal, an MPS
+    out-of-memory error or any other failure becomes a payload status (refused, oom, error), never a lost run."""
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    if mode != "berturk":
+        raise SystemExit("--child mode must be 'berturk', got %r" % (mode,))
+    try:
+        payload = berturk_child(cfg)
+    except SystemExit as e:
+        payload = {"status": "refused", "reason": spike.scrub(str(e))}
+    except Exception as e:
+        oom = isinstance(e, RuntimeError) and spike.is_mps_oom(str(e))
+        payload = {"status": "oom" if oom else "error", "reason": spike.scrub("%s: %s" % (type(e).__name__, e))}
+    write_atomic(cfg["out_json"], (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+
+
+def run_berturk(a, entry, berturk_dir, env):
+    """The BERTurk timing child in a fresh process with the probe's MPS env; its payload (status ok, or why not)."""
+    d = tempfile.mkdtemp(prefix="compute-berturk-")
+    try:
+        cfg = {"source": a.berturk_source, "dir": berturk_dir, "data": os.path.abspath(a.data),
+               "data_sha256": entry["sha256"], "device": a.device, "cpus": a.cpus, "seed": a.seed,
+               "warmup_steps": BERTURK["warmup_steps"], "measured_steps": BERTURK["measured_steps"],
+               "infer_msgs": BERTURK["infer_msgs"], "out_json": os.path.join(d, "berturk.json")}
+        path = os.path.join(d, "config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False)
+        print("BERTurk timing child (%s weights, %s)" % (a.berturk_source, a.device), flush=True)
+        r = subprocess.run([sys.executable, os.path.abspath(__file__), "--child", "berturk", path], cwd=REPO_ROOT,
+                           env=env, shell=False)
+        if not os.path.isfile(cfg["out_json"]):
+            return {"status": "crashed", "returncode": r.returncode}
+        with open(cfg["out_json"], encoding="utf-8") as f:
+            return json.load(f)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def run_score_probe(a, base, env):
+    """Score a --n 32 subset of the manifest's val split with the --base weights on --device, in-process, into a temp
+    out-root that is deleted afterwards; only the sidecar's timing and scorer fields are read (T-04-21: never test,
+    HOTELS or a fine-tuned checkpoint, never a metric)."""
+    with open(a.manifest, encoding="utf-8") as f:
+        val = json.load(f)["splits"]["val"]
+    split = os.path.join(os.path.dirname(os.path.abspath(a.manifest)), val["path"])
+    root = tempfile.mkdtemp(prefix="compute-score-")
+    try:
+        cmd = [sys.executable, os.path.join(REPO_ROOT, "score.py"), split, "--model", "laya", "--checkpoint", base,
+               "--device", a.device, "--workers", "0", "--cpus-per-worker", str(a.cpus), "--n", str(SCORE_PROBE_N),
+               "--manifest", os.path.abspath(a.manifest), "--out-root", root]
+        print("scoring probe: --n %d of val on %s" % (SCORE_PROBE_N, a.device), flush=True)
+        r = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True, shell=False)
+        sidecars = glob.glob(os.path.join(root, "*", "val.json"))
+        if r.returncode != 0 or len(sidecars) != 1:
+            lines = [ln.strip() for ln in (r.stderr or r.stdout).splitlines() if ln.strip()]
+            return {"status": "failed", "returncode": r.returncode,
+                    "reason": spike.scrub(lines[-1] if lines else "no sidecar written")}
+        with open(sidecars[0], encoding="utf-8") as f:
+            side = json.load(f)
+        n, sc = side["n_subset"], side["scorer"]
+        return {"status": "ok", "device": sc["device"], "dtype": sc["dtype"], "amp_enabled": sc["amp_enabled"],
+                "n": n, "s_per_msg": side["timing"]["inference_seconds"] / n, "basis": SCORING_BASIS}
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def build_meta(a, entry, start, model, rid):
     return {"generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "split": {"path": entry["path"], "sha256": entry["sha256"], "n_messages": entry["n_messages"]},
@@ -318,7 +504,9 @@ def build_meta(a, entry, start, model, rid):
             "protocol": {"device": a.device, "epochs": a.epochs, "seed": a.seed, "cpus": a.cpus, "neg": NEG,
                          "spike_start": start, "run_id": rid,
                          "interrupt": {"mode": a.interrupt, "kill_delay_s": a.kill_delay_s},
-                         "test_hooks": {"max_messages": a.max_messages, "calib_frac": a.calib_frac},
+                         "berturk": a.berturk, "score_probe": a.score_probe,
+                         "test_hooks": {"max_messages": a.max_messages, "calib_frac": a.calib_frac,
+                                        "berturk_source": a.berturk_source},
                          "protocol_complete": protocol_complete(a, start)}}
 
 
@@ -346,9 +534,18 @@ def main(argv=None):
     ap.add_argument("--keep-run", action="store_true",
                     help="keep the probe's checkpoint and Ray storage instead of deleting them after the report")
     ap.add_argument("--spike-report", default=DEFAULT_SPIKE, help="the Phase 2 spike report holding verdict.chosen")
+    ap.add_argument("--berturk", action=argparse.BooleanOptionalAction, default=True,
+                    help="time BERTurk in a fresh child on the pinned weights (default on; off keeps the estimates)")
+    ap.add_argument("--score-probe", action=argparse.BooleanOptionalAction, default=True,
+                    help="measure the Laya scoring rate on a --n 32 val subset on --device (default on)")
     ap.add_argument("--max-messages", type=int, default=None, help=argparse.SUPPRESS)   # test hook
     ap.add_argument("--calib-frac", type=float, default=None, help=argparse.SUPPRESS)   # test hook
+    ap.add_argument("--berturk-source", choices=("pinned", "tiny"), default="pinned", help=argparse.SUPPRESS)  # test
+    ap.add_argument("--child", nargs=2, metavar=("MODE", "CONFIG"), default=None, help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
+    if a.child:
+        run_child(*a.child)
+        return
     if a.epochs < 1:
         ap.error("--epochs must be at least 1")
     if a.interrupt != "none" and a.epochs < 2:
@@ -379,6 +576,9 @@ def main(argv=None):
     else:
         raise SystemExit("--base must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % a.base)
     model_bytes = os.path.getsize(os.path.join(base_dir, "model.safetensors"))
+    # BERTurk at the full pinned revision, sha256-verified on the driver before the long Laya probe (the child verifies
+    # the same digests again before it loads anything)
+    berturk_dir = fetch(pins.BERTURK) if a.berturk and a.berturk_source == "pinned" else None
 
     own_storage = a.storage is None
     ray_results = os.path.join(REPO_ROOT, "ray_results")
@@ -413,6 +613,17 @@ def main(argv=None):
 
     ok = attempts[-1]
     measured, ckpt = ctx["result"]["measured"], ctx["result"]["ckpt"]
+    if a.berturk or a.score_probe:
+        wait_for_memory(a.min_available_gib)               # the Laya probe's memory is back before the next child
+    if a.berturk:
+        measured["berturk"] = run_berturk(a, entry, berturk_dir, env)
+        if measured["berturk"].get("status") != "ok":
+            print("BERTurk timing child: %s; the BERTurk lines keep the estimate" % measured["berturk"], flush=True)
+    if a.score_probe:
+        measured["scoring"] = run_score_probe(a, base, env)
+        if measured["scoring"].get("status") != "ok":
+            print("scoring probe: %s; the Laya scoring lines keep the committed CPU rate" % measured["scoring"],
+                  flush=True)
     counts = compute.split_counts(a.manifest)              # all five registered splits, verified bytes
     projection = compute.project(measured, counts, compute.MATRIX)
     report = compute.build_report(meta, measured, counts, compute.MATRIX, projection, pf,
