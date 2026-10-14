@@ -269,6 +269,19 @@ def test_driver_names_the_dir_of_a_corrupted_snapshot():
                             "run fresh")
 
 
+def test_resume_drops_exports_of_a_killed_segment_beyond_the_resumed_epoch(tmp_path):
+    """04-REVIEW WR-02: an export written before its epoch registered (then a kill) is off the resumed trajectory."""
+    d = tmp_path / "exports"
+    for n in ("epoch-001", "epoch-002", "epoch-003", "epoch-003.tmp"):
+        (d / n).mkdir(parents=True)
+        (d / n / "model.safetensors").write_bytes(b"x")
+    (d / "notes").mkdir()                                                     # not an export: left alone
+    assert ray_train.prune_exports(str(d), 1) == ["epoch-002", "epoch-003", "epoch-003.tmp"]
+    assert sorted(p.name for p in d.iterdir()) == ["epoch-001", "notes"]
+    assert ray_train.prune_exports(str(d), 0) == ["epoch-001"]               # a fresh start keeps none
+    assert ray_train.prune_exports(str(tmp_path / "missing"), 0) == []
+
+
 def test_code_state_reads_git():
     st = ray_train.code_state()
     assert set(st) == {"git_sha", "git_dirty"}

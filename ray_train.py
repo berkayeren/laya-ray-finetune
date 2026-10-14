@@ -421,9 +421,26 @@ def dir_bytes(path):
     return sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(path) for f in fs)
 
 
+def prune_exports(exports_dir, start_epoch):
+    """Delete every export a dead segment left beyond the epoch this segment resumes from (and any partial .tmp); returns
+    the names removed. An export is written before its epoch's train state registers, so a kill in between leaves an
+    export of weights the resumed run never continues from (MPS is not bitwise deterministic); the rerun retrains that
+    epoch and writes it again. Rank 0 only, before training."""
+    if not os.path.isdir(exports_dir):
+        return []
+    gone = []
+    for n in sorted(os.listdir(exports_dir)):
+        keep = len(n) == 9 and n.startswith("epoch-") and n[6:].isdigit() and int(n[6:]) <= start_epoch
+        if n.startswith("epoch-") and not keep:
+            shutil.rmtree(os.path.join(exports_dir, n), ignore_errors=True)
+            gone.append(n)
+    return gone
+
+
 def write_export(inner, tok, ecfg, run_dir, name):
     """Rank 0's uncalibrated laya export of a completed epoch at run_dir/exports/<name>, outside Ray's checkpoint
-    rotation (Phase 5 picks the epoch on val without retraining); an existing export is kept (a resumed run)."""
+    rotation (Phase 5 picks the epoch on val without retraining); an existing export is kept (one this segment's start
+    kept, prune_exports, is on the resumed trajectory)."""
     final = os.path.join(run_dir, "exports", name)
     if not os.path.isdir(final):
         tmp = final + ".tmp"
@@ -593,6 +610,11 @@ def train_loop_per_worker(c):
         if names:
             record["export_bytes"] = dir_bytes(os.path.join(exports_dir, names[-1]))
 
+    if rank == 0:                                           # a dead segment's exports past the resumed epoch (WR-02)
+        gone = prune_exports(exports_dir, start_epoch)
+        if gone:
+            print("dropped export(s) %s of a killed segment beyond epoch %d" % (", ".join(gone), start_epoch),
+                  flush=True)
     note_exports()
     last = {"epoch": start_epoch, "loss": rows_out[-1]["loss"] if rows_out else None}
     for epoch in range(start_epoch, c["epochs"]):
