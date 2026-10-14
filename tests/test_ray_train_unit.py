@@ -208,6 +208,8 @@ def test_freeze_flags_conflict(capsys):
     (["--calib-max-messages", "0"], "--calib-max-messages must be at least 1"),
     (["--cpus-per-worker", "0"], "--cpus-per-worker must be at least 1"),
     (["--max-messages", "0"], "--max-messages must be at least 1"),
+    (["--max-len", "0"], "--max-len must be at least 1"),                    # 04-REVIEW IN-10
+    (["--head-max-len", "-5"], "--head-max-len must be at least 1"),
     (["--calib-frac", "0"], "--calib-frac must be in (0, 1]"),
     (["--calib-frac", "1.5"], "--calib-frac must be in (0, 1]"),
 ])

@@ -826,7 +826,9 @@ def main(argv=None):
     # here, not in the worker: a bad value there fails after ray.init, the run dir and the fetch, with resume advice
     for flag, v in (("--workers", a.workers), ("--micro-batch", a.micro_batch), ("--grad-accum", a.grad_accum),
                     ("--calib-batch", a.calib_batch), ("--calib-max-messages", a.calib_max_messages),
-                    ("--cpus-per-worker", a.cpus_per_worker), ("--max-messages", a.max_messages)):
+                    ("--cpus-per-worker", a.cpus_per_worker), ("--max-messages", a.max_messages),
+                    # 0 would fall back to the config default while the run identity recorded 0 (IN-10)
+                    ("--max-len", a.max_len), ("--head-max-len", a.head_max_len)):
         if v is not None and v < 1:
             ap.error("%s must be at least 1" % flag)
     if not 0 < a.calib_frac <= 1:
