@@ -302,5 +302,20 @@ def test_resume_drops_exports_of_a_killed_segment_beyond_the_resumed_epoch(tmp_p
 
 def test_code_state_reads_git():
     st = ray_train.code_state()
-    assert set(st) == {"git_sha", "git_dirty"}
+    assert set(st) == {"git_sha", "git_dirty", "git_diff_sha256"}
     assert st["git_sha"] is None or len(st["git_sha"]) == 40
+    assert st["git_diff_sha256"] is None or len(st["git_diff_sha256"]) == 64
+
+
+def test_code_changed_on_resume_sees_uncommitted_edits():
+    """04-REVIEW WR-04: the same HEAD with another uncommitted diff is a code change; unknown git state is flagged too.
+    Flagged only (RESEARCH A3): nothing here refuses a resume."""
+    def seg(sha="a" * 40, diff="d" * 64):
+        return {"git_sha": sha, "git_dirty": diff != "e" * 64, "git_diff_sha256": diff}
+    assert ray_train.code_changed([seg()]) is False                          # one segment: nothing to compare
+    assert ray_train.code_changed([seg(), seg()]) is False
+    assert ray_train.code_changed([seg(), seg(diff="f" * 64)]) is True       # edited, not committed, between segments
+    assert ray_train.code_changed([seg(), seg(sha="b" * 40)]) is True        # another commit
+    assert ray_train.code_changed([seg(sha=None, diff=None), seg(sha=None, diff=None)]) is True   # no git: unknown
+    old = {"git_sha": "a" * 40, "git_dirty": False}                          # an older train state's segment
+    assert ray_train.code_changed([old, seg()]) is True

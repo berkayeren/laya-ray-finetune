@@ -28,8 +28,9 @@ epoch with the pilot.runs.EPOCH_FIELDS (device-synchronised wall clock of the tr
 state, RNG and export, optimizer steps, items, peak memory sampled after every micro-batch backward and optimizer step,
 system swap delta, and the segment that trained it). Across a kill and resume the record keeps exactly one row per
 completed epoch (the partial epoch leaves none) and one pilot.runs.SEGMENT_FIELDS entry per run segment (start epoch,
-git sha and dirty flag, device, resume load seconds and memory), plus code_changed_on_resume, the relative export names,
-train_state_bytes and export_bytes.
+git sha, dirty flag and uncommitted-diff digest, device, resume load seconds and memory), plus code_changed_on_resume
+(another HEAD or another uncommitted diff between segments, or no git; flagged, never refused), the relative export
+names, train_state_bytes and export_bytes.
 
 Items (data_neg8 by default): the split files label all 48 tags. After the --max-messages subsample and the
 message-level calibration holdout, every training message keeps all its positives plus --neg K random negatives
@@ -248,18 +249,33 @@ def fit_or_exit(trainer, run_dir=None, rung="none"):
 
 
 def code_state():
-    """{"git_sha", "git_dirty"} of the repo this script runs from (tracked files only); both None without git. Recorded
-    per run segment, never part of the run_id (a code fix must not orphan a long epoch's checkpoint)."""
+    """{"git_sha", "git_dirty", "git_diff_sha256"} of the repo this script runs from (tracked files only); all None
+    without git. git_diff_sha256 is the sha256 of `git diff HEAD --binary` outside .planning/ (planning docs are not
+    code), so an uncommitted edit between a kill and its rerun changes it while HEAD stays put. Recorded per run
+    segment, never part of the run_id (a code fix must not orphan a long epoch's checkpoint)."""
     def git(*args):
-        r = subprocess.run(("git",) + args, cwd=REPO_ROOT, capture_output=True, text=True, timeout=60)
+        r = subprocess.run(("git",) + args, cwd=REPO_ROOT, capture_output=True, timeout=60)
         if r.returncode:
-            raise OSError(r.stderr)
-        return r.stdout.strip()
+            raise OSError(r.stderr.decode("utf-8", "replace"))
+        return r.stdout
     try:
-        return {"git_sha": git("rev-parse", "HEAD"),
-                "git_dirty": bool(git("status", "--porcelain", "--untracked-files=no"))}
-    except (OSError, subprocess.SubprocessError):
-        return {"git_sha": None, "git_dirty": None}
+        return {"git_sha": git("rev-parse", "HEAD").decode("ascii").strip(),
+                "git_dirty": bool(git("status", "--porcelain", "--untracked-files=no").strip()),
+                "git_diff_sha256": hashlib.sha256(git("diff", "HEAD", "--binary", "--", ".",
+                                                      ":(exclude).planning")).hexdigest()}
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+        return {"git_sha": None, "git_dirty": None, "git_diff_sha256": None}
+
+
+def code_changed(segments):
+    """code_changed_on_resume of a run record: True when the segments ran different code (another HEAD or another
+    uncommitted diff), or when a resumed run cannot tell (git unavailable in a segment). Flagged, never refused
+    (RESEARCH A3). A segment of an older train state without git_diff_sha256 counts as unknown."""
+    if len(segments) < 2:
+        return False
+    if any(s.get("git_sha") is None or s.get("git_diff_sha256") is None for s in segments):
+        return True
+    return len({(s["git_sha"], s["git_diff_sha256"]) for s in segments}) > 1
 
 
 def free_bytes(path):
@@ -423,10 +439,10 @@ def dir_bytes(path):
 
 
 def prune_exports(exports_dir, start_epoch):
-    """Delete every export a dead segment left beyond the epoch this segment resumes from (and any partial .tmp); returns
-    the names removed. An export is written before its epoch's train state registers, so a kill in between leaves an
-    export of weights the resumed run never continues from (MPS is not bitwise deterministic); the rerun retrains that
-    epoch and writes it again. Rank 0 only, before training."""
+    """Delete every export a dead segment left beyond the epoch this segment resumes from (and any partial .tmp);
+    returns the names removed. An export is written before its epoch's train state registers, so a kill in between
+    leaves an export of weights the resumed run never continues from (MPS is not bitwise deterministic); the rerun
+    retrains that epoch and writes it again. Rank 0 only, before training."""
     if not os.path.isdir(exports_dir):
         return []
     gone = []
@@ -584,7 +600,8 @@ def train_loop_per_worker(c):
             print("resuming %s after epoch %d (segment %d, load %.1fs)" % (c["run_id"], start_epoch, len(segments),
                                                                           resume_load_s), flush=True)
     segment = dict(zip(runs.SEGMENT_FIELDS, (len(segments), start_epoch, start_epoch > 0, c["code"]["git_sha"],
-                                             c["code"]["git_dirty"], device.type, resume_load_s, resume_peak)))
+                                             c["code"]["git_dirty"], c["code"]["git_diff_sha256"], device.type,
+                                             resume_load_s, resume_peak)))
     segments.append(segment)
     exports_dir = os.path.join(run_dir, "exports")
     record = {"device": device.type,
@@ -601,7 +618,7 @@ def train_loop_per_worker(c):
               "n_train_items": len(train_items), "n_train_items_counted": counted, "items_skipped": skipped,
               "load_s": load_s, "calib_s": None, "final_save_s": None, "run_id": c["run_id"],
               "canonical": c["canonical"], "segments": segments,
-              "code_changed_on_resume": len({s["git_sha"] for s in segments}) > 1,
+              "code_changed_on_resume": code_changed(segments),
               "exports": [], "train_state_bytes": state_bytes, "export_bytes": None, "epochs": rows_out}
 
     def note_exports():

@@ -34,8 +34,8 @@ def test_epoch_fields_are_the_thirteen_record_columns():
 
 def test_epoch_fields_cover_segments():
     assert "segment" in runs.EPOCH_FIELDS and "resumed" in runs.EPOCH_FIELDS
-    assert runs.SEGMENT_FIELDS == ("segment", "start_epoch", "resumed", "git_sha", "git_dirty", "device",
-                                   "resume_load_s", "resume_peak_total_bytes")
+    assert runs.SEGMENT_FIELDS == ("segment", "start_epoch", "resumed", "git_sha", "git_dirty", "git_diff_sha256",
+                                   "device", "resume_load_s", "resume_peak_total_bytes")
 
 
 def test_env_strings_are_sorted_key_value_pairs():
