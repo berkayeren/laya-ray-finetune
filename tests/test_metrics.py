@@ -130,3 +130,89 @@ def test_per_tag_theta_vector():
     th[TAGS.index("lost_stolen")] = 0.7
     out = metrics.metrics(Y, P, th)
     assert out["per_tag"]["card"]["tp"] == 1 and out["per_tag"]["lost_stolen"]["fn"] == 1
+
+
+# --- the val-selected θ rule (EVAL-02, D-12; per-tag objective and tie rule: research A2, user-confirmed) ----------
+
+def _scores(*best):
+    """GRID-aligned scores: 1.0 at the θ values in `best`, 0 elsewhere."""
+    s = np.zeros(len(metrics.GRID))
+    for th in best:
+        s[int(round(th * 100)) - 5] = 1.0
+    return s
+
+
+def _rows(spec, n):
+    """(Y, P) [n, 48] from {tag: (gold rows, P on gold rows, P on other rows)}; every other cell is 0."""
+    Y, P = np.zeros((n, 48), dtype=bool), np.zeros((n, 48))
+    for t, (gold, p_pos, p_neg) in spec.items():
+        j = TAGS.index(t)
+        Y[gold, j] = True
+        P[:, j] = np.where(Y[:, j], p_pos, p_neg)
+    return Y, P
+
+
+def test_grid_is_exact():
+    g = metrics.GRID
+    assert len(g) == 91 and g.dtype == np.float64
+    assert g[0] == 0.05 and g[-1] == 0.95 and g[2] == 0.07 and g[35] == 0.40
+    assert np.abs(np.diff(g) - 0.01).max() < 1e-12
+    assert all(g[i] == float("0.%02d" % (i + 5)) for i in range(91))   # every point equals its decimal literal
+
+
+def test_pick_prefers_closest_to_half():
+    assert metrics.pick(_scores(0.30, 0.60)) == 0.6                     # 0.6 is 0.1 from 0.5, 0.3 is 0.2
+
+
+def test_pick_equidistant_takes_lower():
+    assert metrics.pick(_scores(0.45, 0.55)) == 0.45
+
+
+def test_pick_all_zero_scores_returns_half():
+    assert metrics.pick(np.zeros(91)) == 0.5
+
+
+def test_boundary_is_inclusive():
+    # the only positive sits exactly on 0.40: one step above loses it, one step below adds a false positive
+    Y, P = _rows({"card": ([0], 0.40, 0.39)}, 3)
+    sel = metrics.select_theta(Y, P)
+    assert sel["global"] == 0.40 and sel["per_tag"] == {}
+    assert metrics.metrics(Y, P, metrics.theta_vector(sel))["micro_f1"] == 1.0
+
+
+def test_eligibility_at_ten_positives():
+    assert metrics.MIN_VAL_POSITIVES == 10
+    Y, P = _rows({"card": (list(range(10)), 0.9, 0.7), "lost_stolen": (list(range(9)), 0.3, 0.2)}, 20)
+    sel = metrics.select_theta(Y, P)
+    assert sel["eligible_tags"] == ["card"] and sel["min_val_positives"] == 10
+    assert sel["per_tag"] == {"card": 0.71}                 # card's own best range (0.70, 0.90], closest to 0.5
+    assert sel["global"] == 0.30                            # micro-F1 best on (0.20, 0.30]
+    vec = metrics.theta_vector(sel)
+    assert vec.dtype == np.float64 and vec.shape == (48,)
+    assert vec[TAGS.index("card")] == 0.71 and vec[TAGS.index("lost_stolen")] == 0.30   # 9 positives: global θ
+    assert (np.delete(vec, TAGS.index("card")) == 0.30).all()
+
+
+def test_zero_positive_tag_uses_global():
+    Y, P = _rows({"card": (list(range(12)), 0.8, 0.1), "new": ([], 0.0, 0.6)}, 15)
+    sel = metrics.select_theta(Y, P)
+    assert "new" not in sel["eligible_tags"] and sel["eligible_tags"] == ["card"]
+    assert metrics.theta_vector(sel)[TAGS.index("new")] == sel["global"]
+
+
+def test_theta_selected_after_temperature():
+    # one tag positive at z = 2 and negative at z = 1; θ lives on the reported (after-temperature) scale
+    Z = np.full((2, 48), -10.0, dtype=np.float32)
+    Z[0, TAGS.index("card")], Z[1, TAGS.index("card")] = 2.0, 1.0
+    Y = _rows({"card": ([0], 1.0, 0.0)}, 2)[0]
+    want = {1.0: 0.74, 2.0: 0.63}                           # best ranges (0.731, 0.881] and (0.622, 0.731]
+    for T, theta in want.items():
+        P = metrics.probabilities(Z, T)
+        sel = metrics.select_theta(Y, P)
+        assert sel["global"] == theta and sel["per_tag"] == {}
+        assert metrics.metrics(Y, P, metrics.theta_vector(sel))["micro_f1"] == 1.0
+
+
+def test_select_theta_refuses_empty_val():
+    with pytest.raises(SystemExit, match="no val messages"):
+        metrics.select_theta(np.zeros((0, 48), dtype=bool), np.zeros((0, 48)))
