@@ -18,10 +18,13 @@ into metrics with numpy alone (D-05). Systems (--model, default laya):
   --device cpu|mps|cuda picks the scoring device (default: cuda when --gpus-per-worker > 0, else cpu). mps scores
   in-process only (--workers 0; Ray has no MPS device manager) and is refused before any load when MPS is not
   available. --workers 0 scores in-process; --workers N > 0 scores with N Ray Data actors (one checkpoint load each,
-  --cpus-per-worker CPUs and torch threads each, about 2.6 GB each, never restarted: Ray Data restarts a dead actor
-  forever by default, so a refusal raised in an actor hung the run; with max_restarts 0 it ends the run with the
-  actor's message, 04-REVIEW CR-01). Both paths run the same Predictor, and Ray's rows, which come back in any
-  order, are reassembled by uid into split-file order (a duplicate, missing or unexpected uid is refused).
+  --cpus-per-worker CPUs and torch threads each, about 2.6 GB each). Ray Data's actor fault tolerance stays on: an
+  actor killed mid-split (the OOM killer, a crash, `ray stop`) is restarted and its batch retried. Ray counts a
+  SystemExit in an actor as its worker exiting and so restarts it forever too, which hung the run on a refusal
+  (04-REVIEW CR-01); inside Ray the Predictor therefore re-raises a refusal (SystemExit) in its constructor or a
+  batch as a plain RuntimeError marked REFUSAL, which Ray never retries, and the driver turns it back into the same
+  one-line refusal with no dump (04-REVIEW WR-01). Both paths run the same Predictor, and Ray's rows, which come back
+  in any order, are reassembled by uid into split-file order (a duplicate, missing or unexpected uid is refused).
   --gpus-per-worker is the Ray actors' GPU resource (cuda).
 - prior: p_t = messages carrying tag t / all messages, no-intent rows counted, in the training split the scored
   role's models are trained on (pilot.data.TRAINED_ON: final_train for test, selection_train for val)
@@ -66,8 +69,8 @@ TAGS = list(INTENTS)
 BATCH = 16                                                  # messages per scoring call (laya runs one per forward)
 BATCHING = "one message per forward (laya.calibrate.records_from_labeled via pilot.laya_adapter)"
 TEMPERATURE_SOURCE = "laya.load (clamped noul:2 temperature, what the public API serves)"
-ACTOR_MAX_RESTARTS = 0                                      # a dead scoring actor ends the run (04-REVIEW CR-01)
-EXIT_DETAIL = "Worker exits with an exit code "             # ray 2.59: precedes a dead actor's SystemExit message
+REFUSAL = "score.py refusal: "                              # marks a scoring actor's SystemExit (04-REVIEW WR-01)
+EXIT_DETAIL = "Worker exit detail: "                        # ray 2.59: precedes why a dead actor's worker exited
 
 
 def train_counts(manifest_path, role):
@@ -200,33 +203,66 @@ def _under(path, root):
     return path == root or path.startswith(root + os.sep)
 
 
+def actor_error(e):
+    """A SystemExit raised in a Ray Data scoring actor, as a plain RuntimeError whose message is REFUSAL + its own.
+
+    Ray counts a SystemExit in an actor as its worker exiting, and Ray Data's default (max_restarts -1, kept so an actor
+    killed by the OOM killer or a crash is restarted and its batch retried) restarts that actor forever, so a refusal
+    hung the run (04-REVIEW CR-01). Ray neither restarts an actor whose constructor raised an exception nor retries a
+    task that raised one, so this ends the run; score_laya finds the message again with refusal (04-REVIEW WR-01).
+    """
+    return RuntimeError(REFUSAL + str(e.code).replace("\n", " "))
+
+
+def refusal(text):
+    """The message after the first REFUSAL in a Ray error's text (a scoring actor's refusal), else None."""
+    for line in str(text).splitlines():
+        if REFUSAL in line:
+            return line[line.index(REFUSAL) + len(REFUSAL):].strip()
+    return None
+
+
 class Predictor:
     """Scores batches of messages with one Laya checkpoint load: a Ray Data actor, or called in-process (--workers 0).
 
     Returns per row the uid, the float32 [48] margins (la.noul_logits), the served temperature, the agent's state
     (device, dtype, amp, laya's load-time amp default, torch threads, versions; fp32 forced by la.force_fp32 and
     checked by check_agent after the load and after every batch) and its share of the batch's scoring time.
+    in_ray (score_laya's Ray path): a refusal (SystemExit) in the constructor or a batch is raised as actor_error, so
+    Ray ends the run instead of restarting the actor forever; in-process it stays a SystemExit.
     """
 
-    def __init__(self, model_dir, device, expected_sha256, threads):
-        import laya
-        import torch
-        torch.set_num_threads(threads)                      # Ray sets OMP_NUM_THREADS from num_cpus; torch too
-        self.agent = load_agent(model_dir, device, expected_sha256)
-        self.device = device
-        before = la.force_fp32(self.agent)                  # before any forward: laya's mps/cuda default is fp16
-        state = check_agent(self.agent, device)
-        self.temperature = la.noul_temperature(self.agent)
-        self.state = json.dumps(dict(state, laya_default_amp=before["amp_enabled"],
-                                     laya_default_dtype=before["dtype"], torch_threads=torch.get_num_threads(),
-                                     laya_version=laya.__version__, torch_version=torch.__version__), sort_keys=True)
+    def __init__(self, model_dir, device, expected_sha256, threads, in_ray=False):
+        self.in_ray = in_ray
+        try:
+            import laya
+            import torch
+            torch.set_num_threads(threads)                  # Ray sets OMP_NUM_THREADS from num_cpus; torch too
+            self.agent = load_agent(model_dir, device, expected_sha256)
+            self.device = device
+            before = la.force_fp32(self.agent)              # before any forward: laya's mps/cuda default is fp16
+            state = check_agent(self.agent, device)
+            self.temperature = la.noul_temperature(self.agent)
+            self.state = json.dumps(dict(state, laya_default_amp=before["amp_enabled"],
+                                         laya_default_dtype=before["dtype"], torch_threads=torch.get_num_threads(),
+                                         laya_version=laya.__version__, torch_version=torch.__version__),
+                                    sort_keys=True)
+        except SystemExit as e:
+            if not in_ray:
+                raise
+            raise actor_error(e) from None
 
     def __call__(self, batch):
-        texts = [str(t) for t in batch["text"]]
-        t = time.perf_counter()                             # scoring only: load/digest time is not per-message cost
-        logits = la.noul_logits(self.agent, texts, QUESTIONS)
-        dt = time.perf_counter() - t
-        check_agent(self.agent, self.device)                # laya may have moved or re-cast it mid-batch (OOM)
+        try:
+            texts = [str(t) for t in batch["text"]]
+            t = time.perf_counter()                         # scoring only: load/digest time is not per-message cost
+            logits = la.noul_logits(self.agent, texts, QUESTIONS)
+            dt = time.perf_counter() - t
+            check_agent(self.agent, self.device)            # laya may have moved or re-cast it mid-batch (OOM)
+        except SystemExit as e:
+            if not self.in_ray:
+                raise
+            raise actor_error(e) from None
         b = len(texts)
         return {"uid": np.asarray(batch["uid"]), "logits": logits, "temperature": [self.temperature] * b,
                 "agent_state": [self.state] * b, "infer_secs": [dt / b] * b}
@@ -250,9 +286,19 @@ def assemble(rows, uids):
     return np.stack([np.asarray(by_uid[u], dtype=np.float32) for u in uids]).astype(np.float32, copy=False)
 
 
+def error_text(e):
+    """The text of an exception and of every exception in its cause/context chain (Ray Data wraps the actor's)."""
+    seen, out = set(), []
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        out.append(str(e))
+        e = e.__cause__ or e.__context__
+    return "\n".join(out)
+
+
 def actor_exit(text):
-    """The reason in a dead Ray Data actor's failure text: a SystemExit's message lands in Ray's worker exit detail
-    after EXIT_DETAIL; else the text's last non-empty line."""
+    """Why a Ray Data actor died, from its failure text: Ray's worker exit detail (after EXIT_DETAIL), else the
+    text's last non-empty line."""
     for line in str(text).splitlines():
         if EXIT_DETAIL in line:
             return line[line.index(EXIT_DETAIL) + len(EXIT_DETAIL):].strip().rstrip(".")   # Ray adds the "."
@@ -288,18 +334,23 @@ def score_laya(a, checkpoint, cases, device, ident):
     else:
         import ray
         ray.init(ignore_reinit_error=True, log_to_driver=False)
-        # max_restarts 0: Ray Data's default restarts a dead actor forever, so a refusal (SystemExit) in the
-        # Predictor's constructor or after a batch hung the run instead of ending it (04-REVIEW CR-01)
+        # Ray Data's default actor fault tolerance (max_restarts -1) restarts an actor killed mid-split and retries
+        # its batch; in_ray turns a refusal into actor_error, which Ray does not retry (04-REVIEW CR-01, WR-01)
         ds = ray.data.from_items([{"uid": c["uid"], "text": c["state"]} for c in cases]).map_batches(
-            Predictor, fn_constructor_args=(model_dir, device, expected, a.cpus_per_worker),
+            Predictor, fn_constructor_args=(model_dir, device, expected, a.cpus_per_worker, True),
             compute=ray.data.ActorPoolStrategy(size=a.workers), num_cpus=a.cpus_per_worker,
-            num_gpus=a.gpus_per_worker, memory=3 * 1024**3, batch_size=BATCH, batch_format="numpy",
-            max_restarts=ACTOR_MAX_RESTARTS)
+            num_gpus=a.gpus_per_worker, memory=3 * 1024**3, batch_size=BATCH, batch_format="numpy")
         try:
             rows = ds.take_all()
-        except ray.exceptions.RayActorError as e:
-            raise SystemExit("a scoring actor died: %s; nothing was dumped (rescore with --workers 0 to see the "
-                             "error in-process)" % actor_exit(str(e))) from None
+        except Exception as e:                              # ActorDiedError (constructor) or a wrapped task error
+            text = error_text(e)
+            why = refusal(text)
+            if why is not None:
+                raise SystemExit("a scoring actor refused: %s; nothing was dumped" % why) from None
+            if isinstance(e, ray.exceptions.RayActorError):
+                raise SystemExit("a scoring actor died: %s; nothing was dumped (rerun to rescore; if it dies again, "
+                                 "rescore with --workers 0 to see the error in-process)" % actor_exit(text)) from None
+            raise
     secs = time.time() - t0
     temps = {float(r["temperature"]) for r in rows}
     states = {str(r["agent_state"]) for r in rows}
