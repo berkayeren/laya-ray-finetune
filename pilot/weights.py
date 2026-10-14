@@ -14,7 +14,9 @@ which the rewrite does not change; checkpoint_digests hands laya.load the raw-fi
 the normalized one. checkpoint_digests refuses a local checkpoint without tokenizer/tokenizer_config.json or
 encoder/config.json (pilot.dumps.LOCAL_REQUIRED_FILES): laya 0.4.6 would read them from the Hub by the config's encoder
 name, unpinned (04-REVIEW WR-02). laya only warns when it cannot rewrite tokenizer_config.json, so
-check_tokenizer_config_rewritten refuses, after the load, a file it left un-normalized (04-REVIEW IN-01).
+check_tokenizer_config_rewritable refuses, on the driver before any load or ray.init, a file laya would have to rewrite
+in a read-only tokenizer/ (or one that is not a JSON object; 04-REVIEW CR-01), and check_tokenizer_config_rewritten
+refuses, after the load, a file it left un-normalized anyway (the backstop; 04-REVIEW IN-01).
 
 usage: python -m pilot.weights        # fetch and verify both pinned checkpoints, print sizes and free disk
 """
@@ -119,6 +121,32 @@ def tokenizer_config_sha256(path):
         return hashlib.sha256(raw).hexdigest()
     blob = json.dumps(normalized_tokenizer_config(tcfg), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def check_tokenizer_config_rewritable(d, what):
+    """SystemExit, on the driver before any load or ray.init, when laya.load or laya.train.load_checkpoint would have
+    to rewrite d's tokenizer/tokenizer_config.json but cannot (04-REVIEW CR-01): the file is not a JSON object, or it
+    differs from its normalized_tokenizer_config view and tokenizer/ is not writable (laya 0.4.6 writes a mkstemp temp
+    file there and os.replace's it over the file). Without it the refusal came only after the load, from
+    check_tokenizer_config_rewritten, which stays the backstop: inside a Ray Data actor's constructor it made
+    score.py restart the actor forever, and inside a Ray Train worker it came after ray.init and a full base load.
+    A missing file is checkpoint_digests' refusal, not this one."""
+    path = os.path.join(d, TOKENIZER_CONFIG)
+    if not os.path.isfile(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            tcfg = json.load(f)
+    except ValueError:
+        tcfg = None
+    if not isinstance(tcfg, dict):
+        raise SystemExit("%s: %s is not a JSON object, so laya cannot normalize it on load; use a checkpoint dir as "
+                         "laya.train.save_checkpoint writes it" % (what, TOKENIZER_CONFIG))
+    tok_dir = os.path.dirname(path)
+    if normalized_tokenizer_config(tcfg) != tcfg and not os.access(tok_dir, os.W_OK | os.X_OK):
+        raise SystemExit("%s: %s needs laya's load-time rewrite, but %s/ is not writable, so laya would load the "
+                         "un-normalized file; make the checkpoint dir writable (or copy it) and rerun"
+                         % (what, TOKENIZER_CONFIG, os.path.dirname(TOKENIZER_CONFIG)))
 
 
 def check_tokenizer_config_rewritten(d, what):

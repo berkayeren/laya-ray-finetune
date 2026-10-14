@@ -368,6 +368,59 @@ def test_check_tokenizer_config_rewritten_refuses_a_file_laya_left_unnormalized(
             check(str(tmp_path), "checkpoint")
 
 
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
+def test_check_tokenizer_config_rewritable_predicts_a_rewrite_laya_cannot_make(tmp_path):
+    """04-REVIEW CR-01: before any load, refuse a file laya would have to rewrite in a read-only tokenizer/, or one
+    that is not a JSON object; a normalized file (no rewrite needed) or a writable tokenizer/ passes."""
+    check = pilot.weights.check_tokenizer_config_rewritable
+    check(str(tmp_path), "checkpoint")                                     # no file: checkpoint_digests' refusal
+    tok = tmp_path / "tokenizer"
+    tok.mkdir()
+    path = tok / "tokenizer_config.json"
+    normalized = {"tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {"extra_0": "<a>"}}
+    needs = ({"tokenizer_class": "TokenizersBackend", "backend": "tokenizers"}, {"pad_token": "[PAD]"},
+             {"tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": ["<a>"]})
+    for tcfg in (normalized,) + needs:
+        path.write_text(json.dumps(tcfg), encoding="utf-8")
+        check(str(tmp_path), "checkpoint")                                 # writable: laya can rewrite it
+    for bad in ("[]", "not json"):
+        path.write_text(bad, encoding="utf-8")
+        with pytest.raises(SystemExit, match="checkpoint: tokenizer/tokenizer_config.json is not a JSON object"):
+            check(str(tmp_path), "checkpoint")
+    try:
+        for tcfg in needs:
+            path.write_text(json.dumps(tcfg), encoding="utf-8")            # the file stays writable, its dir not
+            os.chmod(tok, 0o555)
+            with pytest.raises(SystemExit, match="base checkpoint: tokenizer/tokenizer_config.json needs laya's "
+                                                 "load-time rewrite, but tokenizer/ is not writable"):
+                check(str(tmp_path), "base checkpoint")
+            os.chmod(tok, 0o755)
+        path.write_text(json.dumps(normalized), encoding="utf-8")
+        os.chmod(tok, 0o555)
+        check(str(tmp_path), "checkpoint")                                 # read-only, but no rewrite needed
+    finally:
+        os.chmod(tok, 0o755)
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
+def test_resolve_checkpoint_refuses_a_read_only_tokenizer_dir_before_any_load(tmp_path):
+    """04-REVIEW CR-01: score.resolve_checkpoint runs check_tokenizer_config_rewritable on the driver, so the refusal
+    is the real message before laya is imported or Ray starts, never a Ray Data actor death."""
+    import score
+    (tmp_path / "model.safetensors").write_bytes(b"weights")
+    (tmp_path / "rl_agent_config.json").write_bytes(b"{}")
+    _components(tmp_path)
+    (tmp_path / "tokenizer" / "tokenizer_config.json").write_text(
+        json.dumps({"tokenizer_class": "TokenizersBackend"}), encoding="utf-8")
+    os.chmod(tmp_path / "tokenizer", 0o555)
+    try:
+        with pytest.raises(SystemExit, match="checkpoint: .* needs laya's load-time rewrite, but tokenizer/ is not"):
+            score.resolve_checkpoint(str(tmp_path))
+    finally:
+        os.chmod(tmp_path / "tokenizer", 0o755)
+    assert score.resolve_checkpoint(str(tmp_path))[0] == str(tmp_path)    # writable: laya can rewrite it on load
+
+
 def test_score_load_is_refused_when_the_checkpoint_changed_after_its_identity(tmp_path):
     import score
     (tmp_path / "model.safetensors").write_bytes(b"weights")

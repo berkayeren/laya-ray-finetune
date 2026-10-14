@@ -76,7 +76,10 @@ when Ray's snapshot points at deleted checkpoints, or "rerun the same command to
 
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
 (tampered, unregistered, val/test/probe) is refused before Ray starts. --base multilingual fetches the pinned,
-sha256-verified Laya weights (pilot.weights) before Ray starts; any other value must be a local checkpoint dir.
+sha256-verified Laya weights (pilot.weights) before Ray starts; any other value must be a local checkpoint dir. A base
+whose tokenizer/tokenizer_config.json laya would have to rewrite on load in a read-only tokenizer/ (or that is not a
+JSON object) is refused before Ray starts too (pilot.weights.check_tokenizer_config_rewritable, 04-REVIEW CR-01); the
+worker's post-load check_tokenizer_config_rewritten stays the backstop.
 --manifest selects the prepare-written splits.json to verify against (default: the committed data/splits.json; use
 OTHER_DIR/splits.json for a `prepare_data.py --out OTHER_DIR` variant). Verification itself cannot be skipped, a
 manifest cannot change any split's role, path or folds, and the checkpoint provenance records manifest_is_committed.
@@ -112,7 +115,8 @@ from pilot import laya_adapter as la
 from pilot import dumps, pins, runs, spike
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file,
                         verify_split_file)
-from pilot.weights import check_tokenizer_config_rewritten, checkpoint_digests, fetch, identity, verify_files
+from pilot.weights import (check_tokenizer_config_rewritable, check_tokenizer_config_rewritten, checkpoint_digests,
+                           fetch, identity, verify_files)
 
 WEIGHT_DECAY = 0.01                                         # AdamW weight decay (part of the run identity)
 CLIP_GRAD_NORM = 1.0                                        # gradient-norm clip per optimizer step (same)
@@ -903,6 +907,7 @@ def main(argv=None):
     base_name = "multilingual" if a.base == "multilingual" else base_dir
     base_ident = identity(base_name)
     base_sha256 = checkpoint_digests(base_name, base_ident)   # workers verify these bytes before loading
+    check_tokenizer_config_rewritable(base_dir, "base checkpoint")   # before ray.init, not after a worker load (CR-01)
     canon = runs.canonical(identity_values(a, r, entry, base_name, base_ident))
     rid = runs.run_id(canon)                                # the Ray experiment name: storage/<rid> is the resume dir
     if a.print_run_id:

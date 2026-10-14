@@ -66,6 +66,30 @@ def test_a_tokenizer_config_laya_could_not_rewrite_is_refused(tiny):
     assert identity(ckpt) == before                                  # the rewrite keeps the identity (IN-05)
 
 
+@pytest.mark.timeout(60)
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
+def test_score_with_ray_actors_refuses_a_read_only_tokenizer_dir_before_ray(tmp_path, tiny, monkeypatch):
+    """04-REVIEW CR-01: with --workers 1 (the default) the IN-01 refusal used to come from the Ray Data actor's
+    constructor, which Ray restarted forever. The driver now refuses a rewrite laya cannot make before ray.init."""
+    import ray
+
+    def no_ray(*a, **kw):
+        raise AssertionError("ray.init reached; the read-only tokenizer/ must be refused first")
+    out_dir, manifest, ckpt = tiny
+    test_jsonl = os.path.join(out_dir, "splits", "test.jsonl")
+    tok_dir = os.path.join(ckpt, "tokenizer")
+    monkeypatch.setattr(ray, "init", no_ray)
+    os.chmod(tok_dir, 0o555)
+    try:
+        with pytest.raises(SystemExit, match="checkpoint: tokenizer/tokenizer_config.json needs laya's load-time "
+                                             "rewrite, but tokenizer/ is not writable"):
+            score.main([test_jsonl, "--model", "laya", "--checkpoint", ckpt, "--workers", "1",
+                        "--manifest", manifest, "--out-root", str(tmp_path / "dumps")])
+    finally:
+        os.chmod(tok_dir, 0o755)
+    assert not (tmp_path / "dumps").exists()
+
+
 def test_tiny_checkpoint_round_trips_through_score_and_report(tmp_path, tiny):
     import laya
     out_dir, manifest, ckpt = tiny

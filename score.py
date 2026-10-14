@@ -126,15 +126,20 @@ def resolve_checkpoint(checkpoint, ident=None):
 
     'multilingual' = the pinned hub weights, fetched and digest-checked here (ENV-02); anything else must be a local
     checkpoint dir, bound to the digests in its recorded identity (ident, default identity(checkpoint)). Refusals and
-    digest mismatches surface here as the real message, not as a Ray actor death. laya is not imported here.
+    digest mismatches surface here as the real message, not as a Ray actor death; that includes a tokenizer config
+    laya would have to rewrite in a read-only tokenizer/ (pilot.weights.check_tokenizer_config_rewritable, 04-REVIEW
+    CR-01; load_agent's post-load check is the backstop). laya is not imported here.
     """
-    from pilot.weights import checkpoint_digests, fetch, identity
+    from pilot.weights import check_tokenizer_config_rewritable, checkpoint_digests, fetch, identity
     check_checkpoint_arg(checkpoint)
     if checkpoint == "multilingual":
         from pilot import pins
-        return fetch(pins.LAYA), checkpoint_digests(checkpoint, None)
-    digests = checkpoint_digests(checkpoint, identity(checkpoint) if ident is None else ident)
-    return os.path.abspath(checkpoint), digests             # abspath: laya treats args with "/" as local
+        model_dir, digests = fetch(pins.LAYA), checkpoint_digests(checkpoint, None)
+    else:
+        digests = checkpoint_digests(checkpoint, identity(checkpoint) if ident is None else ident)
+        model_dir = os.path.abspath(checkpoint)             # abspath: laya treats args with "/" as local
+    check_tokenizer_config_rewritable(model_dir, "checkpoint")
+    return model_dir, digests
 
 
 def load_agent(model_dir, device, expected_sha256):

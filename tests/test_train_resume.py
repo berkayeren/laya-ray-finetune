@@ -158,6 +158,39 @@ def test_snapshot_with_deleted_checkpoints_names_the_dir(prepared, full_run, tmp
     assert os.path.join(str(tmp_path / "s"), rid) in r.stderr
 
 
+@pytest.mark.timeout(120)
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
+def test_a_read_only_base_tokenizer_dir_is_refused_before_ray(prepared, tmp_path, monkeypatch):
+    """04-REVIEW CR-01: a base whose tokenizer_config.json laya must rewrite (a fresh save_checkpoint output holds
+    TokenizersBackend) in a read-only tokenizer/ is refused on the driver, before --print-run-id and ray.init, with
+    its own fix, not after a worker's full base load as "training failed ...; rerun the same command to resume"."""
+    import ray_train
+    d, args = prepared
+
+    def no_ray(*a, **kw):
+        raise AssertionError("ray.init reached; the read-only tokenizer/ must be refused first")
+    base = tiny_checkpoint(tmp_path / "base")                 # its own base: a loaded one is already rewritten
+    args = list(args)
+    args[args.index("--base") + 1] = base
+    tok_dir = os.path.join(base, "tokenizer")
+    with open(os.path.join(tok_dir, "tokenizer_config.json"), "rb") as f:
+        before = f.read()
+    monkeypatch.setattr(ray_train.ray, "init", no_ray)
+    os.chmod(tok_dir, 0o555)
+    try:
+        for extra in ([], ["--print-run-id"]):
+            with pytest.raises(SystemExit) as e:
+                ray_train.main(args + ["--out", str(tmp_path / "o"), "--storage", str(tmp_path / "s")] + extra)
+            assert str(e.value.code).startswith("base checkpoint: tokenizer/tokenizer_config.json needs laya's "
+                                                "load-time rewrite, but tokenizer/ is not writable"), e.value.code
+            assert "rerun the same command" not in str(e.value.code)
+    finally:
+        os.chmod(tok_dir, 0o755)
+    with open(os.path.join(tok_dir, "tokenizer_config.json"), "rb") as f:
+        assert f.read() == before                             # nothing loaded it
+    assert not (tmp_path / "s").exists() and not (tmp_path / "o").exists()
+
+
 @pytest.mark.timeout(600)
 def test_low_disk_is_refused_before_ray(prepared, tmp_path, monkeypatch):
     import collections
