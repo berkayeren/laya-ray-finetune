@@ -19,12 +19,19 @@ to be prefixed with the interpreter (and caffeinate -i on the Mac); ray_train.py
 that is not the chosen recipe. --final-manifest RECORD CKPT... builds the postfit-final/1 manifest of the finished
 final checkpoints (pilot.postfit.final_manifest), refused unless they are exactly the record's final seeds.
 
+--reference-check RECORD [--resolution TEXT] builds the BASE-03 check of a BERTurk postfit record
+(pilot.berturk.reference_check, schema berturk-reference/1): the chosen candidate's val micro-F1 at its val-selected
+global θ against 0.707, exactly; status ok or investigate, the quoted source, the setup differences and the in-sample
+caveat. A Laya record is refused; --resolution (the user's documented reason) only on an investigate status.
+
 usage: python postfit.py results/dumps/RUN_ID [RUN_ID2 ...] [--out results/postfit/laya.json] [--manifest splits.json]
        python postfit.py --prune ray_results/RUN_ID/exports/epoch-001 [...] [--dump-root results/dumps]
        python postfit.py --print-final-commands results/postfit/laya.json --storage ray_results \
                          --out-prefix ckpt/laya-final
        python postfit.py --final-manifest results/postfit/laya.json ckpt/laya-final-s0 ckpt/laya-final-s1 \
                          ckpt/laya-final-s2 --out results/postfit/laya-final.json
+       python postfit.py --reference-check results/postfit/berturk.json [--resolution TEXT] \
+                         [--out results/postfit/berturk-reference.json]
 """
 import argparse
 import json
@@ -40,7 +47,8 @@ def main(argv=None):
                                              "prune epoch exports whose val dump exists, print the final-seed "
                                              "commands or build the final-seed manifest")
     ap.add_argument("run_dir", nargs="*", help="run dirs that each hold one candidate's full val dump")
-    ap.add_argument("--out", default=None, help="write the record (or, with --final-manifest, the manifest) here")
+    ap.add_argument("--out", default=None,
+                    help="write the record (with --final-manifest the manifest, with --reference-check the check) here")
     ap.add_argument("--manifest", default=None,
                     help="splits.json to verify against (default: the committed data/splits.json); with "
                          "--print-final-commands it is passed on to ray_train.py only when given")
@@ -56,11 +64,18 @@ def main(argv=None):
                     help="--print-final-commands: the base the chosen run trained (default the pinned weights)")
     ap.add_argument("--final-manifest", nargs="+", metavar="RECORD CKPT", default=None,
                     help="the postfit record, then the final checkpoint dirs of every final seed")
+    ap.add_argument("--reference-check", metavar="RECORD", default=None,
+                    help="the BASE-03 published-reference check of a BERTurk postfit record")
+    ap.add_argument("--resolution", default=None,
+                    help="--reference-check: the documented resolution of an investigate status")
     a = ap.parse_args(argv)
-    modes = (bool(a.run_dir), a.prune is not None, a.print_final_commands is not None, a.final_manifest is not None)
+    modes = (bool(a.run_dir), a.prune is not None, a.print_final_commands is not None, a.final_manifest is not None,
+             a.reference_check is not None)
     if sum(modes) != 1:
-        ap.error("give exactly one of RUN_DIR [RUN_DIR ...], --prune EXPORT_DIR [...], --print-final-commands RECORD "
-                 "or --final-manifest RECORD CKPT [...]")
+        ap.error("give exactly one of RUN_DIR [RUN_DIR ...], --prune EXPORT_DIR [...], --print-final-commands RECORD, "
+                 "--final-manifest RECORD CKPT [...] or --reference-check RECORD")
+    if a.resolution is not None and a.reference_check is None:
+        ap.error("--resolution applies only to --reference-check")
     if a.print_final_commands is None and (a.storage is not None or a.out_prefix is not None
                                            or a.base != "multilingual"):
         ap.error("--storage, --out-prefix and --base apply only to --print-final-commands")
@@ -76,6 +91,15 @@ def main(argv=None):
                  for seed in record["final"]["seeds"]]
         print("\n".join(lines))
         return lines
+    if a.reference_check is not None:
+        record, sha = postfit.read_record(a.reference_check)
+        out = berturk.reference_check(record, a.reference_check, sha, a.resolution)
+        text = json.dumps(out, indent=2, ensure_ascii=False) + "\n"
+        print(text, end="")
+        if a.out:
+            os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+            write_atomic(a.out, text.encode("utf-8"))
+        return out
     if a.final_manifest is not None:
         if len(a.final_manifest) < 2:
             ap.error("--final-manifest takes the record, then the final checkpoint dirs")

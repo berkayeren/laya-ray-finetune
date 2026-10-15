@@ -27,6 +27,14 @@ Postfit (BASE-02, plan 06-04): PROTOCOL is BERTurk's selection grid for pilot.po
 runs Laya's own functions on BERTurk val dumps under it. prune_export deletes one berturk_train.py epoch export only
 after a verified full val dump of exactly that export exists (postfit.py --prune picks it for a dir holding RECORD).
 
+Reference check (BASE-03, fixed in code before any BERTurk val score): reference_check(record, ...) compares the chosen
+candidate's val micro-F1 at its val-selected global θ after T (the selection objective, A5) with THRESHOLD = 707/1000,
+more than 10 micro-F1 points below the lower published reference 80.7 (REFERENCE: Moghe et al., Multi3NLU++, Table 12
+Turkish BANKING, frozen-encoder MLPs at θ 0.3). The comparison is exact (Fraction of the summed counts, never a rounded
+float): exactly 0.707 is "ok", anything below is "investigate". The result (REFERENCE_SCHEMA) quotes the source, the
+setup DIFFERENCES verbatim and the CAVEATS (θ and T were chosen on the same val messages), and records the user's
+resolution, which is allowed only on "investigate" (OQ2: an investigate result may be written without one).
+
 Checkpoint (an export or, later, a final seed) = CHECKPOINT_FILES: model.safetensors, config.json (id2label in
 INTENTS order), the base's vocab.txt and tokenizer_config.json copied byte for byte (never tokenizer.save_pretrained,
 whose bytes depend on HF_HUB_OFFLINE) and RECORD (schema RECORD_SCHEMA). identity() hashes them without a load;
@@ -36,15 +44,17 @@ so checkpoints that differ in any file the scorer reads never share a dump dir.
 usage: from pilot import berturk; rid = berturk.run_id(berturk.canonical(values)); berturk.label_vector(row)
        ident = berturk.identity(ckpt); berturk.dump_run_id(ident); seed, training = berturk.training_block(
        berturk.read_record(ckpt, ident)); berturk.prune_export(export_dir, dump_root, manifest_path)
+       berturk.reference_check(record, record_path, record_sha256, resolution=None)
 """
 import hashlib
 import json
 import os
 import shutil
+from fractions import Fraction
 
 from intents import INTENTS
 from pilot import dumps, postfit
-from pilot.data import DEFAULT_MANIFEST, sha256_bytes, sha256_file
+from pilot.data import DEFAULT_MANIFEST, repo_relpath, sha256_bytes, sha256_file
 
 # ---- the recipe (A1-A3, A7), confirmed at plan 06-02 ----
 LR = 2e-05                                  # A1: one LR for encoder and head, equal to Laya's single LR
@@ -63,6 +73,34 @@ MASK_LABEL = -100.0                         # a masked (message, tag) label; the
 LR_GRID = (2e-05,)                          # A1: explicit; equal to pilot.postfit.LR_GRID (one LR for both models)
 PROTOCOL = {"lr_grid": LR_GRID, "epochs": EPOCHS, "head_lr": None, "selection_seed": postfit.SELECTION_SEED,
             "final_seeds": postfit.FINAL_SEEDS}       # head_lr None: tied to encoder_lr; the seeds are Laya's (A4)
+
+# ---- the published reference check (BASE-03, A5, OQ2), confirmed at plan 06-02 ----
+REFERENCE_SCHEMA = "berturk-reference/1"
+REFERENCE = {
+    "paper": "Moghe et al., Multi3NLU++ (multilingual, multi-intent, multi-domain NLU dataset)",
+    "venue": "ACL Findings 2023",
+    "url": "https://arxiv.org/abs/2212.10455",
+    "metric": "micro-F1",
+    "table_12": {"title": "In-language in-domain results for intent detection with MLP-based setup (F1 x100)",
+                 "language": "Turkish, in-language", "domain": "BANKING",
+                 "setting": "Large: 10-fold cross-validation, train on 9 of 10 folds (about 1,860 messages)",
+                 "values": [{"model": "MLP on frozen LaBSE", "encoder": "frozen", "theta": 0.3, "micro_f1": 82.8},
+                            {"model": "MLP on frozen mpnet", "encoder": "frozen", "theta": 0.3, "micro_f1": 80.7}]},
+    "table_18": {"setup": "QA-based intent detection", "model": "QA mDeBERTa", "micro_f1": 90.1},
+    "lower_reference": 80.7,
+}
+THRESHOLD = Fraction(707, 1000)
+THRESHOLD_RULE = ("below 0.707 (more than 10 micro-F1 points below the lower published reference 80.7) triggers an "
+                  "investigation; exactly 0.707 passes")
+DIFFERENCES = [
+    "a fixed split (selection train folds 0–13 with about 1,450 messages; final train folds 0–15 with about 1,658)",
+    "a different test portion (folds 16–19)",
+    "a fine-tuned BERTurk rather than a frozen encoder",
+    "a single split rather than cross-validation averages",
+    "this check itself reads val folds 14-15",
+]
+CAVEATS = ["θ and T were chosen on the same val messages, so the value is in-sample and optimistic",
+           "the paper uses a fixed θ 0.3 on frozen-encoder MLPs; neither of our numbers is like-for-like"]
 
 # ---- labels and checkpoint layout ----
 TAGS = list(INTENTS)
@@ -280,6 +318,40 @@ def prune_export(export_dir, dump_root=dumps.DUMP_ROOT, manifest_path=DEFAULT_MA
                          "checkpoint's); score it on val first, then prune" % (dump_root, rid))
     shutil.rmtree(real)
     return rid
+
+
+def reference_check(record, record_path, record_sha256, resolution=None):
+    """The BASE-03 check (REFERENCE_SCHEMA) of a BERTurk postfit record: the chosen candidate's val micro-F1 at its
+    val-selected global θ after T, as the exact Fraction(2TP, 2TP + FP + FN) of its summed counts, against THRESHOLD.
+    status "investigate" when below, else "ok". SystemExit on a record of another system kind, a chosen candidate
+    missing from the candidates, or a resolution on an "ok" status (nothing to resolve). No timestamp, no local path:
+    the same inputs give the same JSON bytes."""
+    if record.get("system_kind") != "berturk":
+        raise SystemExit("%s: system kind %r; the published reference check applies to BERTurk (BASE-03)"
+                         % (record_path, record.get("system_kind")))
+    chosen = record.get("chosen") or {}
+    cand = next((c for c in record.get("candidates") or [] if c.get("dump_sha256") == chosen.get("dump_sha256")), None)
+    if cand is None:
+        raise SystemExit("%s: the chosen candidate (dump_sha256 %s) is not among the record's candidates; rebuild it "
+                         "with postfit.py" % (record_path, chosen.get("dump_sha256")))
+    o = cand["objective"]
+    den = 2 * o["tp"] + o["fp"] + o["fn"]
+    value = Fraction(2 * o["tp"], den) if den else Fraction(0)
+    status = "investigate" if value < THRESHOLD else "ok"
+    resolution = resolution.strip() if isinstance(resolution, str) and resolution.strip() else None
+    if resolution is not None and status == "ok":
+        raise SystemExit("the reference check is ok (val micro-F1 %d/%d >= 0.707); nothing to resolve, drop "
+                         "--resolution" % (value.numerator, value.denominator))
+    return {"schema": REFERENCE_SCHEMA, "postfit": {"path": repo_relpath(record_path), "sha256": record_sha256},
+            "reference": REFERENCE, "threshold": float(THRESHOLD), "threshold_rule": THRESHOLD_RULE,
+            "value": {"metric": postfit.OBJECTIVE,
+                      "val_micro_f1_at_global_theta": cand.get("val_micro_f1_at_global_theta"),
+                      "fraction": [value.numerator, value.denominator],
+                      "val_micro_f1_at_0_5": cand.get("val_micro_f1_at_0_5"), "epoch": chosen.get("epoch"),
+                      "encoder_lr": chosen.get("encoder_lr"), "temperature": chosen.get("temperature"),
+                      "train_run_id": chosen.get("train_run_id"), "dump_run_id": chosen.get("dump_run_id")},
+            "below_threshold": status == "investigate", "status": status, "differences": DIFFERENCES,
+            "caveats": CAVEATS, "resolution": resolution}
 
 
 def disk_need_bytes(model_bytes, epochs, export_epochs, final):
