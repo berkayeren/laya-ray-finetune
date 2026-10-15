@@ -1,9 +1,11 @@
 """BERTurk through Laya's own postfit (BASE-02): pilot.postfit.protocol("berturk") and fit() dispatch by system kind
 over BERTurk val dumps (1 LR x epochs 1..10, the head LR tied to the encoder LR, Laya's seeds, objective, tie order,
-T and θ rules), the val-only refusals for BERTurk input, and the Laya record unchanged by the dispatch.
+T and θ rules), the val-only refusals for BERTurk input, the Laya record unchanged by the dispatch, and the guarded
+prune of BERTurk exports through postfit.py --prune.
 
-No model, torch or Ray: candidate val dumps are written with pilot.dumps.write_dump on the synthetic val split
-(conftest), with a sidecar shaped like score.py --model berturk's (score.sidecar_base + pilot.berturk.training_block).
+Candidate val dumps are written with pilot.dumps.write_dump on the synthetic val split (conftest), with a sidecar shaped
+like score.py --model berturk's (score.sidecar_base + pilot.berturk.training_block): no model, torch or Ray. Only the
+prune tests train a tiny export with berturk_train.py on CPU and score it with score.py (seconds).
 """
 import json
 import os
@@ -236,6 +238,88 @@ def test_berturk_postfit_refuses_a_test_dump(tmp_path, snap):
         postfit_cli.main(run_dirs + ["--manifest", snap[1]])
     with pytest.raises(SystemExit, match="is a file"):
         postfit.candidate(os.path.join(snap[0], "splits", "test.jsonl"), snap[1])
+
+
+# --- guarded prune of BERTurk exports (a tiny export trained by berturk_train.py on CPU) ---------------------------
+
+@pytest.fixture
+def berturk_export(tmp_path, snap):
+    """(export dir <storage>/<run_id>/exports/epoch-001, dump root, manifest, val.jsonl, tiny base dir): a 1-epoch
+    berturk_train.py run on the tiny offline base, on CPU. Scoring sets torch's thread count; it is restored after."""
+    import subprocess
+    import sys
+    import torch
+    from tiny_berturk import tiny_base
+    threads = torch.get_num_threads()
+    out_dir, manifest = snap[0], snap[1]
+    base = tiny_base(tmp_path / "base")
+    storage = tmp_path / "storage"
+    argv = [sys.executable, "berturk_train.py", "--data", os.path.join(out_dir, "splits", "selection_train.jsonl"),
+            "--manifest", manifest, "--base", base, "--device", "cpu", "--epochs", "1", "--batch", "4", "--max-len",
+            "32", "--seed", "0", "--storage", str(storage)]
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run(argv, cwd=pilot.data.REPO_ROOT, env=env, capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stderr[-4000:]
+    (run,) = os.listdir(storage)
+    path = str(storage / run / "exports" / "epoch-001")
+    assert os.path.isfile(os.path.join(path, berturk.RECORD))
+    yield path, str(tmp_path / "dumps"), manifest, os.path.join(out_dir, "splits", "val.jsonl"), base
+    torch.set_num_threads(threads)
+
+
+def _score_berturk_val(export_dir, dump_root, manifest, val_jsonl, *extra):
+    return score.main([val_jsonl, "--model", "berturk", "--checkpoint", export_dir, "--workers", "0",
+                       "--cpus-per-worker", "1", "--manifest", manifest, "--out-root", dump_root, *extra])
+
+
+@pytest.mark.timeout(600)
+def test_prune_deletes_a_berturk_export_only_after_its_val_dump(berturk_export, capsys):
+    path, dump_root, manifest, val_jsonl, _ = berturk_export
+    with pytest.raises(SystemExit, match="no verified full val dump"):
+        postfit_cli.main(["--prune", path, "--dump-root", dump_root, "--manifest", manifest])
+    assert os.path.isdir(path)
+    d, _ = _score_berturk_val(path, dump_root, manifest, val_jsonl)
+    want = berturk.dump_run_id(berturk.identity(path))
+    assert os.path.basename(d) == want
+    capsys.readouterr()
+    rid = postfit_cli.main(["--prune", path, "--dump-root", dump_root, "--manifest", manifest])[0]
+    assert rid == want and not os.path.exists(path)
+    assert os.path.isdir(os.path.dirname(path))                    # only the epoch dir is deleted
+    run = os.path.basename(os.path.dirname(os.path.dirname(path)))
+    assert capsys.readouterr().out.strip() == "pruned %s/exports/epoch-001 (val dump %s)" % (run, rid)
+    _, _, side, _ = dumps.load_dump(os.path.join(dump_root, rid), "val", manifest)   # the dump stays and verifies
+    assert side["system"]["kind"] == "berturk"
+
+
+@pytest.mark.timeout(600)
+def test_prune_refuses_a_berturk_export_without_a_dump_or_through_a_symlink(tmp_path, berturk_export):
+    path, dump_root, manifest, val_jsonl, base = berturk_export
+    with pytest.raises(SystemExit, match="no verified full val dump"):
+        berturk.prune_export(path, dump_root, manifest)
+    link = tmp_path / "link-epoch-001"
+    os.symlink(path, link)
+    with pytest.raises(SystemExit, match="symlink"):
+        berturk.prune_export(str(link), dump_root, manifest)
+    with pytest.raises(SystemExit, match="symlink"):
+        postfit_cli.main(["--prune", str(link), "--dump-root", dump_root, "--manifest", manifest])
+    linked_exports = tmp_path / "storage2" / "berturk-y" / "exports"
+    linked_exports.parent.mkdir(parents=True)
+    os.symlink(os.path.dirname(path), linked_exports)
+    with pytest.raises(SystemExit, match="symlink"):
+        berturk.prune_export(str(linked_exports / "epoch-001"), dump_root, manifest)
+    with pytest.raises(SystemExit, match="not a berturk_train.py export"):
+        berturk.prune_export(base, dump_root, manifest)            # the tiny base, outside an exports/ dir
+    with pytest.raises(SystemExit, match="not a ray_train export"):
+        postfit_cli.main(["--prune", base, "--dump-root", dump_root, "--manifest", manifest])   # no RECORD: Laya's
+    with pytest.raises(SystemExit, match="not a berturk_train.py export"):
+        berturk.prune_export(os.path.join(path, berturk.RECORD), dump_root, manifest)
+    _score_berturk_val(path, dump_root, manifest, val_jsonl, "--n", "2")   # a subset val dump at the export's run id
+    with pytest.raises(SystemExit, match="subset dump or another checkpoint"):
+        berturk.prune_export(path, dump_root, manifest)
+    with pytest.raises(SystemExit, match="subset dump or another checkpoint"):
+        postfit_cli.main(["--prune", path, "--dump-root", dump_root, "--manifest", manifest])
+    for p in (path, link, base):
+        assert os.path.isdir(p)                                    # every refusal left its target in place
 
 
 # --- the Laya path is unchanged ----------------------------------------------------------------------------------

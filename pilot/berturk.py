@@ -24,7 +24,8 @@ berturk_train.py flag is in exactly one of IDENTITY, NOT_IDENTITY or RESOLVED (a
 Postfit (BASE-02, plan 06-04): PROTOCOL is BERTurk's selection grid for pilot.postfit.protocol("berturk"): LR_GRID
 (explicit, kept equal to pilot.postfit.LR_GRID by a test: equal tuning effort, the 2026-10-15 user decision), epochs
 1..EPOCHS, head_lr None (the head LR is the encoder LR) and pilot.postfit's selection and final seeds (A4). postfit.py
-runs Laya's own functions on BERTurk val dumps under it.
+runs Laya's own functions on BERTurk val dumps under it. prune_export deletes one berturk_train.py epoch export only
+after a verified full val dump of exactly that export exists (postfit.py --prune picks it for a dir holding RECORD).
 
 Checkpoint (an export or, later, a final seed) = CHECKPOINT_FILES: model.safetensors, config.json (id2label in
 INTENTS order), the base's vocab.txt and tokenizer_config.json copied byte for byte (never tokenizer.save_pretrained,
@@ -34,15 +35,16 @@ so checkpoints that differ in any file the scorer reads never share a dump dir.
 
 usage: from pilot import berturk; rid = berturk.run_id(berturk.canonical(values)); berturk.label_vector(row)
        ident = berturk.identity(ckpt); berturk.dump_run_id(ident); seed, training = berturk.training_block(
-       berturk.read_record(ckpt, ident))
+       berturk.read_record(ckpt, ident)); berturk.prune_export(export_dir, dump_root, manifest_path)
 """
 import hashlib
 import json
 import os
+import shutil
 
 from intents import INTENTS
 from pilot import dumps, postfit
-from pilot.data import sha256_bytes, sha256_file
+from pilot.data import DEFAULT_MANIFEST, sha256_bytes, sha256_file
 
 # ---- the recipe (A1-A3, A7), confirmed at plan 06-02 ----
 LR = 2e-05                                  # A1: one LR for encoder and head, equal to Laya's single LR
@@ -248,6 +250,36 @@ def training_block(rec):
         "loss_by_epoch": [row.get("loss") for row in rows], "calibrated": rec.get("calibrated"),
         "postfit_sha256": (rec.get("postfit") or {}).get("sha256"), "canonical": canon,
         "config_sha256_sans_seed": dumps.training_digest(canon, epoch)}
+
+
+def prune_export(export_dir, dump_root=dumps.DUMP_ROOT, manifest_path=DEFAULT_MANIFEST):
+    """Delete one berturk_train.py epoch export once its verified full val dump exists; returns the dump's run id.
+
+    Refused, and left in place: a symlink (the export or its exports/ dir), a path that is not a real
+    <storage>/<run_id>/exports/epoch-NNN dir holding RECORD, and an export without a full val dump under dump_root
+    whose sidecar checkpoint_identity equals the export's identity() (load_dump verifies the dump bytes). Only that one
+    dir is ever deleted (mirrors pilot.postfit.prune_export, A8).
+    """
+    path = os.path.abspath(export_dir)
+    if os.path.islink(path) or os.path.islink(os.path.dirname(path)):
+        raise SystemExit("%s is a symlink (or sits in a symlinked exports dir); refusing to delete it" % export_dir)
+    real = os.path.realpath(path)
+    if not (os.path.isdir(real) and postfit.EXPORT_RE.match(os.path.basename(real))
+            and os.path.basename(os.path.dirname(real)) == "exports" and os.path.isfile(os.path.join(real, RECORD))):
+        raise SystemExit("%s is not a berturk_train.py export (<storage>/<run_id>/exports/epoch-NNN); refusing to "
+                         "delete it" % export_dir)
+    ident = identity(real)
+    rid = dump_run_id(ident)
+    try:
+        _, _, side, _ = dumps.load_dump(os.path.join(dump_root, rid), "val", manifest_path)
+    except SystemExit as e:
+        raise SystemExit("no verified full val dump for this export under %s (%s); score it on val first, then prune"
+                         % (dump_root, e))
+    if side.get("n_subset") is not None or (side.get("system") or {}).get("checkpoint_identity") != ident:
+        raise SystemExit("no verified full val dump for this export under %s (%s is a subset dump or another "
+                         "checkpoint's); score it on val first, then prune" % (dump_root, rid))
+    shutil.rmtree(real)
+    return rid
 
 
 def disk_need_bytes(model_bytes, epochs, export_epochs, final):

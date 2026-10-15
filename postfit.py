@@ -5,11 +5,14 @@ Every number comes from verified val dumps (pilot.dumps.load_dump) and the verif
 record rebuilds byte for byte from the committed dumps, in any order of the RUN_DIR arguments. Test input is refused:
 a file path (a .jsonl, an .npz), a run dir holding a test dump, a --n subset val dump, a candidate trained on
 final_train (its val is in-sample), a calibrated candidate and one whose shipped T is not 1.0 (pilot.postfit).
-The rules, the grid and the seeds are the constants of pilot.postfit, as the user confirmed them at plan 05-10.
+The rules are the constants of pilot.postfit, as the user confirmed them at plan 05-10; the grid and the seeds are
+pilot.postfit.protocol of the candidates' system kind (laya: pilot.postfit's constants; berturk: pilot.berturk.PROTOCOL,
+1 LR x epochs 1..10, plan 06-04), so BERTurk val dumps go through exactly Laya's functions. Mixed kinds are refused.
 
---prune EXPORT_DIR... deletes ray_train.py epoch exports (<storage>/<run_id>/exports/epoch-NNN) to free disk, each
-only after a verified full val dump of exactly that export exists under --dump-root (pilot.postfit.prune_export);
-anything else, a symlink included, is refused and left in place.
+--prune EXPORT_DIR... deletes epoch exports (<storage>/<run_id>/exports/epoch-NNN) to free disk, each only after a
+verified full val dump of exactly that export exists under --dump-root: a dir holding berturk_train.json goes to
+pilot.berturk.prune_export, any other to pilot.postfit.prune_export (ray_train.py exports); anything else, a symlink
+included, is refused and left in place.
 
 --print-final-commands RECORD prints one ray_train.py command per final seed (pilot.postfit.final_command), each line
 to be prefixed with the interpreter (and caffeinate -i on the Mac); ray_train.py --postfit still refuses any command
@@ -28,7 +31,7 @@ import json
 import os
 import shlex
 
-from pilot import dumps, postfit
+from pilot import berturk, dumps, postfit
 from pilot.data import DEFAULT_MANIFEST, write_atomic
 
 
@@ -88,7 +91,8 @@ def main(argv=None):
             ap.error("--out applies only to RUN_DIR mode")
         pruned = []
         for d in a.prune:
-            rid = postfit.prune_export(d, a.dump_root, manifest)
+            prune = berturk.prune_export if os.path.isfile(os.path.join(d, berturk.RECORD)) else postfit.prune_export
+            rid = prune(d, a.dump_root, manifest)
             real = os.path.normpath(os.path.abspath(d))
             print("pruned %s/exports/%s (val dump %s)"
                   % (os.path.basename(os.path.dirname(os.path.dirname(real))), os.path.basename(real), rid))
