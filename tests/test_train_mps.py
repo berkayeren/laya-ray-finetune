@@ -40,7 +40,7 @@ def test_mps_record(tmp_path):
     ckpt = tmp_path / "ckpt"
     _run("ray_train.py", "--data", os.path.join(out_dir, "splits", "selection_train.jsonl"),
          "--manifest", os.path.join(out_dir, "splits.json"), "--base", base, "--out", ckpt, "--device", "mps",
-         "--workers", "1", "--cpus-per-worker", "2", "--epochs", "1", "--max-messages", "12", "--calib-frac", "0.2",
+         "--workers", "1", "--cpus-per-worker", "2", "--epochs", "1", "--max-messages", "12",
          "--storage", tmp_path / "ray")
     rec = runs.read_record(str(ckpt))
     assert rec["device"] == "mps" and rec["param_device"] == "mps"
@@ -81,7 +81,7 @@ def test_resume_on_mps(tmp_path):
     args = ["ray_train.py", "--data", os.path.join(out_dir, "splits", "selection_train.jsonl"),
             "--manifest", os.path.join(out_dir, "splits.json"), "--base", base, "--out", tmp_path / "ckpt",
             "--device", "mps", "--workers", "1", "--cpus-per-worker", "2", "--epochs", "2", "--max-messages", "12",
-            "--calib-frac", "0.2", "--storage", tmp_path / "ray"]
+            "--storage", tmp_path / "ray"]
     r = _run_fail(*args, "--fail-after-epoch", "1")
     assert "rerun the same command" in r.stderr, r.stderr[-4000:]
     _run(*args)

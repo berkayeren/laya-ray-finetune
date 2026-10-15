@@ -35,17 +35,6 @@ def test_require_single_node_refuses_a_multi_node_cluster():
         ray_train.require_single_node([{"Alive": True}, {"Alive": True}])
 
 
-def test_holdout_messages_is_message_level_deterministic_and_disjoint():
-    rows = [{"uid": "m%d" % i, "state": "t%d" % i} for i in range(100)]
-    train, calib = ray_train.holdout_messages(rows, 40, 0.1, 0)
-    assert len(calib) == 10                                  # min(40 messages, 10% of 100)
-    assert {r["uid"] for r in train}.isdisjoint(r["uid"] for r in calib)
-    assert len(train) + len(calib) == len(rows)
-    again = ray_train.holdout_messages([dict(r) for r in rows], 40, 0.1, 0)   # what another rank computes
-    assert again == (train, calib)
-    assert len(ray_train.holdout_messages(rows, 3, 0.1, 0)[1]) == 3          # --calib-max-messages caps it
-
-
 def test_read_verified_rows_keeps_unicode_line_separators_inside_messages(tmp_path, synthetic_raw):
     # json.dumps(ensure_ascii=False) leaves U+2028/U+0085/U+2029 raw; prepare() writes them, workers must read them
     from pilot import laya_adapter as la
@@ -89,7 +78,7 @@ def test_run_id_ignores_paths_and_resources_and_follows_the_seed():
     rid = _rid(*base)
     assert rid.startswith("laya-selection_train-neg8-s0-")
     for other in (["--out", "elsewhere"], ["--storage", "/x/ray"], ["--cpus-per-worker", "3"],
-                  ["--manifest", "m.json"], ["--object-store-gb", "2"], ["--calib-batch", "4"]):
+                  ["--manifest", "m.json"], ["--object-store-gb", "2"]):
         assert _rid(*(base + other)) == rid, other
     assert _rid("--out", "o", "--data", "d.jsonl") == rid                     # flag order never matters
     assert _rid("--seed", "3", "--neg", "2", *base) == _rid(*(base + ["--neg", "2", "--seed", "3"]))
@@ -103,10 +92,12 @@ def test_run_id_ignores_paths_and_resources_and_follows_the_seed():
     assert _rid(*(base + ["--neg-seed", "0"])) == rid                        # --neg-seed defaults to --seed
 
 
-def test_the_pinned_base_keeps_the_committed_probe_run_id():
-    """04-REVIEW WR-01: base_files_sha256 is None for --base multilingual (the pin fixes its tokenizer/ and encoder/)
-    and canonical() leaves it out, so the committed compute checkpoint's probe command still names its run
-    laya-selection_train-neg8-s0-db11040d (offline: the committed manifest, report and the pin)."""
+def test_the_committed_probe_run_id_is_historical():
+    """The Phase 4 compute probe trained with the 40-message calibration holdout LAYA-05 removed (identity keys
+    calib_max_messages and calib_frac), so its committed id laya-selection_train-neg8-s0-db11040d is a historical
+    record: the same probe command now names another run, and results/compute/ stays byte-identical
+    (tests/test_compute_report.py). base_files_sha256 is still None for --base multilingual (04-REVIEW WR-01: the pin
+    fixes its tokenizer/ and encoder/) and canonical() leaves it out. Offline: the committed manifest, report and pin."""
     import os
     from pilot import runs
     from pilot.data import REPO_ROOT
@@ -123,8 +114,12 @@ def test_the_pinned_base_keeps_the_committed_probe_run_id():
         "--grad-accum", str(start["grad_accum"]), "--max-len", str(start["max_len"]), "--neg", str(p["neg"]),
         "--seed", str(p["seed"])])
     vals = ray_train.identity_values(a, ray_train.resolve(a), entry, "multilingual", identity("multilingual"))
-    assert vals["base_files_sha256"] is None and "base_files_sha256" not in runs.canonical(vals)
-    assert runs.run_id(runs.canonical(vals)) == p["run_id"] == "laya-selection_train-neg8-s0-db11040d"
+    canon = runs.canonical(vals)
+    assert vals["base_files_sha256"] is None and "base_files_sha256" not in canon
+    assert not [k for k in canon if k.startswith("calib")], sorted(canon)
+    rid = runs.run_id(canon)
+    assert re.fullmatch(r"laya-selection_train-neg8-s0-[0-9a-f]{8}", rid), rid
+    assert p["run_id"] == "laya-selection_train-neg8-s0-db11040d" and rid != p["run_id"]
 
 
 def test_a_local_base_names_the_run_by_its_tokenizer_and_encoder(tiny_run, tmp_path, capsys):
@@ -167,12 +162,17 @@ def test_the_worker_checks_the_tokenizer_config_rewrite_after_the_base_load():
 
 
 def test_intermediate_checkpoint_config_is_marked_and_traceable():
-    base = {"encoder": "x", "temperature": 1.3, "training": {"base_run": 1}}
-    ray_cfg = {"provenance": {"data": "splits/selection_train.jsonl"}, "calibration_holdout": {"n_messages": 4}}
+    """An export resets the temperature to T = 1 with no buckets, never inheriting a base's fitted T (LAYA-05)."""
+    base = {"encoder": "x", "temperature": [1.0, 1.0, 1.3], "temperature_by_options": {"noul:2": 1.3},
+            "training": {"base_run": 1}}
+    ray_cfg = {"provenance": {"data": "splits/selection_train.jsonl"}}
     out = ray_train.epoch_config(base, 128, 64, ray_cfg, 2)
     assert out["fine_tuned"] is True and out["max_len"] == 128 and out["head_max_len"] == 64
+    assert out["temperature"] == [1.0, 1.0, 1.0] and out["temperature_by_options"] == {}
+    assert out["temperature"] is not ray_train.UNCALIBRATED_TEMPERATURE       # a copy, never the shared list
     assert out["training"] == {"base_run": 1, "ray_train": ray_cfg, "epoch": 2, "calibrated": False}
-    assert base["training"] == {"base_run": 1}                                   # the base config is not mutated
+    assert base == {"encoder": "x", "temperature": [1.0, 1.0, 1.3], "temperature_by_options": {"noul:2": 1.3},
+                    "training": {"base_run": 1}}                                 # the base config is not mutated
 
 
 def test_require_driver_node_refuses_a_worker_on_another_node():
@@ -268,20 +268,25 @@ def test_freeze_flags_conflict(capsys):
     (["--micro-batch", "0"], "--micro-batch must be at least 1"),
     (["--grad-accum", "-1"], "--grad-accum must be at least 1"),
     (["--workers", "0"], "--workers must be at least 1"),
-    (["--calib-batch", "0"], "--calib-batch must be at least 1"),
-    (["--calib-max-messages", "0"], "--calib-max-messages must be at least 1"),
     (["--cpus-per-worker", "0"], "--cpus-per-worker must be at least 1"),
     (["--max-messages", "0"], "--max-messages must be at least 1"),
     (["--max-len", "0"], "--max-len must be at least 1"),                    # 04-REVIEW IN-10
     (["--head-max-len", "-5"], "--head-max-len must be at least 1"),
-    (["--calib-frac", "0"], "--calib-frac must be in (0, 1]"),
-    (["--calib-frac", "1.5"], "--calib-frac must be in (0, 1]"),
 ])
 def test_bad_sizes_are_refused_before_ray(flags, msg, capsys):
     """04-REVIEW WR-03: refused by argparse, before the split check, the fetch and ray.init (not in the worker)."""
     with pytest.raises(SystemExit) as e:
         ray_train.main(["--data", "d.jsonl", "--out", "o"] + flags)
     assert e.value.code == 2 and msg in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag, value", [("--calib-frac", "0.2"), ("--calib-max-messages", "40"),
+                                         ("--calib-batch", "16")])
+def test_removed_calibration_flags_are_refused(flag, value, capsys):
+    """LAYA-05: training no longer holds out calibration messages, so the calibration flags are gone, not ignored."""
+    with pytest.raises(SystemExit) as e:
+        ray_train.parser().parse_args(["--data", "d.jsonl", "--out", "o", flag, value])
+    assert e.value.code == 2 and "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_mps_oom_becomes_the_rung_message():
@@ -339,7 +344,7 @@ def test_a_worker_refusal_is_shown_as_is_not_as_resume_advice():
 
 
 def test_a_raw_mps_oom_outside_the_step_gets_the_rung_line_not_resume_advice():
-    """04-REVIEW WR-01: an MPS OOM no mps_oom_exit wrapped (model move, resume, save, calibration) must not say "rerun
+    """04-REVIEW WR-01: an MPS OOM no mps_oom_exit wrapped (model move, resume, save) must not say "rerun
     to resume" (the rerun resumes into the same allocation); it gets the rung line the compute ladder walks on."""
     from ray.train import WorkerGroupError
     from pilot import runs
@@ -361,7 +366,7 @@ def test_a_raw_mps_oom_outside_the_step_gets_the_rung_line_not_resume_advice():
 
 
 def test_a_resume_with_no_epoch_left_never_loads_the_optimizer_state():
-    """04-REVIEW WR-01 (end-of-phase gate): a rerun after a calibration or final-save OOM resumes a train state that
+    """04-REVIEW WR-01 (end-of-phase gate): a rerun after a final-save OOM resumes a train state that
     already holds the last epoch. Its AdamW moments must stay off the device, and an OOM while it moves the model must
     say rerun the same command, never a rung flag that would change the run_id and retrain every epoch."""
     import torch
@@ -385,8 +390,9 @@ def test_a_resume_with_no_epoch_left_never_loads_the_optimizer_state():
     assert len(o.state) == 2 and s.last_epoch == 1          # an epoch left: weight and bias moments, scheduler step
     assert ray_train.training_done(saved, 2) and not ray_train.training_done(saved, 3)
     assert not ray_train.training_done(None, 2)             # a fresh start
-    line = runs.oom_message(None, None, "none", runs.STAGE_RECALIBRATE_MOVE)
-    assert runs.resume_oom(line) and "--freeze-embeddings" not in line
+    for stage in (runs.STAGE_FINALIZE_MOVE, runs.STAGE_FINAL_SAVE):
+        line = runs.oom_message(None, None, "none", stage)
+        assert runs.resume_oom(line) and "--freeze-embeddings" not in line
 
 
 def test_the_trainer_passes_the_resume_stages_by_name():
@@ -395,7 +401,7 @@ def test_the_trainer_passes_the_resume_stages_by_name():
     no copy of any stage text."""
     import inspect
     from pilot import runs
-    names = {"STAGE_CALIBRATE", "STAGE_FINAL_SAVE", "STAGE_RECALIBRATE_MOVE"}
+    names = {"STAGE_FINAL_SAVE", "STAGE_FINALIZE_MOVE"}
     assert set(runs.RESUME_STAGES) == {getattr(runs, n) for n in names}
     loop = inspect.getsource(ray_train.train_loop_per_worker)
     for n in names:
@@ -403,6 +409,34 @@ def test_the_trainer_passes_the_resume_stages_by_name():
     src = inspect.getsource(ray_train)
     for stage in runs.RESUME_STAGES:
         assert stage not in src, stage
+
+
+# laya's train-split / item-level calibration path and the holdout that fed it (LAYA-05)
+CALIBRATION_NAMES = {"holdout_messages", "split_calibration", "calibration_records", "calibration_report",
+                     "fit_temperature_map", "calib_items"}
+
+
+def test_no_train_split_calibration():
+    """LAYA-05 guard: the temperature comes only from message-level val data (postfit.py), so ray_train.py holds no
+    calibration holdout, no laya calibration call and no calibration flag, and both the epoch exports and the final
+    checkpoint write UNCALIBRATED_TEMPERATURE."""
+    import ast
+    import inspect
+    with open(ray_train.__file__, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in CALIBRATION_NAMES:
+            found.add(node.id)
+        elif isinstance(node, ast.Attribute) and node.attr in CALIBRATION_NAMES:
+            found.add(node.attr)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in CALIBRATION_NAMES:
+            found.add(node.name)
+    assert not found, sorted(found)
+    assert not [d for d in _dests() if d.startswith("calib")], sorted(_dests())
+    for fn in (ray_train.epoch_config, ray_train.train_loop_per_worker):
+        assert "UNCALIBRATED_TEMPERATURE" in inspect.getsource(fn), fn.__name__
+    assert ray_train.UNCALIBRATED_TEMPERATURE == [1.0, 1.0, 1.0]
 
 
 def test_driver_names_the_dir_of_a_corrupted_snapshot():

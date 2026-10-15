@@ -246,6 +246,15 @@ def test_fail_after_epoch_and_export_epochs_never_change_the_run_id():
     assert {"fail_after_epoch", "export_epochs"} <= set(runs.NOT_IDENTITY)
 
 
+def test_identity_holds_no_calibration_keys():
+    """LAYA-05: training no longer calibrates, so no calibration value is part of the run identity, and only the two
+    post-training stages (the final save and a finished rerun's model move) say rerun the same command."""
+    keys = set(runs.IDENTITY) | set(runs.NOT_IDENTITY)
+    assert not [k for k in keys if k.startswith("calib")], sorted(keys)
+    assert set(runs.RESUME_STAGES) == {runs.STAGE_FINAL_SAVE, runs.STAGE_FINALIZE_MOVE}
+    assert not hasattr(runs, "STAGE_CALIBRATE") and not hasattr(runs, "STAGE_RECALIBRATE_MOVE")
+
+
 def test_last_line_and_free_bytes(tmp_path):
     """04-REVIEW IN-02: the one shared copy of the failure-text and free-disk helpers."""
     assert runs.last_line("Traceback\n  File x\nValueError: bad\n\n") == "ValueError: bad"

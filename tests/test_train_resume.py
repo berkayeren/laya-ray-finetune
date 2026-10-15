@@ -42,7 +42,7 @@ def prepared(tmp_path_factory):
     base = tiny_checkpoint(d / "base")
     args = ["--data", os.path.join(out_dir, "splits", "selection_train.jsonl"),
             "--manifest", os.path.join(out_dir, "splits.json"), "--base", base, "--device", "cpu", "--workers", "1",
-            "--cpus-per-worker", "1", "--epochs", "2", "--max-messages", "12", "--calib-frac", "0.2", "--neg", "2"]
+            "--cpus-per-worker", "1", "--epochs", "2", "--max-messages", "12", "--neg", "2"]
     return d, args
 
 
@@ -117,22 +117,22 @@ def test_killed_run_resumes_bitwise(prepared, full_run):
 
 
 @pytest.mark.timeout(600)
-def test_a_failure_after_the_last_epoch_resumes_into_calibration_only(prepared, full_run):
+def test_a_failure_after_the_last_epoch_resumes_into_the_final_save_only(prepared, full_run):
     """04-REVIEW WR-01 (end-of-phase gate): the rerun after a failure past the last epoch's checkpoint (as after a
-    calibration or final-save OOM) trains nothing and never loads the optimizer state; it recalibrates the same
-    weights the uninterrupted run published."""
+    final-save OOM) trains nothing and never loads the optimizer state; it writes the final checkpoint of the same
+    weights the uninterrupted run published (uncalibrated, LAYA-05)."""
     d, args = prepared
     rid, full = full_run
-    r = _run("ray_train.py", *args, "--storage", d / "c", "--out", d / "cal", "--fail-after-epoch", "2", ok=False)
+    r = _run("ray_train.py", *args, "--storage", d / "c", "--out", d / "fin", "--fail-after-epoch", "2", ok=False)
     assert r.returncode != 0 and (d / "c" / rid / "epoch-002" / "train_state.pt").is_file(), r.stderr[-4000:]
-    r = _run("ray_train.py", *args, "--storage", d / "c", "--out", d / "cal")
+    r = _run("ray_train.py", *args, "--storage", d / "c", "--out", d / "fin")
     out = r.stdout + r.stderr
     assert "resuming %s after epoch 2" % rid in out and "the optimizer state is not loaded" in out, out[-4000:]
     assert "epoch 1/2" not in out and "epoch 2/2" not in out
-    assert _sha256(d / "cal" / "model.safetensors") == _sha256(full / "model.safetensors")
-    rec = runs.read_record(str(d / "cal"))
+    assert _sha256(d / "fin" / "model.safetensors") == _sha256(full / "model.safetensors")
+    rec = runs.read_record(str(d / "fin"))
     assert [row["segment"] for row in rec["epochs"]] == [0, 0]
-    assert [s["start_epoch"] for s in rec["segments"]] == [0, 2] and rec["calib_s"] > 0
+    assert [s["start_epoch"] for s in rec["segments"]] == [0, 2] and rec["calib_s"] is None
 
 
 @pytest.mark.timeout(600)
