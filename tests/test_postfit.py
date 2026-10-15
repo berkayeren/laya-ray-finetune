@@ -21,6 +21,8 @@ from pilot.data import REPO_ROOT, sha256_bytes
 pytestmark = pytest.mark.unit
 
 GRID = [(lr, e) for lr in postfit.LR_GRID for e in range(1, postfit.EPOCHS + 1)]
+LR3 = (2e-05, 3e-05, 5e-05)                 # the selection rule's tie order across LRs, kept for a later LR grid search
+GRID3 = [(lr, e) for lr in LR3 for e in range(1, postfit.EPOCHS + 1)]
 SCORER = {"device": "mps", "dtype": "torch.float32", "amp_enabled": False}
 
 
@@ -99,60 +101,64 @@ def _cand(lr, epoch, counts=(1, 3, 3), seed=0, kind="laya", scorer=None, canon=N
 
 
 def _grid(**counts):
-    """The 12 candidates, each scoring F 0.25 unless counts[(lr, epoch)] gives other (tp, fp, fn)."""
-    return [_cand(lr, e, counts.get((lr, e), (1, 3, 3))) for lr, e in GRID]
+    """The 12 candidates of a 3-LR grid, each scoring F 0.25 unless counts[(lr, epoch)] gives other (tp, fp, fn)."""
+    return [_cand(lr, e, counts.get((lr, e), (1, 3, 3))) for lr, e in GRID3]
+
+
+def _select(cands, **kw):
+    return postfit.select(cands, **dict({"lr_grid": LR3}, **kw))
 
 
 def _pick(cands):
-    c = postfit.select(cands)
+    c = _select(cands)
     return c["encoder_lr"], c["epoch"]
 
 
 def test_select_picks_the_highest_objective():
     cands = _grid()
-    cands[GRID.index((3e-05, 2))]["objective"] = {"tp": 9, "fp": 1, "fn": 1}
+    cands[GRID3.index((3e-05, 2))]["objective"] = {"tp": 9, "fp": 1, "fn": 1}
     assert _pick(cands) == (3e-05, 2)
 
 
 def test_select_ties_go_to_fewer_epochs_then_lower_lr():
     cands = _grid()                                          # (1, 1, 1) and (2, 2, 2) both score exactly 1/2
-    cands[GRID.index((5e-05, 2))]["objective"] = {"tp": 1, "fp": 1, "fn": 1}
-    cands[GRID.index((3e-05, 2))]["objective"] = {"tp": 2, "fp": 2, "fn": 2}
+    cands[GRID3.index((5e-05, 2))]["objective"] = {"tp": 1, "fp": 1, "fn": 1}
+    cands[GRID3.index((3e-05, 2))]["objective"] = {"tp": 2, "fp": 2, "fn": 2}
     assert _pick(cands) == (3e-05, 2)                        # same epoch: the lower LR
-    cands[GRID.index((5e-05, 1))]["objective"] = {"tp": 3, "fp": 3, "fn": 3}
+    cands[GRID3.index((5e-05, 1))]["objective"] = {"tp": 3, "fp": 3, "fn": 3}
     assert _pick(cands) == (5e-05, 1)                        # fewer epochs before the lower LR
-    assert postfit.score(cands[GRID.index((5e-05, 1))]) == postfit.score(cands[GRID.index((3e-05, 2))])
+    assert postfit.score(cands[GRID3.index((5e-05, 1))]) == postfit.score(cands[GRID3.index((3e-05, 2))])
 
 
 def test_select_is_independent_of_input_order():
     cands = _grid()
     for k, key in enumerate(((2e-05, 4), (5e-05, 3), (3e-05, 3))):
-        cands[GRID.index(key)]["objective"] = {"tp": 4, "fp": 2, "fn": 2}   # a three-way tie at 2/3
-    want = postfit.select(cands)["dump_sha256"]
+        cands[GRID3.index(key)]["objective"] = {"tp": 4, "fp": 2, "fn": 2}   # a three-way tie at 2/3
+    want = _select(cands)["dump_sha256"]
     for seed in range(20):
         shuffled = list(cands)
         random.Random(seed).shuffle(shuffled)
-        assert postfit.select(shuffled)["dump_sha256"] == want
+        assert _select(shuffled)["dump_sha256"] == want
     assert _pick(cands) == (3e-05, 3)
 
 
 def test_select_refuses_an_incomplete_or_duplicated_grid():
     with pytest.raises(SystemExit, match="no candidates"):
-        postfit.select([])
+        _select([])
     with pytest.raises(SystemExit, match="missing \\[\\(5e-05, 4\\)\\]"):
-        postfit.select(_grid()[:-1])
+        _select(_grid()[:-1])
     with pytest.raises(SystemExit, match="unexpected \\[\\(0.0001, 1\\)\\]"):
-        postfit.select(_grid() + [_cand(0.0001, 1)])
+        _select(_grid() + [_cand(0.0001, 1)])
     dup = _cand(2e-05, 1)
     dup["dump_sha256"] = "x" * 64
     with pytest.raises(SystemExit, match="more than once"):
-        postfit.select(_grid() + [dup])
+        _select(_grid() + [dup])
     same = _grid()
     same[1]["dump_sha256"] = same[0]["dump_sha256"]
     with pytest.raises(SystemExit, match="same val dump"):
-        postfit.select(same)
+        _select(same)
     with pytest.raises(SystemExit, match="epochs 1..3"):     # a smaller declared grid still has to match exactly
-        postfit.select(_grid(), epochs=3)
+        _select(_grid(), epochs=3)
 
 
 @pytest.mark.parametrize("change, match", [
@@ -171,7 +177,7 @@ def test_select_refuses_mixed_seeds_scorers_or_recipes(change, match):
     cands = _grid()
     change(cands[5])
     with pytest.raises(SystemExit, match=match):
-        postfit.select(cands)
+        _select(cands)
 
 
 # --- candidate val dumps on the synthetic snapshot -------------------------------------------------------------
@@ -218,12 +224,12 @@ def write_candidate(root, snap, lr, epoch, seed=0, split="selection_train", cali
     return run_dir
 
 
-def _twelve(tmp_path, snap):
+def _grid_dumps(tmp_path, snap):
     return [write_candidate(tmp_path / "dumps", snap, lr, e) for lr, e in GRID]
 
 
-def test_record_from_twelve_dumps(tmp_path, snap, capsys):
-    run_dirs = _twelve(tmp_path, snap)
+def test_record_from_the_grid_dumps(tmp_path, snap, capsys):
+    run_dirs = _grid_dumps(tmp_path, snap)
     out = tmp_path / "postfit" / "laya.json"
     postfit_cli.main(run_dirs + ["--manifest", snap[1], "--out", str(out)])
     text = out.read_text(encoding="utf-8")
@@ -232,7 +238,7 @@ def test_record_from_twelve_dumps(tmp_path, snap, capsys):
     assert rec["schema"] == postfit.SCHEMA and rec["system_kind"] == "laya"
     assert rec["split"]["name"] == "val" and rec["split"]["uids_sha256"] == snap[2]["uids_sha256"]
     assert rec["protocol"] == {"selection_split": "selection_train", "final_split": "final_train",
-                               "lr_grid": [2e-05, 3e-05, 5e-05], "head_lr": 0.0001, "epochs": 4,
+                               "lr_grid": [2e-05], "head_lr": 0.0001, "epochs": 4,
                                "selection_seed": 0, "final_seeds": [0, 1, 2]}
     assert rec["rules"]["temperature_bounds"] == [0.5, 5.0]
     cands = rec["candidates"]
@@ -258,7 +264,7 @@ def test_record_from_twelve_dumps(tmp_path, snap, capsys):
 
 
 def test_record_bytes_do_not_depend_on_argument_order(tmp_path, snap):
-    run_dirs = _twelve(tmp_path, snap)
+    run_dirs = _grid_dumps(tmp_path, snap)
     first = postfit.record_bytes(postfit.fit(run_dirs, snap[1]))
     for seed in range(3):
         shuffled = list(run_dirs)

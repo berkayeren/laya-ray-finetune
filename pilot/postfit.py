@@ -55,7 +55,7 @@ from pilot.data import DEFAULT_MANIFEST, manifest_is_committed, repo_relpath, sh
 SCHEMA = "postfit/1"
 FINAL_SCHEMA = "postfit-final/1"            # final_manifest: the three final seeds bound to one record
 T_MIN, T_MAX = 0.5, 5.0                     # laya TEMP_MIN / TEMP_MAX: laya.load clamps a served T to this band
-LR_GRID = (2e-05, 3e-05, 5e-05)             # A1: encoder LR grid
+LR_GRID = (2e-05,)                          # A1: one encoder LR for now (05-06 user override); a grid search later
 HEAD_LR = 0.0001                            # A1: head LR, fixed (laya's default)
 EPOCHS = 4                                  # the approved max_epochs: every selection run's schedule
 SELECTION_SPLIT = "selection_train"
