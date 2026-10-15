@@ -2,8 +2,9 @@
 
 Offline end to end: a random-init tiny checkpoint (tests/tiny_laya.py) and the synthetic splits (tests/conftest.py),
 so nothing downloads. ray_train.py runs 1 Ray worker for 1 epoch with the encoder frozen on 12 messages of the
-synthetic selection_train (2 held out for calibration at --calib-frac 0.2) through pilot/laya_adapter.py; score.py
-dumps the calibrated checkpoint on the synthetic val and test splits and report.py turns the dumps into metrics.
+synthetic selection_train (all 12 train: there is no calibration holdout, LAYA-05) through pilot/laya_adapter.py;
+score.py dumps the uncalibrated checkpoint (T = 1) on the synthetic val and test splits and report.py turns the dumps
+into metrics.
 Runs in `make test` under the ray marker (CPU only, no weights or data).
 """
 import json
@@ -36,7 +37,7 @@ def _run(*args):
 
 @pytest.fixture(scope="module")
 def trained(tmp_path_factory):
-    """(work dir, splits dir, manifest, calibrated checkpoint dir) of one ray_train.py run on the tiny checkpoint."""
+    """(work dir, splits dir, manifest, uncalibrated checkpoint dir) of one ray_train.py run on the tiny checkpoint."""
     d = tmp_path_factory.mktemp("smoke")
     root, raw_sha256 = make_raw(str(d / "raw"))
     out_dir = str(d / "data")
@@ -46,7 +47,7 @@ def trained(tmp_path_factory):
     ckpt = d / "ckpt"
     _run("ray_train.py", "--data", os.path.join(out_dir, "splits", "selection_train.jsonl"), "--manifest", manifest,
          "--base", base, "--out", ckpt, "--workers", "1", "--freeze-encoder", "--epochs", "1",
-         "--max-messages", "12", "--calib-frac", "0.2", "--storage", d / "ray")
+         "--max-messages", "12", "--storage", d / "ray")
     return d, os.path.join(out_dir, "splits"), manifest, str(ckpt)
 
 
@@ -65,7 +66,8 @@ def _read_json(path):
 def test_ray_train_then_score_and_report(trained):
     d, splits, manifest, ckpt = trained
     cfg = _read_json(os.path.join(ckpt, "rl_agent_config.json"))
-    assert cfg["training"]["ray_train"] and cfg["training"]["calibrated"] is True, cfg.get("training")
+    assert cfg["training"]["ray_train"] and cfg["training"]["calibrated"] is False, cfg.get("training")
+    assert cfg["temperature"] == [1.0, 1.0, 1.0]            # uncalibrated: postfit.py fits T on val (LAYA-05)
     _score(splits, "val", manifest, ckpt, d / "dumps")
     run_dir = _score(splits, "test", manifest, ckpt, d / "dumps")
     _run("report.py", run_dir, "--split", "test", "--manifest", manifest, "--out", d / "r.json")
@@ -77,8 +79,8 @@ def test_ray_train_then_score_and_report(trained):
         sel = v["rows"]["val_selected"]
         assert sel is not None and isinstance(sel["theta"], dict) and sel["in_sample"] is False
     val_side = _read_json(os.path.join(run_dir, "val.json"))
-    t = val_side["temperature"]["shipped"]
-    assert rep["variants"]["shipped"]["temperature"] == t and 0.5 <= t <= 5.0   # laya.load clamps the served T
+    assert val_side["temperature"]["shipped"] == 1.0         # the uncalibrated checkpoint serves T 1
+    assert rep["variants"]["shipped"]["temperature"] == 1.0
     assert rep["variants"]["raw"]["temperature"] == 1.0
 
 

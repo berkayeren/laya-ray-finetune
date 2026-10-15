@@ -1,8 +1,8 @@
 """Distributed fine-tuning of a Laya checkpoint with Ray Train (PyTorch DDP).
 
 `laya.train.finetune` / `laya-train` run on one device. This script keeps Laya's
-own building blocks -- item encoding, RLCD / soft-CE loss, temperature
-calibration and the checkpoint layout `laya.load` reads, all reached through
+own building blocks -- item encoding, RLCD / soft-CE loss and the checkpoint
+layout `laya.load` reads, all reached through
 pilot/laya_adapter.py (the only private-API module, pinned to one laya version)
 -- and runs the training loop under Ray's TorchTrainer, so it scales from 1 CPU worker to N GPUs on one
 node with only --workers / --device changed. It is single-node: workers read the
@@ -10,9 +10,8 @@ base weights and the split from driver-local paths, so it refuses a multi-node
 Ray cluster.
 
 Per worker:  load base -> build items -> shard by rank -> DDP train
-Rank 0:      fit calibration temperatures on whole messages held out before training
-             (every question of a held-out message; none of their text is trained on),
-             save the final checkpoint and report it to Ray.
+Rank 0:      save the final, uncalibrated checkpoint (T = 1) and report it to Ray; postfit.py fits the temperature
+             on message-level val data after training (LAYA-05).
 
 Devices (--device cpu|cuda|mps, default cpu; --gpu is an alias for --device cuda): cpu and cuda take the device from
 Ray (use_gpu on cuda, DDP across --workers). Ray has no MPS device manager, so --device mps runs one Ray worker with
@@ -23,7 +22,8 @@ checkpointing (encoder and head) is on for every full-encoder run (--no-grad-che
 separate --amp choice, on by default only on cuda.
 
 Run record (LAYA-06): the checkpoint config holds training.ray_train.record: device, parameter device, torch threads,
-worker env, precision and checkpointing choices, load, calibration and final-save seconds, and one row per completed
+worker env, precision and checkpointing choices, load and final-save seconds (calib_s is None: training no longer
+calibrates, LAYA-05), and one row per completed
 epoch with the pilot.runs.EPOCH_FIELDS (device-synchronised wall clock of the training steps, save time of the train
 state, RNG and export plus Ray's persist of the epoch checkpoint (save_s_includes_persist; the epoch a rerun resumes
 from keeps the time up to the persist, from save.json), optimizer steps, items, peak memory sampled after every
@@ -33,11 +33,13 @@ entry per run segment (start epoch, git sha, dirty flag and uncommitted-diff dig
 memory), plus code_changed_on_resume (another HEAD or another uncommitted diff between segments, or no git; flagged,
 never refused), the relative export names, train_state_bytes and export_bytes.
 
-Items (data_neg8 by default): the split files label all 48 tags. After the --max-messages subsample and the
-message-level calibration holdout, every training message keeps all its positives plus --neg K random negatives
-(pilot.spike.neg8_rows, one random.Random(--neg-seed) draw per run, --neg-seed defaulting to --seed); --neg 0 trains on
-all 48 labels (data_full). The calibration messages always keep all 48 labels. The record carries the items laya built
-and the torch-free count pilot.runs.neg_items gives, so the compute projection can count any split without a tokenizer.
+Items (data_neg8 by default): the split files label all 48 tags. Every message the --max-messages subsample selects
+(all of them without it) trains: there is no calibration holdout (LAYA-05: the temperature comes only from val). Every
+message keeps all its positives plus --neg K random negatives (pilot.spike.neg8_rows, one random.Random(--neg-seed)
+draw per run, --neg-seed defaulting to --seed); --neg 0 trains on all 48 labels (data_full). The record carries the
+items laya built and the torch-free count pilot.runs.neg_items gives, so the compute projection can count any split
+without a tokenizer. Every export and the final checkpoint carry temperature UNCALIBRATED_TEMPERATURE and an empty
+temperature_by_options, reset explicitly, never inherited from the base (a base with a fitted T must not leak it).
 
 Fallback ladder (LAYA-03): every run starts from the Phase 2 spike's measured config (pilot.runs.SPIKE_START: micro-batch
 8, max_len 128, grad-accum 4, full encoder). The fallbacks are flags, never an in-process retry (the MPS allocator keeps a
@@ -45,14 +47,14 @@ process-wide high-water mark): --freeze-embeddings (rung embeddings_frozen), the
 (rung embeddings_frozen+smaller_batch, effective batch 32 kept), then --freeze-encoder (rung encoder_frozen, head-only,
 weaker). pilot.runs.rung_label derives the rung from the resolved flags; the record carries rung, fallback, weaker,
 spike_departures and the trainable/total parameter counts. An MPS out-of-memory error ends the run with one line naming
-the epoch and micro-batch (or the stage outside the training step: model move, resume, checkpoint save, calibration),
-the rung and the flags of the next rung; the driver gives a raw MPS out-of-memory error from anywhere else the same rung
-line, never "rerun to resume" (the rerun would resume into the same allocation). After the last epoch (calibration, the
-final save; pilot.runs.RESUME_STAGES) the line says to rerun the same command instead: every epoch is saved, the eval
-pass needs less memory than training (the optimizer state is freed and the MPS cache emptied first), and a rung flag
-would change the run_id and retrain from epoch 0. That rerun resumes a train state that already holds the last epoch:
-it never loads the optimizer, scheduler or scaler state (restore_optimizer), and an OOM while it moves the model is a
-resume stage too (pilot.runs.STAGE_RECALIBRATE_MOVE).
+the epoch and micro-batch (or the stage outside the training step: model move, resume, checkpoint save), the rung and
+the flags of the next rung; the driver gives a raw MPS out-of-memory error from anywhere else the same rung line, never
+"rerun to resume" (the rerun would resume into the same allocation). After the last epoch (the final save;
+pilot.runs.RESUME_STAGES) the line says to rerun the same command instead: every epoch is saved, writing the final
+checkpoint needs less memory than training (the optimizer state is freed and the MPS cache emptied first), and a rung
+flag would change the run_id and retrain from epoch 0. That rerun resumes a train state that already holds the last
+epoch and writes the final checkpoint again: it never loads the optimizer, scheduler or scaler state
+(restore_optimizer), and an OOM while it moves the model is a resume stage too (pilot.runs.STAGE_FINALIZE_MOVE).
 
 Run identity (LAYA-04): the run_id is pilot.runs.run_id of the command's canonical config (pilot.runs.IDENTITY: split,
 data and base digests (a local base's tokenizer/ and encoder/ files too), laya version, the resolved device and precision
@@ -121,6 +123,9 @@ from pilot.weights import (check_tokenizer_config_rewritable, check_tokenizer_co
 
 WEIGHT_DECAY = 0.01                                         # AdamW weight decay (part of the run identity)
 CLIP_GRAD_NORM = 1.0                                        # gradient-norm clip per optimizer step (same)
+# laya's QTYPES order (choice, score, noul): T = 1 until postfit.py fits T on val (LAYA-05). Every writer copies it
+# (list(UNCALIBRATED_TEMPERATURE)), never shares the list object.
+UNCALIBRATED_TEMPERATURE = [1.0, 1.0, 1.0]
 FINAL_MARK = "final.json"                                   # in the final checkpoint: the run is finished
 SAVE_META = "save.json"                                     # in an epoch checkpoint: that epoch's save time
 
@@ -198,7 +203,7 @@ def resolve(a):
 def mps_oom_exit(epoch, step, rung, stage=None):
     """Turn an MPS out-of-memory RuntimeError into the one-line rung message (pilot.runs.oom_message); no retry, since
     the MPS allocator keeps a process-wide high-water mark. stage names an MPS allocation outside the training step
-    (model move, resume, epoch save, calibration). Any other error propagates unchanged."""
+    (model move, resume, epoch save, final save). Any other error propagates unchanged."""
     try:
         yield
     except RuntimeError as e:
@@ -318,8 +323,11 @@ def provenance(entry, manifest_path, base, base_dir, ident=None):
 
 def epoch_config(cfg, max_len, head_max_len, ray_cfg, epoch):
     """Config of an intermediate epoch checkpoint: marked fine-tuned and uncalibrated, and traceable to its data
-    (provenance, calibration holdout) like the final one, so a best-epoch pick from ray_results stays auditable."""
+    (provenance, run record) like the final one, so a best-epoch pick from ray_results stays auditable. Every selected
+    message trains (no calibration holdout); the temperature is reset to UNCALIBRATED_TEMPERATURE with no
+    temperature_by_options, never inherited from the base (RESEARCH Pitfall 5): postfit.py fits T on val (LAYA-05)."""
     return dict(cfg, max_len=max_len, head_max_len=head_max_len, fine_tuned=True,
+                temperature=list(UNCALIBRATED_TEMPERATURE), temperature_by_options={},
                 training=dict(cfg.get("training") or {}, ray_train=ray_cfg, epoch=epoch, calibrated=False))
 
 
@@ -344,18 +352,7 @@ def identity_values(a, r, entry, base_name, base_ident):
             "encoder_lr": a.encoder_lr, "head_lr": a.head_lr, "loss": a.loss, "neg": a.neg,
             "freeze_encoder": a.freeze_encoder, "freeze_embeddings": a.freeze_embeddings, "max_len": a.max_len,
             "head_max_len": a.head_max_len, "max_messages": a.max_messages,
-            "calib_max_messages": a.calib_max_messages, "calib_frac": a.calib_frac,
             "shuffle_options": a.shuffle_options, "seed": a.seed}
-
-
-def holdout_messages(rows, calib_max_messages, calib_frac, seed):
-    """(train_rows, calib_rows): whole messages held out for temperature calibration.
-
-    Holding out (message, question) items instead would leave a calibration message's other 47 questions in
-    training, so the encoder would have trained on the exact text it is calibrated on. laya's split_calibration is
-    generic over a sequence and depends only on the seed and the length, so every rank holds out the same messages.
-    """
-    return la.split_calibration(rows, calib_max_messages, calib_frac, seed)
 
 
 def worker_device(c):
@@ -462,16 +459,16 @@ def set_rng_states(rs, device, rng):
 
 
 def training_done(state, epochs):
-    """True when a resumed train state already holds the last epoch (a rerun after an OOM in calibration or the final
-    save): the epoch loop is empty and the rerun only recalibrates."""
+    """True when a resumed train state already holds the last epoch (a rerun after an OOM in the final save): the
+    epoch loop is empty and the rerun only writes the final checkpoint."""
     return state is not None and state["epoch"] >= epochs
 
 
 def restore_optimizer(state, epochs, opt, sched, scaler, rung):
     """Restore AdamW, the cosine scheduler and the GradScaler of a resumed train state; returns True, or False without
     touching them when no epoch is left to train (04-REVIEW WR-01): the AdamW moments (about 2.6 GB of the measured
-    3.86 GB full-encoder train state) would move to the device only to be freed before calibration, on the machine
-    that just ran out of memory calibrating."""
+    3.86 GB full-encoder train state) would move to the device only to be freed before the final save, on the machine
+    that just ran out of memory writing the final checkpoint."""
     if training_done(state, epochs):
         return False
     with mps_oom_exit(None, None, rung, "while restoring the optimizer state of epoch %d" % state["epoch"]):
@@ -562,41 +559,28 @@ def train_loop_per_worker(c):
     head_max_len = c["head_max_len"] or cfg.get("head_max_len", 192)
     parallel = la.uses_parallel_layout(cfg)
 
-    # Every rank builds the same items and the same message-level calibration split (fixed seed),
-    # then takes its own shard of the training items.
+    # Every rank builds the same items (fixed seed), then takes its own shard of the training items. Every selected
+    # message trains: there is no calibration holdout (LAYA-05: T is fitted on message-level val data by postfit.py).
     rows = read_verified_rows(c["data"], c["data_sha256"])
     if c["max_messages"]:
         random.Random(c["seed"]).shuffle(rows)
         rows = rows[:c["max_messages"]]
-    train_rows, calib_rows = holdout_messages(rows, c["calib_max_messages"], c["calib_frac"], c["seed"])
-    # neg-K sampling on the training messages only, after the holdout: calibration keeps all 48 labels (a neg8
-    # calibration set would carry about 22% positives against about 5% on val and test)
+    train_rows = rows
     counted = runs.neg_items(train_rows, c["neg"])
     if c["neg"]:
         train_rows = spike.neg8_rows(train_rows, c["neg_seed"], c["neg"])
     train_items, skipped = la.items_from_rows(tok, train_rows, max_len, head_max_len)
-    calib_items, calib_skipped = la.items_from_rows(tok, calib_rows, max_len, head_max_len)
-    if not calib_items:                                     # same rows on every rank, so every rank stops here
-        raise SystemExit("no calibration items from %d messages (--calib-frac %s); use more messages"
-                         % (len(rows), c["calib_frac"]))
-    calib_uids = "\n".join(r.get("uid", "") for r in calib_rows).encode("utf-8")
-    holdout = {"unit": "message", "n_messages": len(calib_rows), "n_items": len(calib_items),
-               "uids_sha256": hashlib.sha256(calib_uids).hexdigest()}
     # driver-local absolute paths (data, base_dir, storage), the run's node id and the raw env dict stay out of every
     # checkpoint (the env is recorded only as KEY=VALUE strings in the run record)
-    ray_cfg = dict({k: v for k, v in c.items() if k not in ("data", "base_dir", "storage", "driver_node_id",
-                                                            "expect_env")},
-                   calibration_holdout=holdout)
+    ray_cfg = {k: v for k, v in c.items() if k not in ("data", "base_dir", "storage", "driver_node_id", "expect_env")}
     per_rank = len(train_items) // world                    # equal shards keep DDP collectives in step
     if per_rank == 0:                                       # same on every rank: never publish an untrained "fine-tune"
         raise SystemExit("no training items per rank (%d items, %d workers); use more messages or fewer workers"
                          % (len(train_items), world))
     shard = train_items[rank * per_rank:(rank + 1) * per_rank]
     if rank == 0:
-        print("messages %d -> train %d, calibration %d | neg %s: items train %d (counted %d, skipped %r, %d per rank "
-              "x %d), calibration %d (skipped %r)"
-              % (len(rows), len(train_rows), len(calib_rows), c["neg"] or "all", len(train_items), counted, skipped,
-                 per_rank, world, len(calib_items), calib_skipped), flush=True)
+        print("messages %d | neg %s: items train %d (counted %d, skipped %r, %d per rank x %d)"
+              % (len(train_rows), c["neg"] or "all", len(train_items), counted, skipped, per_rank, world), flush=True)
 
     if c["freeze_encoder"]:
         la.freeze_encoder(model)
@@ -610,9 +594,9 @@ def train_loop_per_worker(c):
         print("rung %s%s | trainable params %d of %d" % (c["rung"], " (head-only, weaker)" if runs.weaker(c["rung"])
                                                           else "", trainable_params, total_params), flush=True)
     # the model move (and a resume's weights) allocate on the device outside the training step (04-REVIEW WR-01); a
-    # rerun with no epoch left only recalibrates, so its OOM says to rerun, never the next rung (a rung flag would
-    # change the run_id and retrain every epoch)
-    move = runs.STAGE_RECALIBRATE_MOVE if training_done(state, c["epochs"]) else "while moving the model to the device"
+    # rerun with no epoch left only writes the final checkpoint, so its OOM says to rerun, never the next rung (a rung
+    # flag would change the run_id and retrain every epoch)
+    move = runs.STAGE_FINALIZE_MOVE if training_done(state, c["epochs"]) else "while moving the model to the device"
     with mps_oom_exit(None, None, c["rung"], move):
         if state is not None:                               # fp32 weights into the CPU model: one copy on the device
             t = time.perf_counter()
@@ -663,7 +647,8 @@ def train_loop_per_worker(c):
         if rank == 0:
             print("resuming %s after epoch %d (segment %d, load %.1fs)%s"
                   % (c["run_id"], start_epoch, len(segments), resume_load_s,
-                     "" if restored else "; no epoch left: it only recalibrates, the optimizer state is not loaded"),
+                     "" if restored else "; no epoch left: it only writes the final checkpoint, the optimizer state "
+                                         "is not loaded"),
                   flush=True)
     segment = dict(zip(runs.SEGMENT_FIELDS, (len(segments), start_epoch, start_epoch > 0, c["code"]["git_sha"],
                                              c["code"]["git_dirty"], c["code"]["git_diff_sha256"], device.type,
@@ -789,27 +774,18 @@ def train_loop_per_worker(c):
             raise RuntimeError("simulated failure after epoch %d (--fail-after-epoch)" % (epoch + 1))
         last = metrics
 
-    # Calibrate on the held-out messages and publish the final checkpoint from rank 0.
-    del opt, sched, scaler, params, groups                 # free optimizer state before the eval pass
+    # Publish the final, uncalibrated checkpoint (T = 1) from rank 0; postfit.py fits T on val later (LAYA-05).
+    # record["calib_s"] stays None: training no longer calibrates.
+    del opt, sched, scaler, params, groups                 # free optimizer state before the final save
     gc.collect()
     if device.type == "mps":
-        torch.mps.empty_cache()                             # hand the freed AdamW blocks back before calibrating
+        torch.mps.empty_cache()                             # hand the freed AdamW blocks back before the final save
     if rank == 0:
         inner.eval()
-        t_calib = time.perf_counter()
-        with mps_oom_exit(None, None, c["rung"], runs.STAGE_CALIBRATE):
-            records = la.calibration_records(inner, tok, calib_items, device, max_len, head_max_len,
-                                             batch_size=c["calib_batch"], parallel=parallel)
-        fitted = la.fit_temperature_map(records)
-        record["calib_s"] = time.perf_counter() - t_calib
-        calibration = la.calibration_report(records, fitted["temperature"])
         out_cfg = dict(cfg, max_len=max_len, head_max_len=head_max_len, fine_tuned=True,
-                       temperature=fitted["temperature"])
-        out_cfg.pop("temperature_by_options", None)       # inherited buckets would mask the new fit
-        if fitted["temperature_by_options"]:
-            out_cfg["temperature_by_options"] = fitted["temperature_by_options"]
+                       temperature=list(UNCALIBRATED_TEMPERATURE), temperature_by_options={})
         out_cfg["training"] = dict(out_cfg.get("training") or {}, ray_train=dict(ray_cfg, record=record),
-                                   epoch=c["epochs"], calibrated=True, laya_train_calibration=calibration)
+                                   epoch=c["epochs"], calibrated=False)
         with tempfile.TemporaryDirectory() as d:
             t_save = time.perf_counter()
             with mps_oom_exit(None, None, c["rung"], runs.STAGE_FINAL_SAVE):
@@ -818,8 +794,7 @@ def train_loop_per_worker(c):
             _rewrite_config(d, out_cfg)                      # the record now holds the final save time
             with open(os.path.join(d, FINAL_MARK), "w", encoding="utf-8") as f:
                 json.dump({"kind": "final", "run_id": c["run_id"]}, f)   # a rerun returns this without training
-            ray.train.report(dict(last, temperature=fitted["temperature"]), checkpoint=Checkpoint.from_directory(d),
-                             checkpoint_dir_name="final")
+            ray.train.report(last, checkpoint=Checkpoint.from_directory(d), checkpoint_dir_name="final")
     else:
         ray.train.report(last)
 
@@ -856,10 +831,6 @@ def parser():
     ap.add_argument("--neg", type=int, default=8,
                     help="negatives kept per training message; 0 = all 48 labels (data_full)")
     ap.add_argument("--neg-seed", type=int, default=None, help="negative-sampling seed; default --seed")
-    ap.add_argument("--calib-max-messages", type=int, default=40,
-                    help="messages held out (all their questions) for temperature calibration")
-    ap.add_argument("--calib-frac", type=float, default=0.1, help="cap on the held-out share of messages")
-    ap.add_argument("--calib-batch", type=int, default=16)
     ap.add_argument("--object-store-gb", type=float, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--storage", default=os.path.abspath("ray_results"),
@@ -885,14 +856,11 @@ def main(argv=None):
         ap.error("--neg must be 0 (all labels) or a positive count")
     # here, not in the worker: a bad value there fails after ray.init, the run dir and the fetch, with resume advice
     for flag, v in (("--workers", a.workers), ("--micro-batch", a.micro_batch), ("--grad-accum", a.grad_accum),
-                    ("--calib-batch", a.calib_batch), ("--calib-max-messages", a.calib_max_messages),
                     ("--cpus-per-worker", a.cpus_per_worker), ("--max-messages", a.max_messages),
                     # 0 would fall back to the config default while the run identity recorded 0 (IN-10)
                     ("--max-len", a.max_len), ("--head-max-len", a.head_max_len)):
         if v is not None and v < 1:
             ap.error("%s must be at least 1" % flag)
-    if not 0 < a.calib_frac <= 1:
-        ap.error("--calib-frac must be in (0, 1]")
     if a.freeze_embeddings and a.freeze_encoder:
         ap.error("--freeze-encoder already freezes the embeddings; pass one of them")
     try:
@@ -955,8 +923,7 @@ def main(argv=None):
                 "head_lr": a.head_lr, "loss": a.loss, "freeze_encoder": a.freeze_encoder,
                 "freeze_embeddings": a.freeze_embeddings,
                 "shuffle_options": a.shuffle_options, "max_len": a.max_len, "head_max_len": a.head_max_len,
-                "max_messages": a.max_messages, "neg": a.neg, "calib_max_messages": a.calib_max_messages,
-                "calib_frac": a.calib_frac, "calib_batch": a.calib_batch,
+                "max_messages": a.max_messages, "neg": a.neg,
                 "seed": a.seed, "expect_env": env, "run_id": rid, "canonical": canon, "code": code_state(),
                 "storage": os.path.abspath(a.storage), "export_epochs": a.export_epochs,
                 "fail_after_epoch": a.fail_after_epoch,

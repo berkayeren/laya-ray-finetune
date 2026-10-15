@@ -3,8 +3,11 @@
 Offline (tests/tiny_laya.py + the synthetic splits of tests/conftest.py): 2 epochs on 12 messages with the encoder
 trainable, so gradient checkpointing is on and AMP off. The checkpoint config's training.ray_train.record must name the
 device the parameters landed on and hold one row per epoch with exactly pilot.runs.EPOCH_FIELDS (LAYA-02, LAYA-06).
+Every selected message trains (no calibration holdout), and every export and final checkpoint is uncalibrated at
+T = 1, also from a base that ships another temperature (LAYA-05).
 Runs in `make test` under the ray marker (CPU only, no weights or data).
 """
+import json
 import os
 import subprocess
 import sys
@@ -33,19 +36,22 @@ def _run(*args):
 
 @pytest.fixture(scope="module")
 def tiny_train(tmp_path_factory):
-    """train(name, *flags) -> checkpoint dir of a full-encoder ray_train.py run of the tiny base on --device cpu."""
+    """train(name, *flags, base=None) -> checkpoint dir of a full-encoder ray_train.py run on --device cpu, from the
+    tiny base (temperature 1.0) unless `base` names another local checkpoint. train.storage is the Ray storage dir."""
     d = tmp_path_factory.mktemp("train_cpu")
     root, raw_sha256 = make_raw(str(d / "raw"))
     out_dir = str(d / "data")
     pilot.data.prepare(root, out_dir, raw_sha256)
-    base = tiny_checkpoint(d / "base")
+    tiny = tiny_checkpoint(d / "base")
 
-    def train(name, *flags):
+    def train(name, *flags, base=None):
         ckpt = d / name
         _run("ray_train.py", "--data", os.path.join(out_dir, "splits", "selection_train.jsonl"),
-             "--manifest", os.path.join(out_dir, "splits.json"), "--base", base, "--out", ckpt, "--device", "cpu",
-             "--workers", "1", "--max-messages", "12", "--calib-frac", "0.2", "--storage", d / "ray", *flags)
+             "--manifest", os.path.join(out_dir, "splits.json"), "--base", base or tiny, "--out", ckpt,
+             "--device", "cpu", "--workers", "1", "--max-messages", "12", "--storage", d / "ray", *flags)
         return str(ckpt)
+    train.storage = str(d / "ray")
+    train.work = d
     return train
 
 
@@ -69,15 +75,16 @@ def test_cpu_record(cpu_run):
         assert row["peak_rss_bytes"] > 0 and row["peak_total_bytes"] == row["peak_rss_bytes"]
         assert row["peak_driver_bytes"] is None and row["current_allocated_bytes"] is None
         assert isinstance(row["swap_delta_bytes"], int)
-    # every epoch saves its train state (and export), the last one too; the final checkpoint saves after calibration
+    # every epoch saves its train state (and export), the last one too; the final checkpoint saves after training
     assert all(row["save_s"] > 0 for row in rec["epochs"])
     assert [row["segment"] for row in rec["epochs"]] == [0, 0] and not any(row["resumed"] for row in rec["epochs"])
-    assert rec["load_s"] > 0 and rec["calib_s"] > 0 and rec["final_save_s"] > 0
+    # training no longer calibrates (LAYA-05): the key stays, with None
+    assert rec["calib_s"] is None
+    assert rec["load_s"] > 0 and rec["final_save_s"] > 0
 
 
 @pytest.mark.timeout(600)
 def test_cpu_record_keeps_local_paths_and_raw_env_out(cpu_run):
-    import json
     with open(os.path.join(cpu_run, "rl_agent_config.json"), encoding="utf-8") as f:
         ray_cfg = json.load(f)["training"]["ray_train"]
     assert not {"data", "base_dir", "driver_node_id", "expect_env"} & set(ray_cfg), sorted(ray_cfg)
@@ -86,17 +93,38 @@ def test_cpu_record_keeps_local_paths_and_raw_env_out(cpu_run):
 
 @pytest.mark.timeout(600)
 def test_neg_items_match_the_count(cpu_run):
-    """Default --neg 8: train items are the sampled positives + 8 negatives; calibration keeps all 48 labels."""
-    import json
+    """Default --neg 8: train items are the sampled positives + 8 negatives, on every one of the 12 selected messages
+    (no calibration holdout, LAYA-05)."""
     rec = runs.read_record(cpu_run)
     assert rec["neg"] == 8 and rec["neg_seed"] == 0
+    assert rec["n_train_messages"] == 12                    # the whole --max-messages subsample trains
     assert rec["n_train_items"] == rec["n_train_items_counted"] > 0
     assert rec["n_train_items"] < 48 * rec["n_train_messages"]
     assert rec["items_skipped"] == {}
     assert all(row["n_items"] == rec["n_train_items"] for row in rec["epochs"])   # one worker: the whole shard
     with open(os.path.join(cpu_run, "rl_agent_config.json"), encoding="utf-8") as f:
-        holdout = json.load(f)["training"]["ray_train"]["calibration_holdout"]
-    assert holdout["n_messages"] > 0 and holdout["n_items"] == 48 * holdout["n_messages"]
+        ray_cfg = json.load(f)["training"]["ray_train"]
+    assert "calibration_holdout" not in ray_cfg, sorted(ray_cfg)
+
+
+def _config(path):
+    with open(os.path.join(str(path), "rl_agent_config.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+@pytest.mark.timeout(600)
+def test_uncalibrated_from_a_base_with_another_temperature(tiny_train):
+    """A base that ships T 1.3 never leaks it: the epoch export and the final checkpoint both reset the temperature to
+    [1, 1, 1] with no temperature_by_options and say calibrated False (LAYA-05, RESEARCH Pitfall 5)."""
+    base = tiny_checkpoint(tiny_train.work / "base_t13", temperature=1.3)
+    assert _config(base)["temperature"] == [1.0, 1.0, 1.3]
+    ckpt = tiny_train("ckpt_t13", "--epochs", "1", base=base)
+    rid = runs.read_record(ckpt)["run_id"]
+    for cfg in (_config(ckpt), _config(os.path.join(tiny_train.storage, rid, "exports", "epoch-001"))):
+        assert cfg["temperature"] == [1.0, 1.0, 1.0], cfg["temperature"]
+        assert cfg["temperature_by_options"] == {}
+        assert cfg["training"]["calibrated"] is False and cfg["fine_tuned"] is True
+        assert "laya_train_calibration" not in cfg["training"]
 
 
 @pytest.mark.timeout(600)

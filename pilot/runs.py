@@ -2,7 +2,7 @@
 
 ray_train.py writes one record per run into the checkpoint config, at training.ray_train.record: the device the
 parameters landed on, the worker env (KEY=VALUE strings, MPS only), the precision and checkpointing choices, the
-load, calibration and final-save times, and one row per completed epoch with exactly EPOCH_FIELDS (wall clock of the
+load and final-save times (calib_s is None: training no longer calibrates, LAYA-05), and one row per completed epoch with exactly EPOCH_FIELDS (wall clock of the
 epoch's training steps, save time, optimizer steps, items, peak memory, the system swap delta and the run segment that
 trained it), one SEGMENT_FIELDS entry per run segment (a killed run's rerun adds one). Nothing here may import torch: compute_checkpoint.py imports it before any child sets the MPS env, and torch reads
 PYTORCH_ENABLE_MPS_FALLBACK once, at import.
@@ -39,22 +39,22 @@ from pilot.data import repo_relpath
 IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_config_sha256", "base_files_sha256",
             "laya_version", "device", "workers", "epochs", "micro_batch", "grad_accum", "encoder_lr", "head_lr",
             "weight_decay", "clip_grad_norm", "loss", "neg", "neg_seed", "freeze_encoder", "freeze_embeddings", "grad_checkpointing", "amp", "max_len",
-            "head_max_len", "max_messages", "calib_max_messages", "calib_frac", "shuffle_options", "seed",
-            "adamw_foreach", "adamw_fused")
+            "head_max_len", "max_messages", "shuffle_options", "seed", "adamw_foreach", "adamw_fused")
 # ray_train.py flags that never change training, so never the run_id:
 #   data, base, manifest: paths, represented in IDENTITY by the verified sha256s (data_sha256, base_*_sha256)
 #   out, storage: where the result and the Ray run dir go
 #   cpus_per_worker, object_store_gb: resources (Ray scheduling, torch threads, object store size)
-#   calib_batch: the batch size of the calibration forward pass (eval only, after training)
 #   gpu: an alias, represented by its resolved value (device)
 #   print_run_id: prints the run_id and exits
 #   fail_after_epoch: a test hook that kills the run after an epoch's checkpoint; the rerun must resume the same run
 #   export_epochs: whether per-epoch laya exports are written next to the run (outputs, not training)
-NOT_IDENTITY = ("data", "base", "out", "storage", "manifest", "cpus_per_worker", "object_store_gb", "calib_batch", "gpu",
+NOT_IDENTITY = ("data", "base", "out", "storage", "manifest", "cpus_per_worker", "object_store_gb", "gpu",
                 "print_run_id", "fail_after_epoch", "export_epochs")
 # IDENTITY keys canonical() leaves out when their value is None. base_files_sha256 is the pilot.dumps.files_digest of a
-# local base's tokenizer/ and encoder/ files (04-REVIEW WR-01) and None for the pinned base, whose files the pin fixes,
-# so every pinned run id (the committed probe's laya-selection_train-neg8-s0-db11040d) is the one it had before
+# local base's tokenizer/ and encoder/ files (04-REVIEW WR-01) and None for the pinned base, whose files the pin fixes.
+# The committed compute probe id laya-selection_train-neg8-s0-db11040d (Phase 4, trained with a 40-message calibration
+# holdout, keys calib_max_messages and calib_frac) is historical: LAYA-05 removed the holdout and those keys, so every
+# Phase 5 run id differs from it, and results/compute/ keeps it as the record of that run
 DROPPED_WHEN_NONE = ("base_files_sha256",)
 
 
@@ -175,18 +175,16 @@ _SMALLER = ["--micro-batch", "4", "--grad-accum", "8"]
 OOM_MARK = "MPS out of memory"
 # the stage texts ray_train.py passes to mps_oom_exit after the last epoch; oom_message matches them exactly, so
 # ray_train.py uses these names, never a copy of the text (04-REVIEW IN-01)
-STAGE_CALIBRATE = "while calibrating after the last epoch"
 STAGE_FINAL_SAVE = "while saving the final checkpoint"
 # the model move of a rerun whose train state already holds the last epoch: it trains nothing, never loads the
-# optimizer state and only recalibrates (no rung flag shrinks the model it moves)
-STAGE_RECALIBRATE_MOVE = "while moving the model to the device to recalibrate"
-# stages after the last epoch is registered: every epoch is saved and the eval pass needs less memory than training
-# (the optimizer state is freed and the MPS cache emptied first; a rerun that resumes there never loads it), so the
-# line says to rerun the same command, which resumes there; a rung flag would change the run_id and retrain from
-# epoch 0 (04-REVIEW WR-01). stage -> what the rerun does
-RESUME_STAGES = {STAGE_CALIBRATE: "it only recalibrates; a smaller --calib-batch keeps the run id",
-                 STAGE_FINAL_SAVE: "it recalibrates and saves again",
-                 STAGE_RECALIBRATE_MOVE: "it only recalibrates"}
+# optimizer state and only writes the final checkpoint (no rung flag shrinks the model it moves)
+STAGE_FINALIZE_MOVE = "while moving the model to the device to write the final checkpoint"
+# stages after the last epoch is registered: every epoch is saved and writing the final checkpoint needs less memory
+# than training (the optimizer state is freed and the MPS cache emptied first; a rerun that resumes there never loads
+# it), so the line says to rerun the same command, which resumes there; a rung flag would change the run_id and retrain
+# from epoch 0 (04-REVIEW WR-01). stage -> what the rerun does
+RESUME_STAGES = {STAGE_FINAL_SAVE: "it writes the final checkpoint again",
+                 STAGE_FINALIZE_MOVE: "it only writes the final checkpoint"}
 RESUME_TODO = "every epoch is saved: rerun the same command to resume"
 
 
