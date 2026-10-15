@@ -228,3 +228,21 @@ def test_postfit_final_seed_end_to_end(tiny_train):
     assert abs(side["temperature"]["shipped"] - T) < 1e-6, (side["temperature"], T)
     with pytest.raises(SystemExit, match="selection_train"):                       # a final seed's val is in-sample
         postfit.candidate(final_dump, manifest)
+
+
+@pytest.mark.timeout(600)
+def test_stop_after_epoch_keeps_the_selection_trajectory(tiny_train, cpu_run):
+    """RESEARCH A3: --stop-after-epoch 1 of the --epochs 2 schedule is the selection run's epoch 1 (the cosine T_max and
+    the sigma anneal keep --epochs), so on cpu its final weights are byte for byte cpu_run's exports/epoch-001."""
+    stopped = tiny_train("ckpt_stop1", "--epochs", "2", "--stop-after-epoch", "1")
+    rid = runs.read_record(cpu_run)["run_id"]
+    export = os.path.join(tiny_train.storage, rid, "exports", "epoch-001")
+    with open(os.path.join(stopped, "model.safetensors"), "rb") as f, \
+            open(os.path.join(export, "model.safetensors"), "rb") as g:
+        assert f.read() == g.read()
+    rec = runs.read_record(stopped)
+    assert [row["epoch"] for row in rec["epochs"]] == [1] and rec["run_id"] != rid
+    assert rec["canonical"]["stop_after_epoch"] == 1 and rec["canonical"]["epochs"] == 2 and rec["postfit"] is None
+    cfg = _config(stopped)
+    assert cfg["training"]["epoch"] == 1 and cfg["training"]["calibrated"] is False
+    assert cfg["temperature"] == [1.0, 1.0, 1.0] and "postfit" not in cfg["training"]

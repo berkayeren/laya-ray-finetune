@@ -261,3 +261,21 @@ def test_last_line_and_free_bytes(tmp_path):
     assert runs.last_line("") == "" and runs.last_line("  \n", "none") == "none"
     assert runs.free_bytes(str(tmp_path / "not" / "yet" / "made")) > 0         # the nearest existing parent's volume
     assert runs.free_bytes(os.path.abspath(os.sep)) > 0
+
+
+def test_canonical_keeps_the_final_seed_keys_only_when_set():
+    """stop_after_epoch and postfit_sha256 enter a final seed's run id and stay out of every selection run's."""
+    sel = _identity(stop_after_epoch=None, postfit_sha256=None, base_files_sha256=None)
+    canon = runs.canonical(sel)
+    assert not {"stop_after_epoch", "postfit_sha256", "base_files_sha256"} & set(canon)
+    final = runs.canonical(dict(sel, split="final_train", stop_after_epoch=2, postfit_sha256="f" * 64))
+    assert final["stop_after_epoch"] == 2 and final["postfit_sha256"] == "f" * 64
+    assert runs.run_id(final) != runs.run_id(runs.canonical(dict(sel, split="final_train")))
+    with pytest.raises(ValueError, match="missing stop_after_epoch"):            # still required, as None
+        runs.canonical({k: v for k, v in sel.items() if k != "stop_after_epoch"})
+
+
+def test_identity_and_not_identity_stay_disjoint():
+    assert not set(runs.IDENTITY) & set(runs.NOT_IDENTITY)
+    assert {"stop_after_epoch", "postfit_sha256"} <= set(runs.IDENTITY) & set(runs.DROPPED_WHEN_NONE)
+    assert "postfit" in runs.NOT_IDENTITY and set(runs.DROPPED_WHEN_NONE) <= set(runs.IDENTITY)

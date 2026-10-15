@@ -545,3 +545,124 @@ def test_a_stale_export_that_cannot_be_deleted_is_refused_not_kept(tmp_path, mon
     monkeypatch.undo()
     with pytest.raises(SystemExit, match="exports/epoch-002 already exists"):
         ray_train.write_export(None, None, {}, str(tmp_path), "epoch-002")
+
+
+@pytest.mark.parametrize("k", ["0", "4", "5"])
+def test_stop_after_epoch_bounds(k, capsys):
+    """LAYA-08 boundary: K is 1..--epochs - 1; K = --epochs has one spelling (the omitted flag), refused by argparse
+    before the split check, the fetch and ray.init."""
+    with pytest.raises(SystemExit) as e:
+        ray_train.main(["--data", "d.jsonl", "--out", "o", "--epochs", "4", "--stop-after-epoch", k])
+    err = capsys.readouterr().err
+    assert e.value.code == 2 and "--stop-after-epoch must be at least 1 and below --epochs (4)" in err, err
+
+
+def test_stop_after_epoch_inside_the_schedule_resolves(tiny_run, capsys):
+    ids = set()
+    for k in ("1", "3"):
+        ray_train.main(tiny_run + ["--epochs", "4", "--stop-after-epoch", k, "--print-run-id"])
+        ids.add(capsys.readouterr().out.strip())
+    ray_train.main(tiny_run + ["--epochs", "4", "--print-run-id"])
+    ids.add(capsys.readouterr().out.strip())
+    assert len(ids) == 3 and all(re.fullmatch(r"laya-selection_train-neg8-s0-[0-9a-f]{8}", i) for i in ids), ids
+
+
+def test_run_id_follows_stop_after_epoch_and_postfit():
+    """stop_after_epoch and postfit_sha256 name a final seed's run; without them a selection run keeps the id it had
+    before they existed (laya-selection_train-neg8-s0-c3859768 for this command at 6ef1567)."""
+    from pilot import runs
+    base = ["--data", "d.jsonl", "--out", "o"]
+    rid = _rid(*base)
+    assert rid == "laya-selection_train-neg8-s0-c3859768"
+    a = ray_train.parser().parse_args(base)
+    vals = ray_train.identity_values(a, ray_train.resolve(a), ENTRY, "multilingual", BASE_IDENT)
+    assert vals["stop_after_epoch"] is None and vals["postfit_sha256"] is None
+    assert not {"stop_after_epoch", "postfit_sha256"} & set(runs.canonical(vals))
+    stop3 = _rid(*(base + ["--stop-after-epoch", "3"]))
+    assert stop3 != rid and _rid(*(base + ["--stop-after-epoch", "2"])) != stop3
+    sha = ray_train.identity_values(a, ray_train.resolve(a), ENTRY, "multilingual", BASE_IDENT, "d" * 64)
+    canon = runs.canonical(sha)
+    assert canon["postfit_sha256"] == "d" * 64 and runs.run_id(canon) not in (rid, stop3)
+    other = runs.canonical(dict(sha, postfit_sha256="e" * 64))
+    assert runs.run_id(other) != runs.run_id(canon)
+    assert _rid(*(base + ["--postfit", "results/postfit/laya.json"])) == rid      # the path itself never enters
+
+
+@pytest.fixture
+def final_cmd(tiny_run, tmp_path):
+    """(argv of the final_train command bound to `record`, record path, record) for the tiny command: the chosen
+    canonical is the selection canonical of tiny_run itself (epoch 4 of 4, so no --stop-after-epoch)."""
+    import pilot.data
+    from pilot import postfit, runs
+    from pilot.weights import identity
+    a = ray_train.parser().parse_args(tiny_run)
+    base_dir = a.base
+    entry = pilot.data.verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))
+    canon = runs.canonical(ray_train.identity_values(a, ray_train.resolve(a), entry, base_dir, identity(base_dir)))
+    theta = {"global": 0.5, "per_tag": {}, "eligible_tags": []}
+    record = {"schema": postfit.SCHEMA,
+              "chosen": {"train_run_id": runs.run_id(canon), "dump_run_id": "laya-x", "encoder_lr": canon["encoder_lr"],
+                         "epoch": canon["epochs"], "epochs_schedule": canon["epochs"], "stop_after_epoch": None,
+                         "canonical": canon, "temperature": 1.5, "theta": {"shipped": theta, "raw": theta},
+                         "val_micro_f1_at_global_theta": 0.5},
+              "final": {"split": "final_train", "seeds": [0, 1, 2], "epochs": canon["epochs"], "stop_after_epoch": None},
+              "protocol": {}, "rules": {}}
+    path = str(tmp_path / "postfit" / "laya.json")
+    postfit.write_record(record, path)
+    argv = list(tiny_run)
+    argv[argv.index("--data") + 1] = str(tmp_path / "data" / "splits" / "final_train.jsonl")
+    return argv + ["--postfit", path], path, record
+
+
+def test_postfit_refuses_a_mismatched_final_command_before_ray(final_cmd, tmp_path, capsys):
+    """LAYA-08, T-05-11: a final seed is bound to the record by refusal. The matching command prints a final_train run
+    id; another encoder LR, the selection split, a seed outside the final seeds, a stop epoch the record did not choose
+    and a record of another schema are each refused naming the cause, and ray.init is never reached (tiny_run)."""
+    from pilot import postfit
+    argv, path, record = final_cmd
+    ray_train.main(argv + ["--print-run-id"])
+    assert re.fullmatch(r"laya-final_train-neg8-s0-[0-9a-f]{8}", capsys.readouterr().out.strip())
+    ray_train.main(argv + ["--seed", "2", "--print-run-id"])                   # every final seed is accepted
+    assert re.fullmatch(r"laya-final_train-neg8-s2-[0-9a-f]{8}", capsys.readouterr().out.strip())
+    sel = list(argv)
+    sel[sel.index("--data") + 1] = str(tmp_path / "data" / "splits" / "selection_train.jsonl")
+    for extra, match in ((["--encoder-lr", "3e-05"], "encoder_lr is 3e-05 here but 2.5e-05 in the chosen selection run"),
+                         (["--seed", "5"], "--seed 5 is not one of the record's final seeds \\[0, 1, 2\\]"),
+                         (["--stop-after-epoch", "1"], "chosen candidate is epoch 4 of the --epochs 4 schedule, so omit "
+                                                       "--stop-after-epoch"),
+                         (["--neg", "4"], "neg is 4 here but 8"),
+                         (["--max-messages", "7"], "max_messages is 7 here but None")):
+        with pytest.raises(SystemExit, match=match):
+            ray_train.main(argv + extra + ["--print-run-id"])
+    with pytest.raises(SystemExit, match="trains the final seeds on final_train; --data is selection_train"):
+        ray_train.main(sel + ["--print-run-id"])
+    with pytest.raises(SystemExit, match="trains the final seeds on final_train"):
+        ray_train.main(sel)                                                     # a training command refuses alike
+    postfit.write_record(dict(record, schema="postfit/0"), path)
+    with pytest.raises(SystemExit, match="schema 'postfit/0'"):
+        ray_train.main(argv + ["--print-run-id"])
+    bad_t = dict(record, chosen=dict(record["chosen"], temperature=7.0))
+    postfit.write_record(bad_t, path)
+    with pytest.raises(SystemExit, match="chosen temperature is 7.0"):
+        ray_train.main(argv)
+    assert not (tmp_path / "ray").exists() and not (tmp_path / "o").exists()
+
+
+def test_check_final_names_the_first_differing_key():
+    """The comparison is exact JSON equality over every key outside FINAL_FREE_KEYS, in sorted key order."""
+    from pilot import postfit
+    chosen = {"split": "selection_train", "seed": 0, "neg_seed": 0, "data_sha256": "a", "data_role": "train",
+              "encoder_lr": 3e-05, "epochs": 4, "max_len": 128, "workers": 1}
+    record = {"chosen": {"canonical": chosen, "epoch": 2, "epochs_schedule": 4, "stop_after_epoch": 2,
+                         "train_run_id": "laya-sel"}, "final": {"split": "final_train", "seeds": [0, 1, 2]}}
+    final = dict(chosen, split="final_train", seed=1, neg_seed=1, data_sha256="b", stop_after_epoch=2,
+                 postfit_sha256="c" * 64)
+    postfit.check_final(record, final)
+    for change, match in (({"max_len": 128.0}, "max_len is 128.0 here but 128"),
+                          ({"epochs": 2, "workers": 2}, "epochs is 2 here"),          # sorted: epochs before workers
+                          ({"amp": False}, "amp is False here but None"),            # a key the chosen run lacks
+                          ({"stop_after_epoch": None}, "pass --stop-after-epoch 2")):
+        with pytest.raises(SystemExit, match=match):
+            postfit.check_final(record, dict(final, **change))
+    with pytest.raises(SystemExit, match="workers is None here but 1"):
+        postfit.check_final(record, {k: v for k, v in final.items() if k != "workers"})
