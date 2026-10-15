@@ -226,8 +226,11 @@ __marimo__/
 /data/*
 !/data/splits.json
 
-# Training outputs: Ray run storage (default --storage) and checkpoints (fp16 weights, configs) are never committed
+# Training outputs: Ray run storage (default --storage), BERTurk run storage (berturk_train.py --storage default) and
+# checkpoints (weights, configs; the BERTurk final checkpoints ckpt-berturk-final-s* fall under /ckpt*/) are never
+# committed
 /ray_results/
+/berturk_runs/
 /ckpt*/
 *.safetensors
 .DS_Store

@@ -13,7 +13,9 @@ uid looks like bank_<fold>_<index>; a sidecar or report must have no message-tex
 message text from the local splits and no subset run (a subset dump is never committed). The compute checkpoint
 reports under results/compute/ (plan 04-07) get the same sidecar check, so they hold numbers as JSON numbers, env vars
 only as KEY=VALUE strings and repo-relative paths only. The Phase 5 postfit records under results/postfit/ (plan
-05-03: ids, digests and numbers only) get it too, and only .json files may be tracked there. The generic home-path
+05-03: ids, digests and numbers only) get it too, and only .json files may be tracked there; the same checks cover the
+Phase 6 BERTurk postfit records and BERTurk dump sidecars. Training outputs (Ray storage, BERTurk run storage under
+berturk_runs/, every ckpt*/ checkpoint including ckpt-berturk-final-s*) are proven gitignored. The generic home-path
 test skips binary files, so the .npz check is the guard there. The two legacy reports (100 test messages, no
 no-intent rows) sit under results/legacy/ next to a README that labels them as not comparable (D-08).
 """
@@ -213,9 +215,15 @@ def test_required_files_tracked(rel):
     assert tracked(rel) == [rel], "%s must be tracked (reproducibility depends on it)" % rel
 
 
+BERTURK_RUN = "berturk_runs/berturk-selection_train-s0-0123abcd/"
+
+
 @pytest.mark.parametrize("rel", ["ray_results/laya-final_train-s0-20261013-120000/params.json",
                                  "ckpt/model.safetensors", "ckpt/rl_agent_config.json", "ckpt_s1/model.safetensors",
-                                 "other/model.safetensors"])
+                                 "other/model.safetensors",
+                                 BERTURK_RUN + "exports/epoch-001/model.safetensors",
+                                 BERTURK_RUN + "exports/epoch-001/berturk_train.json", BERTURK_RUN + "done.json",
+                                 "ckpt-berturk-final-s0/model.safetensors", "ckpt-berturk-final-s0/berturk_train.json"])
 def test_training_outputs_are_gitignored(rel):
     # documented commands write Ray storage and checkpoints into the repo root; `git add .` must not pick them up
     r = subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", rel], cwd=REPO_ROOT)

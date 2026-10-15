@@ -125,7 +125,8 @@ HUB_DOWNLOADS = ("snapshot_download", "hf_hub_download")
 def _unpinned_calls(path, in_pilot=False):
     """Weight loads that could bypass pilot.weights.fetch. Outside pilot/: any from-import of a loader or hub download,
     any bare-name load/load_checkpoint call (an aliased from-import), any hub download call. Everywhere: a loader
-    called on a string literal (a hub id), resolve_checkpoint_dir, and a hub download without revision=."""
+    called on a string literal (a hub id), a from_pretrained called on a string literal (a hub id; BERTurk loads go
+    through a fetched or checkpoint dir), resolve_checkpoint_dir, and a hub download without revision=."""
     with open(path, encoding="utf-8") as f:
         tree = ast.parse(f.read(), filename=path)
     bad = []
@@ -151,6 +152,9 @@ def _unpinned_calls(path, in_pilot=False):
         elif (name in ("load", "load_checkpoint") and node.args and isinstance(node.args[0], ast.Constant)
                 and isinstance(node.args[0].value, str)):
             bad.append("%s:%d %s(%r)" % (path, node.lineno, name, node.args[0].value))
+        elif (name == "from_pretrained" and node.args and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)):
+            bad.append("%s:%d from_pretrained(%r)" % (path, node.lineno, node.args[0].value))
     return bad
 
 
@@ -171,8 +175,17 @@ def test_ast_guard_catches_unpinned_calls(tmp_path):
                  'lt.load_checkpoint("convaiinnovations/laya-multilingual")\n'           # 1
                  'import huggingface_hub as hh\nhh.snapshot_download("x/y", revision="0" * 40)\n'   # 1: outside pilot/
                  'hh.hf_hub_download("x/y", "f")\n'                                       # 1
+                 'import transformers\n'
+                 'transformers.AutoModelForSequenceClassification.from_pretrained(\n'          # 1: a hub id literal
+                 '    "dbmdz/bert-base-turkish-cased")\n'
+                 'transformers.AutoModelForSequenceClassification.from_pretrained(ckpt_dir, local_files_only=True)\n'
                  'json.load(f)\nlt.load_checkpoint(base_dir)\nlaya.load(fetch(pin))\n', encoding="utf-8")
-    assert len(_unpinned_calls(str(p))) == 8, _unpinned_calls(str(p))
+    assert len(_unpinned_calls(str(p))) == 9, _unpinned_calls(str(p))
+    assert any("from_pretrained('dbmdz/bert-base-turkish-cased')" in b for b in _unpinned_calls(str(p)))
+    r = tmp_path / "z.py"                                    # inside pilot/ too: a hub id never reaches from_pretrained
+    r.write_text('from transformers import AutoTokenizer\nAutoTokenizer.from_pretrained("x/y")\n'
+                 'AutoTokenizer.from_pretrained(d)\n', encoding="utf-8")
+    assert len(_unpinned_calls(str(r), in_pilot=True)) == 1
     q = tmp_path / "y.py"                                    # inside pilot/: hub downloads must pin a revision
     q.write_text('from huggingface_hub import snapshot_download\n'
                  'snapshot_download("x/y", revision=pin)\nsnapshot_download("x/y")\n', encoding="utf-8")
