@@ -69,17 +69,26 @@ SAME_SOURCE_KEYS = (("system", "kind"), ("system", "checkpoint"), ("system", "ch
 # a local checkpoint's run id is hash-based, so the same checkpoint scored from a renamed dir lands in the same run dir
 # with the same identity and is the same source (04-REVIEW IN-12). Bound means the pin (revision), or a local identity
 # with files_sha256 (weights, config, tokenizer/ and encoder/; 04-REVIEW IN-05) that holds dumps.LOCAL_REQUIRED_FILES
-# (04-REVIEW WR-02); an older local identity (weights and config only) or an incomplete one still compares the path
+# (04-REVIEW WR-02); an older local identity (weights and config only) or an incomplete one still compares the path.
+# A BERTurk identity (pilot.berturk.identity, kind berturk) binds every file score.py's BERTurk branch reads when its
+# model, config and record digests and both BERTURK_FILES digests are set (BASE-02); an incomplete one compares the path
 PATH_KEY = ("system", "checkpoint")
+BERTURK_FILES = ("tokenizer_config.json", "vocab.txt")    # = pilot.berturk.TOKENIZER_FILES (test-pinned; numpy only)
+BERTURK_DIGESTS = ("model_sha256", "config_sha256", "record_sha256")
 
 
 def binds_every_file(ident):
     """True for a checkpoint_identity that pins every file laya.load reads: the pinned checkpoint's (its revision) or a
     local one whose files_sha256 (pilot.weights.identity) holds every dumps.LOCAL_REQUIRED_FILES file; without
-    tokenizer/ or encoder/ laya.load reads them unpinned from the Hub (04-REVIEW WR-02)."""
+    tokenizer/ or encoder/ laya.load reads them unpinned from the Hub (04-REVIEW WR-02). A BERTurk identity (kind
+    berturk) binds when its BERTURK_DIGESTS and the digests of both BERTURK_FILES are all set: those five files are
+    everything score.py's BERTurk branch reads (BASE-02)."""
     if not isinstance(ident, dict):
         return False
     files = ident.get("files_sha256")
+    if ident.get("kind") == "berturk":
+        return (all(ident.get(k) for k in BERTURK_DIGESTS) and isinstance(files, dict)
+                and all(files.get(f) for f in BERTURK_FILES))
     return bool(ident.get("revision")) or (isinstance(files, dict)
                                            and all(k in files for k in dumps.LOCAL_REQUIRED_FILES))
 
