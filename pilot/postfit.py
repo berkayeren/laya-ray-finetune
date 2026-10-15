@@ -9,11 +9,18 @@ val folds, so its val outputs are in-sample), a calibrated candidate and one who
 shapes T, θ or the selection (ROADMAP Phase 5 criterion 3).
 
 Protocol (05-RESEARCH Open Questions 1-4, confirmed by the user at plan 05-10: "Protocol decision: confirm"):
-- A1: encoder LR grid LR_GRID, head LR fixed at HEAD_LR (laya's default); BERTurk shares the three values
+- A1: encoder LR grid LR_GRID, head LR fixed at HEAD_LR (laya's default)
 - A2: OBJECTIVE and TIE_ORDER below; the objective is compared exactly, as the fraction 2TP / (2TP + FP + FN) of the
   summed counts, so equal scores tie exactly and the tie order decides, independent of input order
 - A3: EPOCH_TRANSFER: the final seeds run the EPOCHS schedule and stop after the chosen epoch
 - A4: SELECTION_SEED for every selection run, FINAL_SEEDS for the final runs
+Per system kind (protocol(kind), the one source of a selection grid): "laya" is the constants above; "berturk" is
+pilot.berturk.PROTOCOL (Phase 6, confirmed at plan 06-02): the same LR grid (a test keeps them equal), epochs 1..10, the
+head LR tied to the encoder LR (head_lr None: one HF Trainer LR, recorded as both encoder_lr and head_lr), the same
+seeds. fit() with no grid arguments takes the protocol of its candidates' system kind (one kind, else refused), so
+BERTurk runs exactly these functions, objective, tie order, T and θ rules on its own val dumps (BASE-02), and the Laya
+record is byte for byte what it was before the dispatch. rules.epoch_transfer names the kind's schedule
+(EPOCH_TRANSFER_TEMPLATE).
 Temperature (TEMPERATURE_RULE): one noul T for every (message, tag) pair of val (all 48 tags of every message), the
 minimiser of the mean binary cross-entropy of sigmoid(m / T) over log T in [T_MIN, T_MAX] (scipy's bounded scalar
 minimiser); the two bounds are scored with the optimiser's point and a bound wins an exact tie, so an optimum outside
@@ -35,6 +42,7 @@ final seeds, each bound to its sha256, at the chosen epoch and T, with one share
 usage: from pilot import postfit; record = postfit.fit(run_dirs, manifest_path); postfit.write_record(record, path)
        record, sha = postfit.read_record(path); postfit.prune_export(export_dir, dump_root, manifest_path)
        postfit.final_command(record, seed, record_path, storage, out_prefix); postfit.final_manifest(path, ckpt_dirs)
+       postfit.protocol("laya" | "berturk")
        python postfit.py RUN_DIR [RUN_DIR ...] [--out results/postfit/laya.json] [--manifest splits.json]
        python postfit.py --prune EXPORT_DIR [EXPORT_DIR ...] [--dump-root results/dumps] [--manifest splits.json]
        python postfit.py --print-final-commands RECORD --storage DIR --out-prefix PATH [--base DIR] [--manifest M]
@@ -68,13 +76,26 @@ TEMPERATURE_RULE = ("one noul T over every val (message, tag) pair: the minimise
 OBJECTIVE = ("val micro-F1 at the val-selected global θ on probabilities after the val-fitted T, compared exactly as "
              "2TP / (2TP + FP + FN) of the summed counts")
 TIE_ORDER = "equal objectives: fewer epochs first, then the lower encoder LR"
-EPOCH_TRANSFER = ("the final seeds train on final_train with the selection schedule (--epochs %d) and stop after the "
-                  "chosen epoch (--stop-after-epoch), never --epochs k*" % EPOCHS)
+EPOCH_TRANSFER_TEMPLATE = ("the final seeds train on final_train with the selection schedule (--epochs %d) and stop "
+                           "after the chosen epoch (--stop-after-epoch), never --epochs k*")
+EPOCH_TRANSFER = EPOCH_TRANSFER_TEMPLATE % EPOCHS           # Laya's; a record names its own kind's schedule
 CANDIDATE_SCORER_KEYS = ("device", "dtype", "amp_enabled")
 # canonical run-config keys a final seed may differ in from the chosen selection run (LAYA-08): its split and data,
 # its seeds, its stop epoch (checked against the chosen epoch on its own) and the record it is bound to
 FINAL_FREE_KEYS = ("split", "data_sha256", "data_role", "seed", "neg_seed", "stop_after_epoch", "postfit_sha256")
 EXPORT_RE = re.compile(r"^epoch-[0-9]{3}$")              # ray_train.py's <storage>/<run_id>/exports/epoch-NNN
+
+
+def protocol(kind):
+    """The selection grid of a system kind: {lr_grid, epochs, head_lr, selection_seed, final_seeds}, the keyword
+    arguments of select and build_record. head_lr None ties each candidate's head LR to its own encoder LR."""
+    if kind == "laya":
+        return {"lr_grid": LR_GRID, "epochs": EPOCHS, "head_lr": HEAD_LR, "selection_seed": SELECTION_SEED,
+                "final_seeds": FINAL_SEEDS}
+    if kind == "berturk":
+        from pilot import berturk                           # lazy: pilot.berturk imports this module
+        return dict(berturk.PROTOCOL)
+    raise SystemExit("no postfit protocol for system kind %r; expected laya or berturk" % (kind,))
 
 
 def _nll(m, y):
@@ -173,7 +194,8 @@ def score(c):
 
 def select(cands, lr_grid=LR_GRID, epochs=EPOCHS, selection_seed=SELECTION_SEED, head_lr=HEAD_LR):
     """The chosen candidate: the highest score(); ties go to fewer epochs, then the lower encoder LR. SystemExit unless
-    the candidates are exactly one full selection grid (lr_grid x epochs 1..epochs) of one system and recipe."""
+    the candidates are exactly one full selection grid (lr_grid x epochs 1..epochs) of one system and recipe. head_lr
+    None: every candidate's canonical head_lr must equal its own encoder_lr (one LR for encoder and head)."""
     if not cands:
         raise SystemExit("no candidates; pass the selection run dirs that hold the val dumps")
     pairs = [(c["encoder_lr"], c["epoch"]) for c in cands]
@@ -205,20 +227,25 @@ def select(cands, lr_grid=LR_GRID, epochs=EPOCHS, selection_seed=SELECTION_SEED,
         canon = c["canonical"]
         if not isinstance(canon, dict):
             raise SystemExit("%s: no canonical run config; retrain with this ray_train.py" % c["dump_run_id"])
-        for key, want_v in (("split", SELECTION_SPLIT), ("epochs", epochs), ("head_lr", head_lr),
+        if head_lr is None and _json(canon.get("head_lr")) != _json(c["encoder_lr"]):
+            raise SystemExit("%s: canonical head_lr %r is not its encoder_lr %r; this protocol ties the head LR to the "
+                             "encoder LR (one LR)" % (c["dump_run_id"], canon.get("head_lr"), c["encoder_lr"]))
+        for key, want_v in (("split", SELECTION_SPLIT), ("epochs", epochs),
+                            ("head_lr", c["encoder_lr"] if head_lr is None else head_lr),
                             ("encoder_lr", c["encoder_lr"])):
             if _json(canon.get(key)) != _json(want_v):
                 raise SystemExit("%s: canonical %s %r, expected %r" % (c["dump_run_id"], key, canon.get(key), want_v))
         if runs.setdefault(_json(c["encoder_lr"]), c["train_run_id"]) != c["train_run_id"]:
             raise SystemExit("encoder LR %r comes from two train runs (%s, %s); one run per LR"
                              % (c["encoder_lr"], runs[_json(c["encoder_lr"])], c["train_run_id"]))
+    free = ("encoder_lr",) if head_lr is not None else ("encoder_lr", "head_lr")
     base = cands[0]["canonical"]
     for c in cands[1:]:
         canon = c["canonical"]
         for key in sorted(set(base) | set(canon)):
-            if key != "encoder_lr" and (key not in base or key not in canon or _json(base[key]) != _json(canon[key])):
+            if key not in free and (key not in base or key not in canon or _json(base[key]) != _json(canon[key])):
                 raise SystemExit("the candidates' canonical configs differ in %s (%r vs %r); they may differ only in "
-                                 "encoder_lr" % (key, base.get(key), canon.get(key)))
+                                 "%s" % (key, base.get(key), canon.get(key), " and ".join(free)))
     return max(cands, key=lambda c: (score(c), -c["epoch"], -c["encoder_lr"]))
 
 
@@ -252,7 +279,7 @@ def build_record(cands, chosen, manifest_path, lr_grid=LR_GRID, epochs=EPOCHS, s
                      "head_lr": head_lr, "epochs": epochs, "selection_seed": selection_seed,
                      "final_seeds": list(final_seeds)},
         "rules": {"temperature": TEMPERATURE_RULE, "temperature_bounds": [T_MIN, T_MAX], "objective": OBJECTIVE,
-                  "tie_order": TIE_ORDER, "epoch_transfer": EPOCH_TRANSFER,
+                  "tie_order": TIE_ORDER, "epoch_transfer": EPOCH_TRANSFER_TEMPLATE % epochs,
                   "theta": {"tie_break": metrics.TIE_RULE, "min_val_positives": metrics.MIN_VAL_POSITIVES,
                             "per_tag": "a tag's own θ only with >= %d val positives, else the global θ"
                                        % metrics.MIN_VAL_POSITIVES}},
@@ -267,8 +294,14 @@ def build_record(cands, chosen, manifest_path, lr_grid=LR_GRID, epochs=EPOCHS, s
 
 
 def fit(run_dirs, manifest_path=DEFAULT_MANIFEST, **grid):
-    """candidate() of every run dir, select(), build_record(): the record of one selection grid."""
+    """candidate() of every run dir, select(), build_record(): the record of one selection grid. Without grid
+    arguments the grid is protocol() of the candidates' system kind (SystemExit when they mix kinds)."""
     cands = [candidate(d, manifest_path) for d in run_dirs]
+    if not grid and cands:
+        kinds = sorted({str(c["system_kind"]) for c in cands})
+        if len(kinds) != 1:
+            raise SystemExit("the candidates mix system kinds %s; postfit selects within one system" % kinds)
+        grid = protocol(cands[0]["system_kind"])
     chosen = select(cands, **{k: v for k, v in grid.items() if k != "final_seeds"})
     return build_record(cands, chosen, manifest_path, **grid)
 

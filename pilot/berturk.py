@@ -21,6 +21,11 @@ DROPPED_WHEN_NONE key whose value is None is left out) and run_id() names the ru
 of the sha256 of the sorted, compact canonical JSON>, so two seeds or configs never share <storage>/<run_id>/. Every
 berturk_train.py flag is in exactly one of IDENTITY, NOT_IDENTITY or RESOLVED (a test enforces it).
 
+Postfit (BASE-02, plan 06-04): PROTOCOL is BERTurk's selection grid for pilot.postfit.protocol("berturk"): LR_GRID
+(explicit, kept equal to pilot.postfit.LR_GRID by a test: equal tuning effort, the 2026-10-15 user decision), epochs
+1..EPOCHS, head_lr None (the head LR is the encoder LR) and pilot.postfit's selection and final seeds (A4). postfit.py
+runs Laya's own functions on BERTurk val dumps under it.
+
 Checkpoint (an export or, later, a final seed) = CHECKPOINT_FILES: model.safetensors, config.json (id2label in
 INTENTS order), the base's vocab.txt and tokenizer_config.json copied byte for byte (never tokenizer.save_pretrained,
 whose bytes depend on HF_HUB_OFFLINE) and RECORD (schema RECORD_SCHEMA). identity() hashes them without a load;
@@ -36,7 +41,7 @@ import json
 import os
 
 from intents import INTENTS
-from pilot import dumps
+from pilot import dumps, postfit
 from pilot.data import sha256_bytes, sha256_file
 
 # ---- the recipe (A1-A3, A7), confirmed at plan 06-02 ----
@@ -51,6 +56,11 @@ MAX_GRAD_NORM = 1.0
 OPTIM = "adamw_torch"                       # explicit: the transformers 5.19 default is adamw_torch_fused
 LOSS = "masked_bce"                         # A7
 MASK_LABEL = -100.0                         # a masked (message, tag) label; the Trainer counts labels != -100
+
+# ---- the postfit protocol (BASE-02, plan 06-04) ----
+LR_GRID = (2e-05,)                          # A1: explicit; equal to pilot.postfit.LR_GRID (one LR for both models)
+PROTOCOL = {"lr_grid": LR_GRID, "epochs": EPOCHS, "head_lr": None, "selection_seed": postfit.SELECTION_SEED,
+            "final_seeds": postfit.FINAL_SEEDS}       # head_lr None: tied to encoder_lr; the seeds are Laya's (A4)
 
 # ---- labels and checkpoint layout ----
 TAGS = list(INTENTS)
