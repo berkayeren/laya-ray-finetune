@@ -338,3 +338,127 @@ def test_laya_record_unchanged_by_the_dispatch(tmp_path, snap):
     assert rec["system_kind"] == "laya" and rec["rules"]["epoch_transfer"] == postfit.EPOCH_TRANSFER
     assert postfit.EPOCH_TRANSFER == postfit.EPOCH_TRANSFER_TEMPLATE % postfit.EPOCHS
     assert rec["protocol"]["head_lr"] == postfit.HEAD_LR and rec["protocol"]["epochs"] == postfit.EPOCHS
+
+
+# --- the BASE-03 reference check (fixed before any BERTurk val score) -----------------------------------------------
+
+DIFFERENCES = [
+    "a fixed split (selection train folds 0–13 with about 1,450 messages; final train folds 0–15 with about 1,658)",
+    "a different test portion (folds 16–19)",
+    "a fine-tuned BERTurk rather than a frozen encoder",
+    "a single split rather than cross-validation averages",
+    "this check itself reads val folds 14-15",
+]
+
+
+def _record(tmp_path, snap, counts=None):
+    """(path, record, sha) of a BERTurk postfit record from the ten dumps; counts=(tp, fp, fn) replaces the chosen
+    candidate's objective counts (the record is rewritten, so its sha is of the written bytes)."""
+    rec = postfit.fit(_ten(tmp_path, snap), snap[1])
+    if counts is not None:
+        c = next(c for c in rec["candidates"] if c["dump_sha256"] == rec["chosen"]["dump_sha256"])
+        c["objective"] = dict(zip(("tp", "fp", "fn"), counts))
+    path = str(tmp_path / "postfit" / "berturk.json")
+    postfit.write_record(rec, path)
+    record, sha = postfit.read_record(path)
+    return path, record, sha
+
+
+@pytest.mark.parametrize("counts, status, fraction", [
+    ((707, 293, 293), "ok", [707, 1000]),                    # exactly 0.707 passes
+    ((706, 294, 294), "investigate", [353, 500]),            # 0.706
+    ((706999, 293001, 293001), "investigate", [706999, 1000000]),   # 0.706999: no rounding to 0.707
+    ((708, 292, 292), "ok", [177, 250]),
+])
+def test_reference_threshold_is_exact_at_0_707(tmp_path, snap, counts, status, fraction):
+    path, record, sha = _record(tmp_path, snap, counts)
+    out = berturk.reference_check(record, path, sha)
+    assert out["status"] == status and out["below_threshold"] is (status == "investigate")
+    assert out["value"]["fraction"] == fraction
+    assert out["threshold"] == 0.707 and berturk.THRESHOLD == __import__("fractions").Fraction(707, 1000)
+    assert out["resolution"] is None
+
+
+def test_reference_quotes_the_source_and_differences(tmp_path, snap):
+    path, record, sha = _record(tmp_path, snap)
+    out = berturk.reference_check(record, path, sha)
+    assert out["schema"] == berturk.REFERENCE_SCHEMA == "berturk-reference/1"
+    assert out["postfit"] == {"path": pilot.data.repo_relpath(path), "sha256": sha}
+    ref = out["reference"]
+    assert ref == berturk.REFERENCE and ref["url"] == "https://arxiv.org/abs/2212.10455"
+    assert ref["metric"] == "micro-F1" and ref["lower_reference"] == 80.7
+    t12 = ref["table_12"]
+    assert "Turkish" in t12["language"] and t12["domain"] == "BANKING" and "9 of 10 folds" in t12["setting"]
+    assert [(v["micro_f1"], v["theta"], v["encoder"]) for v in t12["values"]] == [(82.8, 0.3, "frozen"),
+                                                                                    (80.7, 0.3, "frozen")]
+    assert ["LaBSE" in t12["values"][0]["model"], "mpnet" in t12["values"][1]["model"]] == [True, True]
+    assert ref["table_18"]["micro_f1"] == 90.1 and "mDeBERTa" in ref["table_18"]["model"]
+    assert "Moghe" in ref["paper"] and "2023" in ref["venue"]
+    assert out["threshold"] == 0.707 and "exactly 0.707 passes" in out["threshold_rule"]
+    assert out["differences"] == DIFFERENCES == berturk.DIFFERENCES
+    assert out["caveats"] == berturk.CAVEATS
+    assert any("same val messages" in c and "in-sample" in c for c in out["caveats"])
+    chosen = record["chosen"]
+    cand = next(c for c in record["candidates"] if c["dump_sha256"] == chosen["dump_sha256"])
+    v = out["value"]
+    assert v["metric"] == postfit.OBJECTIVE
+    assert v["val_micro_f1_at_global_theta"] == cand["val_micro_f1_at_global_theta"]
+    assert v["val_micro_f1_at_0_5"] == cand["val_micro_f1_at_0_5"]
+    assert (v["epoch"], v["encoder_lr"], v["temperature"], v["train_run_id"], v["dump_run_id"]) == (
+        chosen["epoch"], chosen["encoder_lr"], chosen["temperature"], chosen["train_run_id"], chosen["dump_run_id"])
+    o = cand["objective"]
+    f = __import__("fractions").Fraction(2 * o["tp"], 2 * o["tp"] + o["fp"] + o["fn"])
+    assert v["fraction"] == [f.numerator, f.denominator] and f == postfit.score(cand)
+    assert out["status"] == ("investigate" if f < berturk.THRESHOLD else "ok")
+    text = json.dumps(out, ensure_ascii=False)
+    assert str(tmp_path) not in text and os.path.expanduser("~") not in text and "timestamp" not in text
+    assert berturk.reference_check(record, path, sha) == out
+
+
+def test_reference_refuses_a_laya_record(tmp_path, snap):
+    run_dirs = [write_laya_candidate(tmp_path / "laya", snap, lr, e) for lr, e in LAYA_GRID]
+    path = str(tmp_path / "postfit" / "laya.json")
+    postfit.write_record(postfit.fit(run_dirs, snap[1]), path)
+    record, sha = postfit.read_record(path)
+    with pytest.raises(SystemExit, match="applies to BERTurk \\(BASE-03\\)"):
+        berturk.reference_check(record, path, sha)
+    with pytest.raises(SystemExit, match="applies to BERTurk"):
+        postfit_cli.main(["--reference-check", path])
+    bad = dict(record, system_kind="berturk", chosen=dict(record["chosen"], dump_sha256="0" * 64))
+    with pytest.raises(SystemExit, match="not among the record's candidates"):
+        berturk.reference_check(bad, path, sha)
+
+
+def test_reference_resolution_rules(tmp_path, snap):
+    path, record, sha = _record(tmp_path, snap, (707, 293, 293))
+    with pytest.raises(SystemExit, match="nothing to resolve"):
+        berturk.reference_check(record, path, sha, resolution="documented: lower LR")
+    assert berturk.reference_check(record, path, sha)["resolution"] is None
+    path, record, sha = _record(tmp_path, snap, (706, 294, 294))
+    assert berturk.reference_check(record, path, sha)["resolution"] is None          # the shortfall is on record
+    out = berturk.reference_check(record, path, sha, resolution="documented: the user accepts the shortfall")
+    assert out["status"] == "investigate" and out["resolution"] == "documented: the user accepts the shortfall"
+
+
+def test_reference_cli_writes_and_reproduces(tmp_path, snap, capsys):
+    path, record, sha = _record(tmp_path, snap, (706, 294, 294))
+    out = tmp_path / "postfit" / "berturk-reference.json"
+    got = postfit_cli.main(["--reference-check", path, "--out", str(out)])
+    text = out.read_text(encoding="utf-8")
+    assert json.loads(text) == got == berturk.reference_check(record, path, sha)
+    assert capsys.readouterr().out == text
+    assert text == json.dumps(got, ensure_ascii=False, indent=2) + "\n"
+    again = tmp_path / "again.json"
+    postfit_cli.main(["--reference-check", path, "--out", str(again)])
+    assert again.read_bytes() == out.read_bytes()                 # byte-identical for the same inputs
+    resolved = postfit_cli.main(["--reference-check", path, "--resolution", "fixed: see 06-10"])
+    assert resolved["resolution"] == "fixed: see 06-10"
+    ok_path, _, _ = _record(tmp_path / "ok", snap, (707, 293, 293))
+    with pytest.raises(SystemExit, match="nothing to resolve"):
+        postfit_cli.main(["--reference-check", ok_path, "--resolution", "x"])
+    for bad in (["--resolution", "x", path],                                      # --resolution in RUN_DIR mode
+                [path, "--reference-check", path],                                # two modes at once
+                ["--reference-check", path, "--prune", path]):
+        with pytest.raises(SystemExit) as e:
+            postfit_cli.main(bad)
+        assert e.value.code == 2
