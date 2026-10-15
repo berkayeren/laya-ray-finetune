@@ -11,6 +11,11 @@ and report.py depend on that; `import laya` alone does not import torch, laya.tr
 `from pilot import laya_adapter as la` and call `la.forward(...)` through the module attribute, and every wrapper looks
 its laya function up at call time, so a test can monkeypatch either side.
 
+No item-level calibration (LAYA-05): laya's split_calibration, calibration_records and calibration_report are not
+wrapped, because the temperature is fitted on message-level val dumps by pilot.postfit.fit_temperature. The only
+calibration symbol left is fit_temperature_map, the test oracle that fit is checked against; it has no production
+caller (tests/test_laya_adapter.py::test_no_item_level_calibration_anywhere guards every tracked .py file).
+
 Pinned to laya 0.4.6 (LAYA_VERSION). tests/test_laya_adapter.py snapshots the inspect.signature of every wrapped
 symbol and runs an offline tiny-model round trip; when the lock moves laya (`make lock`), read laya's changelog before
 re-snapshotting.
@@ -29,9 +34,8 @@ COVERS = {"lt.load_checkpoint": "load_checkpoint", "lt.items_from_rows": "items_
           "encoder.gradient_checkpointing_enable": "enable_gradient_checkpointing",
           "encoder.embeddings.tok_embeddings": "freeze_embeddings"}
 
-_TRAIN = ("load_checkpoint", "items_from_rows", "split_calibration", "encode_item", "_forward", "rlcd_loss",
-          "soft_ce_loss", "calibration_records", "calibration_report", "save_checkpoint", "sigma_at",
-          "draw_option_order", "optimizer_updates", "read_jsonl")
+_TRAIN = ("load_checkpoint", "items_from_rows", "encode_item", "_forward", "rlcd_loss", "soft_ce_loss",
+          "save_checkpoint", "sigma_at", "draw_option_order", "optimizer_updates", "read_jsonl")
 _COMMON = ("collate_items", "uses_parallel_layout", "DecisionModel", "temp_bucket")
 _CALIBRATE = ("fit_temperature_map", "records_from_labeled")
 
@@ -86,10 +90,6 @@ def items_from_rows(tok, rows, max_len, head_max_len):
     return _lt().items_from_rows(tok, rows, max_len, head_max_len)
 
 
-def split_calibration(items, calib_max, calib_frac, seed):
-    return _lt().split_calibration(items, calib_max, calib_frac, seed)
-
-
 def encode_item(tok, item, max_len, head_max_len, option_order=None, parallel=False):
     return _lt().encode_item(tok, item, max_len, head_max_len, option_order, parallel)
 
@@ -106,15 +106,6 @@ def rlcd_loss(logits, target, mask, qtype, sigma):
 
 def soft_ce_loss(logits, target, mask):
     return _lt().soft_ce_loss(logits, target, mask)
-
-
-def calibration_records(model, tok, items, device, max_len, head_max_len, batch_size=16, parallel=False):
-    return _lt().calibration_records(model, tok, items, device, max_len, head_max_len, batch_size=batch_size,
-                                     parallel=parallel)
-
-
-def calibration_report(records, temperature):
-    return _lt().calibration_report(records, temperature)
 
 
 def save_checkpoint(model, tok, cfg, path):
@@ -154,6 +145,8 @@ def decision_model(encoder, head_layers=2, n_act=2):
 # ---- laya.calibrate ----
 
 def fit_temperature_map(records):
+    """laya's own temperature fit on (qtype, logits, target, k) records: the test oracle of
+    pilot.postfit.fit_temperature (tests/test_postfit.py), with no production caller (LAYA-05)."""
     return _lcal().fit_temperature_map(records)
 
 

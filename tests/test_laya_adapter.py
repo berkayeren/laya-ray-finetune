@@ -2,8 +2,9 @@
 
 (a) laya.__version__ must be exactly pilot.laya_adapter.LAYA_VERSION; (b) every wrapped laya symbol keeps the
 inspect.signature string in SIGNATURES; (c) an offline tiny-model round trip (items -> encode -> collate -> forward ->
-losses -> calibration records -> temperature fit -> save -> public laya.load -> noul logits) still runs, and the
-adapter's logit route reproduces the public predict_batch probabilities.
+losses -> save -> public laya.load -> noul logits) still runs, and the adapter's logit route reproduces the public
+predict_batch probabilities; (d) no tracked .py file names laya's item-level calibration (LAYA-05: the temperature is
+fitted on val dumps by pilot.postfit; la.fit_temperature_map is its test oracle in tests/test_postfit.py).
 
 SIGNATURES is the laya 0.4.6 snapshot. Pins move only with `make lock`; re-snapshot only after reading laya's changelog.
 """
@@ -29,18 +30,12 @@ SIGNATURES = {
     "laya.train.load_checkpoint": "(model_dir: str)",
     "laya.train.items_from_rows": "(tok, rows: Iterable[Dict[str, Any]], max_len: int, head_max_len: int, "
                                   "label_smoothing: float = 0.0) -> Tuple[List[Dict[str, Any]], Dict[str, int]]",
-    "laya.train.split_calibration": "(items: Sequence[Any], calib_max: int, calib_frac: float, seed: int) "
-                                    "-> Tuple[List[Any], List[Any]]",
     "laya.train.encode_item": "(tok, item: Dict[str, Any], max_len: int, head_max_len: int, "
                               "option_order: Optional[List[int]] = None, parallel: bool = False) -> Dict[str, Any]",
     "laya.train._forward": "(model, batch, device, amp: bool, detach_encoder: bool)",
     "laya.train.rlcd_loss": "(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, qtype: torch.Tensor, "
                             "sigma: float, samples: int = 4, w_sph: float = 0.75, w_rps: float = 1.0) -> torch.Tensor",
     "laya.train.soft_ce_loss": "(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor",
-    "laya.train.calibration_records": "(model, tok, items: Sequence[Dict[str, Any]], device: torch.device, "
-                                      "max_len: int, head_max_len: int, batch_size: int = 16, parallel: bool = False)",
-    "laya.train.calibration_report": "(records: Sequence[Tuple[int, Any, Any, int]], temperature: Sequence[float]) "
-                                     "-> Dict[str, Dict[str, Any]]",
     "laya.train.save_checkpoint": "(model, tok, cfg: Dict[str, Any], path: str) -> None",
     "laya.train.sigma_at": "(epoch: int, epochs: int, start: float, end: float) -> float",
     "laya.train.draw_option_order": "(item: Dict[str, Any], rng: random.Random, shuffle_types: Sequence[str]) "
@@ -130,13 +125,6 @@ def test_training_round_trip_on_tiny_model(tmp_path):
     head = [p for n, p in model.named_parameters() if not n.startswith("encoder.")]
     assert any(p.grad is not None and bool(p.grad.abs().sum() > 0) for p in head)
 
-    records = la.calibration_records(model.eval(), tok, items, torch.device("cpu"), 64, 32)
-    assert len(records) == len(items)
-    fitted = la.fit_temperature_map(records)
-    assert "temperature" in fitted and "temperature_by_options" in fitted, sorted(fitted)
-    assert isinstance(la.calibration_report(records, fitted["temperature"]), dict)
-
-    assert [len(x) for x in la.split_calibration(list(range(100)), 40, 0.1, 0)] == [90, 10]
     assert la.optimizer_updates(10, 4, 2, 1) == 2
     assert la.sigma_at(0, 2, 0.4, 0.1) == 0.4
     path = tmp_path / "rows.jsonl"
@@ -249,6 +237,48 @@ def test_guard_no_private_laya_use_outside_adapter():
     assert ADAPTER in out.split() and {"ray_train.py", "mps_spike.py", "tests/test_spike_unit.py"} <= set(files)
     bad = [b for f in files for b in _private_laya_uses(os.path.join(REPO, f), f, f in AUTOCAST_WRITERS)]
     assert not bad, "private laya use outside %s (route it through the adapter):\n%s" % (ADAPTER, "\n".join(bad))
+
+
+# laya's item-level calibration split, records and report, and the train-message holdout that fed them (LAYA-05)
+ITEM_CALIBRATION = ("split_calibration", "calibration_records", "calibration_report", "holdout_messages")
+
+
+def _item_calibration_uses(path, label=None):
+    """"path:line name" for every Name, Attribute, function definition or import alias named in ITEM_CALIBRATION;
+    string constants are not code, so a test may still name them."""
+    with open(path, encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=path)
+    bad = []
+    for node in ast.walk(tree):
+        names = []
+        if isinstance(node, ast.Name):
+            names = [node.id]
+        elif isinstance(node, ast.Attribute):
+            names = [node.attr]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            names = [node.name]
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [n for a in node.names for n in (a.name.split(".")[-1], a.asname) if n]
+        bad += ["%s:%d %s" % (label or path, node.lineno, n) for n in names if n in ITEM_CALIBRATION]
+    return bad
+
+
+def test_no_item_level_calibration_anywhere(tmp_path):
+    out = subprocess.run(["git", "ls-files", "*.py"], cwd=REPO, capture_output=True, text=True, check=True).stdout
+    files = out.split()
+    assert ADAPTER in files and "ray_train.py" in files
+    bad = [b for f in files for b in _item_calibration_uses(os.path.join(REPO, f), f)]
+    assert not bad, "item-level calibration is gone (LAYA-05; T comes from pilot.postfit):\n%s" % "\n".join(bad)
+    assert not set(ITEM_CALIBRATION) & set(dir(la))
+    p = tmp_path / "bad.py"                                  # the guard sees every form
+    p.write_text("from laya.train import split_calibration\n"
+                 "import x.calibration_report as calibration_records\n"
+                 "la.calibration_records(1)\n"
+                 "def holdout_messages():\n"
+                 "    pass\n"
+                 "ok = 'split_calibration'\n", encoding="utf-8")
+    found = {b.split()[-1] for b in _item_calibration_uses(str(p))}
+    assert found == set(ITEM_CALIBRATION), found
 
 
 def test_guard_catches_every_form(tmp_path):

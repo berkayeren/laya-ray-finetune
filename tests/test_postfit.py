@@ -60,6 +60,26 @@ def test_temperature_refuses_empty_and_all_zero_margins():
         postfit.fit_temperature(np.zeros((3, 48)), np.eye(3, 48, dtype=bool))
 
 
+def _laya_t(m, y):
+    """laya's own noul T (pilot.laya_adapter.fit_temperature_map, the oracle) on the same (margin, label) pairs: one
+    noul record (qtype 2, logits [0, m], target [1 - y, y], 2 options) per pair."""
+    from pilot import laya_adapter as la
+    records = [(2, [0.0, float(v)], [1.0 - float(t), float(t)], 2) for v, t in zip(m, y)]
+    fitted = la.fit_temperature_map(records)
+    return fitted["temperature_by_options"].get("noul:2", fitted["temperature"][2])
+
+
+def test_temperature_matches_laya_fit():
+    """LAYA-05: the scipy fit on every val pair is laya's own temperature rule, without torch (planning probe:
+    0.0008-0.0011 apart for planted T 0.8, 1.0, 1.7); out of band both clamp to the exact bound."""
+    for t in (0.8, 1.0, 1.7):
+        m, y = _planted(t, n=2880, seed=11)
+        mine, theirs = postfit.fit_temperature(m, y)[0], _laya_t(m, y)
+        assert abs(mine - theirs) < 2e-3, (t, mine, theirs)
+    m, y = _planted(20.0, n=2880, seed=11)
+    assert postfit.fit_temperature(m, y)[0] == 5.0 and _laya_t(m, y) == 5.0
+
+
 # --- selection on candidate dicts -------------------------------------------------------------------------------
 
 def _canon(lr, **over):
