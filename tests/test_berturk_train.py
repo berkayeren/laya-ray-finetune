@@ -153,3 +153,147 @@ def test_done_marker_written_after_the_last_epoch(two_runs):
     assert [row["epoch"] for row in rec["record"]["epochs"]] == list(range(1, EPOCHS + 1))
     assert rec == _json(os.path.join(exports(a)[-1], berturk.RECORD))     # the last export's record, whole
     assert os.stat(done).st_mtime_ns >= os.stat(os.path.join(exports(a)[-1], berturk.RECORD)).st_mtime_ns
+
+
+# ---- refusals before any model load or run dir (Task 2) ----
+
+@pytest.fixture
+def no_load(monkeypatch):
+    """Make every tokenizer or model load fail loudly: a refusal test passes only if main stops before one."""
+    import transformers
+
+    def boom(*args, **kwargs):
+        raise AssertionError("a model or tokenizer was loaded before the refusal")
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", boom)
+    monkeypatch.setattr(transformers.BertForSequenceClassification, "from_pretrained", boom)
+    monkeypatch.setattr(transformers.PreTrainedModel, "from_pretrained", boom)
+
+
+def refused(argv, storage, match):
+    """main(argv) raises SystemExit matching `match`, and the storage dir was not created."""
+    import berturk_train
+    with pytest.raises(SystemExit, match=match):
+        berturk_train.main([str(x) for x in argv])
+    assert not os.path.exists(str(storage)), "the refusal left %s behind" % storage
+
+
+@pytest.mark.parametrize("name", ["val", "test", "hotels_probe"])
+def test_refuses_a_non_train_split(inputs, tmp_path, no_load, name):
+    data, manifest, base = inputs
+    other = os.path.join(os.path.dirname(data), name + ".jsonl")
+    refused(train_argv(other, manifest, base, tmp_path / "runs"), tmp_path / "runs", "has role")
+
+
+def test_refuses_a_tampered_or_unregistered_split(tmp_path, synthetic_raw, inputs, no_load):
+    from conftest import prepared
+    _, _, base = inputs
+    out_dir, manifest = prepared(tmp_path, synthetic_raw)
+    data = os.path.join(out_dir, "splits", "selection_train.jsonl")
+    copy = str(tmp_path / "copy.jsonl")
+    with open(data, "rb") as f:
+        raw = bytearray(f.read())
+    with open(copy, "wb") as f:
+        f.write(bytes(raw))
+    refused(train_argv(copy, manifest, base, tmp_path / "runs"), tmp_path / "runs", "not a split registered")
+    i = raw.index(b'"state"') + len(b'"state": "')         # one byte of the first message's text
+    raw[i] = ord("X") if raw[i] != ord("X") else ord("Y")
+    with open(data, "wb") as f:
+        f.write(bytes(raw))
+    refused(train_argv(data, manifest, base, tmp_path / "runs"), tmp_path / "runs", "sha256")
+
+
+def test_refuses_a_row_missing_a_tag(inputs, tmp_path, monkeypatch, no_load):
+    import berturk_train
+    data, manifest, base = inputs
+    seen = {}
+
+    def parse_dropping_a_tag(raw):                          # a doctored file would fail its sha256 first
+        rows = pilot.data.parse_jsonl(raw)
+        del rows[0]["expected"][berturk.TAGS[5]]
+        seen["uid"] = rows[0]["uid"]
+        return rows
+    monkeypatch.setattr(berturk_train, "parse_jsonl", parse_dropping_a_tag)
+    with pytest.raises(SystemExit) as e:
+        berturk_train.main([str(x) for x in train_argv(data, manifest, base, tmp_path / "runs")])
+    assert seen["uid"] in str(e.value) and berturk.TAGS[5] in str(e.value), str(e.value)
+    assert not os.path.exists(str(tmp_path / "runs"))
+
+
+def test_refuses_an_empty_selection(inputs, tmp_path, monkeypatch, no_load):
+    import berturk_train
+    data, manifest, base = inputs
+    monkeypatch.setattr(berturk_train, "parse_jsonl", lambda raw: [])
+    refused(train_argv(data, manifest, base, tmp_path / "runs"), tmp_path / "runs", "no messages")
+
+
+@pytest.mark.parametrize("tags,match", [("no_such_tag", "unknown tag"),
+                                        ("%s,%s" % (berturk.TAGS[0], berturk.TAGS[0]), "more than once")])
+def test_refuses_bad_mask_tags(inputs, tmp_path, no_load, tags, match):
+    data, manifest, base = inputs
+    refused(train_argv(data, manifest, base, tmp_path / "runs", "--mask-tags", tags), tmp_path / "runs", match)
+
+
+@pytest.mark.parametrize("fault", list(berturk.BASE_FILES) + ["lowercasing"])
+def test_refuses_an_incomplete_or_lowercasing_base(inputs, tmp_path, no_load, fault):
+    import shutil
+    data, manifest, base = inputs
+    bad = str(tmp_path / "base")
+    shutil.copytree(base, bad)
+    if fault == "lowercasing":
+        with open(os.path.join(bad, "tokenizer_config.json"), "wb") as f:
+            f.write(json.dumps({"do_lower_case": True}).encode("utf-8"))
+        match = "do_lower_case"
+    else:
+        os.remove(os.path.join(bad, fault))
+        match = "lacks %s" % fault
+    refused(train_argv(data, manifest, bad, tmp_path / "runs"), tmp_path / "runs", match)
+
+
+@pytest.mark.parametrize("flag", ["--epochs", "--batch", "--max-len", "--max-messages", "--cpus", "--lr"])
+def test_refuses_bad_numbers(inputs, tmp_path, no_load, capsys, flag):
+    import berturk_train
+    data, manifest, base = inputs
+    with pytest.raises(SystemExit) as e:
+        berturk_train.main([str(x) for x in train_argv(data, manifest, base, tmp_path / "runs", flag, "0")])
+    assert e.value.code == 2 and flag in capsys.readouterr().err
+    assert not os.path.exists(str(tmp_path / "runs"))
+
+
+def test_refuses_mps_when_unavailable(inputs, tmp_path, monkeypatch, no_load):
+    import torch
+    from pilot import spike
+    data, manifest, base = inputs
+    for k in spike.spike_env("0", 4):                       # main sets the MPS env; monkeypatch restores it
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    threads = torch.get_num_threads()
+    argv = train_argv(data, manifest, base, tmp_path / "runs")
+    argv[argv.index("--device") + 1] = "mps"
+    try:
+        refused(argv, tmp_path / "runs", "MPS is not available")
+    finally:
+        torch.set_num_threads(threads)
+
+
+def test_refuses_an_existing_run_dir(inputs, tmp_path, capsys, no_load):
+    import berturk_train
+    data, manifest, base = inputs
+    storage = tmp_path / "runs"
+    berturk_train.main([str(x) for x in train_argv(data, manifest, base, storage, "--print-run-id")])
+    run_dir = storage / capsys.readouterr().out.strip()
+    run_dir.mkdir(parents=True)                             # a stale, possibly half-written run
+    with pytest.raises(SystemExit, match="never resumed") as e:
+        berturk_train.main([str(x) for x in train_argv(data, manifest, base, storage)])
+    assert str(run_dir) in str(e.value)
+    assert os.listdir(str(run_dir)) == []                   # nothing was written into it
+
+
+def test_print_run_id_starts_nothing(inputs, tmp_path, capsys, no_load):
+    import re
+    import berturk_train
+    data, manifest, base = inputs
+    storage = tmp_path / "runs"
+    assert berturk_train.main([str(x) for x in train_argv(data, manifest, base, storage, "--print-run-id")]) is None
+    out = capsys.readouterr().out
+    assert re.match(r"^berturk-selection_train-s0-[0-9a-f]{8}\n$", out), out
+    assert not storage.exists()
