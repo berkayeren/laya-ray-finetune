@@ -52,6 +52,14 @@ the canonical config without seed and neg_seed, plus the epoch). report.py --com
 when they are distinct seeds of one recipe by that digest. The pinned zero-shot checkpoint, a local checkpoint without
 training.ray_train and the baselines record seed None and training None.
 
+The Phase 5 test interlock (RESEARCH A6; ROADMAP Phase 5 criterion 4): a fine-tuned Laya checkpoint (rl_agent_config
+.json fine_tuned true or a training.ray_train block) is refused on a split with role test under the committed manifest,
+right after the checkpoint argument check and before any hashing, fetch, model load or Ray start (refuse_finetuned_test;
+evaluate.py forwards to score.main and inherits it). Val scoring of the same checkpoint, and the pinned zero-shot or
+a not fine-tuned checkpoint on test, are unaffected; hotels_probe is already refused by the role gate. A
+non-committed manifest (the synthetic CPU smoke test, tests/test_smoke_cpu.py) is outside the interlock. Phase 8
+replaces it with the protocol-hash gate (protocol.json).
+
 Module-level imports stay torch-, Ray- and laya-free.
 
 usage: python score.py data/splits/test.jsonl [--model laya|majority|prior] [--checkpoint multilingual|DIR]
@@ -136,6 +144,29 @@ def check_checkpoint_arg(checkpoint):
     """SystemExit unless --checkpoint is 'multilingual' or a dir holding rl_agent_config.json; no hashing or fetch."""
     if checkpoint != "multilingual" and not os.path.isfile(os.path.join(checkpoint, "rl_agent_config.json")):
         raise SystemExit("--checkpoint must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % checkpoint)
+
+
+def is_finetuned(checkpoint):
+    """True for a local checkpoint whose rl_agent_config.json says fine_tuned or holds a training.ray_train block;
+    False for 'multilingual' (the pinned zero-shot weights). No hashing, fetch or model load."""
+    if checkpoint == "multilingual":
+        return False
+    with open(os.path.join(checkpoint, "rl_agent_config.json"), encoding="utf-8") as f:
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        return False
+    tr = cfg.get("training")
+    return cfg.get("fine_tuned") is True or bool(isinstance(tr, dict) and tr.get("ray_train"))
+
+
+def refuse_finetuned_test(checkpoint, entry, manifest_path):
+    """The Phase 5 test interlock (RESEARCH A6, ROADMAP Phase 5 criterion 4): SystemExit when a fine-tuned Laya
+    checkpoint would be scored on a split with role test under the committed manifest. Runs before any hashing, fetch,
+    model load or Ray start. A non-committed manifest (the synthetic CPU smoke test) is outside it; Phase 8 replaces it
+    with the protocol-hash gate."""
+    if entry["role"] == "test" and manifest_is_committed(manifest_path) and is_finetuned(checkpoint):
+        raise SystemExit("%s is a fine-tuned Laya checkpoint; no fine-tuned model is scored on test before the Phase 8 "
+                         "protocol freeze (protocol.json); score val instead" % _shown(checkpoint))
 
 
 def training_block(checkpoint, ident):
@@ -475,6 +506,7 @@ def main(argv=None):
     if a.model == "laya":
         from pilot.weights import identity
         check_checkpoint_arg(checkpoint)
+        refuse_finetuned_test(checkpoint, entry, a.manifest)  # Phase 5: before any hashing, fetch, load or Ray
         ident = identity(checkpoint)
         seed, training = training_block(checkpoint, ident)   # WR-05: the training seed and recipe, bound by ident
         rid = dumps.run_id("laya", ident)

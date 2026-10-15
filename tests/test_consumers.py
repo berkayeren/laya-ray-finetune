@@ -122,6 +122,33 @@ def test_ray_train_refuses_non_empty_out_before_ray(tmp_repo):
     assert not (tmp_repo / "ray_results").exists()
 
 
+@pytest.mark.timeout(900)
+def test_score_refuses_a_finetuned_checkpoint_on_test_before_any_load(tmp_repo):
+    """ROADMAP Phase 5 criterion 4 (RESEARCH A6): under the committed manifest (tmp_repo's own data/splits.json) a
+    fine-tuned checkpoint is refused on test by score.py and evaluate.py before any load; val, and a checkpoint that is
+    not fine-tuned on test, are unaffected."""
+    import json
+    from tiny_laya import tiny_checkpoint
+    plain = tiny_checkpoint(tmp_repo / "plain")
+    shutil.copytree(plain, str(tmp_repo / "ckpt"))
+    cfg_path = tmp_repo / "ckpt" / "rl_agent_config.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg["fine_tuned"] = True
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    for script in ("score.py", "evaluate.py"):
+        r = _run(tmp_repo, script, "data/splits/test.jsonl", "--checkpoint", "ckpt", "--workers", "0")
+        assert r.returncode != 0, (script, r.stdout, r.stderr)
+        assert "fine-tuned" in r.stderr and "Phase 8" in r.stderr, (script, r.stderr)
+        assert "Traceback" not in r.stderr, (script, r.stderr)
+    assert not (tmp_repo / "results" / "dumps").exists()
+    r = _run(tmp_repo, "score.py", "data/splits/val.jsonl", "--checkpoint", "ckpt", "--workers", "0",
+             "--out-root", "ok")
+    assert r.returncode == 0, r.stderr
+    r = _run(tmp_repo, "score.py", "data/splits/test.jsonl", "--checkpoint", "plain", "--workers", "0",
+             "--out-root", "ok")
+    assert r.returncode == 0, r.stderr
+
+
 @pytest.mark.parametrize("n", ["0", "-5"])
 def test_evaluate_refuses_non_positive_n(tmp_repo, n):
     r = _run(tmp_repo, "evaluate.py", "data/splits/test.jsonl", "--workers", "0", "--n", n)

@@ -2,8 +2,10 @@
 
 - the README results block (between the results-table markers) equals report.render_table of the tracked
   results/reports/*.json in sorted path order, so README numbers cannot be edited by hand or go stale
-- every tracked run dir under results/dumps verifies with pilot.dumps.load_dump for val and test against the
-  committed manifest (offline: load_dump reads no split file)
+- every tracked run dir under results/dumps verifies its val dump with pilot.dumps.load_dump against the committed
+  manifest (offline: load_dump reads no split file); a dir of a fine-tuned (local) Laya checkpoint (system.kind laya,
+  no pinned revision) must hold no tracked test dump until Phase 8's protocol gate (ROADMAP Phase 5 criterion 4),
+  and every other dir (majority, prior, zero-shot Laya) verifies its test dump too
 - the zero-shot run id in the Makefile (LAYA_ZS) is the one score.py derives from the pinned Laya identity
 - the three single-system reports (majority, prior, zero-shot Laya) are full-test, not subset, with both temperature
   variants and a disclosed θ source
@@ -64,13 +66,25 @@ def test_readme_table_matches_committed_reports():
         "README results table differs from `report.py --table results/reports`; paste the generated table"
 
 
-def test_committed_dumps_verify():
+def _finetuned_laya(side):
+    """True for a Laya dump of a local (fine-tuned) checkpoint: kind laya and an identity without the pinned revision."""
+    system = side.get("system") or {}
+    return system.get("kind") == "laya" and not (system.get("checkpoint_identity") or {}).get("revision")
+
+
+def test_committed_dumps_verify_and_no_finetuned_test_dump():
     ids = run_dirs()
     assert set(SYSTEMS) <= set(ids), "missing committed dumps for %s" % sorted(set(SYSTEMS) - set(ids))
     for rid in ids:
-        for split in ("val", "test"):
-            logits, uids, side, _ = dumps.load_dump(os.path.join(DUMPS, rid), split, DEFAULT_MANIFEST)
-            assert side["run_id"] == rid and side["n_subset"] is None and logits.shape == (len(uids), 48)
+        logits, uids, side, _ = dumps.load_dump(os.path.join(DUMPS, rid), "val", DEFAULT_MANIFEST)
+        assert side["run_id"] == rid and side["n_subset"] is None and logits.shape == (len(uids), 48)
+        if _finetuned_laya(side):                           # until Phase 8's protocol gate (ROADMAP Phase 5 SC4)
+            held = tracked("results/dumps/%s/test.npz" % rid, "results/dumps/%s/test.json" % rid)
+            assert not held, ("fine-tuned Laya dump dir %s holds a test dump; no fine-tuned model is scored on test "
+                              "before Phase 8" % rid)
+            continue
+        logits, uids, side, _ = dumps.load_dump(os.path.join(DUMPS, rid), "test", DEFAULT_MANIFEST)
+        assert side["run_id"] == rid and side["n_subset"] is None and logits.shape == (len(uids), 48)
 
 
 def test_makefile_run_id_matches():
