@@ -26,6 +26,19 @@ into metrics with numpy alone (D-05). Systems (--model, default laya):
   one-line refusal with no dump (04-REVIEW WR-01). Both paths run the same Predictor, and Ray's rows, which come back
   in any order, are reassembled by uid into split-file order (a duplicate, missing or unexpected uid is refused).
   --gpus-per-worker is the Ray actors' GPU resource (cuda).
+- berturk: a BERTurk checkpoint written by berturk_train.py (--checkpoint DIR: an epoch export or a final seed holding
+  pilot.berturk.CHECKPOINT_FILES), scored in-process only (--workers 0; seconds for a split) by score_berturk. The
+  driver refuses a split with role test before any hashing, file read or model load, under any manifest (every BERTurk
+  checkpoint is fine-tuned; Phase 8's protocol freeze decides test scoring), then checks the five files, names the
+  dump by pilot.berturk.dump_run_id (berturk-<model sha256[:12]>-<berturk_train.json sha256[:8]>-<digest of
+  config.json and the tokenizer files[:8]>), refuses an existing dump, reads config.json and berturk_train.json from
+  the bytes the identity hashed, and refuses a config.json whose labels are not the 48 INTENTS tags in INTENTS order
+  (pilot.berturk.check_label_order) or a tokenizer that lowercases (check_cased). Right before the load every file is
+  verified against its digest (pilot.weights.verify_files); the tokenizer and BertForSequenceClassification load from
+  the checkpoint dir with local_files_only and fp32, and check_bert refuses parameters off the device or not float32,
+  or autocast on, after the load and after every batch. The logits are the classifier's raw logits (P = sigmoid(logit
+  / T)); the shipped T is berturk_train.json's temperature (1.0 for an export); seed and training come from that
+  record (pilot.berturk.training_block, the keys pilot.postfit reads).
 - prior: p_t = messages carrying tag t / all messages, no-intent rows counted, in the training split the scored
   role's models are trained on (pilot.data.TRAINED_ON: final_train for test, selection_train for val)
 - majority: p = 1 on the most frequent tag of that training split (ties -> the earlier INTENTS tag), 0 elsewhere
@@ -62,9 +75,10 @@ replaces it with the protocol-hash gate (protocol.json).
 
 Module-level imports stay torch-, Ray- and laya-free.
 
-usage: python score.py data/splits/test.jsonl [--model laya|majority|prior] [--checkpoint multilingual|DIR]
+usage: python score.py data/splits/test.jsonl [--model laya|berturk|majority|prior] [--checkpoint multilingual|DIR]
                        [--device cpu|mps|cuda] [--workers W] [--cpus-per-worker C] [--gpus-per-worker G] [--n N]
                        [--out-root DIR] [--force] [--manifest M]
+       python score.py data/splits/val.jsonl --model berturk --checkpoint DIR --workers 0 [--device cpu|mps|cuda]
 """
 import argparse
 import json
@@ -76,7 +90,7 @@ import time
 import numpy as np
 
 from intents import INTENTS, QUESTIONS
-from pilot import dumps
+from pilot import berturk, dumps
 from pilot import laya_adapter as la
 from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, manifest_is_committed, parse_jsonl, questions_sha256,
                         repo_relpath, sha256_bytes, sha256_file, verify_split_file)
@@ -447,19 +461,115 @@ def score_laya(a, checkpoint, cases, device, ident):
     return logits, fields
 
 
+def refuse_berturk_test(checkpoint, entry):
+    """No BERTurk checkpoint is scored on a split with role test in Phase 6, under any manifest (ROADMAP Phase 6
+    criterion 4): every BERTurk checkpoint is fine-tuned. Runs right after the split verification, before any hashing,
+    checkpoint file read or model load; hotels_probe is already refused by the role gate."""
+    if entry["role"] == "test":
+        raise SystemExit("%s is a BERTurk checkpoint; no fine-tuned model is scored on test before the Phase 8 "
+                         "protocol freeze (protocol.json); score val instead" % _shown(checkpoint))
+
+
+def _bound_bytes(path, sha256):
+    """The bytes of `path`, refused unless their sha256 is the one the checkpoint identity recorded."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    if sha256_bytes(raw) != sha256:
+        raise SystemExit("%s changed after it was hashed; rescore" % _shown(path))
+    return raw
+
+
+def check_berturk(checkpoint, ident):
+    """The parsed berturk_train.json of a BERTurk checkpoint, after refusing a config.json that does not score the 48
+    INTENTS tags in INTENTS order or a lowercasing tokenizer; every file is read from the bytes ident hashed."""
+    for name, sha, check in (("config.json", ident["config_sha256"], berturk.check_label_order),
+                             ("tokenizer_config.json", ident["files_sha256"]["tokenizer_config.json"],
+                              berturk.check_cased)):
+        path = os.path.join(checkpoint, name)
+        try:
+            cfg = json.loads(_bound_bytes(path, sha).decode("utf-8"))
+        except ValueError as e:
+            raise SystemExit("%s is not valid JSON (%s); retrain with berturk_train.py" % (_shown(path), e))
+        check(cfg if isinstance(cfg, dict) else {}, _shown(checkpoint))
+    return berturk.read_record(checkpoint, ident)
+
+
+def check_bert(model, device):
+    """{device, dtype, amp_enabled} of a BERTurk model; SystemExit unless every parameter is float32 on `device` and
+    autocast is off there (fp32 scoring on every device, as for Laya). Runs after the load and after every batch."""
+    import torch
+    have = {p.device.type for p in model.parameters()}
+    dtypes = {str(p.dtype) for p in model.parameters()}
+    if have != {device}:
+        raise SystemExit("BERTurk parameters on %s, requested %s; check --device and the visible devices"
+                         % (", ".join(sorted(have)), device))
+    if dtypes != {"torch.float32"} or torch.is_autocast_enabled(device):
+        raise SystemExit("BERTurk runs %s with autocast %s on %s; scoring is fp32 (D-06)"
+                         % (", ".join(sorted(dtypes)), torch.is_autocast_enabled(device), device))
+    return {"device": device, "dtype": "torch.float32", "amp_enabled": False}
+
+
+def score_berturk(a, checkpoint, cases, device, ident, rec):
+    """(float32 [n, 48] logits in `cases` order, sidecar fields) of a BERTurk checkpoint, in-process on `device`.
+    Every file is verified against ident right before the load; batches of BATCH messages in split-file order,
+    padded to the longest, truncated at the record's max_len."""
+    from pilot.weights import verify_files
+    verify_files(checkpoint, dict(ident["files_sha256"], **{"model.safetensors": ident["model_sha256"],
+                                                            "config.json": ident["config_sha256"],
+                                                            berturk.RECORD: ident["record_sha256"]}),
+                 "BERTurk checkpoint")
+    import torch
+    import transformers
+    if device == "mps" and not torch.backends.mps.is_available():
+        raise SystemExit("--device mps, but MPS is not available here; use --device cpu")
+    if device == "cuda" and not torch.cuda.is_available():
+        raise SystemExit("--device cuda, but CUDA is not available here; use --device cpu or mps")
+    torch.set_num_threads(a.cpus_per_worker)
+    model_dir = os.path.abspath(checkpoint)
+    tok = transformers.AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+    model = transformers.BertForSequenceClassification.from_pretrained(model_dir, dtype=torch.float32,
+                                                                       local_files_only=True)
+    model = model.to(device).eval()
+    state = check_bert(model, device)
+    max_len = rec["canonical"]["max_len"]
+    out, infer = [], 0.0
+    t0 = time.time()
+    with torch.no_grad():
+        for i in range(0, len(cases), BATCH):
+            texts = [c["state"] for c in cases[i:i + BATCH]]
+            enc = tok(texts, truncation=True, max_length=max_len, padding="longest", return_tensors="pt")
+            t = time.perf_counter()
+            logits = model(**{k: v.to(device) for k, v in enc.items()}).logits.float().cpu().numpy()
+            infer += time.perf_counter() - t
+            check_bert(model, device)
+            out.append(logits)
+    logits = np.concatenate(out).astype(np.float32, copy=False)
+    fields = {"run_id": berturk.dump_run_id(ident),
+              "system": {"kind": "berturk", "checkpoint": repo_relpath(checkpoint), "checkpoint_identity": ident,
+                         "baseline_source": None, "clip_eps": None},
+              "temperature": {"shipped": float(rec["temperature"]), "source": "berturk_train.json temperature"},
+              "scorer": dict(state, torch_threads=torch.get_num_threads(), torch_version=torch.__version__,
+                             transformers_version=transformers.__version__, numpy_version=np.__version__, workers=0,
+                             batching="%d messages per forward, padded to the longest, truncated at max_len %d"
+                                      % (BATCH, max_len)),
+              "timing": {"seconds": time.time() - t0, "inference_seconds": infer, "sec_per_msg": infer / len(cases)}}
+    return logits, fields
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="score a system on a val/test split into a logit dump")
     ap.add_argument("split_jsonl")
-    ap.add_argument("--model", default="laya", choices=("laya", "majority", "prior"))
+    ap.add_argument("--model", default="laya", choices=("laya", "berturk", "majority", "prior"))
     ap.add_argument("--checkpoint", default=None,
-                    help="--model laya only: multilingual (pinned hub weights; the default) or DIR (local checkpoint)")
+                    help="--model laya: multilingual (pinned hub weights; the default) or DIR (local checkpoint); "
+                         "--model berturk: DIR (a berturk_train.py checkpoint, required)")
     ap.add_argument("--workers", type=int, default=1, help="Ray Data actors; 0 = in-process, no Ray")
     ap.add_argument("--cpus-per-worker", type=int, default=2, help="CPUs and torch threads per actor (or in-process)")
     ap.add_argument("--gpus-per-worker", type=float, default=0,
                     help="GPUs per Ray actor; > 0 implies --device cuda when --device is omitted")
     ap.add_argument("--device", default=None, choices=("cpu", "mps", "cuda"),
-                    help="--model laya only: scoring device (default cuda if --gpus-per-worker > 0, else cpu); "
-                         "mps needs --workers 0")
+                    help="--model laya or berturk: scoring device (default cuda if --gpus-per-worker > 0, else "
+                         "cpu); mps needs --workers 0")
     ap.add_argument("--n", type=int, default=None, help="score a fixed random subset of N messages (debug only)")
     ap.add_argument("--out-root", default=None,
                     help="dump root (default results/dumps; with --n a fresh temp dir, never results/dumps)")
@@ -470,12 +580,16 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.n is not None and a.n <= 0:
         ap.error("--n must be a positive number of messages (omit it to score the whole split)")
-    if a.model != "laya" and a.checkpoint is not None:
-        ap.error("--checkpoint applies only to --model laya")
+    if a.model not in ("laya", "berturk") and a.checkpoint is not None:
+        ap.error("--checkpoint applies only to --model laya or berturk")
+    if a.model == "berturk" and a.checkpoint in (None, "multilingual"):
+        ap.error("--model berturk needs --checkpoint DIR (a berturk_train.py checkpoint)")
+    if a.model == "berturk" and a.workers != 0:
+        ap.error("--model berturk scores in-process: use --workers 0")
     if a.workers < 0 or a.cpus_per_worker < 1 or a.gpus_per_worker < 0:
         ap.error("--workers must be >= 0, --cpus-per-worker >= 1 and --gpus-per-worker >= 0")
-    if a.model != "laya" and a.device is not None:
-        ap.error("--device applies only to --model laya")
+    if a.model not in ("laya", "berturk") and a.device is not None:
+        ap.error("--device applies only to --model laya or berturk")
     device = a.device or ("cuda" if a.gpus_per_worker > 0 else "cpu")
     if a.device in ("cpu", "mps") and a.gpus_per_worker > 0:
         ap.error("--gpus-per-worker > 0 scores on CUDA; it conflicts with --device %s" % a.device)
@@ -491,6 +605,8 @@ def main(argv=None):
     with open(a.split_jsonl, "rb") as f:
         raw = f.read()                                       # hash and parse the same bytes (no reread window)
     entry = verify_split_file(a.split_jsonl, manifest_path=a.manifest, roles=("test", "val"), data=raw)
+    if a.model == "berturk":
+        refuse_berturk_test(a.checkpoint, entry)             # before any hashing, file read or model load
     split_name = os.path.splitext(os.path.basename(entry["path"]))[0]
     cases = parse_jsonl(raw)                                 # split-file order: a full dump verifies by uids_sha256
     if a.n is not None:
@@ -510,6 +626,10 @@ def main(argv=None):
         ident = identity(checkpoint)
         seed, training = training_block(checkpoint, ident)   # WR-05: the training seed and recipe, bound by ident
         rid = dumps.run_id("laya", ident)
+    elif a.model == "berturk":
+        berturk.require_files(checkpoint, "--checkpoint")
+        ident = berturk.identity(checkpoint)
+        rid = berturk.dump_run_id(ident)
     else:
         rid = dumps.run_id(a.model)
     if a.n is None:
@@ -523,9 +643,15 @@ def main(argv=None):
             raise SystemExit("%s already exists; pass --force to rescore it (results/dumps is the committed audit "
                              "record), or --out-root DIR to write elsewhere" % _shown(dst))
 
+    if a.model == "berturk":
+        rec = check_berturk(checkpoint, ident)               # label order, casing and record, before any load
+        seed, training = berturk.training_block(rec)
     if a.model == "laya":
         logits, fields = score_laya(a, checkpoint, cases, device, ident)
         fields = dict(fields, seed=seed, training=training)  # overrides sidecar_base's None for a fine-tuned dump
+    elif a.model == "berturk":
+        logits, fields = score_berturk(a, checkpoint, cases, device, ident, rec)
+        fields = dict(fields, seed=seed, training=training, logit=berturk.LOGIT_NOTE)
     else:
         t0 = time.time()
         name, e_tr, counts, n_tr = train_counts(a.manifest, entry["role"])

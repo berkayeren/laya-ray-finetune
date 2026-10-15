@@ -1,0 +1,105 @@
+"""The Phase 6 tracer on CPU, offline: tiny BERT base -> berturk_train.py (HF Trainer, masked BCE, 2 epochs) -> two
+per-epoch exports -> score.py --model berturk val dumps that pilot.dumps.load_dump verifies -> pilot.postfit.candidate
+and fit accept them -> report.py run_report reports them; score.py refuses the synthetic test split for an export.
+
+No marker: it runs in `make test` (no Ray, no weights, no data download; seconds).
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+import pytest
+
+import pilot.data
+import report
+import score
+from conftest import prepared
+from intents import INTENTS
+from pilot import berturk, dumps, postfit
+from tiny_berturk import tiny_base
+
+REPO = pilot.data.REPO_ROOT
+TIMEOUT = 600
+
+
+def _run(*args):
+    """Run a repo script with the test interpreter (no PYTHONPATH, so it imports like a user's command)."""
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = subprocess.run([sys.executable] + [str(x) for x in args], cwd=REPO, env=env, capture_output=True, text=True,
+                       timeout=TIMEOUT)
+    assert r.returncode == 0, "%s failed (exit %d):\n%s" % (args[0], r.returncode, r.stderr[-4000:])
+    return r
+
+
+def _bytes(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_berturk_train_score_postfit_chain(tmp_path, synthetic_raw):
+    import torch
+    out_dir, manifest = prepared(tmp_path, synthetic_raw)
+    splits = os.path.join(out_dir, "splits")
+    base = tiny_base(tmp_path / "base")
+    storage = tmp_path / "runs"
+    argv = ["berturk_train.py", "--data", os.path.join(splits, "selection_train.jsonl"), "--manifest", manifest,
+            "--base", base, "--device", "cpu", "--epochs", "2", "--batch", "4", "--max-len", "32", "--seed", "0",
+            "--storage", storage]
+    rid = _run(*(argv + ["--print-run-id"])).stdout.strip()
+    assert re.match(r"^berturk-selection_train-s0-[0-9a-f]{8}$", rid), rid
+    assert not storage.exists()                              # --print-run-id creates nothing
+    _run(*argv)
+    run_dir = storage / rid
+    assert sorted(os.listdir(run_dir / "exports")) == ["epoch-001", "epoch-002"]
+    assert (run_dir / berturk.DONE).is_file()
+    exports = [str(run_dir / "exports" / e) for e in ("epoch-001", "epoch-002")]
+    for k, exp in enumerate(exports, 1):
+        assert sorted(os.listdir(exp)) == sorted(berturk.CHECKPOINT_FILES)
+        for f in berturk.TOKENIZER_FILES:                    # byte copies of the base, never save_pretrained output
+            assert _bytes(os.path.join(exp, f)) == _bytes(os.path.join(base, f))
+        with open(os.path.join(exp, "config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+        assert [cfg["id2label"][str(i)] for i in range(len(INTENTS))] == list(INTENTS)
+        with open(os.path.join(exp, berturk.RECORD), encoding="utf-8") as f:
+            rec = json.load(f)
+        assert rec["schema"] == berturk.RECORD_SCHEMA and rec["run_id"] == rid and rec["epoch"] == k
+        assert rec["calibrated"] is False and rec["temperature"] == 1.0
+        assert [row["epoch"] for row in rec["record"]["epochs"]] == list(range(1, k + 1))
+        assert all(set(row) == set(berturk.EPOCH_FIELDS) for row in rec["record"]["epochs"])
+        assert rec["record"]["param_device"] == "cpu" and rec["record"]["dtype"] == "torch.float32"
+
+    dump_root = str(tmp_path / "dumps")
+    val = os.path.join(splits, "val.jsonl")
+    threads = torch.get_num_threads()
+    try:
+        run_dirs = []
+        for k, exp in enumerate(exports, 1):
+            d, _ = score.main([val, "--model", "berturk", "--checkpoint", exp, "--workers", "0", "--manifest",
+                               manifest, "--out-root", dump_root])
+            assert os.path.basename(d) == berturk.dump_run_id(berturk.identity(exp))
+            logits, uids, side, entry = dumps.load_dump(d, "val", manifest)
+            assert logits.shape == (entry["n_messages"], len(INTENTS))
+            assert side["system"]["kind"] == "berturk" and side["temperature"]["shipped"] == 1.0
+            assert (side["scorer"]["device"], side["scorer"]["dtype"], side["scorer"]["amp_enabled"]) \
+                == ("cpu", "torch.float32", False)
+            tr = side["training"]
+            assert side["seed"] == 0 and tr["epoch"] == k and tr["epochs_schedule"] == 2
+            assert tr["encoder_lr"] == tr["head_lr"] == 2e-05 and tr["calibrated"] is False
+            assert side["logit"] == berturk.LOGIT_NOTE
+            assert postfit.candidate(d, manifest)["system_kind"] == "berturk"
+            run_dirs.append(d)
+        rec = postfit.fit(run_dirs, manifest, lr_grid=(2e-05,), epochs=2, head_lr=2e-05, selection_seed=0,
+                          final_seeds=(0, 1, 2))
+        assert rec["chosen"]["epoch"] in (1, 2) and postfit.T_MIN <= rec["chosen"]["temperature"] <= postfit.T_MAX
+        rep = report.run_report(run_dirs[0], "val", manifest)
+        assert sorted(rep["variants"]) == ["raw", "shipped"]
+        with pytest.raises(SystemExit, match="Phase 8"):
+            score.main([os.path.join(splits, "test.jsonl"), "--model", "berturk", "--checkpoint", exports[0],
+                        "--workers", "0", "--manifest", manifest, "--out-root", dump_root])
+        assert not any(os.path.exists(os.path.join(d, "test.npz")) or os.path.exists(os.path.join(d, "test.json"))
+                       for d in run_dirs)
+    finally:
+        torch.set_num_threads(threads)
