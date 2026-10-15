@@ -12,7 +12,8 @@ cuda. The recipe is the one the user confirmed at plan 06-02 (pilot.berturk hold
   transformers.set_seed(--seed) right before the classifier head is created, seed and data_seed for the Trainer.
 - A6: no resume. A run takes minutes, so it is rerun from scratch: an existing <storage>/<run_id>/ is refused, naming
   the dir to delete. No Trainer checkpoint, training_args.bin, optimizer, scheduler or RNG pickle is written or read
-  (save_strategy "no"); the exports are safetensors plus JSON.
+  (save_strategy "no"); the exports are safetensors plus JSON. The Trainer's output_dir is removed after training, and
+  a run is not marked done if the Trainer wrote anything into it.
 - A7: the loss is a masked BCE given to the Trainer as compute_loss_func: a masked (message, tag) label is -100, and
   the loss is the BCE summed over the unmasked entries divided by the Trainer's num_items_in_batch (its count of labels
   != -100 over the accumulation window, clamped at 1). Unmasked, it equals the mean BCE over all 48 tags; a masked tag
@@ -158,6 +159,18 @@ def write_export(model, base_dir, run_dir, epoch, rec):
                          % (name, have, sorted(berturk.CHECKPOINT_FILES)))
     os.rename(tmp, final)
     return final
+
+
+def remove_trainer_dir(path):
+    """Remove the Trainer's output_dir, which save_strategy "no" leaves empty; SystemExit naming what it holds
+    otherwise (A6: no Trainer checkpoint, training_args.bin or RNG pickle), so such a run is never marked done."""
+    if not os.path.isdir(path):
+        return
+    left = sorted(os.listdir(path))
+    if left:
+        raise SystemExit("the Trainer wrote %s under %s; a BERTurk run keeps no Trainer state (A6): check the "
+                         "transformers version and the TrainingArguments" % (", ".join(left), path))
+    os.rmdir(path)
 
 
 def main(argv=None):
@@ -330,6 +343,7 @@ def main(argv=None):
     trainer.train()
     if ep["epoch"] != a.epochs:
         raise SystemExit("the run stopped after %d of %d epochs" % (ep["epoch"], a.epochs))
+    remove_trainer_dir(args.output_dir)
     write_atomic(os.path.join(run_dir, berturk.DONE), berturk.record_bytes(doc(a.epochs)))
     print("%s: %d epochs -> %s" % (rid, a.epochs, os.path.join(run_dir, "exports")))
     return run_dir
