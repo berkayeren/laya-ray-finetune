@@ -11,7 +11,7 @@ Ray cluster.
 
 Per worker:  load base -> build items -> shard by rank -> DDP train
 Rank 0:      save the final, uncalibrated checkpoint (T = 1) and report it to Ray; postfit.py fits the temperature
-             on message-level val data after training (LAYA-05).
+             on message-level val data after training (LAYA-05). A --postfit final seed serves that val-fitted T.
 
 Devices (--device cpu|cuda|mps, default cpu; --gpu is an alias for --device cuda): cpu and cuda take the device from
 Ray (use_gpu on cuda, DDP across --workers). Ray has no MPS device manager, so --device mps runs one Ray worker with
@@ -77,6 +77,18 @@ is below pilot.runs.disk_need_bytes. A failed run ends in one line: the MPS OOM 
 when Ray's snapshot points at deleted checkpoints, a worker's refusal (SystemExit) as is, or "rerun the same command to
 resume".
 
+Final seeds (Phase 5, LAYA-08): --stop-after-epoch K trains epochs 1..K of the --epochs schedule and publishes epoch K
+as the final checkpoint; the cosine T_max and the sigma anneal stay sized by --epochs, so epoch K is the selection run's
+epoch K (RESEARCH A3; on cpu its weights are byte-identical to that run's exports/epoch-NNN). K is 1..--epochs - 1:
+K = --epochs has one spelling, the omitted flag. --postfit RECORD binds a final seed to the val selection by refusal,
+not transcription: the record is read (schema, sha256 of its bytes) before any fetch, and once the base identity is
+known, before --print-run-id and ray.init, pilot.postfit.check_final refuses unless --data is the record's final split (final_train), --seed is one of its final
+seeds, --stop-after-epoch is the chosen one and every other canonical value equals the chosen selection run's (naming
+the first differing key). The final config then serves the record's val-fitted T (temperature [1, 1, T] bit for bit,
+temperature_by_options {}, training.calibrated True, training.postfit with the record's sha256, chosen settings, T and
+θ) and the run record carries postfit {sha256, chosen, temperature}. stop_after_epoch and postfit_sha256 are run-identity
+keys left out when None (every selection run id is unchanged); postfit.py --print-final-commands prints the commands.
+
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
 (tampered, unregistered, val/test/probe) is refused before Ray starts. --base multilingual fetches the pinned,
 sha256-verified Laya weights (pilot.weights) before Ray starts; any other value must be a local checkpoint dir. A base
@@ -94,6 +106,8 @@ usage:
   python ray_train.py ... --device mps --workers 1 --freeze-embeddings   # fallback rung 1 after an MPS OOM
   python ray_train.py ... --workers 2 --freeze-encoder --max-messages 100   # CPU smoke test
   python ray_train.py ... --print-run-id            # the run id (storage/<run_id>/); rerun a killed command to resume
+  python ray_train.py --data data/splits/final_train.jsonl ... --epochs 4 --stop-after-epoch 2 --seed 1 \
+                      --postfit results/postfit/laya.json --no-export-epochs   # a final seed (postfit.py prints it)
 """
 import argparse
 import gc
@@ -115,7 +129,7 @@ from ray.train import Checkpoint, CheckpointConfig, FailureConfig, RunConfig, Sc
 from ray.train.torch import TorchTrainer
 
 from pilot import laya_adapter as la
-from pilot import dumps, pins, runs, spike
+from pilot import dumps, pins, postfit, runs, spike
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file,
                         verify_split_file)
 from pilot.weights import (check_tokenizer_config_rewritable, check_tokenizer_config_rewritten, checkpoint_digests,
@@ -331,12 +345,13 @@ def epoch_config(cfg, max_len, head_max_len, ray_cfg, epoch):
                 training=dict(cfg.get("training") or {}, ray_train=ray_cfg, epoch=epoch, calibrated=False))
 
 
-def identity_values(a, r, entry, base_name, base_ident):
+def identity_values(a, r, entry, base_name, base_ident, postfit_sha256=None):
     """The pilot.runs.IDENTITY values of a command: parsed args `a`, resolve(a) `r`, the verified split `entry` and the
     base identity. Paths enter only as their verified digests, aliases (--gpu) only as their resolved value. A local
     base also enters by the digest of its tokenizer/ and encoder/ files (the tokenizer builds every training item;
     04-REVIEW WR-01); the pinned base's are fixed by the pin, so base_files_sha256 is None there and
-    pilot.runs.canonical leaves it out, which keeps every pinned run id unchanged."""
+    pilot.runs.canonical leaves it out, which keeps every pinned run id unchanged. stop_after_epoch and postfit_sha256
+    (the sha256 of the --postfit record) are None and left out the same way unless a final seed sets them."""
     return {"split": os.path.splitext(os.path.basename(entry["path"]))[0],
             "data_sha256": entry["sha256"], "data_role": entry["role"],
             "base_model_sha256": base_ident["model_sha256"],
@@ -352,7 +367,8 @@ def identity_values(a, r, entry, base_name, base_ident):
             "encoder_lr": a.encoder_lr, "head_lr": a.head_lr, "loss": a.loss, "neg": a.neg,
             "freeze_encoder": a.freeze_encoder, "freeze_embeddings": a.freeze_embeddings, "max_len": a.max_len,
             "head_max_len": a.head_max_len, "max_messages": a.max_messages,
-            "shuffle_options": a.shuffle_options, "seed": a.seed}
+            "shuffle_options": a.shuffle_options, "seed": a.seed,
+            "stop_after_epoch": a.stop_after_epoch, "postfit_sha256": postfit_sha256}
 
 
 def worker_device(c):
@@ -596,7 +612,10 @@ def train_loop_per_worker(c):
     # the model move (and a resume's weights) allocate on the device outside the training step (04-REVIEW WR-01); a
     # rerun with no epoch left only writes the final checkpoint, so its OOM says to rerun, never the next rung (a rung
     # flag would change the run_id and retrain every epoch)
-    move = runs.STAGE_FINALIZE_MOVE if training_done(state, c["epochs"]) else "while moving the model to the device"
+    # a final seed stops after the val-chosen epoch K of the --epochs schedule (--stop-after-epoch): the cosine T_max and
+    # the sigma anneal below keep c["epochs"], so epochs 1..K follow the selection run's own trajectory (RESEARCH A3)
+    stop = c["stop_after_epoch"] or c["epochs"]
+    move = runs.STAGE_FINALIZE_MOVE if training_done(state, stop) else "while moving the model to the device"
     with mps_oom_exit(None, None, c["rung"], move):
         if state is not None:                               # fp32 weights into the CPU model: one copy on the device
             t = time.perf_counter()
@@ -634,7 +653,7 @@ def train_loop_per_worker(c):
     if state is not None:
         # after the optimizer and scheduler exist (the scheduler's constructor sets the lr the saved state restores)
         t = time.perf_counter()
-        restored = restore_optimizer(state, c["epochs"], opt, sched, scaler, c["rung"])
+        restored = restore_optimizer(state, stop, opt, sched, scaler, c["rung"])
         set_rng_states(rng_state, device, rng)
         start_epoch, rows_out, segments = state["epoch"], list(state["history"]), list(state["segments"])
         rows_out[-1]["save_s"] = save_meta["save_s"]       # the saved epoch's own save time, written after its state
@@ -671,6 +690,9 @@ def train_loop_per_worker(c):
               "canonical": c["canonical"], "segments": segments,
               "code_changed_on_resume": code_changed(segments),
               "exports": [], "train_state_bytes": state_bytes, "export_bytes": None, "save_s_includes_persist": True,
+              # a final seed's binding to the val selection (LAYA-08): the record's sha256, chosen settings and T
+              "postfit": ({k: c["postfit"][k] for k in ("sha256", "chosen", "temperature")} if c["postfit"]
+                          else None),
               "epochs": rows_out}
 
     def note_exports():
@@ -687,7 +709,7 @@ def train_loop_per_worker(c):
                   flush=True)
     note_exports()
     last = {"epoch": start_epoch, "loss": rows_out[-1]["loss"] if rows_out else None}
-    for epoch in range(start_epoch, c["epochs"]):
+    for epoch in range(start_epoch, stop):
         t_epoch = time.time()
         order = list(shard)
         random.Random(c["seed"] + 1000 * epoch + rank).shuffle(order)
@@ -734,9 +756,9 @@ def train_loop_per_worker(c):
         metrics = {"epoch": epoch + 1, "loss": row["loss"], "epoch_seconds": round(time.time() - t_epoch, 1),
                    "train_s": train_s}
         if rank == 0:
-            print("epoch %d/%d loss %.4f train %.1fs peak %.2f GiB swap %+.0f MiB"
-                  % (epoch + 1, c["epochs"], row["loss"], train_s, row["peak_total_bytes"] / 2**30,
-                     swap_delta / 2**20), flush=True)
+            print("epoch %d/%d%s loss %.4f train %.1fs peak %.2f GiB swap %+.0f MiB"
+                  % (epoch + 1, c["epochs"], " (stop after %d)" % stop if stop != c["epochs"] else "", row["loss"],
+                     train_s, row["peak_total_bytes"] / 2**30, swap_delta / 2**20), flush=True)
 
         # Epoch checkpoint (LAYA-04): rank 0's fp32 train state + every rank's RNG; never the fp16 laya export
         if device.type == "mps":
@@ -774,8 +796,9 @@ def train_loop_per_worker(c):
             raise RuntimeError("simulated failure after epoch %d (--fail-after-epoch)" % (epoch + 1))
         last = metrics
 
-    # Publish the final, uncalibrated checkpoint (T = 1) from rank 0; postfit.py fits T on val later (LAYA-05).
-    # record["calib_s"] stays None: training no longer calibrates.
+    # Publish the final checkpoint from rank 0: uncalibrated (T = 1; postfit.py fits T on val later, LAYA-05), or, for a
+    # --postfit final seed, serving the record's val-fitted T bit for bit (a JSON float round trip, never rounded), which
+    # laya.load then serves (LAYA-08). record["calib_s"] stays None: training never calibrates.
     del opt, sched, scaler, params, groups                 # free optimizer state before the final save
     gc.collect()
     if device.type == "mps":
@@ -785,7 +808,10 @@ def train_loop_per_worker(c):
         out_cfg = dict(cfg, max_len=max_len, head_max_len=head_max_len, fine_tuned=True,
                        temperature=list(UNCALIBRATED_TEMPERATURE), temperature_by_options={})
         out_cfg["training"] = dict(out_cfg.get("training") or {}, ray_train=dict(ray_cfg, record=record),
-                                   epoch=c["epochs"], calibrated=False)
+                                   epoch=stop, calibrated=False)
+        if c["postfit"]:                                    # [choice, score, noul]: only noul is val-fitted
+            out_cfg["temperature"] = [1.0, 1.0, c["postfit"]["temperature"]]
+            out_cfg["training"].update(calibrated=True, postfit=c["postfit"])
         with tempfile.TemporaryDirectory() as d:
             t_save = time.perf_counter()
             with mps_oom_exit(None, None, c["rung"], runs.STAGE_FINAL_SAVE):
@@ -843,6 +869,13 @@ def parser():
     ap.add_argument("--export-epochs", action=argparse.BooleanOptionalAction, default=True,
                     help="write each epoch's uncalibrated laya export to storage/<run_id>/exports/epoch-NNN for Phase 5 "
                          "epoch selection (default on)")
+    ap.add_argument("--stop-after-epoch", type=int, default=None,
+                    help="stop after epoch K of the --epochs schedule (the cosine schedule and the sigma anneal keep "
+                         "--epochs): the val-selected epoch of a final seed; 1..--epochs - 1, omit it for every epoch")
+    ap.add_argument("--postfit", default=None,
+                    help="the committed postfit record (results/postfit/laya.json): trains a final seed with the "
+                         "val-chosen settings, refused unless every hyperparameter matches, and writes the val-fitted T "
+                         "into the final config")
     ap.add_argument("--fail-after-epoch", type=int, default=None, help=argparse.SUPPRESS)   # test hook, never an env var
     return ap
 
@@ -863,6 +896,10 @@ def main(argv=None):
             ap.error("%s must be at least 1" % flag)
     if a.freeze_embeddings and a.freeze_encoder:
         ap.error("--freeze-encoder already freezes the embeddings; pass one of them")
+    # K = --epochs has one spelling, the omitted flag (one run id per trajectory)
+    if a.stop_after_epoch is not None and not 1 <= a.stop_after_epoch < a.epochs:
+        ap.error("--stop-after-epoch must be at least 1 and below --epochs (%d); omit it to train every epoch"
+                 % a.epochs)
     try:
         r = resolve(a)
     except ValueError as e:
@@ -872,6 +909,8 @@ def main(argv=None):
     if a.amp and r["device"] in ("mps", "cpu"):
         ap.error("--amp is CUDA-only (the MPS fine-tune is measured with AMP off); drop --amp")
     entry = verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))   # before ray.init (D-03)
+    # the postfit record (torch-free read: schema and sha256 of the parsed bytes) before any fetch or ray.init
+    record, record_sha = postfit.read_record(a.postfit) if a.postfit else (None, None)
     if not a.print_run_id and os.path.exists(a.out) and (not os.path.isdir(a.out) or os.listdir(a.out)):
         # copying over old files could leave a mixed checkpoint that laya.load still accepts
         raise SystemExit("--out %s exists and is not empty; choose a new dir" % a.out)
@@ -892,14 +931,18 @@ def main(argv=None):
     base_ident = identity(base_name)
     base_sha256 = checkpoint_digests(base_name, base_ident)   # workers verify these bytes before loading
     check_tokenizer_config_rewritable(base_dir, "base checkpoint")   # before ray.init, not after a worker load (CR-01)
-    canon = runs.canonical(identity_values(a, r, entry, base_name, base_ident))
+    canon = runs.canonical(identity_values(a, r, entry, base_name, base_ident, record_sha))
+    pf_block = None
+    if record is not None:                                  # bound by refusal, never by transcription (LAYA-08)
+        postfit.check_final(record, canon)
+        pf_block = postfit.final_block(record, record_sha, a.postfit)   # refuses a T outside laya's band here
     rid = runs.run_id(canon)                                # the Ray experiment name: storage/<rid> is the resume dir
     if a.print_run_id:
         print(rid)
         return
     run_dir = os.path.join(os.path.abspath(a.storage), rid)  # Ray's experiment dir: the resume key
-    need = runs.disk_need_bytes(os.path.getsize(os.path.join(base_dir, "model.safetensors")), a.epochs,
-                                a.export_epochs)
+    need = runs.disk_need_bytes(os.path.getsize(os.path.join(base_dir, "model.safetensors")),
+                                a.stop_after_epoch or a.epochs, a.export_epochs)
     free = runs.free_bytes(a.storage)
     if free < need:                                         # before ray.init: a full disk mid-save corrupts the run
         raise SystemExit("%.1f GiB free under --storage; this run needs about %.1f GiB (three train states during "
@@ -926,7 +969,8 @@ def main(argv=None):
                 "max_messages": a.max_messages, "neg": a.neg,
                 "seed": a.seed, "expect_env": env, "run_id": rid, "canonical": canon, "code": code_state(),
                 "storage": os.path.abspath(a.storage), "export_epochs": a.export_epochs,
-                "fail_after_epoch": a.fail_after_epoch,
+                "fail_after_epoch": a.fail_after_epoch, "stop_after_epoch": a.stop_after_epoch,
+                "postfit": pf_block,
                 "provenance": provenance(entry, a.manifest, a.base, base_dir, base_ident)}, **r)
     cfg["rung"] = runs.rung_label(cfg)                      # derived from the flags, into the record and the config
     trainer = TorchTrainer(

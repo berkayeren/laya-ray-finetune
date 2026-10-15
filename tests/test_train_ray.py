@@ -5,6 +5,9 @@ trainable, so gradient checkpointing is on and AMP off. The checkpoint config's 
 device the parameters landed on and hold one row per epoch with exactly pilot.runs.EPOCH_FIELDS (LAYA-02, LAYA-06).
 Every selected message trains (no calibration holdout), and every export and final checkpoint is uncalibrated at
 T = 1, also from a base that ships another temperature (LAYA-05).
+The Phase 5 chain runs end to end on the tiny checkpoint: a selection run's epoch exports scored on val build a postfit
+record, a --postfit final seed on final_train serves the record's val-fitted T, and --stop-after-epoch K reproduces the
+selection run's epoch K (LAYA-05, LAYA-08).
 Runs in `make test` under the ray marker (CPU only, no weights or data).
 """
 import json
@@ -16,7 +19,9 @@ import pytest
 
 import pilot.data
 from conftest import make_raw
-from pilot import runs
+from pilot import dumps, postfit, runs
+from pilot.data import sha256_file
+from pilot.weights import identity
 from tiny_laya import tiny_checkpoint
 
 pytestmark = pytest.mark.ray
@@ -36,22 +41,24 @@ def _run(*args):
 
 @pytest.fixture(scope="module")
 def tiny_train(tmp_path_factory):
-    """train(name, *flags, base=None) -> checkpoint dir of a full-encoder ray_train.py run on --device cpu, from the
-    tiny base (temperature 1.0) unless `base` names another local checkpoint. train.storage is the Ray storage dir."""
+    """train(name, *flags, base=None, split="selection_train") -> checkpoint dir of a full-encoder ray_train.py run on
+    --device cpu, from the tiny base (temperature 1.0) unless `base` names another local checkpoint. train.storage is
+    the Ray storage dir, train.data the prepared synthetic snapshot (splits/ and splits.json)."""
     d = tmp_path_factory.mktemp("train_cpu")
     root, raw_sha256 = make_raw(str(d / "raw"))
     out_dir = str(d / "data")
     pilot.data.prepare(root, out_dir, raw_sha256)
     tiny = tiny_checkpoint(d / "base")
 
-    def train(name, *flags, base=None):
+    def train(name, *flags, base=None, split="selection_train"):
         ckpt = d / name
-        _run("ray_train.py", "--data", os.path.join(out_dir, "splits", "selection_train.jsonl"),
+        _run("ray_train.py", "--data", os.path.join(out_dir, "splits", split + ".jsonl"),
              "--manifest", os.path.join(out_dir, "splits.json"), "--base", base or tiny, "--out", ckpt,
              "--device", "cpu", "--workers", "1", "--max-messages", "12", "--storage", d / "ray", *flags)
         return str(ckpt)
     train.storage = str(d / "ray")
     train.work = d
+    train.data = out_dir
     return train
 
 
@@ -169,3 +176,55 @@ def test_worker_oom_ends_the_driver_with_one_line(tmp_path):
     assert r.returncode == 1, r.stderr[-4000:]
     # SystemExit prints the bare line; Ray's forwarded worker logs (prefixed, asynchronous) may follow it
     assert runs.oom_message(2, 17, "none") in r.stderr.splitlines(), r.stderr[-4000:]
+
+
+def _score_val(train, ckpt):
+    """score.py --workers 0 of a checkpoint on the synthetic val split into train.work/dumps; returns the dump dir."""
+    root = str(train.work / "dumps")
+    _run("score.py", os.path.join(train.data, "splits", "val.jsonl"), "--checkpoint", ckpt, "--workers", "0",
+         "--cpus-per-worker", "1", "--manifest", os.path.join(train.data, "splits.json"), "--out-root", root)
+    return os.path.join(root, dumps.run_id("laya", identity(ckpt)))
+
+
+@pytest.mark.timeout(1200)
+def test_postfit_final_seed_end_to_end(tiny_train):
+    """Phase 5 on the tiny checkpoint (LAYA-05, LAYA-08): a 2-epoch selection run's two epoch exports, scored on val,
+    give a postfit record (one-LR grid); a --postfit final seed on final_train trains the chosen recipe and epoch,
+    serves the record's T bit for bit, records the binding, and its own (in-sample) val dump is refused by postfit."""
+    manifest = os.path.join(tiny_train.data, "splits.json")
+    sel = tiny_train("sel_2e5", "--epochs", "2", "--encoder-lr", "2e-05")
+    rid = runs.read_record(sel)["run_id"]
+    run_dirs = [_score_val(tiny_train, os.path.join(tiny_train.storage, rid, "exports", "epoch-%03d" % e))
+                for e in (1, 2)]
+    record = postfit.fit(run_dirs, manifest, lr_grid=(2e-05,), epochs=2)
+    path = postfit.write_record(record, str(tiny_train.work / "postfit" / "laya.json"))
+    sha, chosen = sha256_file(path), record["chosen"]
+    assert chosen["train_run_id"] == rid and chosen["stop_after_epoch"] == (1 if chosen["epoch"] == 1 else None)
+    T = chosen["temperature"]
+    stop = ["--stop-after-epoch", "1"] if chosen["stop_after_epoch"] == 1 else []
+    final = tiny_train("final_s1", "--epochs", "2", "--encoder-lr", "2e-05", "--seed", "1", "--postfit", path,
+                       "--no-export-epochs", *stop, split="final_train")
+
+    cfg = _config(final)
+    assert cfg["temperature"] == [1.0, 1.0, T] and cfg["temperature"][2] == T      # bit for bit, never rounded
+    assert cfg["temperature_by_options"] == {}
+    tr = cfg["training"]
+    assert tr["calibrated"] is True and tr["epoch"] == chosen["epoch"]
+    assert tr["postfit"]["sha256"] == sha and tr["postfit"]["temperature"] == T
+    assert tr["postfit"]["chosen"]["train_run_id"] == rid and tr["postfit"]["theta"] == chosen["theta"]
+    rec = runs.read_record(final)
+    assert rec["postfit"] == {"sha256": sha, "chosen": tr["postfit"]["chosen"], "temperature": T}
+    assert rec["canonical"]["split"] == "final_train" and rec["canonical"]["seed"] == 1
+    assert rec["canonical"]["postfit_sha256"] == sha
+    assert rec["canonical"].get("stop_after_epoch") == chosen["stop_after_epoch"]
+    assert [row["epoch"] for row in rec["epochs"]] == list(range(1, chosen["epoch"] + 1))
+    assert rec["exports"] == []                                                    # --no-export-epochs
+
+    final_dump = _score_val(tiny_train, final)
+    with open(os.path.join(final_dump, "val.json"), encoding="utf-8") as f:
+        side = json.load(f)
+    assert side["seed"] == 1 and side["training"]["postfit_sha256"] == sha
+    assert side["training"]["calibrated"] is True and side["training"]["split"] == "final_train"
+    assert abs(side["temperature"]["shipped"] - T) < 1e-6, (side["temperature"], T)
+    with pytest.raises(SystemExit, match="selection_train"):                       # a final seed's val is in-sample
+        postfit.candidate(final_dump, manifest)

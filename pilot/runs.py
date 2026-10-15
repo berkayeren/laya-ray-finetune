@@ -39,7 +39,8 @@ from pilot.data import repo_relpath
 IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_config_sha256", "base_files_sha256",
             "laya_version", "device", "workers", "epochs", "micro_batch", "grad_accum", "encoder_lr", "head_lr",
             "weight_decay", "clip_grad_norm", "loss", "neg", "neg_seed", "freeze_encoder", "freeze_embeddings", "grad_checkpointing", "amp", "max_len",
-            "head_max_len", "max_messages", "shuffle_options", "seed", "adamw_foreach", "adamw_fused")
+            "head_max_len", "max_messages", "shuffle_options", "seed", "adamw_foreach", "adamw_fused",
+            "stop_after_epoch", "postfit_sha256")
 # ray_train.py flags that never change training, so never the run_id:
 #   data, base, manifest: paths, represented in IDENTITY by the verified sha256s (data_sha256, base_*_sha256)
 #   out, storage: where the result and the Ray run dir go
@@ -48,14 +49,17 @@ IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_conf
 #   print_run_id: prints the run_id and exits
 #   fail_after_epoch: a test hook that kills the run after an epoch's checkpoint; the rerun must resume the same run
 #   export_epochs: whether per-epoch laya exports are written next to the run (outputs, not training)
+#   postfit: a path, represented in IDENTITY by postfit_sha256
 NOT_IDENTITY = ("data", "base", "out", "storage", "manifest", "cpus_per_worker", "object_store_gb", "gpu",
-                "print_run_id", "fail_after_epoch", "export_epochs")
+                "print_run_id", "fail_after_epoch", "export_epochs", "postfit")
 # IDENTITY keys canonical() leaves out when their value is None. base_files_sha256 is the pilot.dumps.files_digest of a
 # local base's tokenizer/ and encoder/ files (04-REVIEW WR-01) and None for the pinned base, whose files the pin fixes.
 # The committed compute probe id laya-selection_train-neg8-s0-db11040d (Phase 4, trained with a 40-message calibration
 # holdout, keys calib_max_messages and calib_frac) is historical: LAYA-05 removed the holdout and those keys, so every
-# Phase 5 run id differs from it, and results/compute/ keeps it as the record of that run
-DROPPED_WHEN_NONE = ("base_files_sha256",)
+# Phase 5 run id differs from it, and results/compute/ keeps it as the record of that run.
+# stop_after_epoch (a final seed stopping at the val-chosen epoch of the --epochs schedule) and postfit_sha256 (the
+# sha256 of the postfit record a final seed is bound to) are absent when unused, so every selection run id is unchanged
+DROPPED_WHEN_NONE = ("base_files_sha256", "stop_after_epoch", "postfit_sha256")
 
 
 def canonical(values):

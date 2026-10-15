@@ -61,6 +61,9 @@ TIE_ORDER = "equal objectives: fewer epochs first, then the lower encoder LR"
 EPOCH_TRANSFER = ("the final seeds train on final_train with the selection schedule (--epochs %d) and stop after the "
                   "chosen epoch (--stop-after-epoch), never --epochs k*" % EPOCHS)
 CANDIDATE_SCORER_KEYS = ("device", "dtype", "amp_enabled")
+# canonical run-config keys a final seed may differ in from the chosen selection run (LAYA-08): its split and data,
+# its seeds, its stop epoch (checked against the chosen epoch on its own) and the record it is bound to
+FINAL_FREE_KEYS = ("split", "data_sha256", "data_role", "seed", "neg_seed", "stop_after_epoch", "postfit_sha256")
 EXPORT_RE = re.compile(r"^epoch-[0-9]{3}$")              # ray_train.py's <storage>/<run_id>/exports/epoch-NNN
 
 
@@ -289,6 +292,53 @@ def read_record(path):
         if not isinstance(record.get(key), dict):
             raise SystemExit("%s has no %s block; rebuild it with this postfit.py" % (path, key))
     return record, sha256_bytes(raw)
+
+
+def check_final(record, canon):
+    """Refuse (SystemExit) a final-seed command whose canonical run config `canon` (pilot.runs.canonical of the
+    ray_train.py command) is not bound to the record: the split must be the record's final split, the seed one of its
+    final seeds, stop_after_epoch the chosen one (None when the chosen epoch is the last of the schedule), and every
+    other key outside FINAL_FREE_KEYS must equal the chosen selection run's canonical value exactly (JSON equality: 1
+    and 1.0 differ). The first differing key in sorted order is named with both values (LAYA-08)."""
+    chosen, final = record["chosen"], record["final"]
+    if canon.get("split") != final.get("split"):
+        raise SystemExit("--postfit trains the final seeds on %s; --data is %s" % (final.get("split"), canon.get("split")))
+    if canon.get("seed") not in (final.get("seeds") or []):
+        raise SystemExit("--seed %r is not one of the record's final seeds %s" % (canon.get("seed"), final.get("seeds")))
+    stop = chosen.get("stop_after_epoch")
+    if canon.get("stop_after_epoch") != stop:
+        want = ("omit --stop-after-epoch" if stop is None else "pass --stop-after-epoch %d" % stop)
+        raise SystemExit("--postfit: the chosen candidate is epoch %r of the --epochs %r schedule, so %s (--stop-after-"
+                         "epoch is %r here)" % (chosen.get("epoch"), chosen.get("epochs_schedule"), want,
+                                                canon.get("stop_after_epoch")))
+    want_canon = chosen.get("canonical")
+    if not isinstance(want_canon, dict):
+        raise SystemExit("the postfit record's chosen run has no canonical config; rebuild it with this postfit.py")
+    missing = object()
+    for key in sorted((set(canon) | set(want_canon)) - set(FINAL_FREE_KEYS)):
+        have, want = canon.get(key, missing), want_canon.get(key, missing)
+        if have is missing or want is missing or _json(have) != _json(want):
+            raise SystemExit("--postfit: %s is %r here but %r in the chosen selection run %s; pass the chosen value "
+                             "(postfit.py --print-final-commands prints each command)"
+                             % (key, None if have is missing else have, None if want is missing else want,
+                                chosen.get("train_run_id")))
+
+
+def final_block(record, sha256, path):
+    """training.postfit of a final seed's config (and ray_train.py's cfg["postfit"]): the record's sha256 and
+    repo-relative path, the chosen settings, the val-fitted T (written as the config's noul temperature) and θ, and
+    the selection rules. Ids, digests and numbers only."""
+    chosen, rules = record["chosen"], record.get("rules") or {}
+    t = chosen.get("temperature")
+    if isinstance(t, bool) or not isinstance(t, float) or not T_MIN <= t <= T_MAX:
+        raise SystemExit("the postfit record's chosen temperature is %r, not a float in laya's band [%s, %s]; rebuild "
+                         "it with this postfit.py" % (t, T_MIN, T_MAX))
+    return {"sha256": sha256, "record": repo_relpath(path),
+            "chosen": {k: chosen.get(k) for k in ("train_run_id", "dump_run_id", "encoder_lr", "epoch",
+                                                  "epochs_schedule", "stop_after_epoch",
+                                                  "val_micro_f1_at_global_theta")},
+            "temperature": chosen["temperature"], "theta": chosen.get("theta"),
+            "rules": {k: rules.get(k) for k in ("objective", "tie_order", "epoch_transfer")}}
 
 
 def prune_export(export_dir, dump_root=dumps.DUMP_ROOT, manifest_path=DEFAULT_MANIFEST):
