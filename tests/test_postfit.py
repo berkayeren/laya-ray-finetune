@@ -305,3 +305,67 @@ def test_postfit_module_is_torch_free():
             "print(sorted(m for m in ('torch', 'ray', 'laya') if m in sys.modules))")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "[]", out.stdout + out.stderr
+
+
+# --- guarded export prune (the tiny checkpoint, scored in-process on the synthetic val) ---------------------------
+
+@pytest.fixture
+def export(tmp_path, snap):
+    """(export dir at storage/laya-x/exports/epoch-001, dump root, manifest, val.jsonl): a tiny checkpoint saved
+    where ray_train.py writes its epoch exports. Scoring sets torch's thread count; it is restored afterwards."""
+    import torch
+    from tiny_laya import tiny_checkpoint
+    threads = torch.get_num_threads()
+    path = tiny_checkpoint(tmp_path / "storage" / "laya-x" / "exports" / "epoch-001")
+    yield path, str(tmp_path / "dumps"), snap[1], os.path.join(snap[0], "splits", "val.jsonl")
+    torch.set_num_threads(threads)
+
+
+def _score_val(export_dir, dump_root, manifest, val_jsonl, *extra):
+    score.main([val_jsonl, "--checkpoint", export_dir, "--workers", "0", "--cpus-per-worker", "1",
+                "--manifest", manifest, "--out-root", dump_root, *extra])
+
+
+def test_prune_deletes_an_export_only_after_its_val_dump(tmp_path, export, capsys):
+    path, dump_root, manifest, val_jsonl = export
+    with pytest.raises(SystemExit, match="no verified full val dump"):
+        postfit.prune_export(path, dump_root, manifest)
+    assert os.path.isdir(path)
+    _score_val(path, dump_root, manifest, val_jsonl)
+    capsys.readouterr()
+    rid = postfit_cli.main(["--prune", path, "--dump-root", dump_root, "--manifest", manifest])[0]
+    assert not os.path.exists(path)
+    assert os.path.isdir(os.path.dirname(path))                    # only the epoch dir is deleted
+    assert capsys.readouterr().out.strip() == "pruned laya-x/exports/epoch-001 (val dump %s)" % rid
+    dumps.load_dump(os.path.join(dump_root, rid), "val", manifest)  # the dump stays and still verifies
+
+
+def test_prune_refuses_without_a_dump_symlinks_and_other_paths(tmp_path, export):
+    from tiny_laya import tiny_checkpoint
+    path, dump_root, manifest, val_jsonl = export
+    link = tmp_path / "link-epoch-001"
+    os.symlink(path, link)
+    with pytest.raises(SystemExit, match="symlink"):
+        postfit.prune_export(str(link), dump_root, manifest)
+    linked_exports = tmp_path / "storage2" / "laya-y" / "exports"
+    linked_exports.parent.mkdir(parents=True)
+    os.symlink(os.path.dirname(path), linked_exports)
+    with pytest.raises(SystemExit, match="symlink"):
+        postfit.prune_export(str(linked_exports / "epoch-001"), dump_root, manifest)
+    base = tiny_checkpoint(tmp_path / "base")
+    with pytest.raises(SystemExit, match="not a ray_train export"):
+        postfit.prune_export(base, dump_root, manifest)
+    odd = tiny_checkpoint(tmp_path / "storage" / "laya-x" / "exports" / "epoch-1")
+    with pytest.raises(SystemExit, match="not a ray_train export"):
+        postfit.prune_export(odd, dump_root, manifest)
+    with pytest.raises(SystemExit, match="not a ray_train export"):
+        postfit.prune_export(os.path.join(path, "rl_agent_config.json"), dump_root, manifest)
+    _score_val(path, dump_root, manifest, val_jsonl, "--n", "2")   # a subset val dump at the export's run id
+    with pytest.raises(SystemExit, match="subset dump or another checkpoint"):
+        postfit.prune_export(path, dump_root, manifest)
+    with pytest.raises(SystemExit):
+        postfit_cli.main(["--prune", path, "--out", str(tmp_path / "x.json"), "--manifest", manifest])
+    with pytest.raises(SystemExit):
+        postfit_cli.main([path, "--prune", path, "--manifest", manifest])   # two modes at once
+    for p in (path, link, base, odd):
+        assert os.path.isdir(p)                                    # every refusal left its target in place

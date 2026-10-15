@@ -12,7 +12,8 @@ allow_pickle=False and hold exactly a float32 [n, 48] finite "logits" array and 
 uid looks like bank_<fold>_<index>; a sidecar or report must have no message-text key, no local home path, no
 message text from the local splits and no subset run (a subset dump is never committed). The compute checkpoint
 reports under results/compute/ (plan 04-07) get the same sidecar check, so they hold numbers as JSON numbers, env vars
-only as KEY=VALUE strings and repo-relative paths only. The generic home-path
+only as KEY=VALUE strings and repo-relative paths only. The Phase 5 postfit records under results/postfit/ (plan
+05-03: ids, digests and numbers only) get it too, and only .json files may be tracked there. The generic home-path
 test skips binary files, so the .npz check is the guard there. The two legacy reports (100 test messages, no
 no-intent rows) sit under results/legacy/ next to a README that labels them as not comparable (D-08).
 """
@@ -230,10 +231,16 @@ def test_tracked_dumps_hold_only_uids_and_logits():
 
 def test_tracked_sidecars_and_reports_hold_no_text_or_paths():
     home, texts = home_dir(), local_split_texts()
-    rels = [f for f in tracked("results/dumps/", "results/reports/", "results/compute/") if f.endswith(".json")]
+    rels = [f for f in tracked("results/dumps/", "results/reports/", "results/compute/", "results/postfit/")
+            if f.endswith(".json")]
     bad = {rel: p for rel in _existing(rels) for p in [sidecar_problems(os.path.join(REPO_ROOT, rel), home, texts)]
            if p}
     assert bad == {}, "tracked sidecars or reports hold text, local paths or subset runs: %s" % bad
+
+
+def test_only_json_under_results_postfit():
+    bad = [f for f in tracked("results/postfit/") if not f.endswith(".json")]
+    assert bad == [], "only postfit records (.json) may be tracked under results/postfit/: %s" % bad
 
 
 def test_only_dump_files_under_results_dumps():

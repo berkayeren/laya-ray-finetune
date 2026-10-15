@@ -29,9 +29,12 @@ only after a verified full val dump of exactly that export exists.
 usage: from pilot import postfit; record = postfit.fit(run_dirs, manifest_path); postfit.write_record(record, path)
        record, sha = postfit.read_record(path); postfit.prune_export(export_dir, dump_root, manifest_path)
        python postfit.py RUN_DIR [RUN_DIR ...] [--out results/postfit/laya.json] [--manifest splits.json]
+       python postfit.py --prune EXPORT_DIR [EXPORT_DIR ...] [--dump-root results/dumps] [--manifest splits.json]
 """
 import json
 import os
+import re
+import shutil
 from fractions import Fraction
 
 import numpy as np
@@ -58,6 +61,7 @@ TIE_ORDER = "equal objectives: fewer epochs first, then the lower encoder LR"
 EPOCH_TRANSFER = ("the final seeds train on final_train with the selection schedule (--epochs %d) and stop after the "
                   "chosen epoch (--stop-after-epoch), never --epochs k*" % EPOCHS)
 CANDIDATE_SCORER_KEYS = ("device", "dtype", "amp_enabled")
+EXPORT_RE = re.compile(r"^epoch-[0-9]{3}$")              # ray_train.py's <storage>/<run_id>/exports/epoch-NNN
 
 
 def _nll(m, y):
@@ -285,3 +289,36 @@ def read_record(path):
         if not isinstance(record.get(key), dict):
             raise SystemExit("%s has no %s block; rebuild it with this postfit.py" % (path, key))
     return record, sha256_bytes(raw)
+
+
+def prune_export(export_dir, dump_root=dumps.DUMP_ROOT, manifest_path=DEFAULT_MANIFEST):
+    """Delete one ray_train.py epoch export once its verified full val dump exists; returns the dump's run id.
+
+    Refused, and left in place: a symlink (the export or its exports/ dir), a path that is not a real
+    <storage>/<run_id>/exports/epoch-NNN dir holding rl_agent_config.json, and an export without a full val dump under
+    dump_root whose sidecar checkpoint_identity equals the export's pilot.weights.identity (load_dump verifies the dump
+    bytes). Only that one dir is ever deleted.
+    """
+    from pilot.weights import identity                      # torch-free; imported here, the only caller
+    path = os.path.abspath(export_dir)
+    if os.path.islink(path) or os.path.islink(os.path.dirname(path)):
+        raise SystemExit("%s is a symlink (or sits in a symlinked exports dir); refusing to delete it" % export_dir)
+    real = os.path.realpath(path)
+    if not (os.path.isdir(real) and EXPORT_RE.match(os.path.basename(real))
+            and os.path.basename(os.path.dirname(real)) == "exports"
+            and os.path.isfile(os.path.join(real, "rl_agent_config.json"))):
+        raise SystemExit("%s is not a ray_train export (<storage>/<run_id>/exports/epoch-NNN); refusing to delete it"
+                         % export_dir)
+    ident = identity(real)
+    rid = dumps.run_id("laya", ident)
+    run_dir = os.path.join(dump_root, rid)
+    try:
+        _, _, side, _ = dumps.load_dump(run_dir, "val", manifest_path)
+    except SystemExit as e:
+        raise SystemExit("no verified full val dump for this export under %s (%s); score it on val first, then prune"
+                         % (dump_root, e))
+    if side.get("n_subset") is not None or (side.get("system") or {}).get("checkpoint_identity") != ident:
+        raise SystemExit("no verified full val dump for this export under %s (%s is a subset dump or another "
+                         "checkpoint's); score it on val first, then prune" % (dump_root, rid))
+    shutil.rmtree(real)
+    return rid
