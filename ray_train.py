@@ -82,12 +82,13 @@ as the final checkpoint; the cosine T_max and the sigma anneal stay sized by --e
 epoch K (RESEARCH A3; on cpu its weights are byte-identical to that run's exports/epoch-NNN). K is 1..--epochs - 1:
 K = --epochs has one spelling, the omitted flag. --postfit RECORD binds a final seed to the val selection by refusal,
 not transcription: the record is read (schema, sha256 of its bytes) before any fetch, and once the base identity is
-known, before --print-run-id and ray.init, pilot.postfit.check_final refuses unless --data is the record's final split (final_train), --seed is one of its final
-seeds, --stop-after-epoch is the chosen one and every other canonical value equals the chosen selection run's (naming
-the first differing key). The final config then serves the record's val-fitted T (temperature [1, 1, T] bit for bit,
-temperature_by_options {}, training.calibrated True, training.postfit with the record's sha256, chosen settings, T and
-θ) and the run record carries postfit {sha256, chosen, temperature}. stop_after_epoch and postfit_sha256 are run-identity
-keys left out when None (every selection run id is unchanged); postfit.py --print-final-commands prints the commands.
+known, before --print-run-id and ray.init, pilot.postfit.check_final refuses unless --data is the record's final split
+(final_train), --seed is one of its final seeds, --stop-after-epoch is the chosen one and every other canonical value
+equals the chosen selection run's (naming the first differing key). The final config then serves the record's
+val-fitted T (temperature [1, 1, T] bit for bit, temperature_by_options {}, training.calibrated True, training.postfit
+with the record's sha256, chosen settings, T and θ) and the run record carries postfit {sha256, chosen, temperature}.
+stop_after_epoch and postfit_sha256 are run-identity keys left out when None (every selection run id is unchanged);
+postfit.py --print-final-commands prints the commands.
 
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
 (tampered, unregistered, val/test/probe) is refused before Ray starts. --base multilingual fetches the pinned,

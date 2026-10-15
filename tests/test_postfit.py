@@ -389,3 +389,189 @@ def test_prune_refuses_without_a_dump_symlinks_and_other_paths(tmp_path, export)
         postfit_cli.main([path, "--prune", path, "--manifest", manifest])   # two modes at once
     for p in (path, link, base, odd):
         assert os.path.isdir(p)                                    # every refusal left its target in place
+
+
+# --- final seeds: the printed commands and the final manifest (LAYA-08) ------------------------------------------
+
+def _committed_entry(name):
+    with open(os.path.join(REPO_ROOT, "data", "splits.json"), encoding="utf-8") as f:
+        return json.load(f)["splits"][name]
+
+
+SELECTION_COMMANDS = [
+    ["--device", "mps", "--workers", "1", "--micro-batch", "8", "--grad-accum", "4", "--max-len", "128",
+     "--encoder-lr", "3e-05"],
+    ["--device", "cuda", "--workers", "2", "--no-amp", "--freeze-embeddings", "--shuffle-options", "--neg", "0",
+     "--head-max-len", "64", "--max-messages", "50", "--no-grad-checkpointing", "--loss", "soft-ce",
+     "--encoder-lr", "5e-05"],
+    ["--device", "cpu", "--workers", "2", "--amp", "--freeze-encoder", "--micro-batch", "4", "--grad-accum", "8"],
+]
+
+
+def _selection_record(ray_train, flags, tmp_path, stop=2):
+    """(record path, record) whose chosen canonical is the selection canonical of `flags` on the committed
+    selection_train entry and the pinned base (ray_train.parser, resolve, identity_values)."""
+    from pilot import runs
+    from pilot.weights import identity
+    a = ray_train.parser().parse_args(["--data", "data/splits/selection_train.jsonl", "--out", "o"] + flags)
+    canon = runs.canonical(ray_train.identity_values(a, ray_train.resolve(a), _committed_entry("selection_train"),
+                                                     "multilingual", identity("multilingual")))
+    theta = {"global": 0.42, "per_tag": {}, "eligible_tags": []}
+    record = {"schema": postfit.SCHEMA,
+              "chosen": {"train_run_id": runs.run_id(canon), "dump_run_id": "laya-x", "dump_sha256": "d" * 64,
+                         "encoder_lr": canon["encoder_lr"], "epoch": stop or canon["epochs"],
+                         "epochs_schedule": canon["epochs"], "stop_after_epoch": stop, "canonical": canon,
+                         "temperature": 1.6109, "theta": {"shipped": theta, "raw": theta},
+                         "val_micro_f1_at_global_theta": 0.8},
+              "final": {"split": "final_train", "seeds": [0, 1, 2], "epochs": canon["epochs"], "stop_after_epoch": stop},
+              "protocol": {}, "rules": {}}
+    path = str(tmp_path / "laya.json")
+    postfit.write_record(record, path)
+    return path, record
+
+
+@pytest.mark.parametrize("flags", SELECTION_COMMANDS)
+def test_final_command_passes_the_binding(flags, tmp_path):
+    """Each printed final command, parsed by ray_train.py on the final_train entry with the record's sha, is a canonical
+    config check_final accepts: every hyperparameter, the AMP and checkpointing choices and the stop epoch transfer."""
+    ray_train = pytest.importorskip("ray_train")
+    from pilot import runs
+    from pilot.weights import identity
+    path, record = _selection_record(ray_train, flags, tmp_path)
+    sha = pilot.data.sha256_file(path)
+    for seed in (0, 1, 2):
+        argv = postfit.final_command(record, seed, path, "ray_results", "ckpt/laya-final", manifest="m.json")
+        assert argv[0] == "ray_train.py"
+        a = ray_train.parser().parse_args(argv[1:])
+        assert a.postfit == path and a.export_epochs is False and a.out == "ckpt/laya-final-s%d" % seed
+        assert a.storage == "ray_results" and a.manifest == "m.json" and a.neg_seed is None
+        assert a.data == "data/splits/final_train.jsonl" and a.stop_after_epoch == 2
+        canon = runs.canonical(ray_train.identity_values(a, ray_train.resolve(a), _committed_entry("final_train"),
+                                                         "multilingual", identity("multilingual"), sha))
+        postfit.check_final(record, canon)
+        assert canon["seed"] == canon["neg_seed"] == seed and canon["split"] == "final_train"
+    with pytest.raises(SystemExit, match="seed 7 is not one of the record's final seeds"):
+        postfit.final_command(record, 7, path, "ray_results", "ckpt/laya-final")
+    other = dict(record, chosen=dict(record["chosen"], canonical=dict(record["chosen"]["canonical"],
+                                                                      base_model_sha256="0" * 64)))
+    with pytest.raises(SystemExit, match="trained another base"):
+        postfit.final_command(other, 0, path, "ray_results", "ckpt/laya-final")
+    assert postfit.final_command(other, 0, path, "s", "o", base="ckpt/base")[4] == "ckpt/base"   # a local base
+
+
+def test_final_command_omits_the_stop_flag_for_the_last_epoch(tmp_path):
+    ray_train = pytest.importorskip("ray_train")
+    path, record = _selection_record(ray_train, SELECTION_COMMANDS[0], tmp_path, stop=None)
+    argv = postfit.final_command(record, 1, path, "s", "o")
+    assert "--stop-after-epoch" not in argv and "--manifest" not in argv
+    assert ray_train.parser().parse_args(argv[1:]).stop_after_epoch is None
+
+
+def test_print_final_commands_cli(tmp_path, capsys):
+    import shlex
+    ray_train = pytest.importorskip("ray_train")
+    path, record = _selection_record(ray_train, SELECTION_COMMANDS[0], tmp_path)
+    lines = postfit_cli.main(["--print-final-commands", path, "--storage", "ray_results", "--out-prefix", "ckpt/f"])
+    assert capsys.readouterr().out.splitlines() == lines and len(lines) == 3
+    assert [shlex.split(ln) for ln in lines] == [postfit.final_command(record, s, path, "ray_results", "ckpt/f")
+                                                 for s in (0, 1, 2)]
+    for bad in (["--print-final-commands", path, "--storage", "s"],                      # no --out-prefix
+                ["--print-final-commands", path, "--storage", "s", "--out-prefix", "o", "--out", "x.json"],
+                [path, "--storage", "s"]):                                                # --storage in another mode
+        with pytest.raises(SystemExit) as e:
+            postfit_cli.main(bad)
+        assert e.value.code == 2
+    r = subprocess.run([sys.executable, "postfit.py", "--print-final-commands", str(tmp_path / "nonexistent.json"),
+                        "--storage", "s", "--out-prefix", "o"], cwd=REPO_ROOT, capture_output=True, text=True)
+    assert r.returncode != 0 and "nonexistent.json not found" in r.stderr, r.stderr
+
+
+@pytest.fixture
+def finals(tmp_path):
+    """(record path, record, sha, make) where make(name, seed, **change) writes a tiny checkpoint whose config carries
+    the training block of a --postfit final seed of the record (final_train canonical, chosen epoch 2, T, record rows);
+    change: postfit_sha (the bound record sha), split, epoch, temperature, data_sha256."""
+    from tiny_laya import tiny_checkpoint
+    chosen_canon = _canon(3e-05, data_sha256="s" * 64, data_role="train", max_messages=None)
+    T = 1.6109375
+    record = {"schema": postfit.SCHEMA,
+              "chosen": {"train_run_id": "laya-selection_train-neg8-s0-00000003", "dump_run_id": "laya-y",
+                         "encoder_lr": 3e-05, "epoch": 2, "epochs_schedule": 4, "stop_after_epoch": 2,
+                         "canonical": chosen_canon, "temperature": T, "theta": {}},
+              "final": {"split": "final_train", "seeds": [0, 1, 2], "epochs": 4, "stop_after_epoch": 2},
+              "protocol": {}}
+    path = str(tmp_path / "postfit" / "laya.json")
+    postfit.write_record(record, path)
+    sha = pilot.data.sha256_file(path)
+    threads = __import__("torch").get_num_threads()
+
+    def make(name, seed, postfit_sha=sha, split="final_train", epoch=2, temperature=T, data_sha256="f" * 64):
+        d = tiny_checkpoint(tmp_path / "ckpt" / name, seed=seed)
+        canon = dict(chosen_canon, split=split, seed=seed, neg_seed=seed, data_sha256=data_sha256,
+                     stop_after_epoch=2, postfit_sha256=postfit_sha)
+        rows = [{"epoch": e, "loss": 0.5 / e, "train_s": 10.0 * e, "save_s": 1.0, "optimizer_steps": 3, "n_items": 9,
+                 "peak_total_bytes": 2**30, "peak_driver_bytes": None, "peak_rss_bytes": 2**30,
+                 "current_allocated_bytes": None, "swap_delta_bytes": 0, "segment": 0, "resumed": False}
+                for e in range(1, epoch + 1)]
+        with open(os.path.join(d, "rl_agent_config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+        cfg.update(temperature=[1.0, 1.0, temperature], temperature_by_options={}, fine_tuned=True)
+        cfg["training"] = {"epoch": epoch, "calibrated": True, "postfit": {"sha256": postfit_sha, "temperature": T},
+                           "ray_train": {"run_id": "laya-%s-neg8-s%d-0000000%d" % (split, seed, seed),
+                                         "canonical": canon,
+                                         "record": {"rung": "none", "fallback": False, "weaker": False,
+                                                    "code_changed_on_resume": False, "epochs": rows}}}
+        with open(os.path.join(d, "rl_agent_config.json"), "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        return d
+    yield path, record, sha, make
+    __import__("torch").set_num_threads(threads)
+
+
+def test_final_manifest_lists_the_three_seeds(finals, tmp_path, capsys):
+    from pilot.weights import identity
+    path, record, sha, make = finals
+    dirs = [make("laya-final-s%d" % s, s) for s in (2, 0, 1)]                   # any argument order
+    out = tmp_path / "laya-final.json"
+    man = postfit_cli.main(["--final-manifest", path] + dirs + ["--out", str(out)])
+    text = out.read_text(encoding="utf-8")
+    assert json.loads(text) == man and capsys.readouterr().out == text
+    assert man["schema"] == "postfit-final/1" and man["final_split"] == "final_train"
+    assert man["postfit"] == {"path": pilot.data.repo_relpath(path), "sha256": sha}
+    assert man["chosen"] == {"train_run_id": record["chosen"]["train_run_id"], "encoder_lr": 3e-05, "epoch": 2,
+                             "epochs_schedule": 4, "stop_after_epoch": 2, "temperature": 1.6109375}
+    assert [e["seed"] for e in man["seeds"]] == [0, 1, 2]
+    for e, d in zip(man["seeds"], sorted(dirs)):
+        ident = identity(d)
+        assert e["checkpoint_name"] == os.path.basename(d) and e["checkpoint_identity"] == ident
+        assert e["dump_run_id"] == dumps.run_id("laya", ident) and e["temperature"] == 1.6109375
+        assert e["loss_by_epoch"] == [0.5, 0.25] and [r["epoch"] for r in e["epochs"]] == [1, 2]
+        assert set(e["epochs"][0]) == {"epoch", "loss", "train_s", "peak_total_bytes", "swap_delta_bytes"}
+        assert e["rung"] == "none" and e["weaker"] is False and e["code_changed_on_resume"] is False
+    canon0 = json.load(open(os.path.join(dirs[1], "rl_agent_config.json"), encoding="utf-8"))
+    assert man["config_sha256_sans_seed"] == dumps.training_digest(canon0["training"]["ray_train"]["canonical"], 2)
+    assert os.path.expanduser("~") not in text and str(tmp_path) not in text and "timestamp" not in text
+    assert postfit.final_manifest(path, list(reversed(dirs))) == man                 # order-independent
+
+
+@pytest.mark.parametrize("case, match", [
+    ("another_sha", "bound to postfit record"),
+    ("duplicate_seed", "seeds \\[0, 0, 1\\]"),
+    ("two_seeds", "seeds \\[0, 1\\]"),
+    ("another_t", "serves temperature"),
+    ("another_epoch", "stopped at epoch 3"),
+    ("selection_split", "trained on selection_train"),
+    ("another_recipe", "differ in more than the seed"),
+])
+def test_final_manifest_refuses_a_wrong_set(finals, case, match):
+    path, record, sha, make = finals
+    s0, s1 = make("s0", 0), make("s1", 1)
+    third = {"another_sha": lambda: make("s2", 2, postfit_sha="0" * 64),
+             "duplicate_seed": lambda: make("s0b", 0),
+             "two_seeds": lambda: None,
+             "another_t": lambda: make("s2", 2, temperature=1.6109376),
+             "another_epoch": lambda: make("s2", 2, epoch=3),
+             "selection_split": lambda: make("s2", 2, split="selection_train"),
+             "another_recipe": lambda: make("s2", 2, data_sha256="0" * 64)}[case]()
+    with pytest.raises(SystemExit, match=match):
+        postfit.final_manifest(path, [s0, s1] + ([third] if third else []))

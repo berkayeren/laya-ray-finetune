@@ -26,10 +26,19 @@ settings, from ids, digests and numbers only: no timestamp, no local path, no me
 rebuilds byte for byte from the committed dumps in any argument order. prune_export deletes a ray_train.py epoch export
 only after a verified full val dump of exactly that export exists.
 
+Final seeds (LAYA-08): ray_train.py --postfit RECORD calls check_final, which refuses a final-seed command whose
+canonical run config is not the chosen selection run's (outside FINAL_FREE_KEYS), and stamps final_block into the final
+config. final_command prints the exact ray_train.py argv of each final seed from the record (nobody retypes a
+hyperparameter); final_manifest (FINAL_SCHEMA) lists the finished checkpoints only when they are exactly the record's
+final seeds, each bound to its sha256, at the chosen epoch and T, with one shared config_sha256_sans_seed.
+
 usage: from pilot import postfit; record = postfit.fit(run_dirs, manifest_path); postfit.write_record(record, path)
        record, sha = postfit.read_record(path); postfit.prune_export(export_dir, dump_root, manifest_path)
+       postfit.final_command(record, seed, record_path, storage, out_prefix); postfit.final_manifest(path, ckpt_dirs)
        python postfit.py RUN_DIR [RUN_DIR ...] [--out results/postfit/laya.json] [--manifest splits.json]
        python postfit.py --prune EXPORT_DIR [EXPORT_DIR ...] [--dump-root results/dumps] [--manifest splits.json]
+       python postfit.py --print-final-commands RECORD --storage DIR --out-prefix PATH [--base DIR] [--manifest M]
+       python postfit.py --final-manifest RECORD CKPT [CKPT ...] [--out results/postfit/laya-final.json]
 """
 import json
 import os
@@ -40,10 +49,11 @@ from fractions import Fraction
 import numpy as np
 from scipy.optimize import minimize_scalar
 
-from pilot import dumps, metrics
+from pilot import dumps, metrics, pins
 from pilot.data import DEFAULT_MANIFEST, manifest_is_committed, repo_relpath, sha256_bytes, sha256_file, write_atomic
 
 SCHEMA = "postfit/1"
+FINAL_SCHEMA = "postfit-final/1"            # final_manifest: the three final seeds bound to one record
 T_MIN, T_MAX = 0.5, 5.0                     # laya TEMP_MIN / TEMP_MAX: laya.load clamps a served T to this band
 LR_GRID = (2e-05, 3e-05, 5e-05)             # A1: encoder LR grid
 HEAD_LR = 0.0001                            # A1: head LR, fixed (laya's default)
@@ -302,7 +312,8 @@ def check_final(record, canon):
     and 1.0 differ). The first differing key in sorted order is named with both values (LAYA-08)."""
     chosen, final = record["chosen"], record["final"]
     if canon.get("split") != final.get("split"):
-        raise SystemExit("--postfit trains the final seeds on %s; --data is %s" % (final.get("split"), canon.get("split")))
+        raise SystemExit("--postfit trains the final seeds on %s; --data is %s"
+                         % (final.get("split"), canon.get("split")))
     if canon.get("seed") not in (final.get("seeds") or []):
         raise SystemExit("--seed %r is not one of the record's final seeds %s" % (canon.get("seed"), final.get("seeds")))
     stop = chosen.get("stop_after_epoch")
@@ -372,3 +383,118 @@ def prune_export(export_dir, dump_root=dumps.DUMP_ROOT, manifest_path=DEFAULT_MA
                          "checkpoint's); score it on val first, then prune" % (dump_root, rid))
     shutil.rmtree(real)
     return rid
+
+
+def _device_amp(device):
+    """ray_train.resolve's AMP default: on only for cuda."""
+    return device == "cuda"
+
+
+def final_command(record, seed, record_path, storage, out_prefix, base="multilingual",
+                  data="data/splits/final_train.jsonl", manifest=None):
+    """The ray_train.py argv (starting with "ray_train.py") that trains final seed `seed` with the chosen settings:
+    every hyperparameter from the chosen canonical config, the chosen stop epoch, --postfit record_path and
+    --no-export-epochs; --out is "<out_prefix>-s<seed>". neg_seed is never passed (it defaults to the seed, A4).
+    ray_train.py's check_final is still the binding; this only spares the operator the transcription."""
+    final, chosen = record["final"], record["chosen"]
+    if seed not in (final.get("seeds") or []):
+        raise SystemExit("seed %r is not one of the record's final seeds %s" % (seed, final.get("seeds")))
+    c = chosen.get("canonical")
+    if not isinstance(c, dict):
+        raise SystemExit("the postfit record's chosen run has no canonical config; rebuild it with this postfit.py")
+    if base == "multilingual" and c.get("base_model_sha256") != pins.LAYA["sha256"]["model.safetensors"]:
+        raise SystemExit("the chosen run trained another base (base_model_sha256 %s, not the pinned Laya weights); "
+                         "pass --base DIR" % c.get("base_model_sha256"))
+    argv = ["ray_train.py", "--data", data, "--base", base, "--device", c["device"], "--workers", str(c["workers"]),
+            "--epochs", str(c["epochs"]), "--micro-batch", str(c["micro_batch"]), "--grad-accum", str(c["grad_accum"]),
+            "--encoder-lr", repr(c["encoder_lr"]), "--head-lr", repr(c["head_lr"]), "--loss", c["loss"],
+            "--neg", str(c["neg"])]
+    for key, flag in (("max_len", "--max-len"), ("head_max_len", "--head-max-len"), ("max_messages", "--max-messages")):
+        if c.get(key) is not None:
+            argv += [flag, str(c[key])]
+    for key, flag in (("freeze_encoder", "--freeze-encoder"), ("freeze_embeddings", "--freeze-embeddings"),
+                      ("shuffle_options", "--shuffle-options")):
+        if c.get(key):
+            argv.append(flag)
+    if not c.get("freeze_encoder") and c.get("grad_checkpointing") is False:
+        argv.append("--no-grad-checkpointing")
+    if c.get("amp") != _device_amp(c["device"]):
+        argv.append("--amp" if c.get("amp") else "--no-amp")
+    if chosen.get("stop_after_epoch") is not None:
+        argv += ["--stop-after-epoch", str(chosen["stop_after_epoch"])]
+    argv += ["--seed", str(seed), "--postfit", record_path, "--no-export-epochs", "--storage", storage,
+             "--out", "%s-s%d" % (out_prefix, seed)]
+    if manifest is not None:
+        argv += ["--manifest", manifest]
+    return argv
+
+
+def _final_entry(record, sha, ckpt_dir):
+    """One final_manifest entry of a finished --postfit checkpoint, or SystemExit naming what does not bind it."""
+    from pilot.weights import identity                      # torch-free; imported here, like prune_export
+    chosen, name = record["chosen"], os.path.basename(os.path.normpath(ckpt_dir))
+    ident = identity(ckpt_dir)
+    path = os.path.join(ckpt_dir, "rl_agent_config.json")
+    if not os.path.isfile(path):
+        raise SystemExit("%s has no rl_agent_config.json; pass the final checkpoint dirs ray_train.py wrote" % name)
+    with open(path, "rb") as f:
+        raw = f.read()
+    if sha256_bytes(raw) != ident["config_sha256"]:
+        raise SystemExit("%s: rl_agent_config.json changed while it was read; rerun" % name)
+    cfg = json.loads(raw.decode("utf-8"))
+    tr = cfg.get("training") if isinstance(cfg, dict) else None
+    rt = tr.get("ray_train") if isinstance(tr, dict) else None
+    if not isinstance(rt, dict) or not isinstance(rt.get("canonical"), dict):
+        raise SystemExit("%s holds no ray_train run config; train it with ray_train.py --postfit" % name)
+    canon, rec = rt["canonical"], rt.get("record") or {}
+    if (tr.get("postfit") or {}).get("sha256") != sha or canon.get("postfit_sha256") != sha:
+        raise SystemExit("%s is bound to postfit record %s, not %s; train it with --postfit of this record"
+                         % (name, (tr.get("postfit") or {}).get("sha256"), sha))
+    if canon.get("split") != record["final"]["split"]:
+        raise SystemExit("%s trained on %s; the final seeds train on %s" % (name, canon.get("split"),
+                                                                            record["final"]["split"]))
+    check_final(record, canon)
+    if tr.get("epoch") != chosen["epoch"]:
+        raise SystemExit("%s stopped at epoch %r; the chosen epoch is %r" % (name, tr.get("epoch"), chosen["epoch"]))
+    temp = cfg.get("temperature")
+    if not (isinstance(temp, list) and len(temp) == 3 and _json(temp[2]) == _json(chosen["temperature"])
+            and cfg.get("temperature_by_options") == {} and tr.get("calibrated") is True):
+        raise SystemExit("%s serves temperature %r (by options %r, calibrated %r); a final seed serves the record's T "
+                         "%r" % (name, temp, cfg.get("temperature_by_options"), tr.get("calibrated"),
+                                 chosen["temperature"]))
+    rows = rec.get("epochs") or []
+    return {"seed": canon["seed"], "train_run_id": rt.get("run_id"), "checkpoint_name": name,
+            "checkpoint_identity": ident, "dump_run_id": dumps.run_id("laya", ident), "rung": rec.get("rung"),
+            "fallback": rec.get("fallback"), "weaker": rec.get("weaker"),
+            "code_changed_on_resume": rec.get("code_changed_on_resume"), "temperature": temp[2],
+            "loss_by_epoch": [row.get("loss") for row in rows],
+            "epochs": [{k: row.get(k) for k in ("epoch", "loss", "train_s", "peak_total_bytes", "swap_delta_bytes")}
+                       for row in rows],
+            "config_sha256_sans_seed": dumps.training_digest(canon, tr.get("epoch"))}
+
+
+def final_manifest(record_path, ckpt_dirs):
+    """The FINAL_SCHEMA manifest of the final checkpoints of one postfit record: refused unless every dir is bound to
+    the record's sha256 (config and canonical), trained on its final split with the chosen recipe (check_final), stops
+    at the chosen epoch, serves the chosen T exactly with no temperature_by_options, the seeds are exactly the record's
+    final seeds (no duplicate, none missing) and every seed shares one config_sha256_sans_seed. Seeds sorted; ids,
+    digests and numbers only (checkpoint_name is a base name; no timestamp, no local path)."""
+    record, sha = read_record(record_path)
+    entries = [_final_entry(record, sha, d) for d in ckpt_dirs]
+    seeds = sorted(e["seed"] for e in entries)
+    want = sorted(record["final"].get("seeds") or [])
+    if seeds != want:
+        raise SystemExit("the checkpoints are seeds %s; the record's final seeds are %s (each exactly once)"
+                         % (seeds, want))
+    digests = sorted({e["config_sha256_sans_seed"] for e in entries})
+    if len(digests) != 1:
+        raise SystemExit("the final seeds differ in more than the seed (config_sha256_sans_seed %s); retrain them with "
+                         "postfit.py --print-final-commands" % digests)
+    chosen = record["chosen"]
+    return {"schema": FINAL_SCHEMA, "postfit": {"path": repo_relpath(record_path), "sha256": sha},
+            "final_split": record["final"]["split"],
+            "chosen": {k: chosen.get(k) for k in ("train_run_id", "encoder_lr", "epoch", "epochs_schedule",
+                                                  "stop_after_epoch", "temperature")},
+            "config_sha256_sans_seed": digests[0],
+            "seeds": [{k: v for k, v in e.items() if k != "config_sha256_sans_seed"}
+                      for e in sorted(entries, key=lambda e: e["seed"])]}
