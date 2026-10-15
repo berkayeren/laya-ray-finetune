@@ -35,7 +35,15 @@ float): exactly 0.707 is "ok", anything below is "investigate". The result (REFE
 setup DIFFERENCES verbatim and the CAVEATS (θ and T were chosen on the same val messages), and records the user's
 resolution, which is allowed only on "investigate" (OQ2: an investigate result may be written without one).
 
-Checkpoint (an export or, later, a final seed) = CHECKPOINT_FILES: model.safetensors, config.json (id2label in
+Final seeds (BASE-01/02/03, plan 06-08; A4, A9 and OQ2 confirmed at plan 06-02): berturk_train.py --postfit RECORD
+--reference REF trains one final seed on final_train with the val-chosen settings and stops after the chosen epoch of
+the selection schedule. check_reference_for_final refuses it unless REF is the reference check of exactly that record
+(its sha256) and reads ok or carries a recorded resolution; pilot.postfit.check_final refuses any other setting. The
+final checkpoint serves the record's T (calibrated true, postfit = pilot.postfit.final_block). final_command prints the
+argv of each final seed from the record; final_manifest (pilot.postfit.FINAL_SCHEMA) lists the finished checkpoints only
+when they are exactly the record's final seeds, each bound to its sha256, at the chosen epoch and T.
+
+Checkpoint (an export or a final seed) = CHECKPOINT_FILES: model.safetensors, config.json (id2label in
 INTENTS order), the base's vocab.txt and tokenizer_config.json copied byte for byte (never tokenizer.save_pretrained,
 whose bytes depend on HF_HUB_OFFLINE) and RECORD (schema RECORD_SCHEMA). identity() hashes them without a load;
 dump_run_id() is berturk-<model sha256[:12]>-<record sha256[:8]>-<digest of config.json and the tokenizer files[:8]>,
@@ -45,6 +53,9 @@ usage: from pilot import berturk; rid = berturk.run_id(berturk.canonical(values)
        ident = berturk.identity(ckpt); berturk.dump_run_id(ident); seed, training = berturk.training_block(
        berturk.read_record(ckpt, ident)); berturk.prune_export(export_dir, dump_root, manifest_path)
        berturk.reference_check(record, record_path, record_sha256, resolution=None)
+       berturk.check_reference_for_final(reference_path, record_sha256)
+       berturk.final_command(record, seed, record_path, reference_path, storage, out_prefix)
+       berturk.final_manifest(record_path, ckpt_dirs)
 """
 import hashlib
 import json
@@ -53,7 +64,7 @@ import shutil
 from fractions import Fraction
 
 from intents import INTENTS
-from pilot import dumps, postfit
+from pilot import dumps, pins, postfit
 from pilot.data import DEFAULT_MANIFEST, repo_relpath, sha256_bytes, sha256_file
 
 # ---- the recipe (A1-A3, A7), confirmed at plan 06-02 ----
@@ -125,7 +136,10 @@ IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_conf
 #   data, base, manifest: paths, represented in IDENTITY by the verified sha256s (data_sha256, base_*_sha256)
 #   storage: where the run dir goes; print_run_id: prints the run id and exits
 #   export_epochs: whether per-epoch exports are written (outputs, not training); cpus: torch threads (a resource)
-NOT_IDENTITY = ("data", "base", "storage", "manifest", "print_run_id", "export_epochs", "cpus")
+#   out: where the final checkpoint goes; postfit: a path, represented by postfit_sha256 (the record's bytes);
+#   reference: the BASE-03 gate, a refusal only (check_reference_for_final binds it to the record's sha256)
+NOT_IDENTITY = ("data", "base", "storage", "manifest", "print_run_id", "export_epochs", "cpus", "out", "postfit",
+                "reference")
 # flags that enter IDENTITY through resolved keys: the HF Trainer has one LR for encoder and head (A1)
 RESOLVED = {"lr": ("encoder_lr", "head_lr")}
 # left out when None: base_files_sha256 (None for the pinned base, whose files the pin fixes), max_messages (a smoke
@@ -352,6 +366,136 @@ def reference_check(record, record_path, record_sha256, resolution=None):
                       "train_run_id": chosen.get("train_run_id"), "dump_run_id": chosen.get("dump_run_id")},
             "below_threshold": status == "investigate", "status": status, "differences": DIFFERENCES,
             "caveats": CAVEATS, "resolution": resolution}
+
+
+def check_reference_for_final(reference_path, record_sha256):
+    """The BASE-03 gate of a final seed (OQ2): the parsed reference check at reference_path, refused (SystemExit) when
+    it is missing, not valid JSON, of another schema, of another postfit record than record_sha256, its status
+    disagrees with its own exact fraction, or it reads "investigate" without a non-empty resolution. No final seed is
+    trained (or printed) before the shortfall is investigated and then fixed or documented."""
+    if not os.path.isfile(reference_path):
+        raise SystemExit("%s not found; build the BASE-03 reference check with postfit.py --reference-check RECORD "
+                         "--out %s before any final seed" % (reference_path, reference_path))
+    with open(reference_path, "rb") as f:
+        raw = f.read()
+    try:
+        ref = json.loads(raw.decode("utf-8"))
+    except ValueError as e:
+        raise SystemExit("%s is not valid JSON (%s); rebuild it with postfit.py --reference-check" % (reference_path, e))
+    if not isinstance(ref, dict) or ref.get("schema") != REFERENCE_SCHEMA:
+        raise SystemExit("%s: schema %r, expected %s; rebuild it with postfit.py --reference-check"
+                         % (reference_path, ref.get("schema") if isinstance(ref, dict) else None, REFERENCE_SCHEMA))
+    if (ref.get("postfit") or {}).get("sha256") != record_sha256:
+        raise SystemExit("the reference check %s is of another postfit record; rebuild it with postfit.py "
+                         "--reference-check" % reference_path)
+    value = ref.get("value") or {}
+    frac = value.get("fraction")
+    try:
+        below = Fraction(frac[0], frac[1]) < THRESHOLD
+    except (TypeError, ValueError, IndexError, ZeroDivisionError):
+        raise SystemExit("%s holds no exact val micro-F1 fraction; rebuild it with postfit.py --reference-check"
+                         % reference_path) from None
+    status = ref.get("status")
+    if status != ("investigate" if below else "ok"):
+        raise SystemExit("%s: status %r disagrees with its val micro-F1 %d/%d against 0.707; rebuild it with postfit.py "
+                         "--reference-check" % (reference_path, status, frac[0], frac[1]))
+    res = ref.get("resolution")
+    if status == "investigate" and not (isinstance(res, str) and res.strip()):
+        raise SystemExit("BASE-03: BERTurk's val micro-F1 %s is below 0.707 and no resolution is recorded; investigate, "
+                         "then fix (a new selection run) or document it (postfit.py --reference-check --resolution) "
+                         "before any final seed" % value.get("val_micro_f1_at_global_theta"))
+    return ref
+
+
+def final_command(record, seed, record_path, reference_path, storage, out_prefix, base="berturk",
+                  data="data/splits/final_train.jsonl", manifest=None):
+    """The berturk_train.py argv (starting with "berturk_train.py") that trains final seed `seed` of a BERTurk postfit
+    record: every hyperparameter from the chosen canonical config, the chosen stop epoch, --postfit record_path,
+    --reference reference_path and --no-export-epochs; --out is "<out_prefix>-s<seed>". berturk_train.py's
+    pilot.postfit.check_final and check_reference_for_final are still the binding; this spares the transcription."""
+    final, chosen = record["final"], record["chosen"]
+    if record.get("system_kind") != "berturk":
+        raise SystemExit("system kind %r; berturk_train.py trains the final seeds of a BERTurk record only"
+                         % (record.get("system_kind"),))
+    if seed not in (final.get("seeds") or []):
+        raise SystemExit("seed %r is not one of the record's final seeds %s" % (seed, final.get("seeds")))
+    c = chosen.get("canonical")
+    if not isinstance(c, dict):
+        raise SystemExit("the postfit record's chosen run has no canonical config; rebuild it with this postfit.py")
+    if base == "berturk" and c.get("base_model_sha256") != pins.BERTURK["sha256"]["model.safetensors"]:
+        raise SystemExit("the chosen run trained another base (base_model_sha256 %s, not the pinned BERTurk weights); "
+                         "pass --base DIR" % c.get("base_model_sha256"))
+    argv = ["berturk_train.py", "--data", data, "--base", base, "--device", c["device"], "--epochs", str(c["epochs"]),
+            "--lr", repr(c["encoder_lr"]), "--batch", str(c["batch"]), "--max-len", str(c["max_len"])]
+    if c.get("max_messages") is not None:
+        argv += ["--max-messages", str(c["max_messages"])]
+    if c.get("mask_tags"):
+        argv += ["--mask-tags", ",".join(c["mask_tags"])]
+    if chosen.get("stop_after_epoch") is not None:
+        argv += ["--stop-after-epoch", str(chosen["stop_after_epoch"])]
+    argv += ["--seed", str(seed), "--postfit", record_path, "--reference", reference_path, "--no-export-epochs",
+             "--storage", storage, "--out", "%s-s%d" % (out_prefix, seed)]
+    if manifest is not None:
+        argv += ["--manifest", manifest]
+    return argv
+
+
+def _final_entry(record, sha, ckpt_dir):
+    """One final_manifest entry of a finished berturk_train.py --postfit checkpoint, or SystemExit naming what does not
+    bind it (mirrors pilot.postfit._final_entry)."""
+    chosen, name = record["chosen"], os.path.basename(os.path.normpath(ckpt_dir))
+    require_files(ckpt_dir, "final checkpoint")
+    ident = identity(ckpt_dir)
+    rec = read_record(ckpt_dir, ident)                      # the bytes ident hashed
+    canon = rec["canonical"]
+    if (rec.get("postfit") or {}).get("sha256") != sha or canon.get("postfit_sha256") != sha:
+        raise SystemExit("%s is bound to postfit record %s, not %s; train it with berturk_train.py --postfit of this "
+                         "record" % (name, (rec.get("postfit") or {}).get("sha256"), sha))
+    if canon.get("split") != record["final"]["split"]:
+        raise SystemExit("%s trained on %s; the final seeds train on %s" % (name, canon.get("split"),
+                                                                            record["final"]["split"]))
+    postfit.check_final(record, canon)
+    if rec.get("epoch") != chosen["epoch"]:
+        raise SystemExit("%s stopped at epoch %r; the chosen epoch is %r" % (name, rec.get("epoch"), chosen["epoch"]))
+    if postfit._json(rec.get("temperature")) != postfit._json(chosen["temperature"]) or rec.get("calibrated") is not True:
+        raise SystemExit("%s serves temperature %r (calibrated %r); a final seed serves the record's T %r"
+                         % (name, rec.get("temperature"), rec.get("calibrated"), chosen["temperature"]))
+    rows = (rec.get("record") or {}).get("epochs") or []
+    return {"seed": canon["seed"], "train_run_id": rec["run_id"], "checkpoint_name": name,
+            "checkpoint_identity": ident, "dump_run_id": dump_run_id(ident), "temperature": rec["temperature"],
+            "loss_by_epoch": [row.get("loss") for row in rows],
+            "epochs": [{k: row.get(k) for k in ("epoch", "loss", "train_s", "peak_total_bytes", "swap_delta_bytes")}
+                       for row in rows],
+            "config_sha256_sans_seed": dumps.training_digest(canon, rec.get("epoch"))}
+
+
+def final_manifest(record_path, ckpt_dirs):
+    """The pilot.postfit.FINAL_SCHEMA manifest of a BERTurk record's final checkpoints: refused unless every dir is
+    bound to the record's sha256 (berturk_train.json postfit and canonical), trained on its final split with the chosen
+    recipe (check_final), stops at the chosen epoch, serves the chosen T exactly, the seeds are exactly the record's
+    final seeds (each once) and every seed shares one config_sha256_sans_seed. Ids, digests and numbers only."""
+    record, sha = postfit.read_record(record_path)
+    if record.get("system_kind") != "berturk":
+        raise SystemExit("%s: system kind %r; this is the BERTurk final manifest" % (record_path,
+                                                                                     record.get("system_kind")))
+    entries = [_final_entry(record, sha, d) for d in ckpt_dirs]
+    seeds = sorted(e["seed"] for e in entries)
+    want = sorted(record["final"].get("seeds") or [])
+    if seeds != want:
+        raise SystemExit("the checkpoints are seeds %s; the record's final seeds are %s (each exactly once)"
+                         % (seeds, want))
+    digests = sorted({e["config_sha256_sans_seed"] for e in entries})
+    if len(digests) != 1:
+        raise SystemExit("the final seeds differ in more than the seed (config_sha256_sans_seed %s); retrain them with "
+                         "postfit.py --print-final-commands" % digests)
+    chosen = record["chosen"]
+    return {"schema": postfit.FINAL_SCHEMA, "system_kind": "berturk",
+            "postfit": {"path": repo_relpath(record_path), "sha256": sha}, "final_split": record["final"]["split"],
+            "chosen": {k: chosen.get(k) for k in ("train_run_id", "encoder_lr", "epoch", "epochs_schedule",
+                                                  "stop_after_epoch", "temperature")},
+            "config_sha256_sans_seed": digests[0],
+            "seeds": [{k: v for k, v in e.items() if k != "config_sha256_sans_seed"}
+                      for e in sorted(entries, key=lambda e: e["seed"])]}
 
 
 def disk_need_bytes(model_bytes, epochs, export_epochs, final):

@@ -14,10 +14,14 @@ verified full val dump of exactly that export exists under --dump-root: a dir ho
 pilot.berturk.prune_export, any other to pilot.postfit.prune_export (ray_train.py exports); anything else, a symlink
 included, is refused and left in place.
 
---print-final-commands RECORD prints one ray_train.py command per final seed (pilot.postfit.final_command), each line
-to be prefixed with the interpreter (and caffeinate -i on the Mac); ray_train.py --postfit still refuses any command
-that is not the chosen recipe. --final-manifest RECORD CKPT... builds the postfit-final/1 manifest of the finished
-final checkpoints (pilot.postfit.final_manifest), refused unless they are exactly the record's final seeds.
+--print-final-commands RECORD prints one training command per final seed, each line to be prefixed with the
+interpreter (and caffeinate -i on the Mac), dispatched on the record's system kind: a Laya record prints ray_train.py
+commands (pilot.postfit.final_command; --base defaults to multilingual), a BERTurk record berturk_train.py commands
+(pilot.berturk.final_command; --base defaults to berturk), which need --reference REF, the record's BASE-03 reference
+check, refused here and in berturk_train.py unless it is of that record and reads ok or carries a resolution. The
+trainer's --postfit still refuses any command that is not the chosen recipe. --final-manifest RECORD CKPT... builds
+the postfit-final/1 manifest of the finished final checkpoints (pilot.postfit.final_manifest for Laya,
+pilot.berturk.final_manifest for BERTurk), refused unless they are exactly the record's final seeds.
 
 --reference-check RECORD [--resolution TEXT] builds the BASE-03 check of a BERTurk postfit record
 (pilot.berturk.reference_check, schema berturk-reference/1): the chosen candidate's val micro-F1 at its val-selected
@@ -30,6 +34,9 @@ usage: python postfit.py results/dumps/RUN_ID [RUN_ID2 ...] [--out results/postf
                          --out-prefix ckpt/laya-final
        python postfit.py --final-manifest results/postfit/laya.json ckpt/laya-final-s0 ckpt/laya-final-s1 \
                          ckpt/laya-final-s2 --out results/postfit/laya-final.json
+       python postfit.py --print-final-commands results/postfit/berturk.json \
+                         --reference results/postfit/berturk-reference.json --storage berturk_runs \
+                         --out-prefix ckpt/berturk-final
        python postfit.py --reference-check results/postfit/berturk.json [--resolution TEXT] \
                          [--out results/postfit/berturk-reference.json]
 """
@@ -60,8 +67,12 @@ def main(argv=None):
     ap.add_argument("--storage", default=None, help="--print-final-commands: the Ray storage dir of the final runs")
     ap.add_argument("--out-prefix", default=None,
                     help="--print-final-commands: final checkpoint dirs are <out-prefix>-s<seed>")
-    ap.add_argument("--base", default="multilingual",
-                    help="--print-final-commands: the base the chosen run trained (default the pinned weights)")
+    ap.add_argument("--base", default=None,
+                    help="--print-final-commands: the base the chosen run trained (default the pinned weights: "
+                         "multilingual for a Laya record, berturk for a BERTurk record)")
+    ap.add_argument("--reference", metavar="REF", default=None,
+                    help="--print-final-commands of a BERTurk record: its BASE-03 reference check (postfit.py "
+                         "--reference-check --out REF)")
     ap.add_argument("--final-manifest", nargs="+", metavar="RECORD CKPT", default=None,
                     help="the postfit record, then the final checkpoint dirs of every final seed")
     ap.add_argument("--reference-check", metavar="RECORD", default=None,
@@ -76,19 +87,31 @@ def main(argv=None):
                  "--final-manifest RECORD CKPT [...] or --reference-check RECORD")
     if a.resolution is not None and a.reference_check is None:
         ap.error("--resolution applies only to --reference-check")
-    if a.print_final_commands is None and (a.storage is not None or a.out_prefix is not None
-                                           or a.base != "multilingual"):
+    if a.print_final_commands is None and (a.storage is not None or a.out_prefix is not None or a.base is not None):
         ap.error("--storage, --out-prefix and --base apply only to --print-final-commands")
+    if a.print_final_commands is None and a.reference is not None:
+        ap.error("--reference applies only to --print-final-commands of a BERTurk record")
     manifest = a.manifest or DEFAULT_MANIFEST
     if a.print_final_commands is not None:
         if a.out is not None:
             ap.error("--out does not apply to --print-final-commands (use --out-prefix)")
         if a.storage is None or a.out_prefix is None:
             ap.error("--print-final-commands needs --storage DIR and --out-prefix PATH")
-        record, _ = postfit.read_record(a.print_final_commands)
-        lines = [shlex.join(postfit.final_command(record, seed, a.print_final_commands, a.storage, a.out_prefix,
-                                                  base=a.base, manifest=a.manifest))
-                 for seed in record["final"]["seeds"]]
+        record, sha = postfit.read_record(a.print_final_commands)
+        if record.get("system_kind") == "berturk":
+            if a.reference is None:
+                ap.error("--print-final-commands of a BERTurk record needs --reference REF (its BASE-03 check)")
+            berturk.check_reference_for_final(a.reference, sha)      # no command printed before the gate passes
+            argvs = [berturk.final_command(record, seed, a.print_final_commands, a.reference, a.storage, a.out_prefix,
+                                           base=a.base or "berturk", manifest=a.manifest)
+                     for seed in record["final"]["seeds"]]
+        else:
+            if a.reference is not None:
+                ap.error("--reference applies only to --print-final-commands of a BERTurk record")
+            argvs = [postfit.final_command(record, seed, a.print_final_commands, a.storage, a.out_prefix,
+                                           base=a.base or "multilingual", manifest=a.manifest)
+                     for seed in record["final"]["seeds"]]
+        lines = [shlex.join(argv) for argv in argvs]
         print("\n".join(lines))
         return lines
     if a.reference_check is not None:
@@ -103,7 +126,9 @@ def main(argv=None):
     if a.final_manifest is not None:
         if len(a.final_manifest) < 2:
             ap.error("--final-manifest takes the record, then the final checkpoint dirs")
-        out = postfit.final_manifest(a.final_manifest[0], a.final_manifest[1:])
+        record, _ = postfit.read_record(a.final_manifest[0])
+        build = berturk.final_manifest if record.get("system_kind") == "berturk" else postfit.final_manifest
+        out = build(a.final_manifest[0], a.final_manifest[1:])
         text = json.dumps(out, indent=2, ensure_ascii=False) + "\n"
         print(text, end="")
         if a.out:

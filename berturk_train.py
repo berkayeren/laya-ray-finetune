@@ -36,6 +36,20 @@ bitwise deterministic), the load time, one row per completed epoch with exactly 
 (git sha, dirty flag, diff digest). A finished run writes <storage>/<run_id>/done.json. Records hold ids, digests,
 numbers and repo-relative paths only, never a local path or message text.
 
+Final seeds (BASE-01/02/03, plan 06-08; A4, A9 and OQ2 confirmed at plan 06-02): --stop-after-epoch K trains epochs
+1..K of the --epochs schedule (the linear schedule and its warm-up stay sized by --epochs, so epoch K is the selection
+trajectory's epoch K; K in 1..--epochs - 1, K = --epochs has one spelling, the omitted flag). --out DIR writes the last
+trained epoch as the final checkpoint (a temp sibling, then one rename; the same files as an export). --postfit RECORD
+--reference REF (each needs the other, and --out) binds a final seed by refusal, never by transcription: before any
+fetch, load or run dir, also with --print-run-id, pilot.berturk.check_reference_for_final refuses unless REF is the
+BASE-03 reference check of exactly that record (its sha256) and reads ok or carries a recorded resolution, and
+pilot.postfit.check_final refuses unless --data is the record's final split, --seed one of its final seeds,
+--stop-after-epoch the chosen one and every other canonical value the chosen selection run's (naming the first
+differing key). The final berturk_train.json serves the val-fitted T: calibrated true, temperature the record's chosen
+T bit for bit (a JSON float round trip), postfit = pilot.postfit.final_block. stop_after_epoch and postfit_sha256 enter
+the run identity and are left out when None, so every selection run id is unchanged. postfit.py
+--print-final-commands prints the three commands.
+
 Run identity: the run id is pilot.berturk.run_id of the canonical config (pilot.berturk.IDENTITY: split, data and base
 digests, transformers and accelerate versions, device, every hyperparameter and the seed; never a path or a resource),
 e.g. berturk-selection_train-s0-1a2b3c4d. --print-run-id prints it after the split and base checks and exits without
@@ -52,6 +66,9 @@ usage:
   python berturk_train.py --data data/splits/selection_train.jsonl --device mps        # the selection run (10 epochs)
   python berturk_train.py --data data/splits/selection_train.jsonl --print-run-id      # its run id, nothing created
   python berturk_train.py --data ... --base DIR --device cpu --epochs 2 --batch 4 --max-len 32 --storage DIR  # smoke
+  python berturk_train.py --data data/splits/final_train.jsonl --device mps --stop-after-epoch K --seed S \
+      --postfit results/postfit/berturk.json --reference results/postfit/berturk-reference.json --no-export-epochs \
+      --out ckpt/berturk-final-sS                   # a final seed (postfit.py --print-final-commands prints it)
 """
 import argparse
 import importlib.metadata
@@ -60,7 +77,7 @@ import os
 import shutil
 import time
 
-from pilot import berturk, pins, runs, spike
+from pilot import berturk, pins, postfit, runs, spike
 from pilot.data import (DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file, write_atomic,
                         verify_split_file)
 from pilot import dumps
@@ -110,6 +127,17 @@ def parser():
                     help="print the run id (<storage>/<run_id>/) and exit without creating anything")
     ap.add_argument("--export-epochs", action=argparse.BooleanOptionalAction, default=True,
                     help="write each epoch's export to <storage>/<run_id>/exports/epoch-NNN (default on)")
+    ap.add_argument("--stop-after-epoch", type=int, default=None,
+                    help="stop after epoch K of the --epochs schedule (the schedule and warm-up keep --epochs): the "
+                         "val-chosen epoch of a final seed; 1..--epochs - 1, omit it to train every epoch")
+    ap.add_argument("--out", default=None,
+                    help="write the last trained epoch here as the final checkpoint (required with --postfit)")
+    ap.add_argument("--postfit", default=None,
+                    help="the committed BERTurk postfit record: trains a final seed with the val-chosen settings, "
+                         "refused unless every setting matches, and serves the val-fitted T (needs --reference, --out)")
+    ap.add_argument("--reference", default=None,
+                    help="the record's BASE-03 reference check (postfit.py --reference-check --out REF); a final seed "
+                         "is refused unless it is of that record and reads ok or carries a resolution")
     return ap
 
 
@@ -136,15 +164,9 @@ def check_float32(model):
         raise SystemExit("model parameters in %s; BERTurk trains in fp32 (A3)" % ", ".join(bad))
 
 
-def write_export(model, base_dir, run_dir, epoch, rec):
-    """<run_dir>/exports/epoch-NNN: model.save_pretrained (config.json + model.safetensors, fp32), the base's tokenizer
-    files byte for byte, then the record; written to a temp sibling and renamed, so it is whole or absent. An existing
-    export is refused (a run dir is never reused, A6)."""
-    name = "epoch-%03d" % epoch
-    final = os.path.join(run_dir, "exports", name)
-    if os.path.lexists(final):
-        raise SystemExit("exports/%s already exists; a BERTurk run dir is never reused (A6): delete %s, then rerun"
-                         % (name, run_dir))
+def _write_checkpoint(model, base_dir, final, rec):
+    """A checkpoint dir at `final`: model.save_pretrained (config.json + model.safetensors, fp32), the base's tokenizer
+    files byte for byte, then the record; written to a temp sibling and renamed, so it is whole or absent."""
     tmp = final + ".tmp"
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp)
@@ -155,10 +177,33 @@ def write_export(model, base_dir, run_dir, epoch, rec):
         f.write(berturk.record_bytes(rec))
     have = sorted(os.listdir(tmp))
     if have != sorted(berturk.CHECKPOINT_FILES):
-        raise SystemExit("export %s holds %s, expected exactly %s; check the transformers version"
-                         % (name, have, sorted(berturk.CHECKPOINT_FILES)))
+        raise SystemExit("checkpoint %s holds %s, expected exactly %s; check the transformers version"
+                         % (os.path.basename(final), have, sorted(berturk.CHECKPOINT_FILES)))
     os.rename(tmp, final)
     return final
+
+
+def write_export(model, base_dir, run_dir, epoch, rec):
+    """<run_dir>/exports/epoch-NNN (_write_checkpoint). An existing export is refused (a run dir is never reused,
+    A6)."""
+    name = "epoch-%03d" % epoch
+    final = os.path.join(run_dir, "exports", name)
+    if os.path.lexists(final):
+        raise SystemExit("exports/%s already exists; a BERTurk run dir is never reused (A6): delete %s, then rerun"
+                         % (name, run_dir))
+    return _write_checkpoint(model, base_dir, final, rec)
+
+
+def write_final(model, base_dir, out, rec):
+    """The final checkpoint at --out (_write_checkpoint): refused when --out was filled meanwhile; an empty --out dir
+    (checked before training) is replaced by the rename."""
+    out = os.path.abspath(out)
+    if os.path.lexists(out):
+        if not os.path.isdir(out) or os.path.islink(out) or os.listdir(out):
+            raise SystemExit("--out %s exists and is not empty; choose a new dir" % out)
+        os.rmdir(out)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    return _write_checkpoint(model, base_dir, out, rec)
 
 
 def remove_trainer_dir(path):
@@ -182,6 +227,14 @@ def main(argv=None):
             ap.error("%s must be at least 1" % flag)
     if not a.lr > 0:
         ap.error("--lr must be positive")
+    # K = --epochs has one spelling, the omitted flag (one run id per trajectory)
+    if a.stop_after_epoch is not None and not 1 <= a.stop_after_epoch < a.epochs:
+        ap.error("--stop-after-epoch must be at least 1 and below --epochs (%d); omit it to train every epoch"
+                 % a.epochs)
+    if (a.postfit is None) != (a.reference is None):
+        ap.error("--postfit and --reference go together: a final seed needs the record and its BASE-03 reference check")
+    if a.postfit is not None and a.out is None:
+        ap.error("--postfit needs --out DIR (the final checkpoint)")
     cpus = a.cpus or (4 if a.device == "mps" else 1)
     if not os.path.isfile(a.data):
         raise SystemExit("%s not found; check the path, or run `make data`" % a.data)
@@ -195,10 +248,19 @@ def main(argv=None):
         raise SystemExit("%s: no messages to train on" % a.data)
     mask = berturk.check_mask_tags(a.mask_tags.split(",")) if a.mask_tags else ()
     labels = [berturk.label_vector(r, mask) for r in rows]
+    # the postfit record and its BASE-03 gate (torch-free reads) before any fetch, load or run dir
+    pf_record, record_sha = postfit.read_record(a.postfit) if a.postfit else (None, None)
+    if pf_record is not None:
+        if pf_record.get("system_kind") != "berturk":
+            raise SystemExit("--postfit %s: system kind %r; berturk_train.py trains the final seeds of a BERTurk "
+                             "record" % (a.postfit, pf_record.get("system_kind")))
+        berturk.check_reference_for_final(a.reference, record_sha)
+    if (a.out is not None and not a.print_run_id and os.path.lexists(a.out)
+            and (not os.path.isdir(a.out) or os.listdir(a.out))):
+        raise SystemExit("--out %s exists and is not empty; choose a new dir" % a.out)
 
-    if a.base == "berturk":                                 # pinned + verified before any load (ENV-02)
-        from pilot.weights import fetch
-        base_dir = fetch(pins.BERTURK)
+    if a.base == "berturk":                                 # the pin names the digests; fetched after the binding
+        base_dir = None
         digests = dict(pins.BERTURK["sha256"])
     else:
         base_dir = os.path.abspath(a.base)
@@ -207,8 +269,6 @@ def main(argv=None):
             raise SystemExit("--base must be 'berturk' (pinned) or a local base dir holding %s; %s lacks %s"
                              % (", ".join(berturk.BASE_FILES), a.base, ", ".join(missing)))
         digests = {f: sha256_file(os.path.join(base_dir, f)) for f in berturk.BASE_FILES}
-    berturk.check_cased(_read_json(os.path.join(base_dir, "tokenizer_config.json"), "base tokenizer_config.json"),
-                        "base")
     canon = berturk.canonical({
         "split": os.path.splitext(os.path.basename(entry["path"]))[0], "data_sha256": entry["sha256"],
         "data_role": entry["role"], "base_model_sha256": digests["model.safetensors"],
@@ -220,7 +280,17 @@ def main(argv=None):
         "weight_decay": berturk.WEIGHT_DECAY, "warmup_ratio": berturk.WARMUP_RATIO,
         "lr_scheduler": berturk.LR_SCHEDULER, "max_grad_norm": berturk.MAX_GRAD_NORM, "optim": berturk.OPTIM,
         "loss": berturk.LOSS, "max_len": a.max_len, "max_messages": a.max_messages,
-        "mask_tags": list(mask) or None, "seed": a.seed, "stop_after_epoch": None, "postfit_sha256": None})
+        "mask_tags": list(mask) or None, "seed": a.seed, "stop_after_epoch": a.stop_after_epoch,
+        "postfit_sha256": record_sha})
+    pf_block = None
+    if pf_record is not None:                               # bound by refusal, never by transcription (BASE-01)
+        postfit.check_final(pf_record, canon)
+        pf_block = postfit.final_block(pf_record, record_sha, a.postfit)   # refuses a T outside laya's band here
+    if a.base == "berturk":                                 # pinned + verified before any load (ENV-02)
+        from pilot.weights import fetch
+        base_dir = fetch(pins.BERTURK)
+    berturk.check_cased(_read_json(os.path.join(base_dir, "tokenizer_config.json"), "base tokenizer_config.json"),
+                        "base")
     rid = berturk.run_id(canon)
     if a.print_run_id:
         print(rid)
@@ -230,8 +300,9 @@ def main(argv=None):
     if os.path.lexists(run_dir):
         raise SystemExit("%s exists; a BERTurk run is rerun from scratch, never resumed (A6): delete %s, then rerun"
                          % (run_dir, run_dir))
-    need = berturk.disk_need_bytes(os.path.getsize(os.path.join(base_dir, "model.safetensors")), a.epochs,
-                                   a.export_epochs, False)
+    stop = a.stop_after_epoch or a.epochs                    # the last epoch this run trains
+    need = berturk.disk_need_bytes(os.path.getsize(os.path.join(base_dir, "model.safetensors")), stop,
+                                   a.export_epochs, a.out is not None)
     free = runs.free_bytes(storage)
     if free < need:
         raise SystemExit("%.1f GiB free under --storage; this run needs about %.1f GiB (one export per epoch); free "
@@ -291,10 +362,14 @@ def main(argv=None):
                            "revision": pins.BERTURK["revision"] if a.base == "berturk" else None,
                            "model_sha256": digests["model.safetensors"]}}
 
-    def doc(epoch):
+    def doc(epoch, final=False):
+        """berturk_train.json: an export (and done.json) is uncalibrated (T = 1); a --postfit final checkpoint serves
+        the record's val-fitted T, copied from final_block without arithmetic (a JSON float round trip, A9)."""
+        served = final and pf_block is not None
         return {"schema": berturk.RECORD_SCHEMA, "run_id": rid, "canonical": canon, "epoch": epoch,
-                "epochs_schedule": a.epochs, "stop_after_epoch": None, "calibrated": False, "temperature": 1.0,
-                "postfit": None, "record": record, "provenance": provenance}
+                "epochs_schedule": a.epochs, "stop_after_epoch": a.stop_after_epoch, "calibrated": served,
+                "temperature": pf_block["temperature"] if served else 1.0, "postfit": pf_block if served else None,
+                "record": record, "provenance": provenance}
 
     ep = {"epoch": 0, "loss_sum": 0.0, "loss_n": 0, "steps": 0, "t0": 0.0, "swap0": 0}
 
@@ -331,6 +406,9 @@ def main(argv=None):
                                  "peak_rss_bytes": peak["rss"], "swap_delta_bytes": spike.swap_used() - ep["swap0"]})
         if a.export_epochs:
             write_export(model, base_dir, run_dir, ep["epoch"], doc(ep["epoch"]))
+        if ep["epoch"] >= stop:                             # the schedule stays sized by --epochs (A4)
+            control.should_training_stop = True
+        return control
 
     cb = transformers.TrainerCallback()                     # an instance with assigned hooks, no subclass
     cb.on_epoch_begin, cb.on_step_end, cb.on_epoch_end = on_epoch_begin, on_step_end, on_epoch_end
@@ -341,11 +419,14 @@ def main(argv=None):
     check_model(trainer.model)
     record["param_device"] = a.device
     trainer.train()
-    if ep["epoch"] != a.epochs:
-        raise SystemExit("the run stopped after %d of %d epochs" % (ep["epoch"], a.epochs))
+    if ep["epoch"] != stop:
+        raise SystemExit("the run stopped after %d of %d epochs" % (ep["epoch"], stop))
     remove_trainer_dir(args.output_dir)
-    write_atomic(os.path.join(run_dir, berturk.DONE), berturk.record_bytes(doc(a.epochs)))
-    print("%s: %d epochs -> %s" % (rid, a.epochs, os.path.join(run_dir, "exports")))
+    if a.out is not None:
+        write_final(trainer.model, base_dir, a.out, doc(stop, final=True))
+    write_atomic(os.path.join(run_dir, berturk.DONE), berturk.record_bytes(doc(stop)))
+    print("%s: %d of %d epochs -> %s" % (rid, stop, a.epochs, a.out if a.out is not None
+                                         else os.path.join(run_dir, "exports")))
     return run_dir
 
 

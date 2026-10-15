@@ -2,6 +2,11 @@
 per-epoch exports -> score.py --model berturk val dumps that pilot.dumps.load_dump verifies -> pilot.postfit.candidate
 and fit accept them -> report.py run_report reports them; score.py refuses the synthetic test split for an export.
 
+test_berturk_final_seed_chain (plan 06-08, BASE-01/02/03) continues the same chain to the final manifest: postfit
+record -> BASE-03 reference check (with a resolution: the tiny model is far below 0.707) -> the printed final commands
+-> 3 bound final seeds serving the val-fitted T -> a final seed's own val dump serves T and is refused by postfit as
+in-sample -> postfit.py --final-manifest.
+
 No marker: it runs in `make test` (no Ray, no weights, no data download; seconds).
 """
 import json
@@ -18,6 +23,7 @@ import score
 from conftest import prepared
 from intents import INTENTS
 from pilot import berturk, dumps, postfit
+from pilot.data import sha256_file
 from tiny_berturk import tiny_base
 
 REPO = pilot.data.REPO_ROOT
@@ -101,5 +107,84 @@ def test_berturk_train_score_postfit_chain(tmp_path, synthetic_raw):
                         "--workers", "0", "--manifest", manifest, "--out-root", dump_root])
         assert not any(os.path.exists(os.path.join(d, "test.npz")) or os.path.exists(os.path.join(d, "test.json"))
                        for d in run_dirs)
+    finally:
+        torch.set_num_threads(threads)
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_berturk_final_seed_chain(tmp_path, synthetic_raw, capsys):
+    import postfit as postfit_cli
+    import torch
+    out_dir, manifest = prepared(tmp_path, synthetic_raw)
+    splits = os.path.join(out_dir, "splits")
+    base = tiny_base(tmp_path / "base")
+    storage = tmp_path / "runs"
+    argv = ["berturk_train.py", "--data", os.path.join(splits, "selection_train.jsonl"), "--manifest", manifest,
+            "--base", base, "--device", "cpu", "--epochs", "2", "--batch", "4", "--max-len", "32", "--seed", "0",
+            "--storage", storage]
+    rid = _run(*(argv + ["--print-run-id"])).stdout.strip()
+    _run(*argv)                                              # the 06-03 tiny selection run
+    dump_root = str(tmp_path / "dumps")
+    val = os.path.join(splits, "val.jsonl")
+    threads = torch.get_num_threads()
+    try:
+        run_dirs = [score.main([val, "--model", "berturk", "--checkpoint", str(storage / rid / "exports" / e),
+                                "--workers", "0", "--manifest", manifest, "--out-root", dump_root])[0]
+                    for e in ("epoch-001", "epoch-002")]
+        record = postfit.fit(run_dirs, manifest, lr_grid=(2e-05,), epochs=2, head_lr=None, selection_seed=0,
+                             final_seeds=(0, 1, 2))
+        path = postfit.write_record(record, str(tmp_path / "postfit" / "berturk.json"))
+        sha, chosen = sha256_file(path), record["chosen"]
+        T = chosen["temperature"]
+        assert record["system_kind"] == "berturk" and chosen["train_run_id"] == rid
+        assert chosen["stop_after_epoch"] == (1 if chosen["epoch"] == 1 else None)
+
+        ref = str(tmp_path / "postfit" / "berturk-reference.json")
+        check = postfit_cli.main(["--reference-check", path, "--resolution", "tiny offline test model", "--out", ref])
+        assert check["status"] == "investigate" and check["postfit"]["sha256"] == sha
+        assert berturk.check_reference_for_final(ref, sha)["resolution"] == "tiny offline test model"
+
+        prefix, final_storage = str(tmp_path / "ckpt" / "berturk-final"), str(tmp_path / "final_runs")
+        final_train = os.path.join(splits, "final_train.jsonl")
+        for seed in (0, 1, 2):
+            cmd = berturk.final_command(record, seed, path, ref, final_storage, prefix, base=base, data=final_train,
+                                        manifest=manifest)
+            assert cmd[0] == "berturk_train.py" and ("--stop-after-epoch" in cmd) == (chosen["epoch"] == 1)
+            _run(*cmd)
+            ckpt = "%s-s%d" % (prefix, seed)
+            assert sorted(os.listdir(ckpt)) == sorted(berturk.CHECKPOINT_FILES)
+            with open(os.path.join(ckpt, berturk.RECORD), encoding="utf-8") as f:
+                rec = json.load(f)
+            assert json.dumps(rec["temperature"]) == json.dumps(T) and rec["temperature"] == T   # bit for bit
+            assert rec["calibrated"] is True and rec["epoch"] == chosen["epoch"]
+            assert rec["postfit"] == postfit.final_block(record, sha, path) and rec["postfit"]["sha256"] == sha
+            canon = rec["canonical"]
+            assert canon["split"] == "final_train" and canon["seed"] == seed and canon["postfit_sha256"] == sha
+            assert canon.get("stop_after_epoch") == chosen["stop_after_epoch"]
+            assert [row["epoch"] for row in rec["record"]["epochs"]] == list(range(1, chosen["epoch"] + 1))
+
+        final_dump, _ = score.main([val, "--model", "berturk", "--checkpoint", prefix + "-s0", "--workers", "0",
+                                    "--manifest", manifest, "--out-root", dump_root])
+        _, _, side, _ = dumps.load_dump(final_dump, "val", manifest)
+        assert side["temperature"]["shipped"] == T and side["seed"] == 0
+        assert side["training"]["postfit_sha256"] == sha and side["training"]["calibrated"] is True
+        with pytest.raises(SystemExit, match="selection_train"):                 # a final seed's val is in-sample
+            postfit.candidate(final_dump, manifest)
+
+        out = str(tmp_path / "postfit" / "berturk-final.json")
+        man = postfit_cli.main(["--final-manifest", path] + ["%s-s%d" % (prefix, s) for s in (2, 0, 1)]
+                               + ["--out", out])
+        assert man["schema"] == postfit.FINAL_SCHEMA and man["system_kind"] == "berturk"
+        assert [e["seed"] for e in man["seeds"]] == [0, 1, 2] and man["postfit"]["sha256"] == sha
+        assert len({e["temperature"] for e in man["seeds"]}) == 1 and man["chosen"]["temperature"] == T
+        assert len(man["config_sha256_sans_seed"]) == 64
+        with open(out, encoding="utf-8") as f:
+            assert json.load(f) == man
+
+        capsys.readouterr()
+        lines = postfit_cli.main(["--print-final-commands", path, "--reference", ref, "--storage", final_storage,
+                                  "--out-prefix", prefix, "--base", base, "--manifest", manifest])
+        printed = capsys.readouterr().out.splitlines()
+        assert printed == lines and len(lines) == 3 and all(l.startswith("berturk_train.py ") for l in lines)
     finally:
         torch.set_num_threads(threads)
