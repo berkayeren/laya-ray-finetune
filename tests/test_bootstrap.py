@@ -181,6 +181,34 @@ def _rename_run(run_dir, dst):
     return dst
 
 
+FAKE_TRAINING = {"config_sha256_sans_seed": "c" * 64, "run_id": "fake"}
+
+
+def _set_seed(run_dir, seed, training=FAKE_TRAINING):
+    """Give run_dir's val and test sidecars a training seed and block (only dump_sha256 binds the npz, not the JSON)."""
+    for split in ("val", "test"):
+        path = os.path.join(run_dir, split + ".json")
+        with open(path, encoding="utf-8") as f:
+            side = json.load(f)
+        side.update(seed=seed, training=training)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(side, f)
+    return run_dir
+
+
+def _seed_copy(run_dir, dst, seed, manifest, rng_seed=5, training=FAKE_TRAINING):
+    """A renamed copy of run_dir turned into another seed of the same system: other logits on both splits (so its
+    dumps differ) and sidecars with seed `seed` and the shared training block."""
+    _rename_run(run_dir, dst)
+    rng = np.random.default_rng(rng_seed)
+    for split in ("val", "test"):
+        logits, uids, side, _ = dumps.load_dump(dst, split, manifest)
+        other = rng.normal(0.0, 2.0, size=logits.shape).astype(np.float32)
+        dumps.write_dump(dst, split, other, uids, {k: v for k, v in side.items()
+                                                   if k not in ("dump_sha256", "schema_version")})
+    return _set_seed(dst, seed, training)
+
+
 def test_identical_copy_is_zero_width(tmp_path, snap):
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     copy = _rename_run(run_dir, str(tmp_path / "copies" / "prior-copy"))
@@ -191,13 +219,8 @@ def test_identical_copy_is_zero_width(tmp_path, snap):
 
 def test_compare_averages_seed_dumps(tmp_path, snap):
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
-    seed1 = _rename_run(run_dir, str(tmp_path / "seeds" / "prior-s1"))
-    rng = np.random.default_rng(5)
-    for split in ("val", "test"):                           # a second "seed" with other logits on both splits
-        logits, uids, side, _ = dumps.load_dump(seed1, split, manifest)
-        other = rng.normal(0.0, 2.0, size=logits.shape).astype(np.float32)
-        dumps.write_dump(seed1, split, other, uids, {k: v for k, v in side.items()
-                                                     if k not in ("dump_sha256", "schema_version")})
+    _set_seed(run_dir, 0)                                   # seed 0 of a fake recipe; a second seed with other logits
+    seed1 = _seed_copy(run_dir, str(tmp_path / "seeds" / "prior-s1"), 1, manifest)
     rep = report.compare([run_dir, seed1], [run_dir], "test", manifest, B=100, seed=0)
     assert rep["a"]["run_ids"] == ["prior", "prior-s1"] and len(rep["a"]["dump_sha256"]["split"]) == 2
     L0, uids, _, entry = dumps.load_dump(run_dir, "test", manifest)
@@ -251,6 +274,60 @@ def test_compare_refuses_repeated_seed(tmp_path, snap):
             report.compare([run_dir], side, "test", manifest, B=50, seed=0)
 
 
+def test_compare_refuses_a_side_that_is_not_one_system(tmp_path, snap):
+    run_dir, manifest = _score_both(snap, tmp_path / "dumps")
+    maj, _ = _score_both(snap, tmp_path / "dumps", model="majority")
+    for a in ([run_dir, maj], [maj, run_dir]):
+        with pytest.raises(SystemExit) as e:
+            report.compare(a, [run_dir], "test", manifest, B=50, seed=0)
+        assert "seeds of one system" in str(e.value.code) and "mixes system kinds" in str(e.value.code)
+        with pytest.raises(SystemExit, match="seeds of one system"):
+            report.compare([run_dir], a, "test", manifest, B=50, seed=0)
+    # one kind, but no training block (Phase 3 sidecars) or another training recipe: not seeds of one system
+    s1 = _seed_copy(run_dir, str(tmp_path / "s" / "prior-s1"), 1, manifest)
+    with pytest.raises(SystemExit, match="same training config apart from the seed"):
+        report.compare([run_dir, s1], [run_dir], "test", manifest, B=50, seed=0)
+    _set_seed(run_dir, 0, {"config_sha256_sans_seed": "d" * 64, "run_id": "fake-other-lr"})
+    with pytest.raises(SystemExit, match="same training config apart from the seed"):
+        report.compare([run_dir, s1], [run_dir], "test", manifest, B=50, seed=0)
+
+
+def test_compare_refuses_missing_or_repeated_seeds(tmp_path, snap):
+    run_dir, manifest = _score_both(snap, tmp_path / "dumps")
+    _set_seed(run_dir, None)                                # a training block but no recorded seed
+    s1 = _seed_copy(run_dir, str(tmp_path / "s" / "prior-s1"), None, manifest)
+    with pytest.raises(SystemExit, match="distinct, recorded seeds; got \\[None, None\\]"):
+        report.compare([run_dir, s1], [run_dir], "test", manifest, B=50, seed=0)
+    _set_seed(run_dir, 1)
+    _set_seed(s1, 1)                                        # two run dirs that claim the same seed
+    with pytest.raises(SystemExit, match="distinct, recorded seeds; got \\[1, 1\\]"):
+        report.compare([run_dir, s1], [run_dir], "test", manifest, B=50, seed=0)
+    _set_seed(s1, None)
+    with pytest.raises(SystemExit, match="distinct, recorded seeds"):
+        report.compare([run_dir], [run_dir, s1], "test", manifest, B=50, seed=0)
+
+
+def test_compare_refuses_identical_dumps_on_one_side(tmp_path, snap):
+    run_dir, manifest = _score_both(snap, tmp_path / "dumps")
+    _set_seed(run_dir, 0)
+    copy = _set_seed(_rename_run(run_dir, str(tmp_path / "s" / "prior-s1")), 1)   # distinct seeds, same npz bytes
+    with pytest.raises(SystemExit) as e:
+        report.compare([run_dir, copy], [run_dir], "test", manifest, B=50, seed=0)
+    assert str(e.value.code) == ("two run dirs on one side of --compare hold identical dumps; each seed counts once")
+    rep = report.compare([run_dir], [copy], "test", manifest, B=50, seed=0)          # across sides it stays legal
+    _assert_zero_width(rep)
+
+
+def test_compare_accepts_distinct_seeds_of_one_system(tmp_path, snap):
+    run_dir, manifest = _score_both(snap, tmp_path / "dumps")
+    _set_seed(run_dir, 0)
+    s1 = _seed_copy(run_dir, str(tmp_path / "s" / "prior-s1"), 1, manifest, rng_seed=1)
+    s2 = _seed_copy(run_dir, str(tmp_path / "s" / "prior-s2"), 2, manifest, rng_seed=2)
+    rep = report.compare([run_dir, s1, s2], [s2, s1], "test", manifest, B=50, seed=0)
+    assert rep["a"]["run_ids"] == ["prior", "prior-s1", "prior-s2"] and rep["b"]["run_ids"] == ["prior-s2", "prior-s1"]
+    assert len(set(rep["a"]["dump_sha256"]["split"])) == 3 and len(set(rep["a"]["dump_sha256"]["val"])) == 3
+
+
 def test_compare_refuses_subset_or_missing_val(tmp_path, snap):
     out_dir, manifest = snap
     root = tmp_path / "sub"
@@ -283,7 +360,8 @@ def test_compare_records_provenance_and_no_decision(tmp_path, snap):
 
 def test_cli_compare(tmp_path, snap, capsys):
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
-    seed1 = _rename_run(run_dir, str(tmp_path / "seeds" / "prior-s1"))
+    _set_seed(run_dir, 0)
+    seed1 = _seed_copy(run_dir, str(tmp_path / "seeds" / "prior-s1"), 1, manifest)
     out = tmp_path / "cmp.json"
     rep = report.main(["--compare", run_dir + "," + seed1, run_dir, "--manifest", manifest, "--B", "50",
                        "--seed", "2", "--out", str(out)])

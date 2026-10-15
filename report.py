@@ -22,6 +22,11 @@ The report holds no timestamps or timings and no rounded value.
 --compare A_DIRS B_DIRS (EVAL-07): a paired, message-level bootstrap between two systems, each side a comma-separated
 list of per-seed run dirs. Every dir needs a full split dump and a full val dump of the same source (SAME_SOURCE_KEYS;
 subset dumps are refused), and every dump of both sides must score the same uids in the same order (else "unpaired").
+A side of several run dirs must be distinct seeds of one system (03-REVIEW WR-05): one system kind, a training block
+in every sidecar with one shared config_sha256_sans_seed (pilot.dumps.training_digest: the training recipe and epoch
+without the seed), distinct non-null seeds and pairwise distinct split and val dump_sha256; a run dir listed twice is
+refused too. A single-dir side (a baseline, zero-shot Laya, one seed) needs none of these, and the checks run within a
+side only, so A = X, B = a copy of X stays a zero-width self-test.
 Per side, sigmoid(logit / T_shipped)
 is averaged over seeds per message and tag (pilot.metrics.seed_average), θ is chosen by D-12 on the seed-averaged val
 probabilities (provisional: Phase 8 freezes the θ rule for seed-averaged systems in protocol.json), and
@@ -170,7 +175,31 @@ def _load_side(run_dirs, split, manifest_path):
                              % (d, rid))
         seen.update((os.path.realpath(d), rid))
         runs.append((d,) + pair)
+    if len(runs) > 1:
+        _check_one_system(runs)
     return runs
+
+
+def _check_one_system(runs):
+    """SystemExit unless a multi-dir side holds distinct seeds of one system (03-REVIEW WR-05): one system kind, a
+    training block with one shared config_sha256_sans_seed (pilot.dumps.training_digest), distinct recorded seeds and
+    distinct split and val dumps. A sidecar without the keys (Phase 3 dumps) reads seed and training as None."""
+    sides = [r[1][2] for r in runs]
+    kinds = sorted({str((s.get("system") or {}).get("kind")) for s in sides})
+    if len(kinds) != 1:
+        raise SystemExit("one side of --compare must be seeds of one system; %s mixes system kinds %s"
+                         % (",".join(r[0] for r in runs), kinds))
+    digests = [(s.get("training") or {}).get("config_sha256_sans_seed") for s in sides]
+    if None in digests or len(set(digests)) != 1:
+        raise SystemExit("one side of --compare must be seeds of one system (same training config apart from the "
+                         "seed); got %s" % digests)
+    seeds = [s.get("seed") for s in sides]
+    if None in seeds or len(set(seeds)) != len(seeds):
+        raise SystemExit("seed dumps on one side need distinct, recorded seeds; got %s" % seeds)
+    for k in (1, 2):                                        # the split dumps, then the val dumps
+        shas = [r[k][2]["dump_sha256"] for r in runs]
+        if len(set(shas)) != len(shas):
+            raise SystemExit("two run dirs on one side of --compare hold identical dumps; each seed counts once")
 
 
 def _check_full(runs):

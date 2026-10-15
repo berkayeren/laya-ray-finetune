@@ -43,6 +43,15 @@ model load or Ray start, unless --force is passed (`make baselines` passes it). 
 alone (pilot.weights.identity) for that check. A dump written outside the repo prints its absolute path on the console
 (03-REVIEW IN-04) so a --n or temp dump can be found; sidecars and reports still record only repo-relative paths.
 
+Seed and training provenance (03-REVIEW WR-05): every sidecar has `seed` and `training`. For a ray_train.py checkpoint
+(an epoch export or a final; rl_agent_config.json holds training.ray_train) training_block reads the config bytes
+the run id hashed and records the training seed (canonical seed) and a training block: the train run id, split, epoch,
+epoch schedule, stop_after_epoch, encoder and head LR, neg seed, rung, fallback, weaker, per-epoch training loss,
+calibrated, the postfit sha256, the canonical run config and config_sha256_sans_seed (pilot.dumps.training_digest:
+the canonical config without seed and neg_seed, plus the epoch). report.py --compare averages one side's run dirs only
+when they are distinct seeds of one recipe by that digest. The pinned zero-shot checkpoint, a local checkpoint without
+training.ray_train and the baselines record seed None and training None.
+
 Module-level imports stay torch-, Ray- and laya-free.
 
 usage: python score.py data/splits/test.jsonl [--model laya|majority|prior] [--checkpoint multilingual|DIR]
@@ -62,7 +71,7 @@ from intents import INTENTS, QUESTIONS
 from pilot import dumps
 from pilot import laya_adapter as la
 from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, manifest_is_committed, parse_jsonl, questions_sha256,
-                        repo_relpath, sha256_file, verify_split_file)
+                        repo_relpath, sha256_bytes, sha256_file, verify_split_file)
 
 SUBSET_SEED = 0                                             # fixed shuffle before --n, so subsets are comparable
 TAGS = list(INTENTS)
@@ -119,13 +128,53 @@ def sidecar_base(entry, split_name, manifest_path, n_subset):
             "manifest": {"path": repo_relpath(manifest_path), "sha256": sha256_file(manifest_path),
                          "is_committed": manifest_is_committed(manifest_path)},
             "questions_sha256": questions_sha256(), "intents_order_sha256": dumps.intents_order_sha256(),
-            "logit": dumps.LOGIT_NOTE, "seed": None, "n_subset": n_subset, "subset_seed": SUBSET_SEED}
+            "logit": dumps.LOGIT_NOTE, "seed": None, "training": None, "n_subset": n_subset,
+            "subset_seed": SUBSET_SEED}
 
 
 def check_checkpoint_arg(checkpoint):
     """SystemExit unless --checkpoint is 'multilingual' or a dir holding rl_agent_config.json; no hashing or fetch."""
     if checkpoint != "multilingual" and not os.path.isfile(os.path.join(checkpoint, "rl_agent_config.json")):
         raise SystemExit("--checkpoint must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % checkpoint)
+
+
+def training_block(checkpoint, ident):
+    """(seed, training) of the sidecar (03-REVIEW WR-05): the training seed and provenance of a ray_train.py checkpoint.
+
+    (None, None) for 'multilingual' (no network access), and for a local checkpoint whose rl_agent_config.json has no
+    training.ray_train block. The config is read once as bytes and parsed only when their sha256 is ident's
+    config_sha256 (the bytes that name the run id), so a config changed after it was hashed is refused. The block holds
+    ids, numbers, digests and the canonical run config (pilot.runs.canonical: digests, never a path or message text);
+    config_sha256_sans_seed (pilot.dumps.training_digest) is shared by the seeds of one recipe and epoch.
+    """
+    if checkpoint == "multilingual":
+        return None, None
+    path = os.path.join(checkpoint, "rl_agent_config.json")
+    with open(path, "rb") as f:
+        raw = f.read()
+    if sha256_bytes(raw) != ident.get("config_sha256"):
+        raise SystemExit("%s changed after it was hashed; rescore" % _shown(path))
+    cfg = json.loads(raw.decode("utf-8"))
+    tr = cfg.get("training") if isinstance(cfg, dict) else None
+    rt = tr.get("ray_train") if isinstance(tr, dict) else None
+    if not rt:
+        return None, None                                    # a local checkpoint not trained by ray_train.py
+    for key in ("run_id", "canonical"):
+        if not rt.get(key):
+            raise SystemExit("%s: training.ray_train has no %s; retrain with this ray_train.py" % (_shown(path), key))
+    canon = rt["canonical"]
+    if not isinstance(canon, dict) or "seed" not in canon:
+        raise SystemExit("%s: training.ray_train.canonical has no seed; retrain with this ray_train.py" % _shown(path))
+    record = rt.get("record") or {}
+    epoch = tr.get("epoch")
+    return canon["seed"], {
+        "run_id": rt["run_id"], "split": canon.get("split"), "epoch": epoch, "epochs_schedule": canon.get("epochs"),
+        "stop_after_epoch": canon.get("stop_after_epoch"), "encoder_lr": canon.get("encoder_lr"),
+        "head_lr": canon.get("head_lr"), "neg_seed": canon.get("neg_seed"), "rung": record.get("rung"),
+        "fallback": record.get("fallback"), "weaker": record.get("weaker"),
+        "loss_by_epoch": [row.get("loss") for row in record.get("epochs") or []],
+        "calibrated": tr.get("calibrated"), "postfit_sha256": (tr.get("postfit") or {}).get("sha256"),
+        "canonical": canon, "config_sha256_sans_seed": dumps.training_digest(canon, epoch)}
 
 
 def resolve_checkpoint(checkpoint, ident=None):
@@ -427,6 +476,7 @@ def main(argv=None):
         from pilot.weights import identity
         check_checkpoint_arg(checkpoint)
         ident = identity(checkpoint)
+        seed, training = training_block(checkpoint, ident)   # WR-05: the training seed and recipe, bound by ident
         rid = dumps.run_id("laya", ident)
     else:
         rid = dumps.run_id(a.model)
@@ -443,6 +493,7 @@ def main(argv=None):
 
     if a.model == "laya":
         logits, fields = score_laya(a, checkpoint, cases, device, ident)
+        fields = dict(fields, seed=seed, training=training)  # overrides sidecar_base's None for a fine-tuned dump
     else:
         t0 = time.time()
         name, e_tr, counts, n_tr = train_counts(a.manifest, entry["role"])

@@ -125,6 +125,83 @@ def test_tiny_checkpoint_round_trips_through_score_and_report(tmp_path, tiny):
     assert shipped["temperature"] == TINY_T and shipped["rows"]["0.5"]["n"] == 7
 
 
+# --- seed and training provenance in the sidecar (03-REVIEW WR-05) --------------------------------------------------
+
+TRAIN_CANON = {"split": "selection_train", "seed": 3, "neg_seed": 3, "epochs": 4, "encoder_lr": 3e-05, "head_lr": 0.0001}
+
+
+def _as_trained(src, dst, epoch=2, **canon):
+    """Copy the tiny checkpoint to dst and give it a ray_train.py training block (canonical TRAIN_CANON + canon)."""
+    import shutil
+    shutil.copytree(src, dst)
+    path = os.path.join(str(dst), "rl_agent_config.json")
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    cfg["fine_tuned"] = True
+    cfg["training"] = {"ray_train": {"run_id": "laya-selection_train-neg8-s3-0123abcd",
+                                     "canonical": dict(TRAIN_CANON, **canon),
+                                     "record": {"rung": "none", "fallback": False, "weaker": False,
+                                                "epochs": [{"loss": 0.5}, {"loss": 0.4}]}},
+                       "epoch": epoch, "calibrated": False}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
+    return str(dst)
+
+
+def _score_val(tiny, ckpt, root):
+    out_dir, manifest, _ = tiny
+    run_dir, _ = score.main([os.path.join(out_dir, "splits", "val.jsonl"), "--checkpoint", ckpt, "--workers", "0",
+                             "--manifest", manifest, "--out-root", str(root)])
+    with open(os.path.join(run_dir, "val.json"), encoding="utf-8") as f:
+        return run_dir, json.load(f)
+
+
+def test_sidecar_records_the_training_seed_and_config(tmp_path, tiny):
+    ckpt = _as_trained(tiny[2], tmp_path / "s3")
+    run_dir, side = _score_val(tiny, ckpt, tmp_path / "dumps")
+    assert side["seed"] == 3
+    t = side["training"]
+    assert t["run_id"] == "laya-selection_train-neg8-s3-0123abcd" and t["split"] == "selection_train"
+    assert t["epoch"] == 2 and t["epochs_schedule"] == 4 and t["stop_after_epoch"] is None
+    assert t["encoder_lr"] == 3e-05 and t["head_lr"] == 0.0001 and t["neg_seed"] == 3
+    assert (t["rung"], t["fallback"], t["weaker"]) == ("none", False, False)
+    assert t["loss_by_epoch"] == [0.5, 0.4] and t["calibrated"] is False and t["postfit_sha256"] is None
+    assert t["canonical"] == TRAIN_CANON
+    assert t["config_sha256_sans_seed"] == dumps.training_digest(TRAIN_CANON, 2)
+    assert not {"state", "text"} & set(t)
+    # another seed of the same recipe: another dump run dir, the same seed-free digest
+    other_dir, other = _score_val(tiny, _as_trained(tiny[2], tmp_path / "s4", seed=4, neg_seed=4), tmp_path / "dumps")
+    assert other_dir != run_dir and other["seed"] == 4
+    assert other["training"]["config_sha256_sans_seed"] == t["config_sha256_sans_seed"]
+    # another learning rate or epoch is another recipe
+    assert dumps.training_digest(dict(TRAIN_CANON, encoder_lr=2e-05), 2) != t["config_sha256_sans_seed"]
+    assert dumps.training_digest(TRAIN_CANON, 3) != t["config_sha256_sans_seed"]
+    assert dumps.training_digest(dict(TRAIN_CANON, split="final_train"), 2) != t["config_sha256_sans_seed"]
+    assert dumps.training_digest(dict(TRAIN_CANON, seed=9, neg_seed=7), 2) == t["config_sha256_sans_seed"]
+
+
+def test_training_block_is_none_without_a_ray_train_config(tmp_path, tiny):
+    _, _, ckpt = tiny
+    assert score.training_block(ckpt, identity(ckpt)) == (None, None)
+    assert score.training_block("multilingual", None) == (None, None)       # no fetch, no identity needed
+    _, side = _score_val(tiny, ckpt, tmp_path / "dumps")
+    assert side["seed"] is None and side["training"] is None
+
+
+def test_training_block_refuses_a_config_changed_after_hashing(tmp_path, tiny):
+    ckpt = _as_trained(tiny[2], tmp_path / "s3")
+    ident = identity(ckpt)
+    assert score.training_block(ckpt, ident)[0] == 3
+    path = os.path.join(ckpt, "rl_agent_config.json")
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    cfg["training"]["ray_train"]["canonical"]["seed"] = 5
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
+    with pytest.raises(SystemExit, match="changed after it was hashed; rescore"):
+        score.training_block(ckpt, ident)
+
+
 # --- Ray reassembly and the Predictor actor (one code path for in-process and Ray scoring) -------------------------
 
 def _rows(*uids):

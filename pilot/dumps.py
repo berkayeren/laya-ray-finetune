@@ -8,7 +8,9 @@ A dump is results/dumps/<run_id>/<split>.npz plus a JSON sidecar <split>.json ne
 - Rows of a full dump stay in split-file order, so sha256 of the newline-joined uids equals the manifest's
   uids_sha256 and proves complete, in-order coverage without reading any message text.
 - The sidecar records provenance (split path/role/sha256, questions_sha256, the INTENTS-order hash, system identity,
-  seed, run_id) and dump_sha256, the sha256 of the npz bytes. It holds repo-relative paths and hashes only.
+  seed, run_id) and dump_sha256, the sha256 of the npz bytes. It holds repo-relative paths and hashes only. A dump of
+  a ray_train.py checkpoint also records its training seed and a training block whose config_sha256_sans_seed
+  (training_digest) is shared by the seeds of one recipe (03-REVIEW WR-05).
 
 load_dump is the only reader and hard-fails (SystemExit, no override; D-04) on any mismatch: npz bytes vs
 dump_sha256, other keys, dtypes or shapes, a pickled array (numpy loads use allow_pickle=False, because a pickled
@@ -60,6 +62,19 @@ LOCAL_REQUIRED_FILES = ("encoder/config.json", "tokenizer/tokenizer_config.json#
 def files_digest(files_sha256):
     """sha256 of the sorted, compact JSON of a local identity's files_sha256 (tokenizer/ and encoder/ digests)."""
     blob = json.dumps(files_sha256, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+# the canonical-config keys two seeds of one recipe may differ in (pilot.runs IDENTITY): training_digest leaves them out
+SEED_KEYS = ("seed", "neg_seed")
+
+
+def training_digest(canonical, epoch):
+    """config_sha256_sans_seed of a ray_train.py checkpoint (03-REVIEW WR-05): the sha256 of the compact, sorted JSON
+    of its canonical run config without SEED_KEYS, plus the checkpoint's epoch. Two seeds of one recipe share it; any
+    other hyperparameter, the training split or the epoch changes it, so report.py --compare averages only seeds."""
+    blob = json.dumps({"canonical": {k: v for k, v in canonical.items() if k not in SEED_KEYS}, "epoch": epoch},
+                      sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
