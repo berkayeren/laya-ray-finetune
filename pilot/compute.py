@@ -9,10 +9,12 @@ items of the committed splits without a tokenizer (pilot.runs.neg_items) and pro
 Projection rate (RESEARCH Pitfall 6): s_per_step is the LARGEST train_s / optimizer_steps over the measured epochs, so
 the MPS warm-up of epoch 1 (or any slower later epoch) makes the projection conservative, never optimistic. A Laya run
 of E epochs on n items costs E x (optimizer_steps(n) x s_per_step + save_s_per_epoch) + load_s + calib_s +
-final_save_s + run_overhead_s, every term measured by the probe run; save_s_per_epoch includes Ray's persist of the
-epoch checkpoint (the train-state copy into storage) when the record says save_s_includes_persist, so that per-epoch
-cost is charged per epoch; run_overhead_s (run_overhead) is the probe child's wall clock minus the record's own terms
-(process and Ray start, the driver's checks, item building, the --out copy), charged once per run. A Laya scoring line
+final_save_s + run_overhead_s, every term measured by the probe run; calib_s is 0 for a record without calibration
+(None: Phase 5 runs no longer calibrate on training messages, LAYA-05), and the formula text then omits that term;
+save_s_per_epoch includes Ray's persist of the epoch checkpoint (the train-state copy into storage) when the record
+says save_s_includes_persist, so that per-epoch cost is charged per epoch; run_overhead_s (run_overhead) is the probe
+child's wall clock minus the record's own terms (process and Ray start, the driver's checks, item building, the --out
+copy), charged once per run. A Laya scoring line
 adds, per score.py run, the scoring probe's run_overhead_s (its wall clock minus its inference seconds: process start,
 the weights' sha256 check, laya.load). A report from before a term was measured leaves it out (0), and assumptions()
 discloses each one left out (04-REVIEW IN-02).
@@ -211,22 +213,23 @@ def measured_from_checkpoint(ckpt_dir):
 
 def run_overhead(wall_s, record):
     """Seconds of one ray_train.py process outside its run record's terms: `wall_s` (the child's wall clock) minus the
-    train and save seconds of the epochs its last segment trained, its load, resume-load, calibration and final-save
-    seconds; what is left (process and Ray start, the driver's split and weight checks, item building, the --out copy)
-    is paid once by every run (04-REVIEW IN-03). Ray's per-epoch persist of the epoch checkpoint is in the epochs'
+    train and save seconds of the epochs its last segment trained, its load, resume-load, calibration (0 when the
+    record has none, LAYA-05) and final-save seconds; what is left (process and Ray start, the driver's split and
+    weight checks, item building, the --out copy) is paid once by every run (04-REVIEW IN-03). Ray's per-epoch persist of the epoch checkpoint is in the epochs'
     save_s when the record says save_s_includes_persist, so it is charged per epoch, not here (04-REVIEW IN-02); in an
     older record it stays in this residual. Never negative."""
     seg = record["segments"][-1]
     inside = sum(r["train_s"] + r["save_s"] for r in record["epochs"] if r["segment"] == seg["segment"])
-    inside += record["load_s"] + (seg.get("resume_load_s") or 0.0) + record["calib_s"] + record["final_save_s"]
+    inside += record["load_s"] + (seg.get("resume_load_s") or 0.0) + (record["calib_s"] or 0.0) + \
+        record["final_save_s"]
     return max(0.0, wall_s - inside)
 
 
 def laya_run_s(n_items, epochs, laya):
     """Seconds of one Laya run of `epochs` epochs on `n_items` items at the measured rate and overheads."""
     steps = spike.optimizer_steps(n_items, laya["micro_batch"], laya["grad_accum"])
-    return epochs * (steps * laya["s_per_step"] + laya["save_s_per_epoch"]) + laya["load_s"] + laya["calib_s"] + \
-        laya["final_save_s"] + (laya.get("run_overhead_s") or 0.0)
+    return epochs * (steps * laya["s_per_step"] + laya["save_s_per_epoch"]) + laya["load_s"] + \
+        (laya["calib_s"] or 0.0) + laya["final_save_s"] + (laya.get("run_overhead_s") or 0.0)
 
 
 def laya_training_epochs(matrix):
@@ -286,9 +289,10 @@ def berturk_rates(measured):
 
 def _laya_source(laya):
     over = laya.get("run_overhead_s")
-    return ("probe run on %s: s/step = the largest train_s / optimizer_steps over %d measured epoch(s); save, load, "
-            "calibration and final-save seconds from the same record%s%s"
+    return ("probe run on %s: s/step = the largest train_s / optimizer_steps over %d measured epoch(s); save, load%s "
+            "final-save seconds from the same record%s%s"
             % (laya["device"], laya["epochs_measured"],
+               " and" if laya.get("calib_s") is None else ", calibration and",
                "; the save seconds include Ray's persist of each epoch checkpoint"
                if laya.get("save_s_includes_persist") else "", "" if over is None else
                "; run overhead %.1f s = the probe child's wall clock minus the record's terms" % over))
@@ -357,10 +361,11 @@ def _laya_train_line(id_, phase, what, runs_, epochs, split, laya, counts, keys,
     part = _laya_part(runs_, epochs, n, laya)
     over = laya.get("run_overhead_s")
     formula = ("%s (%d) x [%s (%d) x (%d optimizer steps (%d %s %s items, micro-batch %d, grad-accum %d) x %.4f s "
-               "+ %.1f s save) + %.1f s load + %.1f s calibration + %.1f s final save%s]"
+               "+ %.1f s save) + %.1f s load%s + %.1f s final save%s]"
                % (keys[0], runs_, keys[1], epochs, part["units_per_epoch"], n, split, items_key[8:],
                   laya["micro_batch"], laya["grad_accum"], laya["s_per_step"], laya["save_s_per_epoch"],
-                  laya["load_s"], laya["calib_s"], laya["final_save_s"],
+                  laya["load_s"], "" if laya.get("calib_s") is None else " + %.1f s calibration" % laya["calib_s"],
+                  laya["final_save_s"],
                   "" if over is None else " + %.1f s run overhead" % over))
     return _line(id_, phase, what, runs_, epochs, part["units_per_epoch"], "optimizer step", laya["s_per_step"],
                  "measured", _laya_source(laya), part["seconds"], formula)

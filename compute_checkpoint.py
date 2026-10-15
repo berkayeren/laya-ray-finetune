@@ -22,7 +22,7 @@ epoch-001. --interrupt fail uses ray_train.py's hidden --fail-after-epoch 1 inst
 --interrupt none runs once. A kill that comes too late is recorded as missed, and the report then says the resume was
 not demonstrated. An attempt that ends with the MPS out-of-memory line is followed by a fresh child on the next rung of
 the LAYA-03 ladder (pilot.runs.next_rung), each with its own run_id (compute.attempt_chain), except an out-of-memory
-after the last epoch (calibration, final save; pilot.runs.resume_oom), which ends the chain as failed with a reason
+after the last epoch (the final save; pilot.runs.resume_oom), which ends the chain as failed with a reason
 that fits this orchestrator: the storage is deleted, so rerun compute_checkpoint.py (a fresh probe), or, with
 --keep-run, the console prints the ray_train.py command that resumes the kept run; every attempt
 stays in the report, and an exhausted ladder is reported as status ladder_exhausted. Before any child, the disk under --storage
@@ -125,8 +125,6 @@ def child_command(a, start, base, ckpt, storage):
     cmd += runs.rung_flags(start["rung"])
     if a.max_messages is not None:
         cmd += ["--max-messages", str(a.max_messages)]
-    if a.calib_frac is not None:
-        cmd += ["--calib-frac", str(a.calib_frac)]
     return cmd
 
 
@@ -162,13 +160,13 @@ def last_line(path):
 
 def protocol_complete(a, start):
     """True only for the real compute checkpoint: mps, the pinned weights, the committed selection_train under the
-    committed manifest, no test hook (--max-messages, --calib-frac, --interrupt fail), a kill-and-resume probe, the
+    committed manifest, no test hook (--max-messages, --interrupt fail), a kill-and-resume probe, the
     spike's start config at rung none, and the timing basis compute.PROTOCOL (--cpus 4, the spike's thread count;
     --epochs 2; --seed 0)."""
     return (a.device == "mps" and a.base == "multilingual"
             and {"cpus": a.cpus, "epochs": a.epochs, "seed": a.seed} == compute.PROTOCOL
             and os.path.realpath(a.data) == os.path.realpath(DEFAULT_DATA) and manifest_is_committed(a.manifest)
-            and a.max_messages is None and a.calib_frac is None and a.interrupt == "kill"
+            and a.max_messages is None and a.interrupt == "kill"
             and (not a.berturk or a.berturk_source == "pinned")
             and {k: start[k] for k in runs.SPIKE_START} == runs.SPIKE_START and start["rung"] == "none")
 
@@ -583,8 +581,7 @@ def build_meta(a, entry, start, model, rid):
                          "spike_start": start, "run_id": rid,
                          "interrupt": {"mode": a.interrupt, "kill_delay_s": a.kill_delay_s},
                          "berturk": a.berturk, "score_probe": a.score_probe,
-                         "test_hooks": {"max_messages": a.max_messages, "calib_frac": a.calib_frac,
-                                        "berturk_source": a.berturk_source},
+                         "test_hooks": {"max_messages": a.max_messages, "berturk_source": a.berturk_source},
                          "protocol_complete": protocol_complete(a, start)}}
 
 
@@ -620,7 +617,6 @@ def main(argv=None):
     ap.add_argument("--score-probe", action=argparse.BooleanOptionalAction, default=True,
                     help="measure the Laya scoring rate on a --n 32 val subset on --device (default on)")
     ap.add_argument("--max-messages", type=int, default=None, help=argparse.SUPPRESS)   # test hook
-    ap.add_argument("--calib-frac", type=float, default=None, help=argparse.SUPPRESS)   # test hook
     ap.add_argument("--berturk-source", choices=("pinned", "tiny"), default="pinned", help=argparse.SUPPRESS)  # test
     ap.add_argument("--child", nargs=2, metavar=("MODE", "CONFIG"), default=None, help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
@@ -641,8 +637,6 @@ def main(argv=None):
         ap.error("--min-available-gib must not be negative")
     if a.max_messages is not None and a.max_messages < 1:
         ap.error("--max-messages must be at least 1")
-    if a.calib_frac is not None and not 0 < a.calib_frac <= 1:
-        ap.error("--calib-frac must be in (0, 1]")
 
     pf = preflight(a.min_available_gib)
     entry = verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))
@@ -697,7 +691,7 @@ def main(argv=None):
             keep_logs = True
             if a.keep_run and runs.resume_oom(attempts[-1].get("line")) and ctx["cmds"]:
                 # console only: the command holds local paths, which never enter the report (IN-06)
-                print("every epoch of run %s is saved under %s; to resume it (recalibrate and save): %s"
+                print("every epoch of run %s is saved under %s; to resume it (write the final checkpoint): %s"
                       % (rid, storage, shlex.join(ctx["cmds"][-1])), flush=True)   # quoted: paths may hold spaces
             raise SystemExit("probe %s after %d attempt(s) (last rung %s); report -> %s; logs kept in %s. Last %d "
                              "lines of %s:\n%s" % (status, len(attempts), attempts[-1]["rung"], md, tmp, TAIL_LINES,

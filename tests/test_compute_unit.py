@@ -58,7 +58,7 @@ def toy_meta(protocol_complete=True):
                          "spike_start": {"micro_batch": 8, "max_len": 128, "grad_accum": 4, "rung": "none",
                                          "fallback": 0},
                          "run_id": "laya-selection_train-neg8-s0-12345678",
-                         "test_hooks": {"max_messages": None, "calib_frac": None},
+                         "test_hooks": {"max_messages": None, "berturk_source": "pinned"},
                          "protocol_complete": protocol_complete}}
 
 
@@ -377,19 +377,19 @@ def test_attempt_chain_stops_on_failure():
 
 
 def test_an_oom_after_the_last_epoch_does_not_walk_the_ladder():
-    """04-REVIEW WR-01: a calibration or final-save OOM ends the chain as failed (rerun to resume), not on a weaker
-    rung that would retrain under another run_id and record a fallback; a training-step OOM still walks it."""
+    """04-REVIEW WR-01: a final-save OOM ends the chain as failed (rerun to resume), not on a weaker rung that would
+    retrain under another run_id and record a fallback; a training-step OOM still walks it."""
     import compute_checkpoint as cc
     from pilot import runs
-    calib = runs.oom_message(None, None, "none", runs.STAGE_CALIBRATE)
-    a = cc.oom_attempt({"run_id": "laya-a"}, runs.failure_line("[Rank 0]\nRuntimeError: " + calib), {"mode": "kill"})
-    assert a["status"] == "failed" and a["line"] == calib
+    final = runs.oom_message(None, None, "none", runs.STAGE_FINAL_SAVE)
+    a = cc.oom_attempt({"run_id": "laya-a"}, runs.failure_line("[Rank 0]\nRuntimeError: " + final), {"mode": "kill"})
+    assert a["status"] == "failed" and a["line"] == final
     # 04-REVIEW IN-06: the report never advises a resume whose storage the orchestrator deletes
-    assert calib.split("; ")[0] in a["reason"] and "rerun the same command" not in a["reason"]
+    assert final.split("; ")[0] in a["reason"] and "rerun the same command" not in a["reason"]
     assert "rerun compute_checkpoint.py" in a["reason"]
     md = "\n".join(compute._attempt_lines([dict(a, rung="none")], "failed"))
     assert a["reason"] in md and "rerun the same command" not in md
-    kept = cc.oom_attempt({"run_id": "laya-a"}, calib, {"mode": "kill"}, keep_run=True)
+    kept = cc.oom_attempt({"run_id": "laya-a"}, final, {"mode": "kill"}, keep_run=True)
     assert "--keep-run kept" in kept["reason"] and "rerun the same command" not in kept["reason"]
     assert cc.oom_attempt({"run_id": "laya-a"}, runs.oom_message(2, 5, "none"), {})["status"] == "oom"
     launch, seen = _fake_launcher(["failed"])
@@ -625,7 +625,7 @@ def test_keep_run_prints_a_resume_command_that_survives_spaces(tmp_path, monkeyp
         cc.main(["--base", str(base), "--storage", str(storage), "--no-berturk", "--no-score-probe", "--keep-run",
                  "--min-available-gib", "0", "--out", str(tmp_path / "out")])
     out = capsys.readouterr().out
-    printed = out.split("to resume it (recalibrate and save): ", 1)[1].splitlines()[0]
+    printed = out.split("to resume it (write the final checkpoint): ", 1)[1].splitlines()[0]
     assert shlex.split(printed) == cmd and printed == shlex.join(cmd)
 
 
@@ -637,7 +637,7 @@ def test_protocol_complete_pins_the_timing_basis():
     from pilot.data import DEFAULT_MANIFEST
     start = dict(compute.spike_start(SPIKE_REPORT))
     real = dict(device="mps", base="multilingual", data=cc.DEFAULT_DATA, manifest=DEFAULT_MANIFEST, max_messages=None,
-                calib_frac=None, interrupt="kill", berturk=True, berturk_source="pinned", **compute.PROTOCOL)
+                interrupt="kill", berturk=True, berturk_source="pinned", **compute.PROTOCOL)
     assert cc.protocol_complete(argparse.Namespace(**real), start) is True
     for k, v in (("cpus", 1), ("cpus", 10), ("epochs", 3), ("seed", 1)):
         assert cc.protocol_complete(argparse.Namespace(**dict(real, **{k: v})), start) is False, (k, v)
@@ -685,6 +685,33 @@ def test_run_overhead_enters_every_laya_run():
     assert "run overhead" not in line(p0, "laya_selection")["formula"]
     assert "run overhead 25.0 s" in compute.render_markdown(compute.build_report(
         toy_meta(), with_, TOY_COUNTS, TOY_MATRIX, p1, toy_preflight()))
+
+
+def test_a_record_without_calibration():
+    """LAYA-05: a Phase 5 run record carries calib_s None (training no longer calibrates). Every sum treats it as 0 s,
+    the formula text drops the calibration term, and the report still renders; the committed Phase 4 report (calib_s
+    12.6) keeps its term (tests/test_compute_report.py)."""
+    rows = toy_rows()
+    record = {"segments": [_segment(0, 0)], "epochs": rows, "load_s": 20.0, "calib_s": None, "final_save_s": 3.0}
+    assert compute.run_overhead(2000.0, record) == pytest.approx(compute.run_overhead(2000.0, dict(record,
+                                                                                                calib_s=0.0)))
+    assert compute.run_overhead(2000.0, record) == pytest.approx(2000.0 - (2 * 940.0 + 23.0))
+    none, zero = dict(TOY_LAYA, calib_s=None), dict(TOY_LAYA, calib_s=0.0)
+    assert compute.laya_run_s(14854, 4, none) == pytest.approx(compute.laya_run_s(14854, 4, zero))
+    measured = {"laya": none, "epochs": toy_rows()}
+    p = compute.project(measured, TOY_COUNTS, TOY_MATRIX)
+    sel = line(p, "laya_selection")
+    assert "calibration" not in sel["formula"] and "calibration" not in sel["source"]
+    assert "+ 20.0 s load + 3.0 s final save" in sel["formula"]
+    assert sel["seconds"] == pytest.approx(line(compute.project({"laya": zero, "epochs": toy_rows()}, TOY_COUNTS,
+                                                                 TOY_MATRIX), "laya_selection")["seconds"])
+    assert "calibration" in line(compute.project(toy_measured(), TOY_COUNTS, TOY_MATRIX), "laya_selection")["formula"]
+    report = compute.build_report(toy_meta(), measured, TOY_COUNTS, TOY_MATRIX, p, toy_preflight(),
+                                  what_if=compute.what_if(measured, TOY_COUNTS, TOY_MATRIX),
+                                  disk=compute.disk_budget(2**30, TOY_MATRIX),
+                                  assumptions=compute.assumptions(TOY_MATRIX, measured, TOY_COUNTS))
+    md = compute.render_markdown(report)
+    assert md.startswith("# Compute checkpoint") and "- Load 20.0 s, calibration - s, final save 3.0 s" in md
 
 
 def test_per_epoch_persist_and_scoring_overhead_are_charged_where_they_occur():

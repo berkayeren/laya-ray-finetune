@@ -36,7 +36,7 @@ def test_compute_checkpoint_on_cpu(tmp_path):
                         "--data", os.path.join(data, "splits", "selection_train.jsonl"),
                         "--manifest", os.path.join(data, "splits.json"), "--epochs", "2", "--cpus", "2",
                         "--interrupt", "fail", "--berturk-source", "tiny",
-                        "--min-available-gib", "0", "--max-messages", "12", "--calib-frac", "0.2",
+                        "--min-available-gib", "0", "--max-messages", "12",
                         "--out", str(out), "--storage", str(storage)],
                        cwd=REPO, env=env, capture_output=True, text=True, timeout=TIMEOUT)
     assert r.returncode == 0, "compute_checkpoint.py failed (exit %d):\n%s\n%s" % (r.returncode, r.stdout[-3000:],
@@ -49,6 +49,8 @@ def test_compute_checkpoint_on_cpu(tmp_path):
     laya = report["measured"]["laya"]
     assert laya["s_per_step"] > 0 and laya["device"] == "cpu" and laya["rung"] == "none"
     assert laya["micro_batch"] == 8 and laya["max_len"] == 128 and laya["grad_accum"] == 4 and laya["neg"] == 8
+    assert laya["calib_s"] is None                          # training no longer calibrates (LAYA-05)
+    assert report["projection"]["total_h"] > 0
     assert [row["epoch"] for row in report["measured"]["epochs"]] == [1, 2]
     assert [row["resumed"] for row in report["measured"]["epochs"]] == [False, True]
     assert report["status"] == "ok"
