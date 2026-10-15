@@ -3,9 +3,10 @@
 - the README results block (between the results-table markers) equals report.render_table of the tracked
   results/reports/*.json in sorted path order, so README numbers cannot be edited by hand or go stale
 - every tracked run dir under results/dumps verifies its val dump with pilot.dumps.load_dump against the committed
-  manifest (offline: load_dump reads no split file); a dir of a fine-tuned (local) Laya checkpoint (system.kind laya,
-  no pinned revision) must hold no tracked test dump until Phase 8's protocol gate (ROADMAP Phase 5 criterion 4),
-  and every other dir (majority, prior, zero-shot Laya) verifies its test dump too
+  manifest (offline: load_dump reads no split file); a dir of a fine-tuned checkpoint (_finetuned: system.kind laya
+  with no pinned revision, or any system.kind berturk) must hold no tracked test dump until Phase 8's protocol gate
+  (ROADMAP Phase 5 criterion 4, Phase 6 criterion 4), and every other dir (majority, prior, zero-shot Laya) verifies
+  its test dump too; the predicate is proven on planted sidecars
 - the zero-shot run id in the Makefile (LAYA_ZS) is the one score.py derives from the pinned Laya identity
 - the three single-system reports (majority, prior, zero-shot Laya) are full-test, not subset, with both temperature
   variants and a disclosed θ source
@@ -66,10 +67,23 @@ def test_readme_table_matches_committed_reports():
         "README results table differs from `report.py --table results/reports`; paste the generated table"
 
 
-def _finetuned_laya(side):
-    """True for a Laya dump of a local (fine-tuned) checkpoint: kind laya and an identity without the pinned revision."""
+def _finetuned(side):
+    """A dump of a local (fine-tuned) checkpoint: Laya without the pinned revision, or any BERTurk checkpoint."""
     system = side.get("system") or {}
-    return system.get("kind") == "laya" and not (system.get("checkpoint_identity") or {}).get("revision")
+    ident = system.get("checkpoint_identity") or {}
+    return (system.get("kind") == "laya" and not ident.get("revision")) or system.get("kind") == "berturk"
+
+
+def test_finetuned_rule_covers_berturk():
+    # planted sidecars: the baselines and the pinned zero-shot Laya keep their test dumps; every fine-tuned one may not
+    def side(kind, ident):
+        return {"system": {"kind": kind, "checkpoint_identity": ident}}
+    assert _finetuned(side("majority", None)) is False
+    assert _finetuned(side("prior", None)) is False
+    assert _finetuned(side("laya", {"revision": "0" * 40, "model_sha256": "a" * 64})) is False
+    assert _finetuned(side("laya", {"local": True, "model_sha256": "a" * 64})) is True
+    assert _finetuned(side("berturk", {"local": True, "model_sha256": "b" * 64})) is True
+    assert _finetuned({}) is False
 
 
 def test_committed_dumps_verify_and_no_finetuned_test_dump():
@@ -78,10 +92,10 @@ def test_committed_dumps_verify_and_no_finetuned_test_dump():
     for rid in ids:
         logits, uids, side, _ = dumps.load_dump(os.path.join(DUMPS, rid), "val", DEFAULT_MANIFEST)
         assert side["run_id"] == rid and side["n_subset"] is None and logits.shape == (len(uids), 48)
-        if _finetuned_laya(side):                           # until Phase 8's protocol gate (ROADMAP Phase 5 SC4)
+        if _finetuned(side):                                # until Phase 8's protocol gate (ROADMAP 5 SC4, 6 SC4)
             held = tracked("results/dumps/%s/test.npz" % rid, "results/dumps/%s/test.json" % rid)
-            assert not held, ("fine-tuned Laya dump dir %s holds a test dump; no fine-tuned model is scored on test "
-                              "before Phase 8" % rid)
+            assert not held, ("fine-tuned (Laya or BERTurk) dump dir %s holds a test dump; no fine-tuned model is "
+                              "scored on test before Phase 8" % rid)
             continue
         logits, uids, side, _ = dumps.load_dump(os.path.join(DUMPS, rid), "test", DEFAULT_MANIFEST)
         assert side["run_id"] == rid and side["n_subset"] is None and logits.shape == (len(uids), 48)
