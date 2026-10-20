@@ -1,0 +1,1696 @@
+{
+  "schema": "postfit/1",
+  "system_kind": "berturk",
+  "split": {
+    "name": "val",
+    "path": "splits/val.jsonl",
+    "sha256": "95f5cfe5ae5921a5d9a28c285efbcbce5d6bf63c081e7f05bf8d4d2df36ad5bc",
+    "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+    "n_messages": 208
+  },
+  "manifest": {
+    "path": "data/splits.json",
+    "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103",
+    "is_committed": true
+  },
+  "protocol": {
+    "selection_split": "selection_train",
+    "final_split": "final_train",
+    "lr_grid": [
+      2e-05
+    ],
+    "head_lr": null,
+    "epochs": 10,
+    "selection_seed": 0,
+    "final_seeds": [
+      0,
+      1,
+      2
+    ]
+  },
+  "rules": {
+    "temperature": "one noul T over every val (message, tag) pair: the minimiser of the mean binary cross-entropy of sigmoid(m / T) over log T in [0.5, 5.0] (scipy bounded scalar minimiser), a bound winning an exact tie",
+    "temperature_bounds": [
+      0.5,
+      5.0
+    ],
+    "objective": "val micro-F1 at the val-selected global θ on probabilities after the val-fitted T, compared exactly as 2TP / (2TP + FP + FN) of the summed counts",
+    "tie_order": "equal objectives: fewer epochs first, then the lower encoder LR",
+    "epoch_transfer": "the final seeds train on final_train with the selection schedule (--epochs 10) and stop after the chosen epoch (--stop-after-epoch), never --epochs k*",
+    "theta": {
+      "tie_break": "closest to 0.5; between two equally close points, the lower θ",
+      "min_val_positives": 10,
+      "per_tag": "a tag's own θ only with >= 10 val positives, else the global θ"
+    }
+  },
+  "candidates": [
+    {
+      "dump_run_id": "berturk-e77a5cd81bdd-10bb633a-29446b61",
+      "dump_sha256": "317ff99a457182cb1ecb60777d9d1fffebca17e84a400cc180aeec7b9faf53ed",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "berturk",
+      "train_run_id": "berturk-selection_train-s0-c0c9505e",
+      "encoder_lr": 2e-05,
+      "epoch": 1,
+      "epochs_schedule": 10,
+      "seed": 0,
+      "rung": null,
+      "fallback": null,
+      "weaker": null,
+      "loss_by_epoch": [
+        0.6289638449316439
+      ],
+      "canonical": {
+        "accelerate_version": "1.15.0",
+        "base_config_sha256": "3be8dbe74813f59a252773db34bd67640166d36c507ded3b06b55f91f05ce78a",
+        "base_model_sha256": "18e29c6c61a046ab18fa48aeec3dce1285b09c5648d9ba68da1474940b9a9fcd",
+        "batch": 32,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 10,
+        "head_lr": 2e-05,
+        "loss": "masked_bce",
+        "lr_scheduler": "linear",
+        "max_grad_norm": 1.0,
+        "max_len": 128,
+        "optim": "adamw_torch",
+        "seed": 0,
+        "split": "selection_train",
+        "transformers_version": "5.19.0",
+        "warmup_ratio": 0.1,
+        "weight_decay": 0.01
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 0.5,
+      "nll_raw": 0.3980127234220048,
+      "nll_fitted": 0.2629757444031338,
+      "objective": {
+        "tp": 377,
+        "fp": 5405,
+        "fn": 106
+      },
+      "val_micro_f1_at_0_5": 0.0040650406504065045,
+      "val_micro_f1_at_global_theta": 0.12035115722266561,
+      "theta": {
+        "shipped": {
+          "global": 0.13,
+          "per_tag": {
+            "transfer_payment_deposit": 0.19,
+            "request_info": 0.34,
+            "wrong_notworking_notshowing": 0.11,
+            "card": 0.2,
+            "make_open_apply_setup_get_activate": 0.33,
+            "account": 0.13,
+            "how_much": 0.18,
+            "affirm": 0.19,
+            "deny": 0.25,
+            "more_higher_after": 0.18,
+            "change": 0.27,
+            "cancel_close_leave_freeze": 0.08,
+            "current": 0.05
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.28,
+          "per_tag": {
+            "transfer_payment_deposit": 0.3,
+            "request_info": 0.42,
+            "wrong_notworking_notshowing": 0.26,
+            "card": 0.33,
+            "make_open_apply_setup_get_activate": 0.42,
+            "account": 0.28,
+            "how_much": 0.33,
+            "affirm": 0.33,
+            "deny": 0.36,
+            "more_higher_after": 0.32,
+            "change": 0.38,
+            "cancel_close_leave_freeze": 0.23,
+            "current": 0.17
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    },
+    {
+      "dump_run_id": "berturk-6a89b0b079ef-11bcc29d-29446b61",
+      "dump_sha256": "6fb0049e86637eac5953cd4c1479a3e53189c4cadfcbe54c9ab2198f829e7b96",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "berturk",
+      "train_run_id": "berturk-selection_train-s0-c0c9505e",
+      "encoder_lr": 2e-05,
+      "epoch": 2,
+      "epochs_schedule": 10,
+      "seed": 0,
+      "rung": null,
+      "fallback": null,
+      "weaker": null,
+      "loss_by_epoch": [
+        0.6289638449316439,
+        0.2995663142722586
+      ],
+      "canonical": {
+        "accelerate_version": "1.15.0",
+        "base_config_sha256": "3be8dbe74813f59a252773db34bd67640166d36c507ded3b06b55f91f05ce78a",
+        "base_model_sha256": "18e29c6c61a046ab18fa48aeec3dce1285b09c5648d9ba68da1474940b9a9fcd",
+        "batch": 32,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 10,
+        "head_lr": 2e-05,
+        "loss": "masked_bce",
+        "lr_scheduler": "linear",
+        "max_grad_norm": 1.0,
+        "max_len": 128,
+        "optim": "adamw_torch",
+        "seed": 0,
+        "split": "selection_train",
+        "transformers_version": "5.19.0",
+        "warmup_ratio": 0.1,
+        "weight_decay": 0.01
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 0.5691887393155677,
+      "nll_raw": 0.23546348308264214,
+      "nll_fitted": 0.1810743764929978,
+      "objective": {
+        "tp": 91,
+        "fp": 191,
+        "fn": 392
+      },
+      "val_micro_f1_at_0_5": 0.0,
+      "val_micro_f1_at_global_theta": 0.23790849673202613,
+      "theta": {
+        "shipped": {
+          "global": 0.12,
+          "per_tag": {
+            "transfer_payment_deposit": 0.16,
+            "request_info": 0.12,
+            "wrong_notworking_notshowing": 0.06,
+            "card": 0.05,
+            "make_open_apply_setup_get_activate": 0.1,
+            "account": 0.05,
+            "how_much": 0.5,
+            "affirm": 0.06,
+            "deny": 0.06,
+            "more_higher_after": 0.5,
+            "change": 0.06,
+            "cancel_close_leave_freeze": 0.5,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.23,
+          "per_tag": {
+            "transfer_payment_deposit": 0.28,
+            "request_info": 0.24,
+            "wrong_notworking_notshowing": 0.17,
+            "card": 0.16,
+            "make_open_apply_setup_get_activate": 0.23,
+            "account": 0.16,
+            "how_much": 0.14,
+            "affirm": 0.17,
+            "deny": 0.17,
+            "more_higher_after": 0.14,
+            "change": 0.18,
+            "cancel_close_leave_freeze": 0.07,
+            "current": 0.11
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    },
+    {
+      "dump_run_id": "berturk-d9d4bc7b1108-f4929084-29446b61",
+      "dump_sha256": "2936a51edd68c0378f408bf80e92c52e445b4164f087bba069655b713050f84d",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "berturk",
+      "train_run_id": "berturk-selection_train-s0-c0c9505e",
+      "encoder_lr": 2e-05,
+      "epoch": 3,
+      "epochs_schedule": 10,
+      "seed": 0,
+      "rung": null,
+      "fallback": null,
+      "weaker": null,
+      "loss_by_epoch": [
+        0.6289638449316439,
+        0.2995663142722586,
+        0.21847198028927264
+      ],
+      "canonical": {
+        "accelerate_version": "1.15.0",
+        "base_config_sha256": "3be8dbe74813f59a252773db34bd67640166d36c507ded3b06b55f91f05ce78a",
+        "base_model_sha256": "18e29c6c61a046ab18fa48aeec3dce1285b09c5648d9ba68da1474940b9a9fcd",
+        "batch": 32,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 10,
+        "head_lr": 2e-05,
+        "loss": "masked_bce",
+        "lr_scheduler": "linear",
+        "max_grad_norm": 1.0,
+        "max_len": 128,
+        "optim": "adamw_torch",
+        "seed": 0,
+        "split": "selection_train",
+        "transformers_version": "5.19.0",
+        "warmup_ratio": 0.1,
+        "weight_decay": 0.01
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 0.6989165730276333,
+      "nll_raw": 0.20116804969629484,
+      "nll_fitted": 0.17807834539839468,
+      "objective": {
+        "tp": 160,
+        "fp": 673,
+        "fn": 323
+      },
+      "val_micro_f1_at_0_5": 0.0,
+      "val_micro_f1_at_global_theta": 0.24316109422492402,
+      "theta": {
+        "shipped": {
+          "global": 0.07,
+          "per_tag": {
+            "transfer_payment_deposit": 0.19,
+            "request_info": 0.14,
+            "wrong_notworking_notshowing": 0.07,
+            "card": 0.06,
+            "make_open_apply_setup_get_activate": 0.09,
+            "account": 0.06,
+            "how_much": 0.5,
+            "affirm": 0.06,
+            "deny": 0.05,
+            "more_higher_after": 0.05,
+            "change": 0.05,
+            "cancel_close_leave_freeze": 0.5,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.13,
+          "per_tag": {
+            "transfer_payment_deposit": 0.27,
+            "request_info": 0.22,
+            "wrong_notworking_notshowing": 0.14,
+            "card": 0.13,
+            "make_open_apply_setup_get_activate": 0.17,
+            "account": 0.13,
+            "how_much": 0.09,
+            "affirm": 0.13,
+            "deny": 0.11,
+            "more_higher_after": 0.11,
+            "change": 0.12,
+            "cancel_close_leave_freeze": 0.06,
+            "current": 0.08
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    },
+    {
+      "dump_run_id": "berturk-90f9d561b7ec-cdca5b18-29446b61",
+      "dump_sha256": "6d9d11a44d3c064f028bb7faf3dee6c7f0ce87bf5097d5e8298db143da987c04",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "berturk",
+      "train_run_id": "berturk-selection_train-s0-c0c9505e",
+      "encoder_lr": 2e-05,
+      "epoch": 4,
+      "epochs_schedule": 10,
+      "seed": 0,
+      "rung": null,
+      "fallback": null,
+      "weaker": null,
+      "loss_by_epoch": [
+        0.6289638449316439,
+        0.2995663142722586,
+        0.21847198028927264,
+        0.19507400594327762
+      ],
+      "canonical": {
+        "accelerate_version": "1.15.0",
+        "base_config_sha256": "3be8dbe74813f59a252773db34bd67640166d36c507ded3b06b55f91f05ce78a",
+        "base_model_sha256": "18e29c6c61a046ab18fa48aeec3dce1285b09c5648d9ba68da1474940b9a9fcd",
+        "batch": 32,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 10,
+        "head_lr": 2e-05,
+        "loss": "masked_bce",
+        "lr_scheduler": "linear",
+        "max_grad_norm": 1.0,
+        "max_len": 128,
+        "optim": "adamw_torch",
+        "seed": 0,
+        "split": "selection_train",
+        "transformers_version": "5.19.0",
+        "warmup_ratio": 0.1,
+        "weight_decay": 0.01
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 0.7748075916924099,
+      "nll_raw": 0.18838336085973983,
+      "nll_fitted": 0.17654721353687317,
+      "objective": {
+        "tp": 165,
+        "fp": 681,
+        "fn": 318
+      },
+      "val_micro_f1_at_0_5": 0.0,
+      "val_micro_f1_at_global_theta": 0.24830699774266365,
+      "theta": {
+        "shipped": {
+          "global": 0.08,
+          "per_tag": {
+            "transfer_payment_deposit": 0.21,
+            "request_info": 0.16,
+            "wrong_notworking_notshowing": 0.08,
+            "card": 0.08,
+            "make_open_apply_setup_get_activate": 0.09,
+            "account": 0.06,
+            "how_much": 0.5,
+            "affirm": 0.06,
+            "deny": 0.05,
+            "more_higher_after": 0.05,
+            "change": 0.05,
+            "cancel_close_leave_freeze": 0.5,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.13,
+          "per_tag": {
+            "transfer_payment_deposit": 0.26,
+            "request_info": 0.22,
+            "wrong_notworking_notshowing": 0.13,
+            "card": 0.13,
+            "make_open_apply_setup_get_activate": 0.14,
+            "account": 0.11,
+            "how_much": 0.08,
+            "affirm": 0.1,
+            "deny": 0.09,
+            "more_higher_after": 0.08,
+            "change": 0.09,
+            "cancel_close_leave_freeze": 0.06,
+            "current": 0.06
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    },
+    {
+      "dump_run_id": "berturk-9d8257de5a33-0267a737-29446b61",
+      "dump_sha256": "00c32f140100228f72da384c925ff6c38b1a1d97058f5624fbca02f3a628fee5",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "berturk",
+      "train_run_id": "berturk-selection_train-s0-c0c9505e",
+      "encoder_lr": 2e-05,
+      "epoch": 5,
+      "epochs_schedule": 10,
+      "seed": 0,
+      "rung": null,
+      "fallback": null,
+      "weaker": null,
+      "loss_by_epoch": [
+        0.6289638449316439,
+        0.2995663142722586,
+        0.21847198028927264,
+        0.19507400594327762,
+        0.185372032225132
+      ],
+      "canonical": {
+        "accelerate_version": "1.15.0",
+        "base_config_sha256": "3be8dbe74813f59a252773db34bd67640166d36c507ded3b06b55f91f05ce78a",
+        "base_model_sha256": "18e29c6c61a046ab18fa48aeec3dce1285b09c5648d9ba68da1474940b9a9fcd",
+        "batch": 32,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 10,
+        "head_lr": 2e-05,
+        "loss": "masked_bce",
+        "lr_scheduler": "linear",
+        "max_grad_norm": 1.0,
+        "max_len": 128,
+        "optim": "adamw_torch",
+        "seed": 0,
+        "split": "selection_train",
+        "transformers_version": "5.19.0",
+        "warmup_ratio": 0.1,
+        "weight_decay": 0.01
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 0.8224919138341048,
+      "nll_raw": 0.18264781523131576,
+      "nll_fitted": 0.17568897144776846,
+      "objective": {
+        "tp": 182,
+        "fp": 809,
+        "fn": 301
+      },
+      "val_micro_f1_at_0_5": 0.0,
+      "val_micro_f1_at_global_theta": 0.24694708276797828,
+      "theta": {
+        "shipped": {
+          "global": 0.08,
+          "per_tag": {
+            "transfer_payment_deposit": 0.21,
+            "request_info": 0.16,
+            "wrong_notworking_notshowing": 0.09,
+            "card": 0.08,
+            "make_open_apply_setup_get_activate": 0.1,
+            "account": 0.07,
+            "how_much": 0.5,
+            "affirm": 0.06,
+            "deny": 0.05,
+            "more_higher_after": 0.05,
+            "change": 0.05,
+            "cancel_close_leave_freeze": 0.5,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.12,
+          "per_tag": {
+            "transfer_payment_deposit": 0.25,
+            "request_info": 0.21,
+            "wrong_notworking_notshowing": 0.13,
+            "card": 0.12,
+            "make_open_apply_setup_get_activate": 0.14,
+            "account": 0.11,
+            "how_much": 0.07,
+            "affirm": 0.09,
+            "deny": 0.08,
+            "more_higher_after": 0.08,
+            "change": 0.08,
+            "cancel_close_leave_freeze": 0.05,
+            "current": 0.05
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    },
+    {
+      "dump_run_id": "berturk-e14e0c7c6f29-aa9f9f52-29446b61",
+      "dump_sha256": "30af8aac6a733aaab6632cd15d5852a5bc6106c102107bf32dfb909fd9312019",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "berturk",
+      "train_run_id": "berturk-selection_train-s0-c0c9505e",
+      "encoder_lr": 2e-05,
+      "epoch": 6,
+      "epochs_schedule": 10,
+      "seed": 0,
+      "rung": null,
+      "fallback": null,
+      "weaker": null,
+      "loss_by_epoch": [
+        0.6289638449316439,
+        0.2995663142722586,
+        0.21847198028927264,
+        0.19507400594327762,
+        0.185372032225132,
+        0.18136420036139694
+      ],
+      "canonical": {
+        "accelerate_version": "1.15.0",
+        "base_config_sha256": "3be8dbe74813f59a252773db34bd67640166d36c507ded3b06b55f91f05ce78a",
+        "base_model_sha256": "18e29c6c61a046ab18fa48aeec3dce1285b09c5648d9ba68da1474940b9a9fcd",
+        "batch": 32,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 10,
+        "head_lr": 2e-05,
+        "loss": "masked_bce",
+        "lr_scheduler": "linear",
+        "max_grad_norm": 1.0,
+        "max_len": 128,
+        "optim": "adamw_torch",
+        "seed": 0,
+        "split": "selection_train",
+        "transformers_version": "5.19.0",
+        "warmup_ratio": 0.1,
+        "weight_decay": 0.01
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 0.852158272424691,
+      "nll_raw": 0.17949306061906192,
+      "nll_fitted": 0.17483846868195133,
+      "objective": {
+        "tp": 188,
+        "fp": 857,
+        "fn": 295
+      },
+      "val_micro_f1_at_0_5": 0.0,
+      "val_micro_f1_at_global_theta": 0.24607329842931938,
+      "theta": {
+        "shipped": {
+          "global": 0.08,
+          "per_tag": {
+            "transfer_payment_deposit": 0.22,
+            "request_info": 0.18,
+            "wrong_notworking_notshowing": 0.09,
+            "card": 0.08,
+            "make_open_apply_setup_get_activate": 0.1,
+            "account": 0.08,
+            "how_much": 0.5,
+            "affirm": 0.06,
+            "deny": 0.05,
+            "more_higher_after": 0.05,
+            "change": 0.05,
+            "cancel_close_leave_freeze": 0.5,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.12,
+          "per_tag": {
+            "transfer_payment_deposit": 0.25,
+            "request_info": 0.21,
+            "wrong_notworking_notshowing": 0.12,
+            "card": 0.12,
+            "make_open_apply_setup_get_activate": 0.13,
+            "account": 0.11,
+            "how_much": 0.07,
+            "affirm": 0.09,
+            "deny": 0.07,
+            "more_higher_after": 0.07,
+            "change": 0.07,
+            "cancel_close_leave_freeze": 0.05,
+            "current": 0.05
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    },
+    {
+      "dump_run_id": "berturk-6418d793ca58-a0bb710a-29446b61",
+      "dump_sha256": "9509fc17aa18d2e11afbdd49769744107d2aa7ef679591c5771a04b79f361fea",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "berturk",
+      "train_run_id": "berturk-selection_train-s0-c0c9505e",
+      "encoder_lr": 2e-05,
+      "epoch": 7,
+      "epochs_schedule": 10,
+      "seed": 0,
+      "rung": null,
+      "fallback": null,
+      "weaker": null,
+      "loss_by_epoch": [
+        0.6289638449316439,
+        0.2995663142722586,
+        0.21847198028927264,
+        0.19507400594327762,
+        0.185372032225132,
+        0.18136420036139694,
+        0.17768254778955295
+      ],
+      "canonical": {
+        "accelerate_version": "1.15.0",
+        "base_config_sha256": "3be8dbe74813f59a252773db34bd67640166d36c507ded3b06b55f91f05ce78a",
+        "base_model_sha256": "18e29c6c61a046ab18fa48aeec3dce1285b09c5648d9ba68da1474940b9a9fcd",
+        "batch": 32,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 10,
+        "head_lr": 2e-05,
+        "loss": "masked_bce",
+        "lr_scheduler": "linear",
+        "max_grad_norm": 1.0,
+        "max_len": 128,
+        "optim": "adamw_torch",
+        "seed": 0,
+        "split": "selection_train",
+        "transformers_version": "5.19.0",
+        "warmup_ratio": 0.1,
+        "weight_decay": 0.01
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 0.8673294027283203,
+      "nll_raw": 0.177418854816749,
+      "nll_fitted": 0.17375363931562254,
+      "objective": {
+        "tp": 175,
+        "fp": 683,
+        "fn": 308
+      },
+      "val_micro_f1_at_0_5": 0.0,
+      "val_micro_f1_at_global_theta": 0.2609992542878449,
+      "theta": {
+        "shipped": {
+          "global": 0.09,
+          "per_tag": {
+            "transfer_payment_deposit": 0.22,
+            "request_info": 0.21,
+            "wrong_notworking_notshowing": 0.1,
+            "card": 0.09,
+            "make_open_apply_setup_get_activate": 0.1,
+            "account": 0.08,
+            "how_much": 0.05,
+            "affirm": 0.06,
+            "deny": 0.05,
+            "more_higher_after": 0.05,
+            "change": 0.05,
+            "cancel_close_leave_freeze": 0.5,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.12,
+          "per_tag": {
+            "transfer_payment_deposit": 0.25,
+            "request_info": 0.24,
+            "wrong_notworking_notshowing": 0.12,
+            "card": 0.12,
+            "make_open_apply_setup_get_activate": 0.13,
+            "account": 0.1,
+            "how_much": 0.07,
+            "affirm": 0.09,
+            "deny": 0.07,
+            "more_higher_after": 0.07,
+            "change": 0.07,
+            "cancel_close_leave_freeze": 0.06,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    },
+    {
+      "dump_run_id": "berturk-a85391eb6087-36ac0406-29446b61",
+      "dump_sha256": "f1f0e111fcfc358c58ad348a4e462f954a63cd203059120704a02173162e0a25",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "berturk",
+      "train_run_id": "berturk-selection_train-s0-c0c9505e",
+      "encoder_lr": 2e-05,
+      "epoch": 8,
+      "epochs_schedule": 10,
+      "seed": 0,
+      "rung": null,
+      "fallback": null,
+      "weaker": null,
+      "loss_by_epoch": [
+        0.6289638449316439,
+        0.2995663142722586,
+        0.21847198028927264,
+        0.19507400594327762,
+        0.185372032225132,
+        0.18136420036139694,
+        0.17768254778955295,
+        0.1763067083514255
+      ],
+      "canonical": {
+        "accelerate_version": "1.15.0",
+        "base_config_sha256": "3be8dbe74813f59a252773db34bd67640166d36c507ded3b06b55f91f05ce78a",
+        "base_model_sha256": "18e29c6c61a046ab18fa48aeec3dce1285b09c5648d9ba68da1474940b9a9fcd",
+        "batch": 32,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 10,
+        "head_lr": 2e-05,
+        "loss": "masked_bce",
+        "lr_scheduler": "linear",
+        "max_grad_norm": 1.0,
+        "max_len": 128,
+        "optim": "adamw_torch",
+        "seed": 0,
+        "split": "selection_train",
+        "transformers_version": "5.19.0",
+        "warmup_ratio": 0.1,
+        "weight_decay": 0.01
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 0.8696565888307187,
+      "nll_raw": 0.17579664659557964,
+      "nll_fitted": 0.1723018331950009,
+      "objective": {
+        "tp": 135,
+        "fp": 408,
+        "fn": 348
+      },
+      "val_micro_f1_at_0_5": 0.0,
+      "val_micro_f1_at_global_theta": 0.2631578947368421,
+      "theta": {
+        "shipped": {
+          "global": 0.1,
+          "per_tag": {
+            "transfer_payment_deposit": 0.22,
+            "request_info": 0.26,
+            "wrong_notworking_notshowing": 0.1,
+            "card": 0.09,
+            "make_open_apply_setup_get_activate": 0.1,
+            "account": 0.08,
+            "how_much": 0.05,
+            "affirm": 0.06,
+            "deny": 0.05,
+            "more_higher_after": 0.05,
+            "change": 0.05,
+            "cancel_close_leave_freeze": 0.5,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.12,
+          "per_tag": {
+            "transfer_payment_deposit": 0.25,
+            "request_info": 0.29,
+            "wrong_notworking_notshowing": 0.13,
+            "card": 0.12,
+            "make_open_apply_setup_get_activate": 0.13,
+            "account": 0.11,
+            "how_much": 0.07,
+            "affirm": 0.08,
+            "deny": 0.07,
+            "more_higher_after": 0.07,
+            "change": 0.07,
+            "cancel_close_leave_freeze": 0.06,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    },
+    {
+      "dump_run_id": "berturk-6ecbbbd6d2ba-f2a23b34-29446b61",
+      "dump_sha256": "322c69207b56a4a60762dac5a28add74f34266a35ef3a10240f80d447b7ffbdd",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "berturk",
+      "train_run_id": "berturk-selection_train-s0-c0c9505e",
+      "encoder_lr": 2e-05,
+      "epoch": 9,
+      "epochs_schedule": 10,
+      "seed": 0,
+      "rung": null,
+      "fallback": null,
+      "weaker": null,
+      "loss_by_epoch": [
+        0.6289638449316439,
+        0.2995663142722586,
+        0.21847198028927264,
+        0.19507400594327762,
+        0.185372032225132,
+        0.18136420036139694,
+        0.17768254778955295,
+        0.1763067083514255,
+        0.17459946352502573
+      ],
+      "canonical": {
+        "accelerate_version": "1.15.0",
+        "base_config_sha256": "3be8dbe74813f59a252773db34bd67640166d36c507ded3b06b55f91f05ce78a",
+        "base_model_sha256": "18e29c6c61a046ab18fa48aeec3dce1285b09c5648d9ba68da1474940b9a9fcd",
+        "batch": 32,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 10,
+        "head_lr": 2e-05,
+        "loss": "masked_bce",
+        "lr_scheduler": "linear",
+        "max_grad_norm": 1.0,
+        "max_len": 128,
+        "optim": "adamw_torch",
+        "seed": 0,
+        "split": "selection_train",
+        "transformers_version": "5.19.0",
+        "warmup_ratio": 0.1,
+        "weight_decay": 0.01
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 0.8686356730823317,
+      "nll_raw": 0.17448921312481205,
+      "nll_fitted": 0.17095551406872447,
+      "objective": {
+        "tp": 187,
+        "fp": 726,
+        "fn": 296
+      },
+      "val_micro_f1_at_0_5": 0.0,
+      "val_micro_f1_at_global_theta": 0.2679083094555874,
+      "theta": {
+        "shipped": {
+          "global": 0.09,
+          "per_tag": {
+            "transfer_payment_deposit": 0.21,
+            "request_info": 0.3,
+            "wrong_notworking_notshowing": 0.1,
+            "card": 0.1,
+            "make_open_apply_setup_get_activate": 0.11,
+            "account": 0.09,
+            "how_much": 0.05,
+            "affirm": 0.06,
+            "deny": 0.05,
+            "more_higher_after": 0.05,
+            "change": 0.05,
+            "cancel_close_leave_freeze": 0.5,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.12,
+          "per_tag": {
+            "transfer_payment_deposit": 0.25,
+            "request_info": 0.33,
+            "wrong_notworking_notshowing": 0.13,
+            "card": 0.11,
+            "make_open_apply_setup_get_activate": 0.14,
+            "account": 0.11,
+            "how_much": 0.07,
+            "affirm": 0.08,
+            "deny": 0.08,
+            "more_higher_after": 0.07,
+            "change": 0.07,
+            "cancel_close_leave_freeze": 0.06,
+            "current": 0.05
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    },
+    {
+      "dump_run_id": "berturk-611ac90c6d93-951f6f1d-29446b61",
+      "dump_sha256": "abf97bd7ae414952d9cdd1b1fd996bd8c5835dc7c06854d40cf34e3e48ec7855",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "berturk",
+      "train_run_id": "berturk-selection_train-s0-c0c9505e",
+      "encoder_lr": 2e-05,
+      "epoch": 10,
+      "epochs_schedule": 10,
+      "seed": 0,
+      "rung": null,
+      "fallback": null,
+      "weaker": null,
+      "loss_by_epoch": [
+        0.6289638449316439,
+        0.2995663142722586,
+        0.21847198028927264,
+        0.19507400594327762,
+        0.185372032225132,
+        0.18136420036139694,
+        0.17768254778955295,
+        0.1763067083514255,
+        0.17459946352502573,
+        0.17371400964000952
+      ],
+      "canonical": {
+        "accelerate_version": "1.15.0",
+        "base_config_sha256": "3be8dbe74813f59a252773db34bd67640166d36c507ded3b06b55f91f05ce78a",
+        "base_model_sha256": "18e29c6c61a046ab18fa48aeec3dce1285b09c5648d9ba68da1474940b9a9fcd",
+        "batch": 32,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 10,
+        "head_lr": 2e-05,
+        "loss": "masked_bce",
+        "lr_scheduler": "linear",
+        "max_grad_norm": 1.0,
+        "max_len": 128,
+        "optim": "adamw_torch",
+        "seed": 0,
+        "split": "selection_train",
+        "transformers_version": "5.19.0",
+        "warmup_ratio": 0.1,
+        "weight_decay": 0.01
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 0.8658664905447302,
+      "nll_raw": 0.1741182724214467,
+      "nll_fitted": 0.1704343769569646,
+      "objective": {
+        "tp": 150,
+        "fp": 469,
+        "fn": 333
+      },
+      "val_micro_f1_at_0_5": 0.0,
+      "val_micro_f1_at_global_theta": 0.27223230490018147,
+      "theta": {
+        "shipped": {
+          "global": 0.1,
+          "per_tag": {
+            "transfer_payment_deposit": 0.21,
+            "request_info": 0.34,
+            "wrong_notworking_notshowing": 0.1,
+            "card": 0.1,
+            "make_open_apply_setup_get_activate": 0.11,
+            "account": 0.08,
+            "how_much": 0.05,
+            "affirm": 0.06,
+            "deny": 0.05,
+            "more_higher_after": 0.05,
+            "change": 0.05,
+            "cancel_close_leave_freeze": 0.5,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.13,
+          "per_tag": {
+            "transfer_payment_deposit": 0.24,
+            "request_info": 0.36,
+            "wrong_notworking_notshowing": 0.13,
+            "card": 0.11,
+            "make_open_apply_setup_get_activate": 0.14,
+            "account": 0.11,
+            "how_much": 0.08,
+            "affirm": 0.08,
+            "deny": 0.08,
+            "more_higher_after": 0.08,
+            "change": 0.07,
+            "cancel_close_leave_freeze": 0.06,
+            "current": 0.05
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    }
+  ],
+  "chosen": {
+    "train_run_id": "berturk-selection_train-s0-c0c9505e",
+    "dump_run_id": "berturk-611ac90c6d93-951f6f1d-29446b61",
+    "dump_sha256": "abf97bd7ae414952d9cdd1b1fd996bd8c5835dc7c06854d40cf34e3e48ec7855",
+    "encoder_lr": 2e-05,
+    "epoch": 10,
+    "epochs_schedule": 10,
+    "stop_after_epoch": null,
+    "canonical": {
+      "accelerate_version": "1.15.0",
+      "base_config_sha256": "3be8dbe74813f59a252773db34bd67640166d36c507ded3b06b55f91f05ce78a",
+      "base_model_sha256": "18e29c6c61a046ab18fa48aeec3dce1285b09c5648d9ba68da1474940b9a9fcd",
+      "batch": 32,
+      "data_role": "train",
+      "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+      "device": "mps",
+      "encoder_lr": 2e-05,
+      "epochs": 10,
+      "head_lr": 2e-05,
+      "loss": "masked_bce",
+      "lr_scheduler": "linear",
+      "max_grad_norm": 1.0,
+      "max_len": 128,
+      "optim": "adamw_torch",
+      "seed": 0,
+      "split": "selection_train",
+      "transformers_version": "5.19.0",
+      "warmup_ratio": 0.1,
+      "weight_decay": 0.01
+    },
+    "temperature": 0.8658664905447302,
+    "theta": {
+      "shipped": {
+        "global": 0.1,
+        "per_tag": {
+          "transfer_payment_deposit": 0.21,
+          "request_info": 0.34,
+          "wrong_notworking_notshowing": 0.1,
+          "card": 0.1,
+          "make_open_apply_setup_get_activate": 0.11,
+          "account": 0.08,
+          "how_much": 0.05,
+          "affirm": 0.06,
+          "deny": 0.05,
+          "more_higher_after": 0.05,
+          "change": 0.05,
+          "cancel_close_leave_freeze": 0.5,
+          "current": 0.5
+        },
+        "eligible_tags": [
+          "transfer_payment_deposit",
+          "request_info",
+          "wrong_notworking_notshowing",
+          "card",
+          "make_open_apply_setup_get_activate",
+          "account",
+          "how_much",
+          "affirm",
+          "deny",
+          "more_higher_after",
+          "change",
+          "cancel_close_leave_freeze",
+          "current"
+        ],
+        "min_val_positives": 10,
+        "grid": {
+          "start": 0.05,
+          "stop": 0.95,
+          "step": 0.01,
+          "n": 91
+        },
+        "objective": {
+          "global": "val micro-F1",
+          "per_tag": "val per-tag F1"
+        },
+        "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+      },
+      "raw": {
+        "global": 0.13,
+        "per_tag": {
+          "transfer_payment_deposit": 0.24,
+          "request_info": 0.36,
+          "wrong_notworking_notshowing": 0.13,
+          "card": 0.11,
+          "make_open_apply_setup_get_activate": 0.14,
+          "account": 0.11,
+          "how_much": 0.08,
+          "affirm": 0.08,
+          "deny": 0.08,
+          "more_higher_after": 0.08,
+          "change": 0.07,
+          "cancel_close_leave_freeze": 0.06,
+          "current": 0.05
+        },
+        "eligible_tags": [
+          "transfer_payment_deposit",
+          "request_info",
+          "wrong_notworking_notshowing",
+          "card",
+          "make_open_apply_setup_get_activate",
+          "account",
+          "how_much",
+          "affirm",
+          "deny",
+          "more_higher_after",
+          "change",
+          "cancel_close_leave_freeze",
+          "current"
+        ],
+        "min_val_positives": 10,
+        "grid": {
+          "start": 0.05,
+          "stop": 0.95,
+          "step": 0.01,
+          "n": 91
+        },
+        "objective": {
+          "global": "val micro-F1",
+          "per_tag": "val per-tag F1"
+        },
+        "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+      }
+    },
+    "scorer": {
+      "device": "mps",
+      "dtype": "torch.float32",
+      "amp_enabled": false
+    },
+    "rung": null,
+    "fallback": null,
+    "weaker": null,
+    "val_micro_f1_at_global_theta": 0.27223230490018147
+  },
+  "final": {
+    "split": "final_train",
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "epochs": 10,
+    "stop_after_epoch": null
+  }
+}
