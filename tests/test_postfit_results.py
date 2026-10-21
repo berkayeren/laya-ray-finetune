@@ -38,6 +38,7 @@ README tests.
   no local path
 - test_render_names_an_interior_optimum_only_without_a_clipped_theta: a copy of the record with every global θ inside
   the grid is an interior optimum without the margin-cutoff disclosure; the committed record is the reverse
+- test_render_shows_unmeasured_final_seed_values_as_na: a final seed without peak, swap or loss values renders n/a
 - test_render_refuses_a_berturk_record: render_markdown refuses the BERTurk record (BERTurk has its own renderer)
 - test_render_refuses_a_manifest_of_another_record: postfit.py --render of the Laya record with the BERTurk final
   manifest is refused with a message naming the Laya record's sha256 (not an argparse usage error)
@@ -350,6 +351,19 @@ def test_render_names_an_interior_optimum_only_without_a_clipped_theta():
     assert "interior optimum" in text and "0 of 4 candidates" in text and "margin cutoff" not in text
     clipped = postfit.render_markdown(record)
     assert "interior optimum" not in clipped and "4 of 4 candidates" in clipped and "margin cutoff" in clipped
+
+
+def test_render_shows_unmeasured_final_seed_values_as_na():
+    """05-REVIEW IN-01: a final seed whose epoch rows hold no peak, swap or loss renders n/a, never 0.00 or a crash."""
+    import copy
+    final = copy.deepcopy(load(FINAL))
+    for r in final["seeds"][0]["epochs"]:
+        r.update(peak_total_bytes=None, swap_delta_bytes=None, loss=None)
+    row = [ln for ln in postfit.render_markdown(_laya_record(), final).splitlines()
+           if ln.startswith("| %d | " % final["seeds"][0]["seed"])]
+    assert len(row) == 1, row
+    cells = [c.strip() for c in row[0].strip("|").split("|")]
+    assert cells[3:6] == ["n/a", "n/a", "n/a"], cells          # final-epoch loss, peak GiB, largest swap delta MiB
 
 
 def test_render_refuses_a_berturk_record():

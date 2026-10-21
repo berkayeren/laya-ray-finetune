@@ -710,12 +710,14 @@ def render_markdown(record, final=None):
         frows = []
         for e in final["seeds"]:
             ep = e.get("epochs") or []
-            peak = max((r.get("peak_total_bytes") or 0) for r in ep) if ep else None
-            swap = max((r.get("swap_delta_bytes") or 0) for r in ep) if ep else None
+            # an unmeasured value (None) is n/a, never 0 (05-REVIEW IN-01)
+            peaks = [r["peak_total_bytes"] for r in ep if r.get("peak_total_bytes") is not None]
+            swaps = [r["swap_delta_bytes"] for r in ep if r.get("swap_delta_bytes") is not None]
+            loss = ep[-1].get("loss") if ep else None
             frows.append(("%d" % e["seed"], e["train_run_id"], "%d" % len(ep),
-                          "n/a" if not ep else "%.4f" % ep[-1]["loss"],
-                          "n/a" if peak is None else "%.2f" % (peak / 2 ** 30),
-                          "n/a" if swap is None else "%.0f" % (swap / 2 ** 20), str(e.get("rung")),
+                          "n/a" if loss is None else "%.4f" % loss,
+                          "n/a" if not peaks else "%.2f" % (max(peaks) / 2 ** 30),
+                          "n/a" if not swaps else "%.0f" % (max(swaps) / 2 ** 20), str(e.get("rung")),
                           str(e.get("code_changed_on_resume"))))
         out += ["", "**Final seeds** (%s, --epochs %d stopped after epoch %d, serving T %.4f; not scored before Phase 8)"
                 % (final["final_split"], chosen["epochs_schedule"], epoch, chosen["temperature"]), "",
