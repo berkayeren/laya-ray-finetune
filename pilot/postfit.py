@@ -93,6 +93,8 @@ CANDIDATE_SCORER_KEYS = ("device", "dtype", "amp_enabled")
 # its seeds, its stop epoch (checked against the chosen epoch on its own) and the record it is bound to
 FINAL_FREE_KEYS = ("split", "data_sha256", "data_role", "seed", "neg_seed", "stop_after_epoch", "postfit_sha256")
 EXPORT_RE = re.compile(r"^epoch-[0-9]{3}$")              # ray_train.py's <storage>/<run_id>/exports/epoch-NNN
+# the chosen block of a final manifest: final_manifest writes exactly these keys and render_markdown checks them
+FINAL_CHOSEN_KEYS = ("train_run_id", "encoder_lr", "epoch", "epochs_schedule", "stop_after_epoch", "temperature")
 
 
 def protocol(kind):
@@ -574,14 +576,10 @@ def final_manifest(record_path, ckpt_dirs):
     chosen = record["chosen"]
     return {"schema": FINAL_SCHEMA, "postfit": {"path": repo_relpath(record_path), "sha256": sha},
             "final_split": record["final"]["split"],
-            "chosen": {k: chosen.get(k) for k in ("train_run_id", "encoder_lr", "epoch", "epochs_schedule",
-                                                  "stop_after_epoch", "temperature")},
+            "chosen": {k: chosen.get(k) for k in FINAL_CHOSEN_KEYS},
             "config_sha256_sans_seed": digests[0],
             "seeds": [{k: v for k, v in e.items() if k != "config_sha256_sans_seed"}
                       for e in sorted(entries, key=lambda e: e["seed"])]}
-
-
-FINAL_CHOSEN_KEYS = ("train_run_id", "encoder_lr", "epoch", "epochs_schedule", "stop_after_epoch", "temperature")
 
 
 def _md(header, rows):
