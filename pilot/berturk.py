@@ -5,8 +5,10 @@ berturk_train.py trains dbmdz/bert-base-turkish-cased with the HF Trainer as a 4
 score.py --model berturk scores its checkpoints into ordinary dumps. Both import this module before torch, so it never
 imports torch, transformers, accelerate, Ray or laya (a test enforces it).
 
-Recipe (confirmed by the user at plan 06-02, "Protocol decision: confirm"): A1 one LR for encoder and head, LR; A2 an
-EPOCHS schedule whose every epoch is a selection candidate; A3 batch BATCH, a LR_SCHEDULER schedule with a WARMUP_RATIO
+Recipe (confirmed by the user at plan 06-02, "Protocol decision: confirm"): A1 one encoder LR, LR (Laya's single
+encoder LR), and the freshly initialised classifier head (the HEAD_PREFIX parameters) at HEAD_LR, Laya's head LR: the
+BASE-03 fix (plan 06-10 gate, 2026-10-21; SUPERSEDED holds the run that tied the head LR to LR); A2 an EPOCHS
+schedule whose every epoch is a selection candidate; A3 batch BATCH, a LR_SCHEDULER schedule with a WARMUP_RATIO
 warm-up, AdamW (OPTIM, WEIGHT_DECAY), MAX_GRAD_NORM, MAX_LEN, fp32, no gradient checkpointing, the seed set right
 before the head is created; A6 no resume (a run dir that exists is refused; a run is rerun from scratch); A7 a masked
 BCE (LOSS): a masked (message, tag) label is MASK_LABEL and the loss averages over the unmasked entries only.
@@ -23,7 +25,8 @@ berturk_train.py flag is in exactly one of IDENTITY, NOT_IDENTITY or RESOLVED (a
 
 Postfit (BASE-02, plan 06-04): PROTOCOL is BERTurk's selection grid for pilot.postfit.protocol("berturk"): LR_GRID
 (explicit, kept equal to pilot.postfit.LR_GRID by a test: equal tuning effort, the 2026-10-15 user decision), epochs
-1..EPOCHS, head_lr None (the head LR is the encoder LR) and pilot.postfit's selection and final seeds (A4). postfit.py
+1..EPOCHS, head_lr HEAD_LR (Laya's, so both models share both LRs; a test enforces it) and pilot.postfit's selection
+and final seeds (A4). postfit.py
 runs Laya's own functions on BERTurk val dumps under it. prune_export deletes one berturk_train.py epoch export only
 after a verified full val dump of exactly that export exists (postfit.py --prune picks it for a dir holding RECORD).
 
@@ -58,6 +61,11 @@ whose bytes depend on HF_HUB_OFFLINE) and RECORD (schema RECORD_SCHEMA). identit
 dump_run_id() is berturk-<model sha256[:12]>-<record sha256[:8]>-<digest of config.json and the tokenizer files[:8]>,
 so checkpoints that differ in any file the scorer reads never share a dump dir.
 
+Optimizer (the BASE-03 fix): optimizer_groups splits the parameter names into four AdamW groups, the encoder at the
+encoder LR and the head at the head LR, each with the HF Trainer's own weight-decay split; it refuses unless the head
+(the HEAD_PREFIX names) is exactly the set of parameters from_pretrained newly initialised. berturk_train.py hands the
+optimizer to the Trainer, which still builds the linear schedule and its warm-up over it (both LRs scale alike).
+
 usage: from pilot import berturk; rid = berturk.run_id(berturk.canonical(values)); berturk.label_vector(row)
        ident = berturk.identity(ckpt); berturk.dump_run_id(ident); seed, training = berturk.training_block(
        berturk.read_record(ckpt, ident)); berturk.prune_export(export_dir, dump_root, manifest_path)
@@ -65,6 +73,7 @@ usage: from pilot import berturk; rid = berturk.run_id(berturk.canonical(values)
        berturk.check_reference_for_final(reference_path, record_sha256)
        berturk.final_command(record, seed, record_path, reference_path, storage, out_prefix)
        berturk.final_manifest(record_path, ckpt_dirs)
+       berturk.optimizer_groups(param_names, decay_names, new_names, encoder_lr, head_lr, weight_decay)
        for s in berturk.SUPERSEDED: s["record"], s["postfit_sha256"], s["protocol"]
 """
 import hashlib
@@ -78,7 +87,11 @@ from pilot import dumps, pins, postfit
 from pilot.data import DEFAULT_MANIFEST, repo_relpath, sha256_bytes, sha256_file
 
 # ---- the recipe (A1-A3, A7), confirmed at plan 06-02 ----
-LR = 2e-05                                  # A1: one LR for encoder and head, equal to Laya's single LR
+LR = 2e-05                                  # A1: the encoder LR, equal to Laya's single encoder LR
+# the BASE-03 fix (plan 06-10 gate reply "fix: head LR 1e-4 (Recommended)", 2026-10-21): the freshly initialised
+# classifier head trains at Laya's head LR; the encoder keeps LR and every other recipe value is unchanged
+HEAD_LR = postfit.HEAD_LR
+HEAD_PREFIX = "classifier."                 # the head's parameter names: exactly the ones from_pretrained initialises
 EPOCHS = 10                                 # A2: the selection schedule (approved berturk_epochs)
 BATCH = 32                                  # A3: messages per optimizer step (approved berturk_batch)
 MAX_LEN = 128                               # A3: Laya's max_len, in WordPiece tokens with [CLS] and [SEP]
@@ -92,8 +105,8 @@ MASK_LABEL = -100.0                         # a masked (message, tag) label; the
 
 # ---- the postfit protocol (BASE-02, plan 06-04) ----
 LR_GRID = (2e-05,)                          # A1: explicit; equal to pilot.postfit.LR_GRID (one LR for both models)
-PROTOCOL = {"lr_grid": LR_GRID, "epochs": EPOCHS, "head_lr": None, "selection_seed": postfit.SELECTION_SEED,
-            "final_seeds": postfit.FINAL_SEEDS}       # head_lr None: tied to encoder_lr; the seeds are Laya's (A4)
+PROTOCOL = {"lr_grid": LR_GRID, "epochs": EPOCHS, "head_lr": HEAD_LR, "selection_seed": postfit.SELECTION_SEED,
+            "final_seeds": postfit.FINAL_SEEDS}       # head_lr: Laya's fixed head LR (BASE-03 fix); seeds Laya's (A4)
 
 # ---- superseded selection runs (BASE-03 fix, plan 06-10 gate; RP-2) ----
 # kept as disclosed history under results/superseded/<name>/, never current; protocol values are literals on purpose
@@ -165,8 +178,8 @@ IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_conf
 #   reference: the BASE-03 gate, a refusal only (check_reference_for_final binds it to the record's sha256)
 NOT_IDENTITY = ("data", "base", "storage", "manifest", "print_run_id", "export_epochs", "cpus", "out", "postfit",
                 "reference")
-# flags that enter IDENTITY through resolved keys: the HF Trainer has one LR for encoder and head (A1)
-RESOLVED = {"lr": ("encoder_lr", "head_lr")}
+# flags that enter IDENTITY through resolved keys: --lr is the encoder LR (A1); --head-lr is its own IDENTITY key
+RESOLVED = {"lr": ("encoder_lr",)}
 # left out when None: base_files_sha256 (None for the pinned base, whose files the pin fixes), max_messages (a smoke
 # subsample), mask_tags (Phase 6 trains unmasked), stop_after_epoch and postfit_sha256 (a final seed, plan 06-08), so
 # every selection run id is fixed now
@@ -189,6 +202,29 @@ def run_id(canon):
     order."""
     blob = json.dumps(canon, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     return "berturk-%s-s%d-%s" % (canon["split"], canon["seed"], hashlib.sha256(blob).hexdigest()[:8])
+
+
+# ---- the optimizer groups (the BASE-03 fix) ----
+
+def optimizer_groups(param_names, decay_names, new_names, encoder_lr, head_lr, weight_decay):
+    """Four AdamW param groups over the parameter names, in the fixed order encoder + decay, encoder + no decay,
+    head + decay, head + no decay: {"group": "encoder" | "head", "decay": bool, "lr", "weight_decay" (weight_decay
+    for a decay group, else 0.0), "params": [names in param_names order]}. The head is the names starting with
+    HEAD_PREFIX, decay follows decay_names (the HF Trainer's own rule). SystemExit unless the head is non-empty and
+    exactly new_names, the parameters from_pretrained newly initialised (a pretrained parameter at the head LR, or a
+    fresh one left at the encoder LR, would be another recipe). Every name lands in exactly one group."""
+    names, decay, new = list(param_names), set(decay_names), set(new_names)
+    head = {n for n in names if n.startswith(HEAD_PREFIX)}
+    if not head or head != new:
+        raise SystemExit("the classifier head must be exactly the newly initialised parameters (head %s, newly "
+                         "initialised %s); check the base and the transformers version"
+                         % (sorted(head) or "none", sorted(new) or "none"))
+    groups = []
+    for group, lr in (("encoder", encoder_lr), ("head", head_lr)):
+        for d in (True, False):
+            groups.append({"group": group, "decay": d, "lr": lr, "weight_decay": weight_decay if d else 0.0,
+                           "params": [n for n in names if (n in head) == (group == "head") and (n in decay) == d]})
+    return groups
 
 
 # ---- labels ----
@@ -451,7 +487,8 @@ def final_command(record, seed, record_path, reference_path, storage, out_prefix
         raise SystemExit("the chosen run trained another base (base_model_sha256 %s, not the pinned BERTurk weights); "
                          "pass --base DIR" % c.get("base_model_sha256"))
     argv = ["berturk_train.py", "--data", data, "--base", base, "--device", c["device"], "--epochs", str(c["epochs"]),
-            "--lr", repr(c["encoder_lr"]), "--batch", str(c["batch"]), "--max-len", str(c["max_len"])]
+            "--lr", repr(c["encoder_lr"]), "--head-lr", repr(c["head_lr"]), "--batch", str(c["batch"]),
+            "--max-len", str(c["max_len"])]
     if c.get("max_messages") is not None:
         argv += ["--max-messages", str(c["max_messages"])]
     if c.get("mask_tags"):

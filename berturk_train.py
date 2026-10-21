@@ -3,13 +3,19 @@ multi-label intent classifier (Phase 6, BASE-01): the baseline Laya is compared 
 
 One process, no Ray (PROJECT.md: "BERTurk is trained with the HF Trainer, not the Ray harness"): --device cpu, mps or
 cuda. The recipe is the one the user confirmed at plan 06-02 (pilot.berturk holds the values):
-- A1: one LR for encoder and head, --lr (default 2e-05, Laya's LR); the canonical config records it as encoder_lr and
-  head_lr, so pilot.postfit selects BERTurk candidates with the same code as Laya's.
+- A1: the encoder LR, --lr (default 2e-05, Laya's single encoder LR), and the classifier head's LR, --head-lr (default
+  1e-4, pilot.berturk.HEAD_LR = Laya's head LR): the BASE-03 fix (plan 06-10 gate, 2026-10-21), which replaced one LR
+  for encoder and head. The head is exactly the parameters from_pretrained newly initialised (classifier.weight,
+  classifier.bias; refused otherwise, before the run dir). The canonical config records encoder_lr and head_lr, so
+  pilot.postfit selects BERTurk candidates with the same code as Laya's.
 - A2: --epochs (default 10); every epoch writes an export, every export is a val selection candidate.
-- A3: batch 32 messages (--batch), a linear schedule with a 10% warm-up, AdamW (optim adamw_torch, weight decay 0.01),
-  max grad norm 1.0, max_len 128 WordPiece tokens with [CLS] and [SEP] (--max-len; longer messages are truncated and
-  counted, n_truncated), fp32 (no fp16, bf16 or autocast), no gradient checkpointing, default dropout,
-  transformers.set_seed(--seed) right before the classifier head is created, seed and data_seed for the Trainer.
+- A3: batch 32 messages (--batch), a linear schedule with a 10% warm-up, AdamW (optim adamw_torch, weight decay 0.01)
+  in four param groups (build_optimizer: encoder and head, each split by the Trainer's own weight-decay rule, with the
+  Trainer's own AdamW class and kwargs), passed as Trainer(optimizers=(optimizer, None)) so the Trainer still builds
+  the schedule and its warm-up over both LRs (one multiplier, no Trainer subclass), max grad norm 1.0, max_len 128
+  WordPiece tokens with [CLS] and [SEP] (--max-len; longer messages are truncated and counted, n_truncated), fp32 (no
+  fp16, bf16 or autocast), no gradient checkpointing, default dropout, transformers.set_seed(--seed) right before the
+  classifier head is created, seed and data_seed for the Trainer.
 - A6: no resume. A run takes minutes, so it is rerun from scratch: an existing <storage>/<run_id>/ is refused, naming
   the dir to delete. No Trainer checkpoint, training_args.bin, optimizer, scheduler or RNG pickle is written or read
   (save_strategy "no"); the exports are safetensors plus JSON. The Trainer's output_dir is removed after training, and
@@ -30,8 +36,9 @@ exactly model.safetensors and config.json (model.save_pretrained, fp32), vocab.t
 byte for byte from the base (never tokenizer.save_pretrained, whose tokenizer_config.json depends on HF_HUB_OFFLINE),
 and berturk_train.json (schema berturk-train/1: run id, canonical config, epoch, epoch schedule, calibrated false,
 temperature 1.0, postfit None, the run record and provenance). The run record holds the device, parameter device,
-dtype, versions, optimizer, n_messages, n_truncated, max_len, bit_reproducible (true on cpu only: MPS is not
-bitwise deterministic), the load time, one row per completed epoch with exactly pilot.berturk.EPOCH_FIELDS
+dtype, versions, optimizer and its groups (optimizer_groups: group, decay, lr, weight_decay, n_tensors; counts, never
+parameter names or values), n_messages, n_truncated, max_len, bit_reproducible (true on cpu only: MPS is not bitwise
+deterministic), the load time, one row per completed epoch with exactly pilot.berturk.EPOCH_FIELDS
 (mean loss, device-synchronised training seconds, optimizer steps, peak memory, swap delta) and the code state
 (git sha, dirty flag, diff digest). A finished run writes <storage>/<run_id>/done.json. Records hold ids, digests,
 numbers and repo-relative paths only, never a local path or message text.
@@ -101,6 +108,29 @@ def masked_bce(outputs, labels, num_items_in_batch=None):
     return total / max(int(n), 1)
 
 
+def build_optimizer(model, args, head_lr, new_names):
+    """(optimizer, groups): the HF Trainer's own AdamW (transformers.Trainer.get_optimizer_cls_and_kwargs of args,
+    optim adamw_torch) over four param groups from pilot.berturk.optimizer_groups: the encoder at args.learning_rate,
+    the head (exactly new_names, the parameters from_pretrained newly initialised; SystemExit otherwise) at head_lr,
+    each split by the Trainer's own weight-decay rule (transformers.Trainer.get_decay_parameter_names, which reads no
+    Trainer state in the pinned transformers) at args.weight_decay or 0.0. With head_lr equal to the encoder LR it
+    trains exactly as the Trainer's own optimizer (tests/test_berturk_train.py)."""
+    import torch
+    import transformers
+    named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+    decay = transformers.Trainer.get_decay_parameter_names(None, model)
+    cls, kwargs = transformers.Trainer.get_optimizer_cls_and_kwargs(args, model)
+    if cls is not torch.optim.AdamW or set(kwargs) - {"lr", "betas", "eps"}:
+        raise SystemExit("the Trainer's optimizer for optim %s is %s with %s, expected torch.optim.AdamW with lr, "
+                         "betas and eps; check the transformers version" % (args.optim, cls, sorted(kwargs)))
+    groups = berturk.optimizer_groups([n for n, _ in named], decay, new_names, args.learning_rate, head_lr,
+                                      args.weight_decay)
+    params = dict(named)
+    optimizer = cls([{"params": [params[n] for n in g["params"]], "lr": g["lr"], "weight_decay": g["weight_decay"]}
+                     for g in groups], **kwargs)
+    return optimizer, groups
+
+
 def parser():
     ap = argparse.ArgumentParser(description="fine-tune BERTurk with the HF Trainer (48-label multi-label, masked BCE)")
     ap.add_argument("--data", required=True, help="a registered split with role train")
@@ -109,7 +139,9 @@ def parser():
                          % ", ".join(berturk.BASE_FILES))
     ap.add_argument("--device", choices=("cpu", "mps", "cuda"), default="cpu")
     ap.add_argument("--epochs", type=int, default=berturk.EPOCHS)
-    ap.add_argument("--lr", type=float, default=berturk.LR, help="one LR for encoder and head (A1)")
+    ap.add_argument("--lr", type=float, default=berturk.LR, help="the encoder LR (A1: Laya's single encoder LR)")
+    ap.add_argument("--head-lr", type=float, default=berturk.HEAD_LR,
+                    help="the classifier head's LR: the BASE-03 fix (plan 06-10 gate), Laya's head LR")
     ap.add_argument("--batch", type=int, default=berturk.BATCH, help="messages per optimizer step")
     ap.add_argument("--max-len", type=int, default=berturk.MAX_LEN,
                     help="WordPiece tokens per message with [CLS] and [SEP]; longer ones are truncated and counted")
@@ -227,6 +259,8 @@ def main(argv=None):
             ap.error("%s must be at least 1" % flag)
     if not a.lr > 0:
         ap.error("--lr must be positive")
+    if not a.head_lr > 0:
+        ap.error("--head-lr must be positive")
     # K = --epochs has one spelling, the omitted flag (one run id per trajectory)
     if a.stop_after_epoch is not None and not 1 <= a.stop_after_epoch < a.epochs:
         ap.error("--stop-after-epoch must be at least 1 and below --epochs (%d); omit it to train every epoch"
@@ -276,7 +310,7 @@ def main(argv=None):
         "base_files_sha256": (None if a.base == "berturk"
                               else dumps.files_digest({f: digests[f] for f in berturk.TOKENIZER_FILES})),
         "transformers_version": _version("transformers"), "accelerate_version": _version("accelerate"),
-        "device": a.device, "epochs": a.epochs, "batch": a.batch, "encoder_lr": a.lr, "head_lr": a.lr,
+        "device": a.device, "epochs": a.epochs, "batch": a.batch, "encoder_lr": a.lr, "head_lr": a.head_lr,
         "weight_decay": berturk.WEIGHT_DECAY, "warmup_ratio": berturk.WARMUP_RATIO,
         "lr_scheduler": berturk.LR_SCHEDULER, "max_grad_norm": berturk.MAX_GRAD_NORM, "optim": berturk.OPTIM,
         "loss": berturk.LOSS, "max_len": a.max_len, "max_messages": a.max_messages,
@@ -332,9 +366,10 @@ def main(argv=None):
         data.append({"input_ids": enc["input_ids"], "token_type_ids": enc["token_type_ids"],
                      "attention_mask": enc["attention_mask"], "labels": lab})
     transformers.set_seed(a.seed)                           # right before the head is created (Pitfall 6)
-    model = transformers.BertForSequenceClassification.from_pretrained(
+    model, info = transformers.BertForSequenceClassification.from_pretrained(
         base_dir, num_labels=len(berturk.TAGS), problem_type=berturk.PROBLEM_TYPE, id2label=berturk.id2label(),
-        label2id=berturk.label2id(), dtype=torch.float32, local_files_only=True)
+        label2id=berturk.label2id(), dtype=torch.float32, local_files_only=True, output_loading_info=True)
+    new_names = info["missing_keys"]                         # the newly initialised parameters: the fresh head
     load_s = time.time() - t0
     args = transformers.TrainingArguments(
         output_dir=os.path.join(run_dir, "trainer"), per_device_train_batch_size=a.batch,
@@ -348,10 +383,15 @@ def main(argv=None):
         raise SystemExit("the Trainer picked device %s, requested %s; check the visible devices"
                          % (args.device.type, a.device))
     device = args.device
+    model = model.to(device)                                 # before the optimizer holds its parameters
+    optimizer, groups = build_optimizer(model, args, a.head_lr, new_names)   # refuses a head that is not fresh
     reset, sync, sample, _, peak = memory_sampler(device)
     record = {"device": a.device, "param_device": None, "dtype": "torch.float32", "amp": False,
               "torch_version": torch.__version__, "transformers_version": transformers.__version__,
-              "accelerate_version": canon["accelerate_version"], "optim": berturk.OPTIM, "n_messages": len(rows),
+              "accelerate_version": canon["accelerate_version"], "optim": berturk.OPTIM,
+              "optimizer_groups": [{"group": g["group"], "decay": g["decay"], "lr": g["lr"],
+                                    "weight_decay": g["weight_decay"], "n_tensors": len(g["params"])} for g in groups],
+              "n_messages": len(rows),
               "n_truncated": n_truncated, "max_len": a.max_len, "bit_reproducible": a.device == "cpu",
               "torch_threads": torch.get_num_threads(), "load_s": load_s, "epochs": [], "code": code_state()}
     provenance = {"split": {"name": canon["split"], "path": entry["path"], "sha256": entry["sha256"],
@@ -415,7 +455,7 @@ def main(argv=None):
     os.makedirs(run_dir)
     trainer = transformers.Trainer(model=model, args=args, train_dataset=data,
                                    data_collator=transformers.DataCollatorWithPadding(tok),
-                                   compute_loss_func=loss_fn, callbacks=[cb])
+                                   compute_loss_func=loss_fn, callbacks=[cb], optimizers=(optimizer, None))
     check_model(trainer.model)
     record["param_device"] = a.device
     trainer.train()
