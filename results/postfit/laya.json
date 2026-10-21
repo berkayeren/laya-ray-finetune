@@ -1,0 +1,826 @@
+{
+  "schema": "postfit/1",
+  "system_kind": "laya",
+  "split": {
+    "name": "val",
+    "path": "splits/val.jsonl",
+    "sha256": "95f5cfe5ae5921a5d9a28c285efbcbce5d6bf63c081e7f05bf8d4d2df36ad5bc",
+    "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+    "n_messages": 208
+  },
+  "manifest": {
+    "path": "data/splits.json",
+    "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103",
+    "is_committed": true
+  },
+  "protocol": {
+    "selection_split": "selection_train",
+    "final_split": "final_train",
+    "lr_grid": [
+      2e-05
+    ],
+    "head_lr": 0.0001,
+    "epochs": 4,
+    "selection_seed": 0,
+    "final_seeds": [
+      0,
+      1,
+      2
+    ]
+  },
+  "rules": {
+    "temperature": "one noul T over every val (message, tag) pair: the minimiser of the mean binary cross-entropy of sigmoid(m / T) over log T in [0.5, 5.0] (scipy bounded scalar minimiser), a bound winning an exact tie",
+    "temperature_bounds": [
+      0.5,
+      5.0
+    ],
+    "objective": "val micro-F1 at the val-selected global θ on probabilities after the val-fitted T, compared exactly as 2TP / (2TP + FP + FN) of the summed counts",
+    "tie_order": "equal objectives: fewer epochs first, then the lower encoder LR",
+    "epoch_transfer": "the final seeds train on final_train with the selection schedule (--epochs 4) and stop after the chosen epoch (--stop-after-epoch), never --epochs k*",
+    "theta": {
+      "tie_break": "closest to 0.5; between two equally close points, the lower θ",
+      "min_val_positives": 10,
+      "per_tag": "a tag's own θ only with >= 10 val positives, else the global θ"
+    }
+  },
+  "candidates": [
+    {
+      "dump_run_id": "laya-283e9965bce5-70ce7445-cc216d59",
+      "dump_sha256": "bc286a550b5f7e55f903121e03fd902930f3583846bb05ade0e72299aa43a842",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "laya",
+      "train_run_id": "laya-selection_train-neg8-s0-d92447f4",
+      "encoder_lr": 2e-05,
+      "epoch": 1,
+      "epochs_schedule": 4,
+      "seed": 0,
+      "rung": "none",
+      "fallback": false,
+      "weaker": false,
+      "loss_by_epoch": [
+        0.8047582538163808
+      ],
+      "canonical": {
+        "adamw_foreach": false,
+        "adamw_fused": false,
+        "amp": false,
+        "base_config_sha256": "25061739243b617ad88d1219ba6f8a9c86c5881ca28df024fa2d9b3b2fcc30c6",
+        "base_model_sha256": "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204",
+        "clip_grad_norm": 1.0,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 4,
+        "freeze_embeddings": false,
+        "freeze_encoder": false,
+        "grad_accum": 4,
+        "grad_checkpointing": true,
+        "head_lr": 0.0001,
+        "head_max_len": null,
+        "laya_version": "0.4.6",
+        "loss": "rlcd",
+        "max_len": 128,
+        "max_messages": null,
+        "micro_batch": 8,
+        "neg": 8,
+        "neg_seed": 0,
+        "seed": 0,
+        "shuffle_options": false,
+        "split": "selection_train",
+        "weight_decay": 0.01,
+        "workers": 1
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 5.0,
+      "nll_raw": 0.49554210860344,
+      "nll_fitted": 0.1253589643425658,
+      "objective": {
+        "tp": 405,
+        "fp": 178,
+        "fn": 78
+      },
+      "val_micro_f1_at_0_5": 0.7386262265834077,
+      "val_micro_f1_at_global_theta": 0.7598499061913696,
+      "theta": {
+        "shipped": {
+          "global": 0.95,
+          "per_tag": {
+            "transfer_payment_deposit": 0.5,
+            "request_info": 0.95,
+            "wrong_notworking_notshowing": 0.88,
+            "card": 0.5,
+            "make_open_apply_setup_get_activate": 0.95,
+            "account": 0.58,
+            "how_much": 0.7,
+            "affirm": 0.5,
+            "deny": 0.5,
+            "more_higher_after": 0.5,
+            "change": 0.5,
+            "cancel_close_leave_freeze": 0.9,
+            "current": 0.06
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.93,
+          "per_tag": {
+            "transfer_payment_deposit": 0.5,
+            "request_info": 0.93,
+            "wrong_notworking_notshowing": 0.5,
+            "card": 0.5,
+            "make_open_apply_setup_get_activate": 0.69,
+            "account": 0.83,
+            "how_much": 0.5,
+            "affirm": 0.5,
+            "deny": 0.5,
+            "more_higher_after": 0.5,
+            "change": 0.5,
+            "cancel_close_leave_freeze": 0.5,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    },
+    {
+      "dump_run_id": "laya-5efa46dfddaf-2f6120ee-cc216d59",
+      "dump_sha256": "106f3d535f0419738cdf0091641d86ccf7bc3278d3bd140c25d9fc36cd2b79b9",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "laya",
+      "train_run_id": "laya-selection_train-neg8-s0-d92447f4",
+      "encoder_lr": 2e-05,
+      "epoch": 2,
+      "epochs_schedule": 4,
+      "seed": 0,
+      "rung": "none",
+      "fallback": false,
+      "weaker": false,
+      "loss_by_epoch": [
+        0.8047582538163808,
+        0.5604656276415582
+      ],
+      "canonical": {
+        "adamw_foreach": false,
+        "adamw_fused": false,
+        "amp": false,
+        "base_config_sha256": "25061739243b617ad88d1219ba6f8a9c86c5881ca28df024fa2d9b3b2fcc30c6",
+        "base_model_sha256": "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204",
+        "clip_grad_norm": 1.0,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 4,
+        "freeze_embeddings": false,
+        "freeze_encoder": false,
+        "grad_accum": 4,
+        "grad_checkpointing": true,
+        "head_lr": 0.0001,
+        "head_max_len": null,
+        "laya_version": "0.4.6",
+        "loss": "rlcd",
+        "max_len": 128,
+        "max_messages": null,
+        "micro_batch": 8,
+        "neg": 8,
+        "neg_seed": 0,
+        "seed": 0,
+        "shuffle_options": false,
+        "split": "selection_train",
+        "weight_decay": 0.01,
+        "workers": 1
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 4.997357145688617,
+      "nll_raw": 0.4053927699181037,
+      "nll_fitted": 0.10343511319930525,
+      "objective": {
+        "tp": 411,
+        "fp": 152,
+        "fn": 72
+      },
+      "val_micro_f1_at_0_5": 0.7704918032786885,
+      "val_micro_f1_at_global_theta": 0.7858508604206501,
+      "theta": {
+        "shipped": {
+          "global": 0.95,
+          "per_tag": {
+            "transfer_payment_deposit": 0.92,
+            "request_info": 0.95,
+            "wrong_notworking_notshowing": 0.8,
+            "card": 0.29,
+            "make_open_apply_setup_get_activate": 0.5,
+            "account": 0.5,
+            "how_much": 0.5,
+            "affirm": 0.5,
+            "deny": 0.05,
+            "more_higher_after": 0.95,
+            "change": 0.54,
+            "cancel_close_leave_freeze": 0.94,
+            "current": 0.05
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.74,
+          "per_tag": {
+            "transfer_payment_deposit": 0.5,
+            "request_info": 0.5,
+            "wrong_notworking_notshowing": 0.5,
+            "card": 0.5,
+            "make_open_apply_setup_get_activate": 0.5,
+            "account": 0.5,
+            "how_much": 0.5,
+            "affirm": 0.5,
+            "deny": 0.5,
+            "more_higher_after": 0.5,
+            "change": 0.68,
+            "cancel_close_leave_freeze": 0.5,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    },
+    {
+      "dump_run_id": "laya-047381259d3b-cf0f7846-cc216d59",
+      "dump_sha256": "2dfc0394afa7bec72c9972facb27f14f3fb5b87953c396e88c1ad612290b589a",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "laya",
+      "train_run_id": "laya-selection_train-neg8-s0-d92447f4",
+      "encoder_lr": 2e-05,
+      "epoch": 3,
+      "epochs_schedule": 4,
+      "seed": 0,
+      "rung": "none",
+      "fallback": false,
+      "weaker": false,
+      "loss_by_epoch": [
+        0.8047582538163808,
+        0.5604656276415582,
+        0.3091834745924135
+      ],
+      "canonical": {
+        "adamw_foreach": false,
+        "adamw_fused": false,
+        "amp": false,
+        "base_config_sha256": "25061739243b617ad88d1219ba6f8a9c86c5881ca28df024fa2d9b3b2fcc30c6",
+        "base_model_sha256": "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204",
+        "clip_grad_norm": 1.0,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 4,
+        "freeze_embeddings": false,
+        "freeze_encoder": false,
+        "grad_accum": 4,
+        "grad_checkpointing": true,
+        "head_lr": 0.0001,
+        "head_max_len": null,
+        "laya_version": "0.4.6",
+        "loss": "rlcd",
+        "max_len": 128,
+        "max_messages": null,
+        "micro_batch": 8,
+        "neg": 8,
+        "neg_seed": 0,
+        "seed": 0,
+        "shuffle_options": false,
+        "split": "selection_train",
+        "weight_decay": 0.01,
+        "workers": 1
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 4.7698254528950175,
+      "nll_raw": 0.3550172666163294,
+      "nll_fitted": 0.09417181866832926,
+      "objective": {
+        "tp": 426,
+        "fp": 142,
+        "fn": 57
+      },
+      "val_micro_f1_at_0_5": 0.8,
+      "val_micro_f1_at_global_theta": 0.8106565176022835,
+      "theta": {
+        "shipped": {
+          "global": 0.95,
+          "per_tag": {
+            "transfer_payment_deposit": 0.95,
+            "request_info": 0.5,
+            "wrong_notworking_notshowing": 0.5,
+            "card": 0.5,
+            "make_open_apply_setup_get_activate": 0.46,
+            "account": 0.5,
+            "how_much": 0.5,
+            "affirm": 0.5,
+            "deny": 0.5,
+            "more_higher_after": 0.5,
+            "change": 0.5,
+            "cancel_close_leave_freeze": 0.9,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.33,
+          "per_tag": {
+            "transfer_payment_deposit": 0.5,
+            "request_info": 0.5,
+            "wrong_notworking_notshowing": 0.5,
+            "card": 0.5,
+            "make_open_apply_setup_get_activate": 0.33,
+            "account": 0.5,
+            "how_much": 0.5,
+            "affirm": 0.5,
+            "deny": 0.5,
+            "more_higher_after": 0.5,
+            "change": 0.5,
+            "cancel_close_leave_freeze": 0.5,
+            "current": 0.5
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    },
+    {
+      "dump_run_id": "laya-f1ffb616dc78-ebdabc55-cc216d59",
+      "dump_sha256": "9778215baaf28a25d3762d6b385aee668bc33ad0b3a93a1b6b78e5a38e598bd3",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+      "system_kind": "laya",
+      "train_run_id": "laya-selection_train-neg8-s0-d92447f4",
+      "encoder_lr": 2e-05,
+      "epoch": 4,
+      "epochs_schedule": 4,
+      "seed": 0,
+      "rung": "none",
+      "fallback": false,
+      "weaker": false,
+      "loss_by_epoch": [
+        0.8047582538163808,
+        0.5604656276415582,
+        0.3091834745924135,
+        0.16427468752745075
+      ],
+      "canonical": {
+        "adamw_foreach": false,
+        "adamw_fused": false,
+        "amp": false,
+        "base_config_sha256": "25061739243b617ad88d1219ba6f8a9c86c5881ca28df024fa2d9b3b2fcc30c6",
+        "base_model_sha256": "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204",
+        "clip_grad_norm": 1.0,
+        "data_role": "train",
+        "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+        "device": "mps",
+        "encoder_lr": 2e-05,
+        "epochs": 4,
+        "freeze_embeddings": false,
+        "freeze_encoder": false,
+        "grad_accum": 4,
+        "grad_checkpointing": true,
+        "head_lr": 0.0001,
+        "head_max_len": null,
+        "laya_version": "0.4.6",
+        "loss": "rlcd",
+        "max_len": 128,
+        "max_messages": null,
+        "micro_batch": 8,
+        "neg": 8,
+        "neg_seed": 0,
+        "seed": 0,
+        "shuffle_options": false,
+        "split": "selection_train",
+        "weight_decay": 0.01,
+        "workers": 1
+      },
+      "scorer": {
+        "device": "mps",
+        "dtype": "torch.float32",
+        "amp_enabled": false
+      },
+      "temperature": 4.874629654589638,
+      "nll_raw": 0.3972411928701338,
+      "nll_fitted": 0.10397507121954355,
+      "objective": {
+        "tp": 433,
+        "fp": 162,
+        "fn": 50
+      },
+      "val_micro_f1_at_0_5": 0.7747105966162066,
+      "val_micro_f1_at_global_theta": 0.8033395176252319,
+      "theta": {
+        "shipped": {
+          "global": 0.95,
+          "per_tag": {
+            "transfer_payment_deposit": 0.94,
+            "request_info": 0.83,
+            "wrong_notworking_notshowing": 0.4,
+            "card": 0.5,
+            "make_open_apply_setup_get_activate": 0.4,
+            "account": 0.5,
+            "how_much": 0.93,
+            "affirm": 0.06,
+            "deny": 0.5,
+            "more_higher_after": 0.5,
+            "change": 0.5,
+            "cancel_close_leave_freeze": 0.95,
+            "current": 0.59
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        },
+        "raw": {
+          "global": 0.95,
+          "per_tag": {
+            "transfer_payment_deposit": 0.5,
+            "request_info": 0.83,
+            "wrong_notworking_notshowing": 0.13,
+            "card": 0.5,
+            "make_open_apply_setup_get_activate": 0.13,
+            "account": 0.5,
+            "how_much": 0.5,
+            "affirm": 0.94,
+            "deny": 0.5,
+            "more_higher_after": 0.5,
+            "change": 0.5,
+            "cancel_close_leave_freeze": 0.87,
+            "current": 0.84
+          },
+          "eligible_tags": [
+            "transfer_payment_deposit",
+            "request_info",
+            "wrong_notworking_notshowing",
+            "card",
+            "make_open_apply_setup_get_activate",
+            "account",
+            "how_much",
+            "affirm",
+            "deny",
+            "more_higher_after",
+            "change",
+            "cancel_close_leave_freeze",
+            "current"
+          ],
+          "min_val_positives": 10,
+          "grid": {
+            "start": 0.05,
+            "stop": 0.95,
+            "step": 0.01,
+            "n": 91
+          },
+          "objective": {
+            "global": "val micro-F1",
+            "per_tag": "val per-tag F1"
+          },
+          "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+        }
+      }
+    }
+  ],
+  "chosen": {
+    "train_run_id": "laya-selection_train-neg8-s0-d92447f4",
+    "dump_run_id": "laya-047381259d3b-cf0f7846-cc216d59",
+    "dump_sha256": "2dfc0394afa7bec72c9972facb27f14f3fb5b87953c396e88c1ad612290b589a",
+    "encoder_lr": 2e-05,
+    "epoch": 3,
+    "epochs_schedule": 4,
+    "stop_after_epoch": 3,
+    "canonical": {
+      "adamw_foreach": false,
+      "adamw_fused": false,
+      "amp": false,
+      "base_config_sha256": "25061739243b617ad88d1219ba6f8a9c86c5881ca28df024fa2d9b3b2fcc30c6",
+      "base_model_sha256": "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204",
+      "clip_grad_norm": 1.0,
+      "data_role": "train",
+      "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+      "device": "mps",
+      "encoder_lr": 2e-05,
+      "epochs": 4,
+      "freeze_embeddings": false,
+      "freeze_encoder": false,
+      "grad_accum": 4,
+      "grad_checkpointing": true,
+      "head_lr": 0.0001,
+      "head_max_len": null,
+      "laya_version": "0.4.6",
+      "loss": "rlcd",
+      "max_len": 128,
+      "max_messages": null,
+      "micro_batch": 8,
+      "neg": 8,
+      "neg_seed": 0,
+      "seed": 0,
+      "shuffle_options": false,
+      "split": "selection_train",
+      "weight_decay": 0.01,
+      "workers": 1
+    },
+    "temperature": 4.7698254528950175,
+    "theta": {
+      "shipped": {
+        "global": 0.95,
+        "per_tag": {
+          "transfer_payment_deposit": 0.95,
+          "request_info": 0.5,
+          "wrong_notworking_notshowing": 0.5,
+          "card": 0.5,
+          "make_open_apply_setup_get_activate": 0.46,
+          "account": 0.5,
+          "how_much": 0.5,
+          "affirm": 0.5,
+          "deny": 0.5,
+          "more_higher_after": 0.5,
+          "change": 0.5,
+          "cancel_close_leave_freeze": 0.9,
+          "current": 0.5
+        },
+        "eligible_tags": [
+          "transfer_payment_deposit",
+          "request_info",
+          "wrong_notworking_notshowing",
+          "card",
+          "make_open_apply_setup_get_activate",
+          "account",
+          "how_much",
+          "affirm",
+          "deny",
+          "more_higher_after",
+          "change",
+          "cancel_close_leave_freeze",
+          "current"
+        ],
+        "min_val_positives": 10,
+        "grid": {
+          "start": 0.05,
+          "stop": 0.95,
+          "step": 0.01,
+          "n": 91
+        },
+        "objective": {
+          "global": "val micro-F1",
+          "per_tag": "val per-tag F1"
+        },
+        "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+      },
+      "raw": {
+        "global": 0.33,
+        "per_tag": {
+          "transfer_payment_deposit": 0.5,
+          "request_info": 0.5,
+          "wrong_notworking_notshowing": 0.5,
+          "card": 0.5,
+          "make_open_apply_setup_get_activate": 0.33,
+          "account": 0.5,
+          "how_much": 0.5,
+          "affirm": 0.5,
+          "deny": 0.5,
+          "more_higher_after": 0.5,
+          "change": 0.5,
+          "cancel_close_leave_freeze": 0.5,
+          "current": 0.5
+        },
+        "eligible_tags": [
+          "transfer_payment_deposit",
+          "request_info",
+          "wrong_notworking_notshowing",
+          "card",
+          "make_open_apply_setup_get_activate",
+          "account",
+          "how_much",
+          "affirm",
+          "deny",
+          "more_higher_after",
+          "change",
+          "cancel_close_leave_freeze",
+          "current"
+        ],
+        "min_val_positives": 10,
+        "grid": {
+          "start": 0.05,
+          "stop": 0.95,
+          "step": 0.01,
+          "n": 91
+        },
+        "objective": {
+          "global": "val micro-F1",
+          "per_tag": "val per-tag F1"
+        },
+        "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+      }
+    },
+    "scorer": {
+      "device": "mps",
+      "dtype": "torch.float32",
+      "amp_enabled": false
+    },
+    "rung": "none",
+    "fallback": false,
+    "weaker": false,
+    "val_micro_f1_at_global_theta": 0.8106565176022835
+  },
+  "final": {
+    "split": "final_train",
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "epochs": 4,
+    "stop_after_epoch": 3
+  }
+}

@@ -12,7 +12,17 @@ README tests.
   exactly the grid postfit reads: one train run, one full val dump per (LR, epoch) of LR_GRID x 1..EPOCHS, seed 0,
   uncalibrated (shipped T 1.0), one rung and one canonical recipe, every dump verified (pilot.dumps.load_dump), and no
   test dump. A dump at any other encoder LR (3e-05, 5e-05) fails it
+- test_committed_record_is_complete_and_consistent (plan 05-07): RECORD (results/postfit/laya.json, postfit/1, system
+  kind laya) is tracked; its protocol and rules are pilot.postfit's constants; its candidates cover LR_GRID x
+  1..EPOCHS once each and are exactly the tracked Laya selection dumps, each verified with its dump_sha256 and train run
+  id and with no test dump; its chosen candidate is what pilot.postfit.select returns on the recorded candidates; T lies
+  in [T_MIN, T_MAX]; stop_after_epoch is None exactly at epoch EPOCHS; the final block is final_train with FINAL_SEEDS
+- test_makefile_lists_the_selection_dumps: the Makefile's LAYA_SELECTION is the record's candidate dump run ids in
+  record order, and `make laya-postfit` rebuilds RECORD from results/dumps/$(LAYA_SELECTION)
+- test_record_reproduces_from_the_committed_dumps (data): pilot.postfit.fit over the candidate dirs, with no grid
+  arguments (the protocol dispatches by system kind), rebuilds RECORD byte for byte
 """
+import glob
 import json
 import os
 import re
@@ -20,7 +30,7 @@ import subprocess
 
 import pytest
 
-from pilot import berturk, compute, dumps, postfit
+from pilot import berturk, compute, dumps, metrics, postfit
 from pilot.data import DEFAULT_MANIFEST
 
 pytestmark = pytest.mark.unit
@@ -28,6 +38,7 @@ pytestmark = pytest.mark.unit
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DUMPS = "results/dumps"
 SELECTION_RUN_RE = re.compile(r"^laya-selection_train-neg8-s0-[0-9a-f]{8}$")
+RECORD = "results/postfit/laya.json"
 
 
 def tracked(*pathspec):
@@ -125,3 +136,89 @@ def test_laya_selection_dumps_are_the_single_lr_grid():
 
     assert len(rungs) == 1, "the Laya selection dumps ran at rungs %s, not one" % sorted(rungs)
     assert len(canons) == 1, "the Laya selection dumps carry %d canonical configs, not one recipe" % len(canons)
+
+
+def _laya_record():
+    """The parsed committed Laya postfit record; it must be tracked (plan 05-07), so a missing record fails the caller."""
+    assert tracked(RECORD) == [RECORD], "%s is not tracked; build it with `make laya-postfit` and commit it" % RECORD
+    return load(RECORD)
+
+
+def test_committed_record_is_complete_and_consistent():
+    r = _laya_record()
+    proto = postfit.protocol("laya")
+    assert r["schema"] == postfit.SCHEMA == "postfit/1"
+    assert r["system_kind"] == "laya"
+    for key in ("lr_grid", "head_lr", "epochs", "selection_seed", "final_seeds"):
+        assert as_json(r["protocol"][key]) == as_json(proto[key]), key
+    assert r["protocol"]["selection_split"] == "selection_train" and r["protocol"]["final_split"] == "final_train"
+
+    rules = r["rules"]
+    assert rules["temperature"] == postfit.TEMPERATURE_RULE
+    assert rules["temperature_bounds"] == [postfit.T_MIN, postfit.T_MAX]
+    assert rules["objective"] == postfit.OBJECTIVE and rules["tie_order"] == postfit.TIE_ORDER
+    assert rules["epoch_transfer"] == postfit.EPOCH_TRANSFER
+    assert rules["theta"]["tie_break"] == metrics.TIE_RULE
+    assert rules["theta"]["min_val_positives"] == metrics.MIN_VAL_POSITIVES
+
+    cands = r["candidates"]
+    pairs = [(c["encoder_lr"], c["epoch"]) for c in cands]
+    want = [(lr, e) for lr in postfit.LR_GRID for e in range(1, postfit.EPOCHS + 1)]
+    assert sorted(pairs) == want and len(set(pairs)) == len(pairs), pairs
+    assert {c["dump_run_id"] for c in cands} == set(laya_selection_sidecars()), \
+        "the record's candidates are not exactly the tracked Laya selection dumps"
+    assert all(c["system_kind"] == "laya" for c in cands)
+    files = set(tracked(DUMPS + "/"))
+    for c in cands:
+        rid = c["dump_run_id"]
+        for name in ("val.npz", "val.json"):
+            assert "%s/%s/%s" % (DUMPS, rid, name) in files, "%s/%s is not tracked" % (rid, name)
+        for name in ("test.npz", "test.json"):
+            assert "%s/%s/%s" % (DUMPS, rid, name) not in files, "%s holds a tracked test dump" % rid
+        logits, uids, side, entry = dumps.load_dump(path(DUMPS + "/" + rid), "val", DEFAULT_MANIFEST)
+        assert side["run_id"] == rid and side["dump_sha256"] == c["dump_sha256"], rid
+        assert side["training"]["run_id"] == c["train_run_id"] and side["n_subset"] is None, rid
+        assert entry["role"] == "val" and logits.shape == (len(uids), 48), rid
+
+    chosen = postfit.select(cands, **{k: v for k, v in proto.items() if k != "final_seeds"})
+    c = r["chosen"]
+    assert c["dump_run_id"] == chosen["dump_run_id"] and c["dump_sha256"] == chosen["dump_sha256"]
+    assert c["epoch"] == chosen["epoch"] and as_json(c["theta"]) == as_json(chosen["theta"])
+    assert c["temperature"] == chosen["temperature"]
+    assert postfit.T_MIN <= c["temperature"] <= postfit.T_MAX
+    if c["epoch"] == postfit.EPOCHS:
+        assert c["stop_after_epoch"] is None
+    else:
+        assert c["stop_after_epoch"] == c["epoch"]
+    for key in ("rung", "fallback", "weaker"):
+        assert all(as_json(x[key]) == as_json(c[key]) for x in cands), key
+    f = r["final"]
+    assert f["split"] == "final_train" and f["seeds"] == list(postfit.FINAL_SEEDS)
+    assert f["epochs"] == postfit.EPOCHS and f["stop_after_epoch"] == c["stop_after_epoch"]
+
+
+def test_makefile_lists_the_selection_dumps():
+    record = _laya_record()
+    with open(path("Makefile"), encoding="utf-8") as f:
+        text = f.read()
+    m = re.search(r"^LAYA_SELECTION := (.+)$", text, re.M)
+    assert m, "Makefile has no LAYA_SELECTION := line"
+    assert m.group(1).split() == [c["dump_run_id"] for c in record["candidates"]], \
+        "LAYA_SELECTION is not the record's candidate dump run ids in record order"
+    phony = re.search(r"^\.PHONY: (.+)$", text, re.M)
+    assert phony and "laya-postfit" in phony.group(1).split(), "laya-postfit is not in .PHONY"
+    recipe = re.search(r"^laya-postfit:\n((?:\t.*\n)+)", text, re.M)
+    assert recipe, "Makefile has no laya-postfit target"
+    assert ("$(PYTHON) postfit.py $(addprefix results/dumps/,$(LAYA_SELECTION)) --out %s" % RECORD) \
+        in recipe.group(1), "laya-postfit does not rebuild %s from results/dumps/$(LAYA_SELECTION)" % RECORD
+
+
+@pytest.mark.data
+def test_record_reproduces_from_the_committed_dumps():
+    record = _laya_record()
+    if not glob.glob(os.path.join(REPO_ROOT, "data", "splits", "*.jsonl")):
+        pytest.fail("data/splits/ is empty; run `make data` first")
+    dirs = [path("%s/%s" % (DUMPS, c["dump_run_id"])) for c in record["candidates"]]
+    got = postfit.fit(dirs, DEFAULT_MANIFEST)       # no grid: postfit.fit dispatches the protocol by system kind
+    with open(path(RECORD), "rb") as f:
+        assert postfit.record_bytes(got) == f.read(), "%s does not rebuild from the committed dumps" % RECORD
