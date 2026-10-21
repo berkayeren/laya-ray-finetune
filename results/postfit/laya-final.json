@@ -1,0 +1,166 @@
+{
+  "schema": "postfit-final/1",
+  "postfit": {
+    "path": "results/postfit/laya.json",
+    "sha256": "e08e8735b19c0973606622be546617ef851f1bf06e2b2d60b1d920d8676b6da2"
+  },
+  "final_split": "final_train",
+  "chosen": {
+    "train_run_id": "laya-selection_train-neg8-s0-d92447f4",
+    "encoder_lr": 2e-05,
+    "epoch": 3,
+    "epochs_schedule": 4,
+    "stop_after_epoch": 3,
+    "temperature": 4.7698254528950175
+  },
+  "config_sha256_sans_seed": "4fe1e17f770171cafff5e80196f521eb73566e949fc8877b1226d612eff62650",
+  "seeds": [
+    {
+      "seed": 0,
+      "train_run_id": "laya-final_train-neg8-s0-95cf6955",
+      "checkpoint_name": "ckpt-final-s0",
+      "checkpoint_identity": {
+        "local": true,
+        "model_sha256": "a6a866dd69fcf8d8c3bf5f34ef313412e0bd00daee6edec74e93756219b8ad51",
+        "config_sha256": "88cfaa80742be89d3b4c8b0b2efea9bf49a2916ee306adc0da391a65e62fb931",
+        "files_sha256": {
+          "encoder/config.json": "81d6856137aeb1d9cfbc1c1776d5b8196eed2e6ff879e894f517a21a580cc9d3",
+          "tokenizer/tokenizer.json": "dbba919c6e5e492bc22beb80abb64e6fcc7e8744dc696e8388b8c977767afa4b",
+          "tokenizer/tokenizer_config.json#normalized": "56f416183cdd31134a297020bbe9a6f602c129e51ff2d3dce9f99c5279e89928"
+        }
+      },
+      "dump_run_id": "laya-a6a866dd69fc-88cfaa80-cc216d59",
+      "rung": "none",
+      "fallback": false,
+      "weaker": false,
+      "code_changed_on_resume": false,
+      "temperature": 4.7698254528950175,
+      "loss_by_epoch": [
+        0.8191126931436052,
+        0.5362695907735848,
+        0.2825661309922222
+      ],
+      "epochs": [
+        {
+          "epoch": 1,
+          "loss": 0.8191126931436052,
+          "train_s": 976.8908959170003,
+          "peak_total_bytes": 8817770496,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 2,
+          "loss": 0.5362695907735848,
+          "train_s": 982.9858679579993,
+          "peak_total_bytes": 9398894592,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 3,
+          "loss": 0.2825661309922222,
+          "train_s": 966.2555352499985,
+          "peak_total_bytes": 9266135040,
+          "swap_delta_bytes": 0
+        }
+      ]
+    },
+    {
+      "seed": 1,
+      "train_run_id": "laya-final_train-neg8-s1-07a1ee59",
+      "checkpoint_name": "ckpt-final-s1",
+      "checkpoint_identity": {
+        "local": true,
+        "model_sha256": "f43484c8aab4af7f54ab97b271b5ee0a05c2d8c39bd4d80d313d5b4153b9924a",
+        "config_sha256": "b43eaa5460b6e1770e081247f38527931954e7e0332ef5928b275b18cf1aa6c9",
+        "files_sha256": {
+          "encoder/config.json": "81d6856137aeb1d9cfbc1c1776d5b8196eed2e6ff879e894f517a21a580cc9d3",
+          "tokenizer/tokenizer.json": "dbba919c6e5e492bc22beb80abb64e6fcc7e8744dc696e8388b8c977767afa4b",
+          "tokenizer/tokenizer_config.json#normalized": "56f416183cdd31134a297020bbe9a6f602c129e51ff2d3dce9f99c5279e89928"
+        }
+      },
+      "dump_run_id": "laya-f43484c8aab4-b43eaa54-cc216d59",
+      "rung": "none",
+      "fallback": false,
+      "weaker": false,
+      "code_changed_on_resume": false,
+      "temperature": 4.7698254528950175,
+      "loss_by_epoch": [
+        0.8122251204161328,
+        0.5530531584231787,
+        0.2935788590662834
+      ],
+      "epochs": [
+        {
+          "epoch": 1,
+          "loss": 0.8122251204161328,
+          "train_s": 971.4863917080002,
+          "peak_total_bytes": 8893939712,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 2,
+          "loss": 0.5530531584231787,
+          "train_s": 964.1027498749972,
+          "peak_total_bytes": 9320775680,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 3,
+          "loss": 0.2935788590662834,
+          "train_s": 964.0040379589991,
+          "peak_total_bytes": 9395142656,
+          "swap_delta_bytes": 0
+        }
+      ]
+    },
+    {
+      "seed": 2,
+      "train_run_id": "laya-final_train-neg8-s2-bbb5230e",
+      "checkpoint_name": "ckpt-final-s2",
+      "checkpoint_identity": {
+        "local": true,
+        "model_sha256": "6f66dfd4c331a7779963e1ef4e4d69ade442ee37cafbd75e9ce5c0c4f4fb49f9",
+        "config_sha256": "23b938303cf68ea32e92baa1a9a3ecf2e0bf2219f3860d71986c6f58c25bf069",
+        "files_sha256": {
+          "encoder/config.json": "81d6856137aeb1d9cfbc1c1776d5b8196eed2e6ff879e894f517a21a580cc9d3",
+          "tokenizer/tokenizer.json": "dbba919c6e5e492bc22beb80abb64e6fcc7e8744dc696e8388b8c977767afa4b",
+          "tokenizer/tokenizer_config.json#normalized": "56f416183cdd31134a297020bbe9a6f602c129e51ff2d3dce9f99c5279e89928"
+        }
+      },
+      "dump_run_id": "laya-6f66dfd4c331-23b93830-cc216d59",
+      "rung": "none",
+      "fallback": false,
+      "weaker": false,
+      "code_changed_on_resume": false,
+      "temperature": 4.7698254528950175,
+      "loss_by_epoch": [
+        0.7892107195401614,
+        0.530459800010186,
+        0.25906132486359196
+      ],
+      "epochs": [
+        {
+          "epoch": 1,
+          "loss": 0.7892107195401614,
+          "train_s": 966.7960886250003,
+          "peak_total_bytes": 9606578176,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 2,
+          "loss": 0.530459800010186,
+          "train_s": 964.4186686250032,
+          "peak_total_bytes": 9444999168,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 3,
+          "loss": 0.25906132486359196,
+          "train_s": 965.8514599170012,
+          "peak_total_bytes": 9455566848,
+          "swap_delta_bytes": 0
+        }
+      ]
+    }
+  ]
+}

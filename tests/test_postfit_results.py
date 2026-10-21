@@ -21,6 +21,13 @@ README tests.
   record order, and `make laya-postfit` rebuilds RECORD from results/dumps/$(LAYA_SELECTION)
 - test_record_reproduces_from_the_committed_dumps (data): pilot.postfit.fit over the candidate dirs, with no grid
   arguments (the protocol dispatches by system kind), rebuilds RECORD byte for byte
+- test_committed_final_manifest (plan 05-08): FINAL (results/postfit/laya-final.json, postfit-final/1) is tracked and
+  bound to RECORD (its path and sha256, its chosen settings, the single encoder LR 2e-05 == LR_GRID[0]); it lists
+  final_train and exactly seeds 0, 1, 2 (never only the best), with three distinct train run ids carrying their seed and
+  one config_sha256_sans_seed; every seed serves the chosen T, has one row per epoch up to the chosen epoch, ran at the
+  chosen rung, flags code_changed_on_resume as a bool, names a bare checkpoint dir and carries the dump run id of its
+  checkpoint identity; no tracked results/dumps dir is named after a final seed's dump run id (none was scored in
+  Phase 5)
 """
 import glob
 import json
@@ -31,7 +38,7 @@ import subprocess
 import pytest
 
 from pilot import berturk, compute, dumps, metrics, postfit
-from pilot.data import DEFAULT_MANIFEST
+from pilot.data import DEFAULT_MANIFEST, sha256_file
 
 pytestmark = pytest.mark.unit
 
@@ -222,3 +229,46 @@ def test_record_reproduces_from_the_committed_dumps():
     got = postfit.fit(dirs, DEFAULT_MANIFEST)       # no grid: postfit.fit dispatches the protocol by system kind
     with open(path(RECORD), "rb") as f:
         assert postfit.record_bytes(got) == f.read(), "%s does not rebuild from the committed dumps" % RECORD
+
+
+FINAL = "results/postfit/laya-final.json"
+FINAL_RUN_RE = re.compile(r"^laya-final_train-neg8-s([012])-[0-9a-f]{8}$")
+
+
+def test_committed_final_manifest():
+    """LAYA-08 (plan 05-08): the committed manifest of the 3 Laya final seeds is bound to the committed record (its
+    sha256 and chosen settings, the 4-epoch schedule stopped at the chosen epoch, the single encoder LR 2e-05); it lists
+    all three seeds (never only the best), each serving the chosen T at the chosen rung, and no final seed has a tracked
+    dump (none was scored in Phase 5)."""
+    assert tracked(FINAL) == [FINAL], "%s is not tracked" % FINAL
+    record = _laya_record()
+    m = load(FINAL)
+    assert m["schema"] == postfit.FINAL_SCHEMA == "postfit-final/1", m["schema"]
+    assert m["postfit"] == {"path": RECORD, "sha256": sha256_file(path(RECORD))}, \
+        "%s is not bound to the committed %s" % (FINAL, RECORD)
+    keys = ("train_run_id", "encoder_lr", "epoch", "epochs_schedule", "stop_after_epoch", "temperature")
+    chosen = record["chosen"]
+    assert as_json(m["chosen"]) == as_json({k: chosen[k] for k in keys}), "the manifest's chosen settings differ"
+    assert chosen["encoder_lr"] == 2e-05 == postfit.LR_GRID[0], chosen["encoder_lr"]
+    assert m["final_split"] == record["final"]["split"] == "final_train"
+    seeds = m["seeds"]
+    assert [e["seed"] for e in seeds] == [0, 1, 2] == record["final"]["seeds"]
+    ids = [e["train_run_id"] for e in seeds]
+    assert len(set(ids)) == 3, "the final seeds share a train run id: %s" % ids
+    for e in seeds:
+        mm = FINAL_RUN_RE.match(e["train_run_id"])
+        assert mm and int(mm.group(1)) == e["seed"], e["train_run_id"]
+    assert re.fullmatch(r"[0-9a-f]{64}", m["config_sha256_sans_seed"]), "one config_sha256_sans_seed for all seeds"
+    for e in seeds:
+        s = e["seed"]
+        assert e["temperature"] == chosen["temperature"], "seed %d serves T %r" % (s, e["temperature"])
+        assert len(e["epochs"]) == len(e["loss_by_epoch"]) == chosen["epoch"], "seed %d epochs" % s
+        assert [r["epoch"] for r in e["epochs"]] == list(range(1, chosen["epoch"] + 1)), "seed %d epoch rows" % s
+        for key in ("rung", "fallback", "weaker"):
+            assert as_json(e[key]) == as_json(chosen[key]), "seed %d %s %r, chosen %r" % (s, key, e[key], chosen[key])
+        assert isinstance(e["code_changed_on_resume"], bool), "seed %d code_changed_on_resume %r" % (
+            s, e["code_changed_on_resume"])
+        assert "/" not in e["checkpoint_name"] and "\\" not in e["checkpoint_name"], e["checkpoint_name"]
+        assert e["dump_run_id"] == dumps.run_id("laya", e["checkpoint_identity"]), "seed %d dump_run_id" % s
+    scored = sorted({f.split("/")[2] for f in tracked(DUMPS + "/")} & {e["dump_run_id"] for e in seeds})
+    assert scored == [], "a Laya final seed was scored in Phase 5: %s" % scored
