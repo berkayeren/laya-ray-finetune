@@ -195,6 +195,13 @@ def test_berturk_final_seed_chain(tmp_path, synthetic_raw, capsys):
         assert len(man["config_sha256_sans_seed"]) == 64
         with open(out, encoding="utf-8") as f:
             assert json.load(f) == man
+        # 06-REVIEW IN-06: a record on the committed manifest binds only final seeds trained on it (these seeds were
+        # trained on the synthetic manifest, so the same seeds are refused for a copy of the record marked committed)
+        assert record["manifest"]["is_committed"] is False
+        marked = postfit.write_record(dict(record, manifest=dict(record["manifest"], is_committed=True)),
+                                      str(tmp_path / "postfit" / "marked.json"))
+        with pytest.raises(SystemExit, match="provenance manifest is_committed False"):
+            berturk.final_manifest(marked, ["%s-s%d" % (prefix, s) for s in (0, 1, 2)])
 
         capsys.readouterr()
         lines = postfit_cli.main(["--print-final-commands", path, "--reference", ref, "--storage", final_storage,

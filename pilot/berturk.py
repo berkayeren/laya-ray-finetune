@@ -558,6 +558,16 @@ def _final_entry(record, sha, ckpt_dir):
     ident = identity(ckpt_dir)
     rec = read_record(ckpt_dir, ident)                      # the bytes ident hashed
     canon = rec["canonical"]
+    prov = rec.get("provenance") or {}
+    man, split = prov.get("manifest") or {}, prov.get("split") or {}
+    # 06-REVIEW IN-06 (Laya parity, 05-REVIEW WR-01): a record built on the committed manifest binds final seeds
+    # trained on it, whose provenance split bytes are the canonical data_sha256; other records keep it free, as
+    # check_final does
+    if (record.get("manifest") or {}).get("is_committed") is True and \
+            (man.get("is_committed") is not True or split.get("sha256") != canon.get("data_sha256")):
+        raise SystemExit("%s: provenance manifest is_committed %r (split sha256 %s, canonical %s); a final seed of a "
+                         "record on the committed manifest trains on the committed data/splits.json (06-REVIEW IN-06)"
+                         % (name, man.get("is_committed"), split.get("sha256"), canon.get("data_sha256")))
     if (rec.get("postfit") or {}).get("sha256") != sha or canon.get("postfit_sha256") != sha:
         raise SystemExit("%s is bound to postfit record %s, not %s; train it with berturk_train.py --postfit of this "
                          "record" % (name, (rec.get("postfit") or {}).get("sha256"), sha))
