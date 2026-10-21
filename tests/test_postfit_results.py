@@ -34,8 +34,8 @@ README tests.
 - test_render_discloses_the_selection: the rendered block names the single encoder LR 2e-05 against the approved
   lr_grid of pilot.compute.MATRIX (fixed, not tuned), the grid-edge verdict of the chosen epoch (never "interior
   optimum" while a candidate's shipped θ is clipped at a θ-grid edge), the θ-edge count over every candidate
-  (05-REVIEW CR-01, WR-04), every candidate's exact objective fraction and every final seed's train run id, and holds
-  no local path
+  (05-REVIEW CR-01, WR-04), every candidate's exact objective fraction 2TP/(2TP + FP + FN), unreduced, and every
+  final seed's train run id, and holds no local path
 - test_render_names_an_interior_optimum_only_without_a_clipped_theta: a copy of the record with every global θ inside
   the grid is an interior optimum without the margin-cutoff disclosure; the committed record is the reverse
 - test_render_shows_unmeasured_final_seed_values_as_na: a final seed without peak, swap or loss values renders n/a
@@ -329,8 +329,10 @@ def test_render_discloses_the_selection():
     assert ("T-dependent margin cutoff" in text) is clipped
     assert "max_epochs %d" % compute.MATRIX["max_epochs"] in text, "the approved max_epochs is not named"
     for c in record["candidates"]:
-        s = postfit.score(c)
-        assert "%d/%d" % (s.numerator, s.denominator) in text, "candidate epoch %d's fraction is missing" % c["epoch"]
+        o = c["objective"]
+        frac = "%d/%d" % (2 * o["tp"], 2 * o["tp"] + o["fp"] + o["fn"])           # unreduced (05-REVIEW IN-02)
+        assert frac in text, "candidate epoch %d's fraction %s is missing" % (c["epoch"], frac)
+        assert postfit.score(c) == __import__("fractions").Fraction(*map(int, frac.split("/")))
     for e in load(FINAL)["seeds"]:
         assert e["train_run_id"] in text, "final seed %d's train run id is missing" % e["seed"]
     assert "/Users/" not in text and "/home/" not in text, "the rendered block holds a local path"

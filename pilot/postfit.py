@@ -590,9 +590,10 @@ def _md(header, rows):
 
 
 def _f1(c):
-    """Val micro-F1 at the global θ with its exact fraction in lowest terms, e.g. "0.8107 (852/1051)"."""
-    s = score(c)
-    return "%.4f (%d/%d)" % (c["val_micro_f1_at_global_theta"], s.numerator, s.denominator)
+    """Val micro-F1 at the global θ with its exact fraction 2TP / (2TP + FP + FN) of the summed counts, not reduced
+    (05-REVIEW IN-02: the counts stay readable), e.g. "0.8107 (852/1051)"."""
+    o = c["objective"]
+    return "%.4f (%d/%d)" % (c["val_micro_f1_at_global_theta"], 2 * o["tp"], 2 * o["tp"] + o["fp"] + o["fn"])
 
 
 def theta_edges(cands, name):
