@@ -22,12 +22,23 @@ protocol, its reference check still reads investigate with no resolution (so che
 the gate of any final seed), and the record rebuilds from the moved dumps. test_no_superseded_run_is_current proves
 none of it is current: no tracked results/dumps dir holds one of its dumps or is named after one of its candidates, no
 tracked results/postfit file carries its sha256, and results/dumps holds BERTurk selection dumps of at most one train
-run. Plan 06-16 adds the current-run tests (the head-LR run's record, its reference and its Makefile list) to the same
-helpers.
+run.
+
+The current run (plan 06-16, the head-LR selection run of plans 06-14/06-15): results/postfit/berturk.json is checked by
+the same helpers under pilot.postfit.protocol("berturk") (head_lr 0.0001), every candidate's canonical head_lr is
+pilot.berturk.HEAD_LR and its sha256 is no superseded one; the Makefile's BERTURK_SELECTION lists its candidate dump run
+ids in record order and berturk-postfit is phony; results/postfit/berturk-reference.json equals its recompute, and an
+"investigate" status carries a resolution unless no final seed exists yet (results/postfit/berturk-final.json untracked);
+the record rebuilds from the committed dumps with the protocol dispatched by kind (data marker).
+test_exactly_one_current_berturk_selection_run (RP-2) proves the current selection is one train run: every tracked
+BERTurk selection val sidecar under results/dumps names the record's chosen train run, the BERTurk dump dirs there are
+exactly the record's candidates, and that run's canonical config is the superseded run's chosen one with head_lr
+pilot.berturk.HEAD_LR and nothing else changed (so its run id is not a superseded one).
 """
 import glob
 import json
 import os
+import re
 import subprocess
 from fractions import Fraction
 
@@ -42,6 +53,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUPERSEDED_IDS = [s["name"] for s in berturk.SUPERSEDED]
 # the reference value each superseded entry was retired at (plan 06-10: 150/551 = 0.2722 < 0.707)
 SUPERSEDED_VALUE = {"berturk-tied-head-lr": {"status": "investigate", "fraction": [150, 551]}}
+RECORD = "results/postfit/berturk.json"
+REFERENCE = "results/postfit/berturk-reference.json"
+FINAL = "results/postfit/berturk-final.json"
+DUMPS = "results/dumps"
 
 
 def tracked(*pathspec):
@@ -185,3 +200,83 @@ def test_no_superseded_run_is_current():
     records = [rel for rel in tracked("results/postfit/") if rel.endswith(".json") and os.path.isfile(path(rel))]
     stale = [rel for rel in records if sha256_file(path(rel)) in shas]
     assert stale == [], "results/postfit holds a superseded record: %s" % stale
+
+
+def _canonical_of_chosen(record):
+    return record["chosen"]["canonical"]
+
+
+def test_committed_berturk_record_is_complete_and_consistent():
+    r = _check_record(RECORD, DUMPS, postfit.protocol("berturk"))
+    assert r["protocol"]["head_lr"] == berturk.HEAD_LR == 0.0001
+    for c in r["candidates"]:
+        assert c["canonical"]["head_lr"] == berturk.HEAD_LR, "%s: head_lr %r" % (c["dump_run_id"],
+                                                                                 c["canonical"]["head_lr"])
+        assert c["canonical"]["encoder_lr"] == c["encoder_lr"] == berturk.LR, c["dump_run_id"]
+    assert _canonical_of_chosen(r)["head_lr"] == berturk.HEAD_LR
+    sha = sha256_file(path(RECORD))
+    assert sha not in {s["postfit_sha256"] for s in berturk.SUPERSEDED}, "%s is a superseded record" % RECORD
+    assert r["chosen"]["train_run_id"] not in {s["train_run_id"] for s in berturk.SUPERSEDED}
+
+
+def test_makefile_lists_the_berturk_selection_dumps():
+    with open(path("Makefile"), encoding="utf-8") as f:
+        text = f.read()
+    m = re.search(r"^BERTURK_SELECTION := (.+)$", text, re.M)
+    assert m, "Makefile has no BERTURK_SELECTION := line"
+    record = load(RECORD)
+    assert m.group(1).split() == [c["dump_run_id"] for c in record["candidates"]], \
+        "BERTURK_SELECTION is not the record's candidate dump run ids in record order"
+    phony = re.search(r"^\.PHONY: (.+)$", text, re.M)
+    assert phony and "berturk-postfit" in phony.group(1).split(), "berturk-postfit is not in .PHONY"
+    recipe = re.search(r"^berturk-postfit:\n((?:\t.*\n)+)", text, re.M)
+    assert recipe, "Makefile has no berturk-postfit target"
+    assert ("$(PYTHON) postfit.py $(addprefix results/dumps/,$(BERTURK_SELECTION)) --out %s" % RECORD) \
+        in recipe.group(1), "berturk-postfit does not rebuild %s from results/dumps/$(BERTURK_SELECTION)" % RECORD
+
+
+def test_committed_reference_check_equals_its_recompute():
+    ref = _check_reference(RECORD, REFERENCE, RECORD)
+    record = load(RECORD)
+    assert ref["value"]["train_run_id"] == record["chosen"]["train_run_id"]
+    assert ref["value"]["dump_run_id"] == record["chosen"]["dump_run_id"]
+    if ref["status"] == "investigate":
+        res = ref["resolution"]
+        assert (isinstance(res, str) and res.strip()) or tracked(FINAL) == [], \
+            "the BASE-03 check reads investigate with no resolution, yet %s is tracked (a final seed trained)" % FINAL
+    else:
+        assert ref["resolution"] is None
+
+
+@pytest.mark.data
+def test_berturk_record_reproduces_from_the_committed_dumps():
+    _reproduce(RECORD, DUMPS, {})                # no grid: postfit.fit dispatches the protocol by system kind
+
+
+def test_exactly_one_current_berturk_selection_run():
+    record = load(RECORD)
+    chosen_run = record["chosen"]["train_run_id"]
+    runs, dirs = set(), set()
+    for rel in tracked(DUMPS + "/"):
+        if not rel.endswith("/val.json") or not os.path.isfile(path(rel)):
+            continue
+        side = load(rel)
+        if (side.get("system") or {}).get("kind") != "berturk":
+            continue
+        dirs.add(rel.split("/")[2])
+        tr = side.get("training") or {}
+        if tr.get("split") == "selection_train":
+            runs.add(tr.get("run_id"))
+    assert runs == {chosen_run}, "results/dumps holds BERTurk selection dumps of %s, not only %s" % (sorted(runs),
+                                                                                                     chosen_run)
+    assert dirs == {c["dump_run_id"] for c in record["candidates"]}, \
+        "the BERTurk dump dirs under results/dumps are not exactly the record's candidates"
+    assert {c["train_run_id"] for c in record["candidates"]} == {chosen_run}
+    canon = _canonical_of_chosen(record)
+    assert berturk.run_id(canon) == chosen_run
+    for s in berturk.SUPERSEDED:
+        old = dict(load(s["record"])["chosen"]["canonical"])
+        assert berturk.run_id(old) == s["train_run_id"] != chosen_run
+        old["head_lr"] = berturk.HEAD_LR
+        assert json.dumps(as_json(canon), sort_keys=True) == json.dumps(as_json(old), sort_keys=True), \
+            "the current run's canonical config differs from the superseded %s in more than head_lr" % s["name"]

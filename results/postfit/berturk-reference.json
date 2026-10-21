@@ -1,0 +1,69 @@
+{
+  "schema": "berturk-reference/1",
+  "postfit": {
+    "path": "results/postfit/berturk.json",
+    "sha256": "7086c7f100007c1ab812e1f473a537cb460d0b911962b12de3940618ffd40d58"
+  },
+  "reference": {
+    "paper": "Moghe et al., Multi3NLU++ (multilingual, multi-intent, multi-domain NLU dataset)",
+    "venue": "ACL Findings 2023",
+    "url": "https://arxiv.org/abs/2212.10455",
+    "metric": "micro-F1",
+    "table_12": {
+      "title": "In-language in-domain results for intent detection with MLP-based setup (F1 x100)",
+      "language": "Turkish, in-language",
+      "domain": "BANKING",
+      "setting": "Large: 10-fold cross-validation, train on 9 of 10 folds (about 1,860 messages)",
+      "values": [
+        {
+          "model": "MLP on frozen LaBSE",
+          "encoder": "frozen",
+          "theta": 0.3,
+          "micro_f1": 82.8
+        },
+        {
+          "model": "MLP on frozen mpnet",
+          "encoder": "frozen",
+          "theta": 0.3,
+          "micro_f1": 80.7
+        }
+      ]
+    },
+    "table_18": {
+      "setup": "QA-based intent detection",
+      "model": "QA mDeBERTa",
+      "micro_f1": 90.1
+    },
+    "lower_reference": 80.7
+  },
+  "threshold": 0.707,
+  "threshold_rule": "below 0.707 (more than 10 micro-F1 points below the lower published reference 80.7) triggers an investigation; exactly 0.707 passes",
+  "value": {
+    "metric": "val micro-F1 at the val-selected global θ on probabilities after the val-fitted T, compared exactly as 2TP / (2TP + FP + FN) of the summed counts",
+    "val_micro_f1_at_global_theta": 0.47478991596638653,
+    "fraction": [
+      113,
+      238
+    ],
+    "val_micro_f1_at_0_5": 0.213768115942029,
+    "epoch": 10,
+    "encoder_lr": 2e-05,
+    "temperature": 0.8560291556451071,
+    "train_run_id": "berturk-selection_train-s0-8c033154",
+    "dump_run_id": "berturk-0cf7ae114982-60eedf95-29446b61"
+  },
+  "below_threshold": true,
+  "status": "investigate",
+  "differences": [
+    "a fixed split (selection train folds 0–13 with about 1,450 messages; final train folds 0–15 with about 1,658)",
+    "a different test portion (folds 16–19)",
+    "a fine-tuned BERTurk rather than a frozen encoder",
+    "a single split rather than cross-validation averages",
+    "this check itself reads val folds 14-15"
+  ],
+  "caveats": [
+    "θ and T were chosen on the same val messages, so the value is in-sample and optimistic",
+    "the paper uses a fixed θ 0.3 on frozen-encoder MLPs; neither of our numbers is like-for-like"
+  ],
+  "resolution": null
+}

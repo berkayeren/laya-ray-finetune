@@ -8,17 +8,19 @@
 #                    (needs `make data` and the pinned weights; about 5 minutes on the M4). It passes --force,
 #                    because score.py refuses to overwrite an existing dump in results/dumps (the committed record)
 #   make baseline-reports  rebuild the reports and print the results table from the committed dumps (no model)
+#   make berturk-postfit   rebuild the Phase 6 BERTurk postfit record from the committed head-LR selection dumps (no model)
 PYTHON ?= python
 UV ?= uv
 PY312 ?= python3.12
 VENV ?= .venv
 LOCK_DATE := 2026-10-13T00:00:00Z
 LAYA_ZS := laya-zeroshot-7b928d82
+BERTURK_SELECTION := berturk-091a3daacd74-1c8b6c80-29446b61 berturk-18579d8de257-0ec63c75-29446b61 berturk-3d05bf5d0a66-4f387ff8-29446b61 berturk-ddf9d83bad62-2b5a4009-29446b61 berturk-f47735f1c892-4b07782f-29446b61 berturk-736a4c29ca0e-8a7b46bb-29446b61 berturk-4b6d36a8a788-8580e471-29446b61 berturk-a159207c2727-2582cf0e-29446b61 berturk-37f76167f8e7-f4a040e2-29446b61 berturk-0cf7ae114982-60eedf95-29446b61
 SCORE_WORKERS ?= 2
 SCORE_CPUS ?= 4
 REPORTS := results/reports
 
-.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports
+.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports berturk-postfit
 
 env:
 	$(PY312) -m venv $(VENV)
@@ -67,6 +69,10 @@ baseline-reports:
 	$(PYTHON) report.py --compare results/dumps/$(LAYA_ZS) results/dumps/prior --split test --out $(REPORTS)/compare-$(LAYA_ZS)-vs-prior.json > /dev/null
 	$(PYTHON) report.py --compare results/dumps/$(LAYA_ZS) results/dumps/$(LAYA_ZS) --split test --out $(REPORTS)/compare-$(LAYA_ZS)-vs-self.json > /dev/null
 	$(PYTHON) report.py --table $(REPORTS)
+
+berturk-postfit:
+	mkdir -p results/postfit
+	$(PYTHON) postfit.py $(addprefix results/dumps/,$(BERTURK_SELECTION)) --out results/postfit/berturk.json > /dev/null
 
 clean-data:
 	rm -rf data/splits data/audit
