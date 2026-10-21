@@ -28,6 +28,15 @@ README tests.
   chosen rung, flags code_changed_on_resume as a bool, names a bare checkpoint dir and carries the dump run id of its
   checkpoint identity; no tracked results/dumps dir is named after a final seed's dump run id (none was scored in
   Phase 5)
+- test_readme_postfit_block_matches_the_record (plan 05-09, LAYA-08): README.md holds exactly one pair of the
+  laya-postfit markers, and the block between them equals pilot.postfit.render_markdown of the committed record and
+  final manifest, so the reported chosen settings cannot be edited by hand or go stale
+- test_render_discloses_the_selection: the rendered block names the single encoder LR 2e-05 against the approved
+  lr_grid of pilot.compute.MATRIX (fixed, not tuned), the grid-edge verdict of the chosen epoch, every candidate's
+  exact objective fraction and every final seed's train run id, and holds no local path
+- test_render_refuses_a_berturk_record: render_markdown refuses the BERTurk record (BERTurk has its own renderer)
+- test_render_refuses_a_manifest_of_another_record: postfit.py --render of the Laya record with the BERTurk final
+  manifest is refused with a message naming the Laya record's sha256 (not an argparse usage error)
 """
 import glob
 import json
@@ -272,3 +281,55 @@ def test_committed_final_manifest():
         assert e["dump_run_id"] == dumps.run_id("laya", e["checkpoint_identity"]), "seed %d dump_run_id" % s
     scored = sorted({f.split("/")[2] for f in tracked(DUMPS + "/")} & {e["dump_run_id"] for e in seeds})
     assert scored == [], "a Laya final seed was scored in Phase 5: %s" % scored
+
+
+README = "README.md"
+POSTFIT_START, POSTFIT_END = "<!-- laya-postfit:start -->", "<!-- laya-postfit:end -->"
+
+
+def _rendered():
+    record = _laya_record()
+    return postfit.render_markdown(record, load(FINAL))
+
+
+def test_readme_postfit_block_matches_the_record():
+    with open(path(README), encoding="utf-8") as f:
+        text = f.read()
+    assert text.count(POSTFIT_START) == 1 and text.count(POSTFIT_END) == 1, \
+        "README.md must hold exactly one pair of the laya-postfit markers"
+    i, j = text.index(POSTFIT_START), text.index(POSTFIT_END)
+    assert i < j, "the laya-postfit end marker comes before the start marker"
+    block = text[i + len(POSTFIT_START):j]
+    assert block.strip() == _rendered().strip(), (
+        "the README laya-postfit block differs from pilot.postfit.render_markdown of %s and %s; regenerate it with "
+        "`python postfit.py --render %s %s`" % (RECORD, FINAL, RECORD, FINAL))
+
+
+def test_render_discloses_the_selection():
+    record = _laya_record()
+    text = _rendered()
+    assert "2e-05" in text and "not tuned" in text, "the single fixed encoder LR is not disclosed"
+    assert "lr_grid %d" % compute.MATRIX["lr_grid"] in text, "the approved lr_grid is not named"
+    epoch, top = record["chosen"]["epoch"], record["protocol"]["epochs"]
+    edge = "upper edge" if epoch == top else "lower edge" if epoch == 1 else "interior optimum"
+    assert edge in text, "the grid-edge verdict %r is missing" % edge
+    assert "max_epochs %d" % compute.MATRIX["max_epochs"] in text, "the approved max_epochs is not named"
+    for c in record["candidates"]:
+        s = postfit.score(c)
+        assert "%d/%d" % (s.numerator, s.denominator) in text, "candidate epoch %d's fraction is missing" % c["epoch"]
+    for e in load(FINAL)["seeds"]:
+        assert e["train_run_id"] in text, "final seed %d's train run id is missing" % e["seed"]
+    assert "/Users/" not in text and "/home/" not in text, "the rendered block holds a local path"
+
+
+def test_render_refuses_a_berturk_record():
+    with pytest.raises(SystemExit, match="laya"):
+        postfit.render_markdown(load("results/postfit/berturk.json"))
+
+
+def test_render_refuses_a_manifest_of_another_record():
+    import postfit as postfit_cli
+    sha = sha256_file(path(RECORD))
+    with pytest.raises(SystemExit) as e:
+        postfit_cli.main(["--render", path(RECORD), path("results/postfit/berturk-final.json")])
+    assert isinstance(e.value.code, str) and sha in e.value.code, e.value.code

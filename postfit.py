@@ -30,6 +30,11 @@ pilot.berturk.final_manifest for BERTurk), refused unless they are exactly the r
 global θ against 0.707, exactly; status ok or investigate, the quoted source, the setup differences and the in-sample
 caveat. A Laya record is refused; --resolution (the user's documented reason) only on an investigate status.
 
+--render RECORD [FINAL_MANIFEST] prints the README's Phase 5 block of a Laya postfit record
+(pilot.postfit.render_markdown: the chosen settings, the rule, the encoder-LR and grid-edge lines, the θ and T bound
+positions, the candidates and, with the manifest, the final seeds). A manifest bound to another record (its
+postfit.sha256) and a record of another system kind are refused.
+
 usage: python postfit.py results/dumps/RUN_ID [RUN_ID2 ...] [--out results/postfit/laya.json] [--manifest splits.json]
        python postfit.py --prune ray_results/RUN_ID/exports/epoch-001 [...] [--dump-root results/dumps]
        python postfit.py --print-final-commands results/postfit/laya.json --storage ray_results \
@@ -41,6 +46,7 @@ usage: python postfit.py results/dumps/RUN_ID [RUN_ID2 ...] [--out results/postf
                          --out-prefix ckpt/berturk-final
        python postfit.py --reference-check results/postfit/berturk.json [--resolution TEXT] \
                          [--out results/postfit/berturk-reference.json]
+       python postfit.py --render results/postfit/laya.json results/postfit/laya-final.json
 """
 import argparse
 import json
@@ -81,12 +87,14 @@ def main(argv=None):
                     help="the BASE-03 published-reference check of a BERTurk postfit record")
     ap.add_argument("--resolution", default=None,
                     help="--reference-check: the documented resolution of an investigate status")
+    ap.add_argument("--render", nargs="+", metavar="RECORD [FINAL_MANIFEST]", default=None,
+                    help="print the README's Phase 5 block of a Laya postfit record (and its final manifest)")
     a = ap.parse_args(argv)
     modes = (bool(a.run_dir), a.prune is not None, a.print_final_commands is not None, a.final_manifest is not None,
-             a.reference_check is not None)
+             a.reference_check is not None, a.render is not None)
     if sum(modes) != 1:
         ap.error("give exactly one of RUN_DIR [RUN_DIR ...], --prune EXPORT_DIR [...], --print-final-commands RECORD, "
-                 "--final-manifest RECORD CKPT [...] or --reference-check RECORD")
+                 "--final-manifest RECORD CKPT [...], --reference-check RECORD or --render RECORD [FINAL_MANIFEST]")
     if a.resolution is not None and a.reference_check is None:
         ap.error("--resolution applies only to --reference-check")
     if a.print_final_commands is None and (a.storage is not None or a.out_prefix is not None or a.base is not None):
@@ -94,6 +102,23 @@ def main(argv=None):
     if a.print_final_commands is None and a.reference is not None:
         ap.error("--reference applies only to --print-final-commands of a BERTurk record")
     manifest = a.manifest or DEFAULT_MANIFEST
+    if a.render is not None:
+        if len(a.render) > 2:
+            ap.error("--render takes RECORD and at most one FINAL_MANIFEST")
+        if a.out is not None:
+            ap.error("--out does not apply to --render (it prints the markdown)")
+        record, sha = postfit.read_record(a.render[0])
+        final = None
+        if len(a.render) == 2:
+            with open(a.render[1], encoding="utf-8") as f:
+                final = json.load(f)
+            bound = (final.get("postfit") or {}).get("sha256") if isinstance(final, dict) else None
+            if bound != sha:
+                raise SystemExit("%s is bound to postfit record %s, not %s (%s); render a record with its own final "
+                                 "manifest" % (a.render[1], bound, sha, a.render[0]))
+        text = postfit.render_markdown(record, final)
+        print(text, end="")
+        return text
     if a.print_final_commands is not None:
         if a.out is not None:
             ap.error("--out does not apply to --print-final-commands (use --out-prefix)")

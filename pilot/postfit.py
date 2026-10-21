@@ -41,14 +41,19 @@ config. final_command prints the exact ray_train.py argv of each final seed from
 hyperparameter); final_manifest (FINAL_SCHEMA) lists the finished checkpoints only when they are exactly the record's
 final seeds, each bound to its sha256, at the chosen epoch and T, with one shared config_sha256_sans_seed.
 
+render_markdown renders the README's Phase 5 block (postfit.py --render) from a Laya record and its final manifest:
+the chosen settings, the rules, the encoder-LR and grid-edge lines against pilot.compute.MATRIX, the θ and T bound
+positions, the candidates and the final seeds, rounded for display only (it changes no record byte).
+
 usage: from pilot import postfit; record = postfit.fit(run_dirs, manifest_path); postfit.write_record(record, path)
        record, sha = postfit.read_record(path); postfit.prune_export(export_dir, dump_root, manifest_path)
        postfit.final_command(record, seed, record_path, storage, out_prefix); postfit.final_manifest(path, ckpt_dirs)
-       postfit.protocol("laya" | "berturk")
+       postfit.protocol("laya" | "berturk"); text = postfit.render_markdown(record, final_manifest)
        python postfit.py RUN_DIR [RUN_DIR ...] [--out results/postfit/laya.json] [--manifest splits.json]
        python postfit.py --prune EXPORT_DIR [EXPORT_DIR ...] [--dump-root results/dumps] [--manifest splits.json]
        python postfit.py --print-final-commands RECORD --storage DIR --out-prefix PATH [--base DIR] [--manifest M]
        python postfit.py --final-manifest RECORD CKPT [CKPT ...] [--out results/postfit/laya-final.json]
+       python postfit.py --render RECORD [FINAL_MANIFEST]
 """
 import json
 import os
@@ -534,3 +539,118 @@ def final_manifest(record_path, ckpt_dirs):
             "config_sha256_sans_seed": digests[0],
             "seeds": [{k: v for k, v in e.items() if k != "config_sha256_sans_seed"}
                       for e in sorted(entries, key=lambda e: e["seed"])]}
+
+
+FINAL_CHOSEN_KEYS = ("train_run_id", "encoder_lr", "epoch", "epochs_schedule", "stop_after_epoch", "temperature")
+
+
+def _md(header, rows):
+    """A markdown table in report.py's _md layout (pilot modules never import the CLI scripts)."""
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
+    return "\n".join(lines + ["| " + " | ".join(r) + " |" for r in rows])
+
+
+def _f1(c):
+    """Val micro-F1 at the global θ with its exact fraction in lowest terms, e.g. "0.8107 (852/1051)"."""
+    s = score(c)
+    return "%.4f (%d/%d)" % (c["val_micro_f1_at_global_theta"], s.numerator, s.denominator)
+
+
+def render_markdown(record, final=None):
+    """The README's Phase 5 block (markdown) of a Laya postfit record and, optionally, its final manifest: the chosen
+    settings, the rule line, the encoder-LR line against the approved pilot.compute.MATRIX lr_grid, the grid-edge line
+    against its max_epochs, the θ-grid and T-bound positions, the candidates (chosen and runner-up marked) and the final
+    seeds. Display rounding only; no timestamp, no local path, no test number. SystemExit on a record of another system
+    kind (BERTurk has its own renderer) or a manifest whose chosen block or final split is not the record's."""
+    from pilot import compute                               # torch-free; lazy like the other optional imports
+    if record.get("system_kind") != "laya":
+        raise SystemExit("render_markdown renders postfit records of system kind 'laya' only (BERTurk has its own "
+                         "renderer); this record's system kind is %r" % (record.get("system_kind"),))
+    chosen, proto, rules = record["chosen"], record["protocol"], record.get("rules") or {}
+    if final is not None:
+        for key in FINAL_CHOSEN_KEYS:
+            if _json((final.get("chosen") or {}).get(key)) != _json(chosen.get(key)):
+                raise SystemExit("the final manifest's chosen %s is %r, the record's %r; it belongs to another record"
+                                 % (key, (final.get("chosen") or {}).get(key), chosen.get(key)))
+        if final.get("final_split") != record["final"]["split"]:
+            raise SystemExit("the final manifest's final split is %r, the record's %r"
+                             % (final.get("final_split"), record["final"]["split"]))
+    cands = record["candidates"]
+    by_id = {c["dump_run_id"]: c for c in cands}
+    if chosen["dump_run_id"] not in by_id:
+        raise SystemExit("the record's chosen dump %s is not among its candidates" % chosen["dump_run_id"])
+    cc = by_id[chosen["dump_run_id"]]
+    th = chosen["theta"]
+    epoch, sched, stop = chosen["epoch"], chosen["epochs_schedule"], chosen["stop_after_epoch"]
+    lr_grid = proto["lr_grid"]
+    out = ["**Chosen on val** (selection run on %s, seed %s, %d val messages x %d tags; val numbers, in-sample)"
+           % (proto["selection_split"], proto["selection_seed"], record["split"]["n_messages"], len(metrics.TAGS)), ""]
+    out.append(_md(("setting", "value"), [
+        ("train run id", chosen["train_run_id"]),
+        ("encoder LR", "%g (head LR %g)" % (chosen["encoder_lr"], proto["head_lr"])),
+        ("epoch", "%d of %d, %s" % (epoch, sched, "--stop-after-epoch omitted (last epoch)" if stop is None
+                                    else "--stop-after-epoch %d" % stop)),
+        ("val-fitted T", "%.4f (bounds [%s, %s])" % (chosen["temperature"], T_MIN, T_MAX)),
+        ("val NLL at T / at T = 1", "%.5f / %.5f" % (cc["nll_fitted"], cc["nll_raw"])),
+        ("global θ shipped / raw", "%.2f / %.2f" % (th["shipped"]["global"], th["raw"]["global"])),
+        ("tags with their own θ (shipped / raw)", "%d / %d" % (len(th["shipped"]["per_tag"]), len(th["raw"]["per_tag"]))),
+        ("val micro-F1 at the global θ", _f1(cc)),
+        ("val micro-F1 at θ 0.5", "%.4f" % cc["val_micro_f1_at_0_5"])]))
+    out += ["", "- Rule: %s; tie order: %s." % (rules.get("objective"), rules.get("tie_order"))]
+    approved = compute.MATRIX["lr_grid"]
+    if len(lr_grid) == 1:
+        out.append("- Encoder LR grid: %g (one value, fixed, not tuned; the approved budget allows lr_grid %d)."
+                   % (lr_grid[0], approved))
+    else:
+        out.append("- Encoder LR grid: %s (%d values, val-selected; the approved budget allows lr_grid %d)."
+                   % (", ".join("%g" % x for x in lr_grid), len(lr_grid), approved))
+    edge = ("epoch %d of the epoch grid 1..%d (approved max_epochs %d)"
+            % (epoch, proto["epochs"], compute.MATRIX["max_epochs"]))
+    if epoch == proto["epochs"]:
+        out.append("- Grid edge: upper edge: %s; the objective may still rise beyond it, and extending the grid would "
+                   "be a protocol change after a val outcome, decided only by the user." % edge)
+    elif epoch == 1:
+        out.append("- Grid edge: lower edge: %s." % edge)
+    else:
+        out.append("- Grid edge: interior optimum: %s." % edge)
+    pos = []
+    for name in ("shipped", "raw"):
+        g, grid = th[name]["global"], th[name]["grid"]
+        where = ("at the upper edge" if g == grid["stop"] else "at the lower edge" if g == grid["start"]
+                 else "inside")
+        pos.append("%s %.2f (%s)" % (name, g, where))
+    temps = [c["temperature"] for c in cands]
+    on_bound = sum(t in (T_MIN, T_MAX) for t in temps)
+    out.append("- Bounds: on the θ grid %s..%s the chosen global θ is %s; the candidates' fitted T span %.4f..%.4f "
+               "in laya's band [%s, %s] (%d of %d on a bound), and the chosen T %.4f is %.4f below the upper bound %s."
+               % (th["shipped"]["grid"]["start"], th["shipped"]["grid"]["stop"], " and ".join(pos), min(temps),
+                  max(temps), T_MIN, T_MAX, on_bound, len(temps), chosen["temperature"],
+                  T_MAX - chosen["temperature"], T_MAX))
+    ranked = sorted(cands, key=lambda c: (score(c), -c["epoch"], -c["encoder_lr"]), reverse=True)
+    runner = ranked[1]["dump_run_id"] if len(ranked) > 1 else None
+    rows = []
+    for c in cands:
+        mark = ("chosen" if c["dump_run_id"] == chosen["dump_run_id"] else
+                "runner-up" if c["dump_run_id"] == runner else "")
+        rows.append(("%d" % c["epoch"], "%g" % c["encoder_lr"], "%.4f" % c["temperature"], "%.5f" % c["nll_fitted"],
+                     "%.5f" % c["nll_raw"], "%.4f" % c["val_micro_f1_at_0_5"], _f1(c),
+                     "%.2f" % c["theta"]["shipped"]["global"], "%.2f" % c["theta"]["raw"]["global"], mark))
+    out += ["", "**Candidates** (one full val dump per epoch export; the objective is micro-F1 at the global θ)", "",
+            _md(("epoch", "encoder LR", "T", "NLL at T", "NLL at T = 1", "micro-F1 @0.5", "micro-F1 @global θ",
+                 "θ shipped", "θ raw", "pick"), rows)]
+    if final is not None:
+        frows = []
+        for e in final["seeds"]:
+            ep = e.get("epochs") or []
+            peak = max((r.get("peak_total_bytes") or 0) for r in ep) if ep else None
+            swap = max((r.get("swap_delta_bytes") or 0) for r in ep) if ep else None
+            frows.append(("%d" % e["seed"], e["train_run_id"], "%d" % len(ep),
+                          "n/a" if not ep else "%.4f" % ep[-1]["loss"],
+                          "n/a" if peak is None else "%.2f" % (peak / 2 ** 30),
+                          "n/a" if swap is None else "%.0f" % (swap / 2 ** 20), str(e.get("rung")),
+                          str(e.get("code_changed_on_resume"))))
+        out += ["", "**Final seeds** (%s, --epochs %d stopped after epoch %d, serving T %.4f; not scored before Phase 8)"
+                % (final["final_split"], chosen["epochs_schedule"], epoch, chosen["temperature"]), "",
+                _md(("seed", "train run id", "epochs trained", "final-epoch loss", "peak GiB", "largest swap delta MiB",
+                     "rung", "code changed on resume"), frows)]
+    return "\n".join(out) + "\n"
