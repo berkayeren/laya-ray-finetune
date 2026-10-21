@@ -660,11 +660,11 @@ def test_check_final_names_the_first_differing_key():
     postfit.check_final(record, final)
     for change, match in (({"max_len": 128.0}, "max_len is 128.0 here but 128"),
                           ({"epochs": 2, "workers": 2}, "epochs is 2 here"),          # sorted: epochs before workers
-                          ({"amp": False}, "amp is False here but None"),            # a key the chosen run lacks
+                          ({"amp": False}, "amp is False here but <absent>"),        # a key the chosen run lacks
                           ({"stop_after_epoch": None}, "pass --stop-after-epoch 2")):
         with pytest.raises(SystemExit, match=match):
             postfit.check_final(record, dict(final, **change))
-    with pytest.raises(SystemExit, match="workers is None here but 1"):
+    with pytest.raises(SystemExit, match="workers is <absent> here but 1"):
         postfit.check_final(record, {k: v for k, v in final.items() if k != "workers"})
 
 

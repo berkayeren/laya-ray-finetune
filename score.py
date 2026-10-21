@@ -166,11 +166,17 @@ def check_checkpoint_arg(checkpoint):
 
 def is_finetuned(checkpoint):
     """True for a local checkpoint whose rl_agent_config.json says fine_tuned or holds a training.ray_train block;
-    False for 'multilingual' (the pinned zero-shot weights). No hashing, fetch or model load."""
+    False for 'multilingual' (the pinned zero-shot weights). No hashing, fetch or model load. SystemExit on a config
+    that is not valid JSON (05-REVIEW IN-06)."""
     if checkpoint == "multilingual":
         return False
-    with open(os.path.join(checkpoint, "rl_agent_config.json"), encoding="utf-8") as f:
-        cfg = json.load(f)
+    path = os.path.join(checkpoint, "rl_agent_config.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except ValueError as e:
+        raise SystemExit("%s is not valid JSON (%s); use a checkpoint dir laya.train.save_checkpoint or ray_train.py "
+                         "wrote" % (_shown(path), e))
     if not isinstance(cfg, dict):
         return False
     tr = cfg.get("training")

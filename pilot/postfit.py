@@ -354,7 +354,8 @@ def check_final(record, canon):
     ray_train.py command) is not bound to the record: the split must be the record's final split, the seed one of its
     final seeds, stop_after_epoch the chosen one (None when the chosen epoch is the last of the schedule), and every
     other key outside FINAL_FREE_KEYS must equal the chosen selection run's canonical value exactly (JSON equality: 1
-    and 1.0 differ). The first differing key in sorted order is named with both values (LAYA-08). Two free keys are
+    and 1.0 differ). The first differing key in sorted order is named with both values, a key missing on one side as
+    <absent> (LAYA-08). Two free keys are
     bound on their own (05-REVIEW WR-01): neg_seed must equal the seed when the chosen run's did (A4: --neg-seed is
     never passed), and when the record was built on the committed manifest (manifest.is_committed) data_sha256 must be
     the committed final_train sha256 of data/splits.json, read at check time (the record stays byte-identical)."""
@@ -390,10 +391,10 @@ def check_final(record, canon):
     for key in sorted((set(canon) | set(want_canon)) - set(FINAL_FREE_KEYS)):
         have, want = canon.get(key, missing), want_canon.get(key, missing)
         if have is missing or want is missing or _json(have) != _json(want):
-            raise SystemExit("--postfit: %s is %r here but %r in the chosen selection run %s; pass the chosen value "
+            shown = ["<absent>" if v is missing else repr(v) for v in (have, want)]   # 05-REVIEW IN-06: not "None"
+            raise SystemExit("--postfit: %s is %s here but %s in the chosen selection run %s; pass the chosen value "
                              "(postfit.py --print-final-commands prints each command)"
-                             % (key, None if have is missing else have, None if want is missing else want,
-                                chosen.get("train_run_id")))
+                             % (key, shown[0], shown[1], chosen.get("train_run_id")))
 
 
 def final_block(record, sha256, path):

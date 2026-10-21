@@ -202,6 +202,13 @@ def test_training_block_refuses_a_config_changed_after_hashing(tmp_path, tiny):
         score.training_block(ckpt, ident)
 
 
+def test_is_finetuned_refuses_an_invalid_config(tmp_path):
+    """05-REVIEW IN-06: a corrupt rl_agent_config.json is a refusal naming the file, not a traceback."""
+    (tmp_path / "rl_agent_config.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(SystemExit, match="rl_agent_config.json is not valid JSON"):
+        score.is_finetuned(str(tmp_path))
+
+
 # --- Ray reassembly and the Predictor actor (one code path for in-process and Ray scoring) -------------------------
 
 def _rows(*uids):
