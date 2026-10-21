@@ -1,7 +1,7 @@
 """BERTurk through Laya's own postfit (BASE-02): pilot.postfit.protocol("berturk") and fit() dispatch by system kind
-over BERTurk val dumps (1 LR x epochs 1..10, the head LR tied to the encoder LR, Laya's seeds, objective, tie order,
-T and θ rules), the val-only refusals for BERTurk input, the Laya record unchanged by the dispatch, and the guarded
-prune of BERTurk exports through postfit.py --prune.
+over BERTurk val dumps (1 LR x epochs 1..10, the head LR fixed at Laya's HEAD_LR 1e-4 since the BASE-03 fix, Laya's
+seeds, objective, tie order, T and θ rules), the val-only refusals for BERTurk input, the Laya record unchanged by the
+dispatch, and the guarded prune of BERTurk exports through postfit.py --prune.
 
 Candidate val dumps are written with pilot.dumps.write_dump on the synthetic val split (conftest), with a sidecar shaped
 like score.py --model berturk's (score.sidecar_base + pilot.berturk.training_block): no model, torch or Ray. Only the
@@ -54,10 +54,11 @@ def _values(**over):
 
 
 def write_berturk_candidate(root, snap, epoch, lr=LR, seed=0, split="selection_train", calibrated=False, shipped=1.0,
-                            n=None, head_lr=None, kind="berturk", logits=None):
+                            n=None, head_lr=postfit.HEAD_LR, kind="berturk", logits=None):
     """A BERTurk candidate val dump under root/<dump run id>: random margins (or `logits`), a fake local BERTurk
     identity and the training block pilot.berturk.training_block builds from a berturk_train.json record (canonical
-    with split, epochs 10, encoder_lr = head_lr = lr unless head_lr is given, seed). Returns the run dir."""
+    with split, epochs 10, encoder_lr lr, head_lr (default Laya's pilot.postfit.HEAD_LR = pilot.berturk.HEAD_LR, the
+    BASE-03 fix; a test that wants the superseded tied head passes head_lr=lr), seed). Returns the run dir."""
     _, manifest, entry, uids = snap
     uids = uids if n is None else uids[:n]
     if logits is None:
@@ -68,8 +69,7 @@ def write_berturk_candidate(root, snap, epoch, lr=LR, seed=0, split="selection_t
              "config_sha256": sha256_bytes(("config " + tag).encode()),
              "record_sha256": sha256_bytes(("record " + tag).encode()),
              "files_sha256": {f: sha256_bytes(f.encode()) for f in berturk.TOKENIZER_FILES}}
-    canon = berturk.canonical(_values(split=split, encoder_lr=lr, head_lr=lr if head_lr is None else head_lr,
-                                      seed=seed))
+    canon = berturk.canonical(_values(split=split, encoder_lr=lr, head_lr=head_lr, seed=seed))
     rec = {"run_id": berturk.run_id(canon), "canonical": canon, "epoch": epoch, "calibrated": calibrated,
            "postfit": None, "record": {"epochs": [{"epoch": k, "loss": 0.5 / k} for k in range(1, epoch + 1)]}}
     side_seed, training = berturk.training_block(rec)
@@ -104,7 +104,7 @@ def test_berturk_record_from_ten_dumps(tmp_path, snap, capsys):
     assert json.loads(capsys.readouterr().out) == rec
     assert rec["schema"] == "postfit/1" and rec["system_kind"] == "berturk"
     assert rec["protocol"] == {"selection_split": "selection_train", "final_split": "final_train",
-                               "lr_grid": [2e-05], "head_lr": None, "epochs": 10, "selection_seed": 0,
+                               "lr_grid": [2e-05], "head_lr": 0.0001, "epochs": 10, "selection_seed": 0,
                                "final_seeds": [0, 1, 2]}
     assert "--epochs 10" in rec["rules"]["epoch_transfer"] and "--stop-after-epoch" in rec["rules"]["epoch_transfer"]
     assert rec["rules"]["epoch_transfer"] == postfit.EPOCH_TRANSFER_TEMPLATE % 10
@@ -112,7 +112,7 @@ def test_berturk_record_from_ten_dumps(tmp_path, snap, capsys):
     assert rec["rules"]["temperature"] == postfit.TEMPERATURE_RULE and rec["rules"]["temperature_bounds"] == [0.5, 5.0]
     cands = rec["candidates"]
     assert [(c["encoder_lr"], c["epoch"]) for c in cands] == [(LR, e) for e in range(1, 11)]
-    assert all(c["system_kind"] == "berturk" and c["canonical"]["head_lr"] == c["encoder_lr"] for c in cands)
+    assert all(c["system_kind"] == "berturk" and c["canonical"]["head_lr"] == berturk.HEAD_LR for c in cands)
     chosen = rec["chosen"]
     assert chosen["dump_sha256"] in {c["dump_sha256"] for c in cands}
     best = max(postfit.score(c) for c in cands)
@@ -135,7 +135,7 @@ def test_berturk_grid_equals_laya_grid():
     assert berturk.LR_GRID == postfit.LR_GRID == (2e-05,)            # one LR for both models (equal tuning effort)
     assert berturk.LR in berturk.LR_GRID
     p = postfit.protocol("berturk")
-    assert p == {"lr_grid": (2e-05,), "epochs": 10, "head_lr": None, "selection_seed": postfit.SELECTION_SEED,
+    assert p == {"lr_grid": (2e-05,), "epochs": 10, "head_lr": 0.0001, "selection_seed": postfit.SELECTION_SEED,
                  "final_seeds": postfit.FINAL_SEEDS}
     assert p["selection_seed"] == 0 and p["final_seeds"] == (0, 1, 2)
     assert p is not berturk.PROTOCOL                                  # a copy: a caller cannot edit the protocol
@@ -187,12 +187,16 @@ def test_berturk_temperature_band_bounds(tmp_path, snap):
     assert postfit.candidate(lo, manifest)["temperature"] == postfit.T_MIN == 0.5
 
 
-def test_berturk_head_lr_must_be_tied(tmp_path, snap):
+def test_berturk_head_lr_must_be_the_laya_head_lr(tmp_path, snap):
+    """The BASE-03 fix: under the BERTurk protocol a candidate whose head LR is tied to its encoder LR (the
+    superseded recipe) is refused."""
     run_dirs = _ten(tmp_path, snap)
-    untied = write_berturk_candidate(tmp_path / "untied", snap, 5, head_lr=0.0001)
-    dirs = [d for k, d in enumerate(run_dirs, 1) if k != 5] + [untied]
-    with pytest.raises(SystemExit, match="canonical head_lr 0.0001 is not its encoder_lr 2e-05"):
+    tied = write_berturk_candidate(tmp_path / "tied", snap, 5, head_lr=LR)
+    dirs = [d for k, d in enumerate(run_dirs, 1) if k != 5] + [tied]
+    with pytest.raises(SystemExit, match="canonical head_lr 2e-05, expected 0.0001"):
         postfit.fit(dirs, snap[1])
+    with pytest.raises(SystemExit, match="canonical head_lr 2e-05, expected 0.0001"):
+        postfit_cli.main(dirs + ["--manifest", snap[1]])
 
 
 def test_fit_refuses_mixed_kinds(tmp_path, snap):

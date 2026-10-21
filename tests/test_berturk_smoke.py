@@ -76,6 +76,11 @@ def test_berturk_train_score_postfit_chain(tmp_path, synthetic_raw):
         assert [row["epoch"] for row in rec["record"]["epochs"]] == list(range(1, k + 1))
         assert all(set(row) == set(berturk.EPOCH_FIELDS) for row in rec["record"]["epochs"])
         assert rec["record"]["param_device"] == "cpu" and rec["record"]["dtype"] == "torch.float32"
+        assert rec["canonical"]["encoder_lr"] == 2e-05 and rec["canonical"]["head_lr"] == 0.0001   # the BASE-03 fix
+        groups = rec["record"].get("optimizer_groups") or []      # the fresh head at Laya's head LR, own groups
+        assert [(g["group"], g["decay"], g["lr"]) for g in groups] == [
+            ("encoder", True, 2e-05), ("encoder", False, 2e-05), ("head", True, 0.0001), ("head", False, 0.0001)]
+        assert [g["weight_decay"] for g in groups] == [0.01, 0.0, 0.01, 0.0] and groups[2]["n_tensors"] == 1
 
     dump_root = str(tmp_path / "dumps")
     val = os.path.join(splits, "val.jsonl")
@@ -93,11 +98,11 @@ def test_berturk_train_score_postfit_chain(tmp_path, synthetic_raw):
                 == ("cpu", "torch.float32", False)
             tr = side["training"]
             assert side["seed"] == 0 and tr["epoch"] == k and tr["epochs_schedule"] == 2
-            assert tr["encoder_lr"] == tr["head_lr"] == 2e-05 and tr["calibrated"] is False
+            assert tr["encoder_lr"] == 2e-05 and tr["head_lr"] == 0.0001 and tr["calibrated"] is False
             assert side["logit"] == berturk.LOGIT_NOTE
             assert postfit.candidate(d, manifest)["system_kind"] == "berturk"
             run_dirs.append(d)
-        rec = postfit.fit(run_dirs, manifest, lr_grid=(2e-05,), epochs=2, head_lr=2e-05, selection_seed=0,
+        rec = postfit.fit(run_dirs, manifest, lr_grid=(2e-05,), epochs=2, head_lr=berturk.HEAD_LR, selection_seed=0,
                           final_seeds=(0, 1, 2))
         assert rec["chosen"]["epoch"] in (1, 2) and postfit.T_MIN <= rec["chosen"]["temperature"] <= postfit.T_MAX
         rep = report.run_report(run_dirs[0], "val", manifest)
@@ -131,8 +136,9 @@ def test_berturk_final_seed_chain(tmp_path, synthetic_raw, capsys):
         run_dirs = [score.main([val, "--model", "berturk", "--checkpoint", str(storage / rid / "exports" / e),
                                 "--workers", "0", "--manifest", manifest, "--out-root", dump_root])[0]
                     for e in ("epoch-001", "epoch-002")]
-        record = postfit.fit(run_dirs, manifest, lr_grid=(2e-05,), epochs=2, head_lr=None, selection_seed=0,
-                             final_seeds=(0, 1, 2))
+        assert [dumps.load_dump(d, "val", manifest)[2]["training"]["head_lr"] for d in run_dirs] == [0.0001, 0.0001]
+        record = postfit.fit(run_dirs, manifest, lr_grid=(2e-05,), epochs=2, head_lr=berturk.HEAD_LR,
+                             selection_seed=0, final_seeds=(0, 1, 2))
         path = postfit.write_record(record, str(tmp_path / "postfit" / "berturk.json"))
         sha, chosen = sha256_file(path), record["chosen"]
         T = chosen["temperature"]
@@ -150,6 +156,7 @@ def test_berturk_final_seed_chain(tmp_path, synthetic_raw, capsys):
             cmd = berturk.final_command(record, seed, path, ref, final_storage, prefix, base=base, data=final_train,
                                         manifest=manifest)
             assert cmd[0] == "berturk_train.py" and ("--stop-after-epoch" in cmd) == (chosen["epoch"] == 1)
+            assert cmd[cmd.index("--head-lr") + 1] == "0.0001"            # the head LR, from the chosen canonical
             _run(*cmd)
             ckpt = "%s-s%d" % (prefix, seed)
             assert sorted(os.listdir(ckpt)) == sorted(berturk.CHECKPOINT_FILES)
@@ -161,6 +168,7 @@ def test_berturk_final_seed_chain(tmp_path, synthetic_raw, capsys):
             canon = rec["canonical"]
             assert canon["split"] == "final_train" and canon["seed"] == seed and canon["postfit_sha256"] == sha
             assert canon.get("stop_after_epoch") == chosen["stop_after_epoch"]
+            assert canon["head_lr"] == berturk.HEAD_LR and canon["encoder_lr"] == 2e-05
             assert [row["epoch"] for row in rec["record"]["epochs"]] == list(range(1, chosen["epoch"] + 1))
 
         final_dump, _ = score.main([val, "--model", "berturk", "--checkpoint", prefix + "-s0", "--workers", "0",
@@ -186,5 +194,6 @@ def test_berturk_final_seed_chain(tmp_path, synthetic_raw, capsys):
                                   "--out-prefix", prefix, "--base", base, "--manifest", manifest])
         printed = capsys.readouterr().out.splitlines()
         assert printed == lines and len(lines) == 3 and all(l.startswith("berturk_train.py ") for l in lines)
+        assert all(" --head-lr 0.0001 " in l for l in lines)
     finally:
         torch.set_num_threads(threads)
