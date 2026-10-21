@@ -99,13 +99,15 @@ are hash-registered too, so later phases can trust the flag list.
 | `pilot/metrics.py` | torch-free metrics, the val θ rule and the paired bootstrap, the same for every system |
 | `pilot/runs.py` | torch-free run-record schema of `ray_train.py`, the run id, the neg-K item count, the MPS fallback ladder |
 | `pilot/compute.py` | torch-free compute-checkpoint logic: projection, what-if table, disk budget, report and markdown |
-| `ray_train.py` | Ray Train `TorchTrainer` (DDP) fine-tune using Laya's own loss, calibration and checkpoint format; cpu, cuda or one MPS worker; resumes by rerunning |
+| `ray_train.py` | Ray Train `TorchTrainer` (DDP) fine-tune using Laya's own loss and checkpoint format, uncalibrated (T = 1) checkpoints; cpu, cuda or one MPS worker; resumes by rerunning |
 | `score.py` | the only place a model runs: one system on one val/test split → a logit dump (in-process or Ray Data actors) |
 | `report.py` | dumps → metrics (numpy only, no model); `--compare` paired bootstrap; `--table` results table |
 | `evaluate.py` | one-step wrapper: `score.py --model laya`, then `report.py`'s report of that dump |
 | `mps_spike.py` | Phase 2 MPS feasibility spike (`results/spike/`) |
 | `compute_checkpoint.py` | Phase 4 compute checkpoint: a measured MPS fine-tune probe and the projected experiment-matrix runtime (`results/compute/`) |
-| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`) |
+| `pilot/postfit.py` | torch-free Phase 5 postfit: the val-fitted T, θ and the chosen epoch in one byte-reproducible record; the final-seed binding and manifest; the README Phase 5 block |
+| `postfit.py` | Phase 5 CLI: val dumps → `results/postfit/laya.json`, `--prune`, `--print-final-commands`, `--final-manifest`, `--render` |
+| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`), postfit records (`postfit/`) |
 | `tests/` | pytest suite (markers `unit`, `data`, `weights`, `ray`, `mps`) |
 
 ## Run
@@ -116,6 +118,12 @@ python ray_train.py --data data/splits/selection_train.jsonl --base multilingual
     --device mps --workers 1 --micro-batch 8 --grad-accum 4 --max-len 128
 python ray_train.py ... --print-run-id     # the run id: its Ray dir ray_results/<run_id>/ and resume key
 # after a kill or crash, rerun the identical command: it resumes from the last completed epoch
+
+# Phase 5 final seeds: print the commands from the val-selected record, then run each one (one at a time on MPS);
+# each is ray_train.py on final_train with --stop-after-epoch at the chosen epoch and --postfit, which serves the val T
+python postfit.py --print-final-commands results/postfit/laya.json --storage ray_results --out-prefix ckpt-final
+python ray_train.py --data data/splits/final_train.jsonl ... --epochs 4 --stop-after-epoch 3 --seed 0 \
+    --postfit results/postfit/laya.json --no-export-epochs --storage ray_results --out ckpt-final-s0
 
 # CPU smoke fine-tune (CUDA: drop --freeze-encoder/--max-messages, add --device cuda; --gpu is the same)
 python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
@@ -151,9 +159,10 @@ Useful flags: `--neg K` (negatives kept per training message, default 8; 0 = all
 trains the head only and gains much less), `--max-messages N` (subsample for smoke tests),
 `--loss rlcd|soft-ce`. A training run records its device, memory, per-epoch wall clock and fallback rung
 in the checkpoint config (`training.ray_train.record`). An MPS out-of-memory error during training names the
-flags of the next rung. After the last epoch (calibration, the final save, or the model move of a rerun that only
-recalibrates) every epoch is already saved, so that error says to rerun the same command instead: a rung flag would
-change the run id and retrain from epoch 0.
+flags of the next rung. After the last epoch (the final save, or the model move of a rerun that only writes the final
+checkpoint) every epoch is already saved, so that error says to rerun the same command instead: a rung flag would
+change the run id and retrain from epoch 0. There is no calibration stage: training writes uncalibrated checkpoints
+(T = 1), and `postfit.py` fits T on val afterwards.
 
 ## Scoring path
 
@@ -239,11 +248,11 @@ approves this budget. To rerun the checkpoint on a quiet Mac on AC power (about 
 ## Why a custom Ray loop
 
 `laya.train.finetune` / `laya-train` are single-device. `ray_train.py` reuses Laya's building
-blocks (`items_from_rows`, `encode_item`, `soft_ce_loss` / `rlcd_loss`, `calibration_records`,
-`fit_temperature_map`, `save_checkpoint`) and adds: rank sharding, DDP via
-`ray.train.torch.prepare_model`, `no_sync` on gradient-accumulation steps, per-epoch checkpoints
-reported to Ray, and temperature calibration on whole messages held out before training (rank 0;
-`--calib-max-messages`, default 40, capped at `--calib-frac` of the messages).
+blocks (`items_from_rows`, `encode_item`, `soft_ce_loss` / `rlcd_loss`, `save_checkpoint`) and adds:
+rank sharding, DDP via `ray.train.torch.prepare_model`, `no_sync` on gradient-accumulation steps and
+per-epoch checkpoints reported to Ray. Training no longer calibrates: every message trains, and the
+checkpoints ship T = 1. `postfit.py` fits the temperature on the val messages after training (LAYA-05);
+laya's own temperature fit is only the oracle the tests check it against.
 The output loads with `laya.load(path)`. It does not reproduce `laya-train`'s before/after report
 or abstention-threshold fitting — use `score.py` + `report.py` for held-out metrics. The Laya
 internals it uses are reached through `pilot/laya_adapter.py`, the only module allowed to touch
