@@ -8,7 +8,7 @@ imports torch, transformers, accelerate, Ray or laya (a test enforces it).
 Recipe (confirmed by the user at plan 06-02, "Protocol decision: confirm"): A1 one encoder LR, LR (Laya's single
 encoder LR), and the freshly initialised classifier head (the HEAD_PREFIX parameters) at HEAD_LR, Laya's head LR: the
 BASE-03 fix (plan 06-10 gate, 2026-10-21; SUPERSEDED holds the run that tied the head LR to LR); A2 an EPOCHS
-schedule whose every epoch is a selection candidate; A3 batch BATCH, a LR_SCHEDULER schedule with a WARMUP_RATIO
+schedule (30 since the second BASE-03 fix, plan 06-16 gate) whose every epoch is a selection candidate; A3 batch BATCH, a LR_SCHEDULER schedule with a WARMUP_RATIO
 warm-up, AdamW (OPTIM, WEIGHT_DECAY), MAX_GRAD_NORM, MAX_LEN, fp32, no gradient checkpointing, the seed set right
 before the head is created; A6 no resume (a run dir that exists is refused; a run is rerun from scratch); A7 a masked
 BCE (LOSS): a masked (message, tag) label is MASK_LABEL and the loss averages over the unmasked entries only.
@@ -25,9 +25,9 @@ berturk_train.py flag is in exactly one of IDENTITY, NOT_IDENTITY or RESOLVED (a
 
 Postfit (BASE-02, plan 06-04): PROTOCOL is BERTurk's selection grid for pilot.postfit.protocol("berturk"): LR_GRID
 (explicit, kept equal to pilot.postfit.LR_GRID by a test: equal tuning effort, the 2026-10-15 user decision), epochs
-1..EPOCHS, head_lr HEAD_LR (Laya's, so both models share both LRs; a test enforces it) and pilot.postfit's selection
-and final seeds (A4). postfit.py
-runs Laya's own functions on BERTurk val dumps under it. prune_export deletes one berturk_train.py epoch export only
+1..EPOCHS (30 since the second BASE-03 fix; the 10-epoch protocols are kept in SUPERSEDED), head_lr HEAD_LR (Laya's,
+so both models share both LRs; a test enforces it) and pilot.postfit's selection and final seeds (A4). postfit.py runs
+Laya's own functions on BERTurk val dumps under it. prune_export deletes one berturk_train.py epoch export only
 after a verified full val dump of exactly that export exists (postfit.py --prune picks it for a dir holding RECORD).
 
 Superseded runs (BASE-03 fixes, plan 06-10 and 06-16 gates): SUPERSEDED is an ordered chain, oldest first, of the
@@ -95,7 +95,11 @@ LR = 2e-05                                  # A1: the encoder LR, equal to Laya'
 # classifier head trains at Laya's head LR; the encoder keeps LR and every other recipe value is unchanged
 HEAD_LR = postfit.HEAD_LR
 HEAD_PREFIX = "classifier."                 # the head's parameter names: exactly the ones from_pretrained initialises
-EPOCHS = 10                                 # A2: the selection schedule (approved berturk_epochs)
+# A2: the selection schedule. The second BASE-03 fix (plan 06-16 gate reply "fix: extend epochs (Recommended)",
+# 2026-10-21): 30, the user's choice (the gate option's own example); SUPERSEDED[-1] holds the 10-epoch run. The linear
+# schedule and its 10% warm-up span all 30 epochs. It deviates from the approved compute budget (berturk_epochs 10),
+# which pilot/compute.py keeps as approved and the README discloses.
+EPOCHS = 30
 BATCH = 32                                  # A3: messages per optimizer step (approved berturk_batch)
 MAX_LEN = 128                               # A3: Laya's max_len, in WordPiece tokens with [CLS] and [SEP]
 WEIGHT_DECAY = 0.01

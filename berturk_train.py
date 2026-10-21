@@ -8,7 +8,8 @@ cuda. The recipe is the one the user confirmed at plan 06-02 (pilot.berturk hold
   for encoder and head. The head is exactly the parameters from_pretrained newly initialised (classifier.weight,
   classifier.bias; refused otherwise, before the run dir). The canonical config records encoder_lr and head_lr, so
   pilot.postfit selects BERTurk candidates with the same code as Laya's.
-- A2: --epochs (default 10); every epoch writes an export, every export is a val selection candidate.
+- A2: --epochs (default pilot.berturk.EPOCHS = 30, the second BASE-03 fix of the plan 06-16 gate; the linear schedule
+  and its 10% warm-up span all epochs); every epoch writes an export, every export is a val selection candidate.
 - A3: batch 32 messages (--batch), a linear schedule with a 10% warm-up, AdamW (optim adamw_torch, weight decay 0.01)
   in four param groups (build_optimizer: encoder and head, each split by the Trainer's own weight-decay rule, with the
   Trainer's own AdamW class and kwargs), passed as Trainer(optimizers=(optimizer, None)) so the Trainer still builds
@@ -70,7 +71,7 @@ torch-free: torch, transformers and the ray_train helpers are imported in main a
 PYTORCH_ENABLE_MPS_FALLBACK once, at import).
 
 usage:
-  python berturk_train.py --data data/splits/selection_train.jsonl --device mps        # the selection run (10 epochs)
+  python berturk_train.py --data data/splits/selection_train.jsonl --device mps        # the selection run (30 epochs)
   python berturk_train.py --data data/splits/selection_train.jsonl --print-run-id      # its run id, nothing created
   python berturk_train.py --data ... --base DIR --device cpu --epochs 2 --batch 4 --max-len 32 --storage DIR  # smoke
   python berturk_train.py --data data/splits/final_train.jsonl --device mps --stop-after-epoch K --seed S \
