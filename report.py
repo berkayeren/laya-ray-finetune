@@ -12,10 +12,13 @@ same way, with no system-specific branch (D-10, D-12):
   The test dump never shapes θ. The val dump must come from the same source as the reported dump: their sidecars
   must agree on SAME_SOURCE_KEYS (system kind, checkpoint identity, shipped T, scorer device, dtype and amp; the
   checkpoint path only when no identity binds the scored bytes; 03-REVIEW WR-01), else the report is refused naming
-  the key. A subset (--n) val dump next to a reported test dump
-  is refused; without a val dump the val-selected row is null with a reason; on the val split itself the val-selected
-  row is labelled in_sample, and a --n subset val dump reported on val gets its θ 0.5 rows with the val-selected row
-  null and SUBSET_VAL_REASON (03-REVIEW WR-04)
+  the key. A val dump of a model whose training saw val (a training block whose split is not
+  pilot.data.TRAINED_ON["val"], selection_train, or that carries a postfit_sha256: a final seed on final_train, which
+  holds the val folds) is refused as a θ source here and in --compare (refuse_in_sample_theta, 05-REVIEW WR-02): its
+  θ is the bound postfit record's, never re-selected on its own in-sample val. A subset (--n) val dump next to a
+  reported test dump is refused; without a val dump the val-selected row is null with a reason; on the val split
+  itself the val-selected row is labelled in_sample, and a --n subset val dump reported on val gets its θ 0.5 rows
+  with the val-selected row null and SUBSET_VAL_REASON (03-REVIEW WR-04)
 - the full θ (global, per tag, eligible tags, grid, objective, tie rule) and its val dump's hashes are disclosed
 The report holds no timestamps or timings and no rounded value.
 
@@ -49,7 +52,7 @@ import json
 import os
 
 from pilot import dumps, metrics
-from pilot.data import DEFAULT_MANIFEST, manifest_is_committed, repo_relpath, sha256_file, write_atomic
+from pilot.data import DEFAULT_MANIFEST, TRAINED_ON, manifest_is_committed, repo_relpath, sha256_file, write_atomic
 
 SCHEMA_VERSION = 1
 COMPARE_PROCEDURE = ("EVAL-07: per-seed probabilities averaged per message and tag, then thresholded; test messages "
@@ -111,6 +114,20 @@ def same_source(side, val_side, where):
                              % (where, (side.get("split") or {}).get("name"), ".".join(path), b, a))
 
 
+def refuse_in_sample_theta(val_side, where):
+    """SystemExit when the θ-source val dump comes from a model whose training saw val (05-REVIEW WR-02): a training
+    block that names a split other than TRAINED_ON["val"] or carries a postfit_sha256 (a final seed). Such a model's θ
+    is its postfit record's (training.postfit.theta of its config), never selected again on its own in-sample val
+    dump. score.py's training_block always names the split; a block without one names no training data to refuse."""
+    tr = val_side.get("training")
+    if isinstance(tr, dict) and (tr.get("split") not in (None, TRAINED_ON["val"]) or
+                                 tr.get("postfit_sha256") is not None):
+        raise SystemExit("%s: the val dump comes from a model trained on %s (postfit record %s); its val is in-sample, "
+                         "so report.py does not select θ on it. A final seed's θ is its postfit record's "
+                         "(training.postfit.theta); Phase 8 reports final seeds with it"
+                         % (where, tr.get("split"), tr.get("postfit_sha256")))
+
+
 def theta_source(run_dir, manifest_path):
     """(val logits, gold, sidecar, disclosure) of the run dir's full val dump, or None when it has no val dump.
 
@@ -124,6 +141,7 @@ def theta_source(run_dir, manifest_path):
     logits, uids, side, entry = dumps.load_dump(run_dir, "val", manifest_path)
     if side["n_subset"] is not None:
         raise SystemExit("%s: θ is selected only on a full val dump; rescore val without --n" % npz)
+    refuse_in_sample_theta(side, run_dir)
     return logits, dumps.read_gold(entry, manifest_path, uids), side, {
         "run_id": side["run_id"], "split": "val", "dump_sha256": side["dump_sha256"],
         "uids_sha256": dumps.uids_sha256(uids), "n_messages": len(uids)}
@@ -178,6 +196,7 @@ def _load_side(run_dirs, split, manifest_path):
             raise SystemExit("compare needs a full val dump in every run dir; %s has none (score.py on val)" % d)
         pair = (dumps.load_dump(d, split, manifest_path), dumps.load_dump(d, "val", manifest_path))
         same_source(pair[0][2], pair[1][2], d)
+        refuse_in_sample_theta(pair[1][2], d)
         rid = pair[0][2]["run_id"]                          # == the run dir name (load_dump checks it)
         if os.path.realpath(d) in seen or rid in seen:
             raise SystemExit("%s (run_id %s) is listed more than once on one side of --compare; each seed counts once"

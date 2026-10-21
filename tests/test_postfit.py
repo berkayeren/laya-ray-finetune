@@ -194,14 +194,14 @@ def snap(tmp_path, synthetic_raw):
 
 
 def write_candidate(root, snap, lr, epoch, seed=0, split="selection_train", calibrated=False, shipped=1.0,
-                    n=None, rng_seed=None):
+                    n=None, rng_seed=None, postfit_sha256=None):
     """A candidate val dump under root/<run_id>: random margins, a fake local identity and a training block shaped
     like score.training_block's. Returns the run dir."""
     _, manifest, entry, uids = snap
     rng = np.random.default_rng(rng_seed if rng_seed is not None else int(lr * 1e6) * 10 + epoch)
     uids = uids if n is None else uids[:n]
     logits = rng.normal(0.0, 3.0, size=(len(uids), 48)).astype(np.float32)
-    tag = "%s-%d-%s-%s-%s-%s" % (lr, epoch, seed, split, calibrated, shipped)
+    tag = "%s-%d-%s-%s-%s-%s-%s" % (lr, epoch, seed, split, calibrated, shipped, postfit_sha256)
     ident = {"local": True, "model_sha256": sha256_bytes(("model " + tag).encode()),
              "config_sha256": sha256_bytes(("config " + tag).encode()),
              "files_sha256": {"encoder/config.json": "e" * 64, "tokenizer/tokenizer_config.json#normalized": "t" * 64}}
@@ -211,7 +211,7 @@ def write_candidate(root, snap, lr, epoch, seed=0, split="selection_train", cali
                 "epochs_schedule": 4, "stop_after_epoch": None, "encoder_lr": lr, "head_lr": 0.0001,
                 "neg_seed": seed, "rung": "none", "fallback": False, "weaker": False,
                 "loss_by_epoch": [0.5 / (k + 1) for k in range(epoch)], "calibrated": calibrated,
-                "postfit_sha256": None, "canonical": canon,
+                "postfit_sha256": postfit_sha256, "canonical": canon,
                 "config_sha256_sans_seed": dumps.training_digest(canon, epoch)}
     fields = {"run_id": rid, "seed": seed, "training": training,
               "system": {"kind": "laya", "checkpoint": "ray_results/x/exports/epoch-%03d" % epoch,
@@ -222,6 +222,25 @@ def write_candidate(root, snap, lr, epoch, seed=0, split="selection_train", cali
     run_dir = os.path.join(str(root), rid)
     dumps.write_dump(run_dir, "val", logits, uids, sidecar)
     return run_dir
+
+
+def test_report_never_selects_theta_on_an_in_sample_val_dump(tmp_path, snap):
+    """05-REVIEW WR-02: report.py selects θ on a selection run's val dump (labelled in_sample on val), but refuses, in
+    run_report and in --compare, the val dump of a final_train model and of a postfit-bound final seed."""
+    import report
+    manifest = snap[1]
+    ok = write_candidate(tmp_path / "dumps", snap, 2e-05, 3)
+    rep = report.run_report(ok, "val", manifest)
+    assert rep["variants"]["shipped"]["rows"]["val_selected"]["in_sample"] is True
+    final = write_candidate(tmp_path / "dumps", snap, 2e-05, 3, split="final_train")
+    bound = write_candidate(tmp_path / "dumps", snap, 2e-05, 3, postfit_sha256="p" * 64)
+    for d, what in ((final, "trained on final_train"), (bound, "postfit record " + "p" * 64)):
+        with pytest.raises(SystemExit, match=what):
+            report.run_report(d, "val", manifest)
+        with pytest.raises(SystemExit, match="in-sample"):
+            report.compare([d], [ok], "val", manifest, B=10)
+        with pytest.raises(SystemExit, match="in-sample"):
+            report.compare([ok], [d], "val", manifest, B=10)
 
 
 def _grid_dumps(tmp_path, snap):
