@@ -40,6 +40,12 @@ record's chosen train run, the BERTurk dump dirs there are exactly the record's 
 config is pilot.berturk.SUPERSEDED[-1]'s chosen one with SUPERSEDED[-1]["delta"] applied and nothing else changed (the
 end of the chain that test_superseded_runs_change_one_recorded_key_per_step checks step by step), and its run id is no
 superseded one.
+
+Final seeds (plan 06-11): test_committed_berturk_final_manifest checks results/postfit/berturk-final.json
+(postfit-final/1, system kind berturk): bound to the current record's sha256 (never a superseded one) and its chosen
+settings (30-epoch schedule, the chosen stop epoch and T), seeds exactly [0, 1, 2] on final_train with distinct train
+run ids, one config_sha256_sans_seed, each seed serving the chosen T over the chosen number of epochs, bare checkpoint
+names, and no tracked results/dumps dir named after any seed's dump run id (no final seed is scored in Phase 6).
 """
 import glob
 import json
@@ -338,3 +344,43 @@ def test_exactly_one_current_berturk_selection_run():
     assert _sorted_json(applied) == _sorted_json(canon), \
         "the current run's canonical config is not the superseded %s's with its delta applied" % last["name"]
     assert berturk.run_id(applied) == chosen_run
+
+
+FINAL_RUN_RE = re.compile(r"^berturk-final_train-s([012])-[0-9a-f]{8}$")
+
+
+def test_committed_berturk_final_manifest():
+    """BASE-01 (plan 06-11): the committed manifest of the 3 BERTurk final seeds is bound to the current record (its
+    sha256 and chosen settings, the 30-epoch schedule stopped at the chosen epoch), never to a superseded one; it lists
+    all three seeds (never only the best), each serving the chosen T, and no final seed has a tracked dump (none was
+    scored in Phase 6)."""
+    assert tracked(FINAL) == [FINAL], "%s is not tracked" % FINAL
+    record = _current_record()
+    m = load(FINAL)
+    assert m["schema"] == postfit.FINAL_SCHEMA == "postfit-final/1" and m["system_kind"] == "berturk"
+    sha = sha256_file(path(RECORD))
+    assert m["postfit"] == {"path": RECORD, "sha256": sha}, "%s is not bound to the current %s" % (FINAL, RECORD)
+    assert sha not in {s["postfit_sha256"] for s in berturk.SUPERSEDED}, "%s is bound to a superseded record" % FINAL
+    keys = ("train_run_id", "encoder_lr", "epoch", "epochs_schedule", "stop_after_epoch", "temperature")
+    chosen = record["chosen"]
+    assert as_json(m["chosen"]) == as_json({k: chosen[k] for k in keys}), "the manifest's chosen settings differ"
+    assert chosen["canonical"]["head_lr"] == berturk.HEAD_LR == 0.0001
+    assert chosen["canonical"]["epochs"] == m["chosen"]["epochs_schedule"] == berturk.EPOCHS == 30
+    assert m["chosen"]["train_run_id"] not in {s["train_run_id"] for s in berturk.SUPERSEDED}
+    assert m["final_split"] == record["final"]["split"] == "final_train"
+    seeds = m["seeds"]
+    assert [e["seed"] for e in seeds] == [0, 1, 2] == record["final"]["seeds"]
+    ids = [e["train_run_id"] for e in seeds]
+    assert len(set(ids)) == 3, "the final seeds share a train run id: %s" % ids
+    for e in seeds:
+        mm = FINAL_RUN_RE.match(e["train_run_id"])
+        assert mm and int(mm.group(1)) == e["seed"], e["train_run_id"]
+    assert re.fullmatch(r"[0-9a-f]{64}", m["config_sha256_sans_seed"]), "one config_sha256_sans_seed for all seeds"
+    for e in seeds:
+        assert e["temperature"] == chosen["temperature"], "seed %d serves T %r" % (e["seed"], e["temperature"])
+        assert len(e["epochs"]) == len(e["loss_by_epoch"]) == chosen["epoch"], "seed %d epochs" % e["seed"]
+        assert [r["epoch"] for r in e["epochs"]] == list(range(1, chosen["epoch"] + 1))
+        assert "/" not in e["checkpoint_name"] and "\\" not in e["checkpoint_name"], e["checkpoint_name"]
+        assert e["dump_run_id"] == berturk.dump_run_id(e["checkpoint_identity"])
+    scored = sorted({f.split("/")[2] for f in tracked(DUMPS + "/")} & {e["dump_run_id"] for e in seeds})
+    assert scored == [], "a BERTurk final seed was scored in Phase 6: %s" % scored
