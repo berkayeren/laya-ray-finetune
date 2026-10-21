@@ -91,6 +91,7 @@ usage: from pilot import berturk; rid = berturk.run_id(berturk.canonical(values)
 """
 import hashlib
 import json
+import math
 import os
 import shutil
 from fractions import Fraction
@@ -362,7 +363,8 @@ def record_bytes(obj):
 
 def read_record(ckpt_dir, ident):
     """The parsed berturk_train.json of a checkpoint, from bytes whose sha256 is ident's record_sha256 (the bytes that
-    name the dump run id); SystemExit on changed bytes or another schema."""
+    name the dump run id); SystemExit on changed bytes, another schema, or a canonical max_len that is not a positive
+    int or a temperature that is not a finite float > 0, the two values score.py scores with (06-REVIEW IN-03)."""
     path = os.path.join(ckpt_dir, RECORD)
     with open(path, "rb") as f:
         raw = f.read()
@@ -378,6 +380,13 @@ def read_record(ckpt_dir, ident):
     canon = rec.get("canonical")
     if not rec.get("run_id") or not isinstance(canon, dict) or "seed" not in canon:
         raise SystemExit("%s has no run_id or canonical seed; retrain with this berturk_train.py" % RECORD)
+    n, t = canon.get("max_len"), rec.get("temperature")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+        raise SystemExit("%s: canonical max_len %r is not a positive int; retrain with this berturk_train.py"
+                         % (RECORD, n))
+    if not isinstance(t, float) or not math.isfinite(t) or t <= 0:
+        raise SystemExit("%s: temperature %r is not a finite float > 0; retrain with this berturk_train.py"
+                         % (RECORD, t))
     return rec
 
 

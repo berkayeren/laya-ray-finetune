@@ -5,6 +5,7 @@ Offline (unit): the loss tests use torch on CPU tensors only; nothing loads a mo
 """
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -371,6 +372,26 @@ def test_identity_record_changed_after_hash_is_refused(tmp_path):
     with open(path, "wb") as f:
         f.write(berturk.record_bytes(_record(schema="berturk-train/0")))
     with pytest.raises(SystemExit, match="schema"):
+        berturk.read_record(d, berturk.identity(d))
+
+
+@pytest.mark.parametrize("over, match", [
+    ({"temperature": None}, "temperature None"),
+    ({"temperature": 0.0}, "temperature 0.0"),
+    ({"temperature": -1.5}, "temperature -1.5"),
+    ({"temperature": 1}, "temperature 1 "),                  # an int is not the JSON float the record writes
+    ({"temperature": True}, "temperature True"),
+    ({"canonical": {"seed": 0, "max_len": None}}, "max_len None"),
+    ({"canonical": {"seed": 0}}, "max_len None"),
+    ({"canonical": {"seed": 0, "max_len": 0}}, "max_len 0"),
+    ({"canonical": {"seed": 0, "max_len": 128.0}}, "max_len 128.0"),
+])
+def test_read_record_refuses_values_the_scorer_cannot_use(tmp_path, over, match):
+    """06-REVIEW IN-03: a refusal, not a KeyError or TypeError, before the scorer reads max_len and the temperature."""
+    d = _checkpoint(str(tmp_path / "ckpt"))
+    with open(os.path.join(d, berturk.RECORD), "wb") as f:
+        f.write(berturk.record_bytes(_record(**over)))
+    with pytest.raises(SystemExit, match=re.escape(match)):
         berturk.read_record(d, berturk.identity(d))
 
 
