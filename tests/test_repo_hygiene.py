@@ -17,7 +17,9 @@ only as KEY=VALUE strings and repo-relative paths only. The Phase 5 postfit reco
 Phase 6 BERTurk postfit records and BERTurk dump sidecars. Training outputs (Ray storage, BERTurk run storage under
 berturk_runs/, every ckpt*/ checkpoint including ckpt-berturk-final-s*) are proven gitignored. The generic home-path
 test skips binary files, so the .npz check is the guard there. The two legacy reports (100 test messages, no
-no-intent rows) sit under results/legacy/ next to a README that labels them as not comparable (D-08).
+no-intent rows) sit under results/legacy/ next to a README that labels them as not comparable (D-08). The superseded
+BERTurk tied-LR selection (BASE-03 fix) sits under results/superseded/ next to a README that labels it superseded and
+not comparable, and gets the same dump and sidecar checks.
 """
 import io
 import json
@@ -36,6 +38,8 @@ UID_RE = re.compile(r"^bank_[0-9]+_[0-9]+$")       # split uids are bank_<fold>_
 DUMP_KEYS = {"logits", "uids"}
 DUMP_COLUMNS = 48                                   # one logit per INTENTS tag
 DUMP_PATH_RE = re.compile(r"^results/dumps/[^/]+/(val|test)\.(npz|json)$")
+# a superseded dir (pilot.berturk.SUPERSEDED) holds its README, its records and its val dumps only (RP-2)
+SUPERSEDED_PATH_RE = re.compile(r"^results/superseded/[^/]+/(README\.md|postfit/[^/]+\.json|dumps/[^/]+/val\.(npz|json))$")
 # Coarse backstop only: the longest legitimate manifest value is a 64-char sha256, but message text is often far
 # shorter ("Evet.", "cari hesap"), so length cannot detect it. The key-name check and, when the split files exist
 # locally, the exact-text check below are the real guards.
@@ -232,15 +236,15 @@ def test_training_outputs_are_gitignored(rel):
 
 def test_tracked_dumps_hold_only_uids_and_logits():
     found = {rel: dump_problems(os.path.join(REPO_ROOT, rel))
-             for rel in _existing(f for f in tracked("results/dumps/") if f.endswith(".npz"))}
+             for rel in _existing(f for f in tracked("results/dumps/", "results/superseded/") if f.endswith(".npz"))}
     bad = {rel: p for rel, p in found.items() if p}
     assert bad == {}, "tracked dumps hold more than uids and float32 logits: %s" % bad
 
 
 def test_tracked_sidecars_and_reports_hold_no_text_or_paths():
     home, texts = home_dir(), local_split_texts()
-    rels = [f for f in tracked("results/dumps/", "results/reports/", "results/compute/", "results/postfit/")
-            if f.endswith(".json")]
+    rels = [f for f in tracked("results/dumps/", "results/reports/", "results/compute/", "results/postfit/",
+                               "results/superseded/") if f.endswith(".json")]
     bad = {rel: p for rel in _existing(rels) for p in [sidecar_problems(os.path.join(REPO_ROOT, rel), home, texts)]
            if p}
     assert bad == {}, "tracked sidecars or reports hold text, local paths or subset runs: %s" % bad
@@ -356,3 +360,39 @@ def test_legacy_results_are_labelled():
     assert "legacy protocol" in label and "not comparable" in label
     assert tracked("results/zeroshot_multilingual.json", "results/finetuned_smoke.json") == [], \
         "legacy reports must live under results/legacy/, not at the top of results/"
+
+
+def test_superseded_results_are_labelled():
+    # RP-2 (BASE-03 fix): a superseded BERTurk selection is kept for audit, never read as current or as a test result
+    from pilot import berturk               # lazy: the rest of this file must not need pilot.berturk
+    files = tracked("results/superseded/")
+    bad = [f for f in files if not SUPERSEDED_PATH_RE.match(f)]
+    assert bad == [], "only README.md, postfit/*.json and dumps/<run id>/val.(npz|json) may be tracked per " \
+                      "superseded dir: %s" % bad
+    tests = [f for f in files if os.path.basename(f) in ("test.npz", "test.json")]
+    assert tests == [], "a superseded run never holds a test dump: %s" % tests
+    dirs = {"/".join(f.split("/")[:3]) for f in files}
+    assert dirs == {s["dir"] for s in berturk.SUPERSEDED}, \
+        "tracked superseded dirs %s != pilot.berturk.SUPERSEDED dirs" % sorted(dirs)
+    for d in sorted(dirs):
+        readme = d + "/README.md"
+        assert readme in files, "%s is not tracked" % readme
+        with open(os.path.join(REPO_ROOT, readme), encoding="utf-8") as f:
+            label = f.read()
+        for word in ("superseded", "not comparable", "BASE-03"):
+            assert word in label, "%s does not say %r" % (readme, word)
+
+
+@pytest.mark.parametrize("rel,ok", [
+    ("results/superseded/x/README.md", True),
+    ("results/superseded/x/postfit/berturk.json", True),
+    ("results/superseded/x/dumps/y/val.npz", True),
+    ("results/superseded/x/dumps/y/val.json", True),
+    ("results/superseded/x/dumps/y/test.npz", False),
+    ("results/superseded/x/notes.txt", False),
+    ("results/superseded/x/postfit/a.npz", False),
+    ("results/superseded/README.md", False),
+    ("results/superseded/x/dumps/y/z/val.npz", False),
+])
+def test_superseded_path_pin_flags_planted_paths(rel, ok):
+    assert bool(SUPERSEDED_PATH_RE.match(rel)) is ok, rel
