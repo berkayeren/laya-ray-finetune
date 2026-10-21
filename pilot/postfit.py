@@ -36,8 +36,9 @@ rebuilds byte for byte from the committed dumps in any argument order. prune_exp
 only after a verified full val dump of exactly that export exists.
 
 Final seeds (LAYA-08): ray_train.py --postfit RECORD calls check_final, which refuses a final-seed command whose
-canonical run config is not the chosen selection run's (outside FINAL_FREE_KEYS), and stamps final_block into the final
-config. final_command prints the exact ray_train.py argv of each final seed from the record (nobody retypes a
+canonical run config is not the chosen selection run's (outside FINAL_FREE_KEYS; neg_seed must still equal the seed, and
+a record of the committed manifest binds data_sha256 to the committed final_train), and stamps final_block into the
+final config. final_command prints the exact ray_train.py argv of each final seed from the record (nobody retypes a
 hyperparameter); final_manifest (FINAL_SCHEMA) lists the finished checkpoints only when they are exactly the record's
 final seeds, each bound to its sha256, at the chosen epoch and T, with one shared config_sha256_sans_seed.
 
@@ -350,7 +351,10 @@ def check_final(record, canon):
     ray_train.py command) is not bound to the record: the split must be the record's final split, the seed one of its
     final seeds, stop_after_epoch the chosen one (None when the chosen epoch is the last of the schedule), and every
     other key outside FINAL_FREE_KEYS must equal the chosen selection run's canonical value exactly (JSON equality: 1
-    and 1.0 differ). The first differing key in sorted order is named with both values (LAYA-08)."""
+    and 1.0 differ). The first differing key in sorted order is named with both values (LAYA-08). Two free keys are
+    bound on their own (05-REVIEW WR-01): neg_seed must equal the seed when the chosen run's did (A4: --neg-seed is
+    never passed), and when the record was built on the committed manifest (manifest.is_committed) data_sha256 must be
+    the committed final_train sha256 of data/splits.json, read at check time (the record stays byte-identical)."""
     chosen, final = record["chosen"], record["final"]
     if canon.get("split") != final.get("split"):
         raise SystemExit("--postfit trains the final seeds on %s; --data is %s"
@@ -366,6 +370,19 @@ def check_final(record, canon):
     want_canon = chosen.get("canonical")
     if not isinstance(want_canon, dict):
         raise SystemExit("the postfit record's chosen run has no canonical config; rebuild it with this postfit.py")
+    if "neg_seed" in want_canon and want_canon["neg_seed"] == want_canon.get("seed") and \
+            canon.get("neg_seed") != canon.get("seed"):
+        raise SystemExit("--postfit: neg_seed is %r but the seed is %r; the chosen selection run drew its negatives "
+                         "with neg_seed == seed, so omit --neg-seed (it defaults to --seed)"
+                         % (canon.get("neg_seed"), canon.get("seed")))
+    if (record.get("manifest") or {}).get("is_committed") is True:
+        with open(DEFAULT_MANIFEST, encoding="utf-8") as f:
+            committed = ((json.load(f).get("splits") or {}).get(final.get("split")) or {}).get("sha256")
+        if canon.get("data_sha256") != committed:
+            raise SystemExit("--postfit: the final seed's data sha256 is %s, not the committed %s sha256 %s "
+                             "(data/splits.json); a record built on the committed manifest trains its final seeds "
+                             "on the committed split (drop --manifest, or run `make data`)"
+                             % (canon.get("data_sha256"), final.get("split"), committed))
     missing = object()
     for key in sorted((set(canon) | set(want_canon)) - set(FINAL_FREE_KEYS)):
         have, want = canon.get(key, missing), want_canon.get(key, missing)
@@ -487,7 +504,11 @@ def _final_entry(record, sha, ckpt_dir):
     rt = tr.get("ray_train") if isinstance(tr, dict) else None
     if not isinstance(rt, dict) or not isinstance(rt.get("canonical"), dict):
         raise SystemExit("%s holds no ray_train run config; train it with ray_train.py --postfit" % name)
-    canon, rec = rt["canonical"], rt.get("record") or {}
+    canon, rec, prov = rt["canonical"], rt.get("record") or {}, rt.get("provenance") or {}
+    if prov.get("manifest_is_committed") is not True or prov.get("data_sha256") != canon.get("data_sha256"):
+        raise SystemExit("%s: provenance manifest_is_committed %r (data sha256 %s, canonical %s); a final seed trains "
+                         "on the committed data/splits.json (05-REVIEW WR-01)"
+                         % (name, prov.get("manifest_is_committed"), prov.get("data_sha256"), canon.get("data_sha256")))
     if (tr.get("postfit") or {}).get("sha256") != sha or canon.get("postfit_sha256") != sha:
         raise SystemExit("%s is bound to postfit record %s, not %s; train it with --postfit of this record"
                          % (name, (tr.get("postfit") or {}).get("sha256"), sha))
@@ -516,7 +537,9 @@ def _final_entry(record, sha, ckpt_dir):
 
 def final_manifest(record_path, ckpt_dirs):
     """The FINAL_SCHEMA manifest of the final checkpoints of one postfit record: refused unless every dir is bound to
-    the record's sha256 (config and canonical), trained on its final split with the chosen recipe (check_final), stops
+    the record's sha256 (config and canonical), trained under the committed data/splits.json (its provenance
+    manifest_is_committed True, its provenance data sha256 the canonical one), on its final split with the chosen
+    recipe (check_final), stops
     at the chosen epoch, serves the chosen T exactly with no temperature_by_options, the seeds are exactly the record's
     final seeds (no duplicate, none missing) and every seed shares one config_sha256_sans_seed. Seeds sorted; ids,
     digests and numbers only (checkpoint_name is a base name; no timestamp, no local path)."""

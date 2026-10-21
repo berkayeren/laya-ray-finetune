@@ -666,3 +666,25 @@ def test_check_final_names_the_first_differing_key():
             postfit.check_final(record, dict(final, **change))
     with pytest.raises(SystemExit, match="workers is None here but 1"):
         postfit.check_final(record, {k: v for k, v in final.items() if k != "workers"})
+
+
+def test_check_final_binds_neg_seed_and_the_committed_final_data():
+    """05-REVIEW WR-01: neg_seed must equal the seed when the chosen run's did, and a record built on the committed
+    manifest binds data_sha256 to the committed final_train sha256 (read from data/splits.json at check time)."""
+    import json
+    from pilot import postfit
+    from pilot.data import DEFAULT_MANIFEST
+    with open(DEFAULT_MANIFEST, encoding="utf-8") as f:
+        committed = json.load(f)["splits"]["final_train"]["sha256"]
+    chosen = {"split": "selection_train", "seed": 0, "neg_seed": 0, "data_sha256": "a", "data_role": "train",
+              "encoder_lr": 3e-05, "epochs": 4}
+    record = {"chosen": {"canonical": chosen, "epoch": 4, "epochs_schedule": 4, "stop_after_epoch": None,
+                         "train_run_id": "laya-sel"}, "final": {"split": "final_train", "seeds": [0, 1, 2]}}
+    final = dict(chosen, split="final_train", seed=1, neg_seed=1, data_sha256="b", postfit_sha256="c" * 64)
+    postfit.check_final(record, final)                       # a record of another manifest: data_sha256 stays free
+    with pytest.raises(SystemExit, match="neg_seed is 0 but the seed is 1"):
+        postfit.check_final(record, dict(final, neg_seed=0))
+    on_committed = dict(record, manifest={"is_committed": True})
+    with pytest.raises(SystemExit, match="not the committed final_train sha256 %s" % committed):
+        postfit.check_final(on_committed, final)
+    postfit.check_final(on_committed, dict(final, data_sha256=committed))

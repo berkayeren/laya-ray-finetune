@@ -496,7 +496,8 @@ def test_print_final_commands_cli(tmp_path, capsys):
 def finals(tmp_path):
     """(record path, record, sha, make) where make(name, seed, **change) writes a tiny checkpoint whose config carries
     the training block of a --postfit final seed of the record (final_train canonical, chosen epoch 2, T, record rows);
-    change: postfit_sha (the bound record sha), split, epoch, temperature, data_sha256."""
+    change: postfit_sha (the bound record sha), split, epoch, temperature, data_sha256, neg_seed and committed (the
+    provenance manifest_is_committed)."""
     from tiny_laya import tiny_checkpoint
     chosen_canon = _canon(3e-05, data_sha256="s" * 64, data_role="train", max_messages=None)
     T = 1.6109375
@@ -511,10 +512,11 @@ def finals(tmp_path):
     sha = pilot.data.sha256_file(path)
     threads = __import__("torch").get_num_threads()
 
-    def make(name, seed, postfit_sha=sha, split="final_train", epoch=2, temperature=T, data_sha256="f" * 64):
+    def make(name, seed, postfit_sha=sha, split="final_train", epoch=2, temperature=T, data_sha256="f" * 64,
+             neg_seed=None, committed=True):
         d = tiny_checkpoint(tmp_path / "ckpt" / name, seed=seed)
-        canon = dict(chosen_canon, split=split, seed=seed, neg_seed=seed, data_sha256=data_sha256,
-                     stop_after_epoch=2, postfit_sha256=postfit_sha)
+        canon = dict(chosen_canon, split=split, seed=seed, neg_seed=seed if neg_seed is None else neg_seed,
+                     data_sha256=data_sha256, stop_after_epoch=2, postfit_sha256=postfit_sha)
         rows = [{"epoch": e, "loss": 0.5 / e, "train_s": 10.0 * e, "save_s": 1.0, "optimizer_steps": 3, "n_items": 9,
                  "peak_total_bytes": 2**30, "peak_driver_bytes": None, "peak_rss_bytes": 2**30,
                  "current_allocated_bytes": None, "swap_delta_bytes": 0, "segment": 0, "resumed": False}
@@ -525,6 +527,7 @@ def finals(tmp_path):
         cfg["training"] = {"epoch": epoch, "calibrated": True, "postfit": {"sha256": postfit_sha, "temperature": T},
                            "ray_train": {"run_id": "laya-%s-neg8-s%d-0000000%d" % (split, seed, seed),
                                          "canonical": canon,
+                                         "provenance": {"data_sha256": data_sha256, "manifest_is_committed": committed},
                                          "record": {"rung": "none", "fallback": False, "weaker": False,
                                                     "code_changed_on_resume": False, "epochs": rows}}}
         with open(os.path.join(d, "rl_agent_config.json"), "w", encoding="utf-8") as f:
@@ -568,6 +571,8 @@ def test_final_manifest_lists_the_three_seeds(finals, tmp_path, capsys):
     ("another_epoch", "stopped at epoch 3"),
     ("selection_split", "trained on selection_train"),
     ("another_recipe", "differ in more than the seed"),
+    ("shared_neg_seed", "neg_seed is 0 but the seed is 2"),
+    ("not_committed", "manifest_is_committed False"),
 ])
 def test_final_manifest_refuses_a_wrong_set(finals, case, match):
     path, record, sha, make = finals
@@ -578,6 +583,8 @@ def test_final_manifest_refuses_a_wrong_set(finals, case, match):
              "another_t": lambda: make("s2", 2, temperature=1.6109376),
              "another_epoch": lambda: make("s2", 2, epoch=3),
              "selection_split": lambda: make("s2", 2, split="selection_train"),
-             "another_recipe": lambda: make("s2", 2, data_sha256="0" * 64)}[case]()
+             "another_recipe": lambda: make("s2", 2, data_sha256="0" * 64),
+             "shared_neg_seed": lambda: make("s2", 2, neg_seed=0),        # 05-REVIEW WR-01: one negative draw
+             "not_committed": lambda: make("s2", 2, committed=False)}[case]()
     with pytest.raises(SystemExit, match=match):
         postfit.final_manifest(path, [s0, s1] + ([third] if third else []))
