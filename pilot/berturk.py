@@ -8,10 +8,11 @@ imports torch, transformers, accelerate, Ray or laya (a test enforces it).
 Recipe (confirmed by the user at plan 06-02, "Protocol decision: confirm"): A1 one encoder LR, LR (Laya's single
 encoder LR), and the freshly initialised classifier head (the HEAD_PREFIX parameters) at HEAD_LR, Laya's head LR: the
 BASE-03 fix (plan 06-10 gate, 2026-10-21; SUPERSEDED holds the run that tied the head LR to LR); A2 an EPOCHS
-schedule (30 since the second BASE-03 fix, plan 06-16 gate) whose every epoch is a selection candidate; A3 batch BATCH, a LR_SCHEDULER schedule with a WARMUP_RATIO
-warm-up, AdamW (OPTIM, WEIGHT_DECAY), MAX_GRAD_NORM, MAX_LEN, fp32, no gradient checkpointing, the seed set right
-before the head is created; A6 no resume (a run dir that exists is refused; a run is rerun from scratch); A7 a masked
-BCE (LOSS): a masked (message, tag) label is MASK_LABEL and the loss averages over the unmasked entries only.
+schedule (30 since the second BASE-03 fix, plan 06-16 gate) whose every epoch is a selection candidate; A3 batch
+BATCH, a LR_SCHEDULER schedule with a WARMUP_RATIO warm-up, AdamW (OPTIM, WEIGHT_DECAY), MAX_GRAD_NORM, MAX_LEN, fp32,
+no gradient checkpointing, the seed set right before the head is created; A6 no resume (a run dir that exists is
+refused; a run is rerun from scratch); A7 a masked BCE (LOSS): a masked (message, tag) label is MASK_LABEL and the loss
+averages over the unmasked entries only.
 
 Labels: id2label/label2id and every label vector follow INTENTS order, the dump's column order. check_label_order
 refuses a config.json that scores another order (plausible but wrong per-tag numbers otherwise); label_vector refuses
