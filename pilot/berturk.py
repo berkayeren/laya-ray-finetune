@@ -764,6 +764,7 @@ def render_markdown(record, reference, final=None, superseded=()):
                    len(s_up), len(cands), grid["stop"], len(s_lo), grid["start"], len(r_up), len(r_lo),
                    "; the objective is clipped at a θ-grid edge for those candidates" if clipped
                    else "; no candidate's objective is clipped at a θ-grid edge"))
+    out.append(postfit.per_tag_edge_line(cands, th))
     # the published reference check (BASE-03)
     v, ref = reference["value"], reference["reference"]
     t12, t18 = ref["table_12"], ref["table_18"]

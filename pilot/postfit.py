@@ -615,12 +615,31 @@ def theta_edges(cands, name):
     return up, lo
 
 
+def per_tag_edge_line(cands, th):
+    """The README line of per-tag θ on a grid edge (06-REVIEW IN-02): the chosen candidate's (`th`, its theta block)
+    by tag, and the count over every candidate, shipped and raw. A per-tag θ on an edge is clipped there for its tag;
+    per-tag θ serve the val-selected rows and the final seeds, while the selection objective uses the global θ only."""
+    def on_edge(t):
+        return sorted(k for k, v in (t.get("per_tag") or {}).items() if v in (t["grid"]["start"], t["grid"]["stop"]))
+    names = ("shipped", "raw")
+    mine = ["%s %s" % (n, ", ".join("%s %.2f" % (k, th[n]["per_tag"][k]) for k in on_edge(th[n])) or "none")
+            for n in names]
+    every = ["%d %s per-tag θ (%d candidates)" % (sum(len(on_edge(c["theta"][n])) for c in cands), n,
+                                         sum(bool(on_edge(c["theta"][n])) for c in cands)) for n in names]
+    return ("- Per-tag θ grid edge: the chosen candidate's per-tag θ on an edge of the grid %s..%s: %s (of %d / %d tags "
+            "with their own θ); over all %d candidates, %s sit on an edge. A per-tag θ on an edge is clipped there for "
+            "its tag; per-tag θ serve the val-selected rows and the final seeds, and the selection objective uses the "
+            "global θ only." % (th["shipped"]["grid"]["start"], th["shipped"]["grid"]["stop"], "; ".join(mine),
+                                len(th["shipped"]["per_tag"]), len(th["raw"]["per_tag"]), len(cands),
+                                " and ".join(every)))
+
+
 def render_markdown(record, final=None):
     """The README's Phase 5 block (markdown) of a Laya postfit record and, optionally, its final manifest: the chosen
     settings, the rule line, the encoder-LR line against the approved pilot.compute.MATRIX lr_grid, the grid-edge line
     against its max_epochs, the θ-grid and T-bound positions, the θ-edge line (how many candidates' global θ is clipped
     at a θ-grid edge, theta_edges; while any shipped θ is, the epoch is never called a plain interior optimum), the
-    candidates (chosen and runner-up marked) and the final seeds. Display rounding only; every number comes from the
+    per-tag θ edge line (per_tag_edge_line), the candidates (chosen and runner-up marked) and the final seeds. Display rounding only; every number comes from the
     record; no timestamp, no local path, no test number. SystemExit on a record of another system kind (BERTurk has its
     own renderer) or a manifest whose chosen block or final split is not the record's."""
     from pilot import compute                               # torch-free; lazy like the other optional imports
@@ -705,6 +724,7 @@ def render_markdown(record, final=None):
                        counts, min(cut), max(cut)))
     else:
         out.append("- θ grid edge: %s; no candidate's objective is clipped at a θ-grid edge." % counts)
+    out.append(per_tag_edge_line(cands, th))
     ranked = sorted(cands, key=lambda c: (score(c), -c["epoch"], -c["encoder_lr"]), reverse=True)
     runner = ranked[1]["dump_run_id"] if len(ranked) > 1 else None
     rows = []

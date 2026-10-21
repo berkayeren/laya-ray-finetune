@@ -427,6 +427,21 @@ def test_readme_berturk_block_matches_the_records():
     assert text.index("## BERTurk baseline (Phase 6)") < i, "the block is not in the BERTurk baseline section"
 
 
+def test_render_discloses_per_tag_theta_on_a_grid_edge():
+    """06-REVIEW IN-02: the block names the chosen candidate's per-tag θ on a grid edge and counts them over every
+    candidate, from the record (the global-θ edge line alone ignores them)."""
+    record = _current_record()
+    def edge(t):
+        return [k for k, v in t["per_tag"].items() if v in (t["grid"]["start"], t["grid"]["stop"])]
+    counts = {n: (sum(len(edge(c["theta"][n])) for c in record["candidates"]),
+                  sum(bool(edge(c["theta"][n])) for c in record["candidates"])) for n in ("shipped", "raw")}
+    line = next(l for l in _rendered_berturk().splitlines() if l.startswith("- Per-tag θ grid edge:"))
+    assert "%d shipped per-tag θ (%d candidates) and %d raw per-tag θ (%d candidates)" % (
+        counts["shipped"] + counts["raw"]) in line, line
+    chosen = record["chosen"]["theta"]
+    assert ("shipped none" in line) == (not edge(chosen["shipped"])) and ("raw none" in line) == (not edge(chosen["raw"]))
+
+
 def test_render_discloses_the_protocol_change():
     """Every SUPERSEDED entry's train run id, exact fraction, gate reply and history dir reach the block, with the
     count of extra selection runs; the reference check's value, threshold, status, differences and caveats too."""

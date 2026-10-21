@@ -365,6 +365,7 @@ fails if it is edited by hand or goes stale.
 - Grid edge: interior in the epoch grid: epoch 3 of the epoch grid 1..4 (approved max_epochs 4); θ clipped at the grid edge (see the θ-edge line), so the epoch is not a clean optimum of the objective.
 - Bounds: on the θ grid 0.05..0.95 the chosen global θ is shipped 0.95 (at the upper edge) and raw 0.33 (inside); the candidates' fitted T span 4.7698..5.0000 in laya's band [0.5, 5.0] (1 of 4 on a bound), and the chosen T 4.7698 is 0.2302 below the upper bound 5.0.
 - θ grid edge: 4 of 4 candidates choose the shipped global θ on the upper edge 0.95 and 0 on the lower edge 0.05 (raw: 1 upper, 0 lower), so the epoch ranking is a ranking at a T-dependent margin cutoff (T x logit(θ): 14.04..14.72 over the clipped candidates), not at each candidate's best θ; the objective is clipped at the edge, and a θ outside the pre-declared grid may rank the epochs differently.
+- Per-tag θ grid edge: the chosen candidate's per-tag θ on an edge of the grid 0.05..0.95: shipped transfer_payment_deposit 0.95; raw none (of 13 / 13 tags with their own θ); over all 4 candidates, 8 shipped per-tag θ (4 candidates) and 0 raw per-tag θ (0 candidates) sit on an edge. A per-tag θ on an edge is clipped there for its tag; per-tag θ serve the val-selected rows and the final seeds, and the selection objective uses the global θ only.
 
 **Candidates** (one full val dump per epoch export; the objective is micro-F1 at the global θ)
 
@@ -488,6 +489,7 @@ manifest, plus the superseded history under `results/superseded/` (read and sha2
 - Grid edge: next to the upper edge: epoch 29 of the epoch grid 1..30, one epoch below it; runner-up epoch 30 at 0.8135 (772/949), 0.0003 below the chosen.
 - Bounds: on the θ grid 0.05..0.95 the chosen global θ is shipped 0.19 (inside) and raw 0.26 (inside); the candidates' fitted T span 0.5000..0.9862 in laya's band [0.5, 5.0] (1 of 30 on a bound), and the chosen T 0.7430 is 0.2430 above the lower bound 0.5 and 4.2570 below the upper bound 5.0.
 - θ grid edge: 0 of 30 candidates choose the shipped global θ on the upper edge 0.95 and 0 on the lower edge 0.05 (raw: 0 upper, 0 lower); no candidate's objective is clipped at a θ-grid edge.
+- Per-tag θ grid edge: the chosen candidate's per-tag θ on an edge of the grid 0.05..0.95: shipped none; raw none (of 13 / 13 tags with their own θ); over all 30 candidates, 18 shipped per-tag θ (13 candidates) and 3 raw per-tag θ (3 candidates) sit on an edge. A per-tag θ on an edge is clipped there for its tag; per-tag θ serve the val-selected rows and the final seeds, and the selection objective uses the global θ only.
 
 **Published reference check (BASE-03)** (Moghe et al., Multi3NLU++ (multilingual, multi-intent, multi-domain NLU dataset), ACL Findings 2023; https://arxiv.org/abs/2212.10455)
 
