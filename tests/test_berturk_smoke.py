@@ -4,8 +4,8 @@ and fit accept them -> report.py run_report reports them; score.py refuses the s
 
 test_berturk_final_seed_chain (plan 06-08, BASE-01/02/03) continues the same chain to the final manifest: postfit
 record -> BASE-03 reference check (with a resolution: the tiny model is far below 0.707) -> the printed final commands
--> 3 bound final seeds serving the val-fitted T -> a final seed's own val dump serves T and is refused by postfit as
-in-sample -> postfit.py --final-manifest.
+-> 3 bound final seeds serving the val-fitted T -> a final seed's own val dump serves T and is refused as in-sample by
+postfit and by report.py (run_report and either side of --compare; 06-REVIEW IN-01) -> postfit.py --final-manifest.
 
 No marker: it runs in `make test` (no Ray, no weights, no data download; seconds).
 """
@@ -178,6 +178,13 @@ def test_berturk_final_seed_chain(tmp_path, synthetic_raw, capsys):
         assert side["training"]["postfit_sha256"] == sha and side["training"]["calibrated"] is True
         with pytest.raises(SystemExit, match="selection_train"):                 # a final seed's val is in-sample
             postfit.candidate(final_dump, manifest)
+        # 06-REVIEW IN-01: report.py never selects θ on a BERTurk final seed's val dump, alone or on either side of
+        # --compare (its training block names final_train and carries the postfit sha256)
+        with pytest.raises(SystemExit, match="trained on final_train \\(postfit record %s\\)" % sha):
+            report.run_report(final_dump, "val", manifest)
+        for a_dirs, b_dirs in (([final_dump], run_dirs[:1]), (run_dirs[:1], [final_dump])):
+            with pytest.raises(SystemExit, match="in-sample"):
+                report.compare(a_dirs, b_dirs, "val", manifest, B=10)
 
         out = str(tmp_path / "postfit" / "berturk-final.json")
         man = postfit_cli.main(["--final-manifest", path] + ["%s-s%d" % (prefix, s) for s in (2, 0, 1)]
