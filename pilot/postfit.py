@@ -556,12 +556,23 @@ def _f1(c):
     return "%.4f (%d/%d)" % (c["val_micro_f1_at_global_theta"], s.numerator, s.denominator)
 
 
+def theta_edges(cands, name):
+    """(candidates on the upper θ-grid edge, on the lower edge) of variant `name` (shipped or raw): those whose global
+    θ equals their own grid's stop or start. A clipped θ means the candidate is scored at the edge, not at its best θ
+    (05-REVIEW CR-01, WR-04)."""
+    up = [c for c in cands if c["theta"][name]["global"] == c["theta"][name]["grid"]["stop"]]
+    lo = [c for c in cands if c["theta"][name]["global"] == c["theta"][name]["grid"]["start"]]
+    return up, lo
+
+
 def render_markdown(record, final=None):
     """The README's Phase 5 block (markdown) of a Laya postfit record and, optionally, its final manifest: the chosen
     settings, the rule line, the encoder-LR line against the approved pilot.compute.MATRIX lr_grid, the grid-edge line
-    against its max_epochs, the θ-grid and T-bound positions, the candidates (chosen and runner-up marked) and the final
-    seeds. Display rounding only; no timestamp, no local path, no test number. SystemExit on a record of another system
-    kind (BERTurk has its own renderer) or a manifest whose chosen block or final split is not the record's."""
+    against its max_epochs, the θ-grid and T-bound positions, the θ-edge line (how many candidates' global θ is clipped
+    at a θ-grid edge, theta_edges; while any shipped θ is, the epoch is never called a plain interior optimum), the
+    candidates (chosen and runner-up marked) and the final seeds. Display rounding only; every number comes from the
+    record; no timestamp, no local path, no test number. SystemExit on a record of another system kind (BERTurk has its
+    own renderer) or a manifest whose chosen block or final split is not the record's."""
     from pilot import compute                               # torch-free; lazy like the other optional imports
     if record.get("system_kind") != "laya":
         raise SystemExit("render_markdown renders postfit records of system kind 'laya' only (BERTurk has its own "
@@ -606,11 +617,16 @@ def render_markdown(record, final=None):
                    % (", ".join("%g" % x for x in lr_grid), len(lr_grid), approved))
     edge = ("epoch %d of the epoch grid 1..%d (approved max_epochs %d)"
             % (epoch, proto["epochs"], compute.MATRIX["max_epochs"]))
+    edges = {name: theta_edges(cands, name) for name in ("shipped", "raw")}
+    clipped = edges["shipped"][0] + edges["shipped"][1]
     if epoch == proto["epochs"]:
         out.append("- Grid edge: upper edge: %s; the objective may still rise beyond it, and extending the grid would "
                    "be a protocol change after a val outcome, decided only by the user." % edge)
     elif epoch == 1:
         out.append("- Grid edge: lower edge: %s." % edge)
+    elif clipped:
+        out.append("- Grid edge: interior in the epoch grid: %s; θ clipped at the grid edge (see the θ-edge line), so "
+                   "the epoch is not a clean optimum of the objective." % edge)
     else:
         out.append("- Grid edge: interior optimum: %s." % edge)
     pos = []
@@ -626,6 +642,19 @@ def render_markdown(record, final=None):
                % (th["shipped"]["grid"]["start"], th["shipped"]["grid"]["stop"], " and ".join(pos), min(temps),
                   max(temps), T_MIN, T_MAX, on_bound, len(temps), chosen["temperature"],
                   T_MAX - chosen["temperature"], T_MAX))
+    (s_up, s_lo), (r_up, r_lo) = edges["shipped"], edges["raw"]
+    n, grid = len(cands), th["shipped"]["grid"]
+    counts = ("%d of %d candidates choose the shipped global θ on the upper edge %.2f and %d on the lower edge %.2f "
+              "(raw: %d upper, %d lower)" % (len(s_up), n, grid["stop"], len(s_lo), grid["start"], len(r_up), len(r_lo)))
+    if clipped:
+        cut = [c["temperature"] * float(np.log(c["theta"]["shipped"]["global"] / (1 - c["theta"]["shipped"]["global"])))
+               for c in clipped]
+        out.append("- θ grid edge: %s, so the epoch ranking is a ranking at a T-dependent margin cutoff (T x logit(θ): "
+                   "%.2f..%.2f over the clipped candidates), not at each candidate's best θ; the objective is clipped at "
+                   "the edge, and a θ outside the pre-declared grid may rank the epochs differently." % (
+                       counts, min(cut), max(cut)))
+    else:
+        out.append("- θ grid edge: %s; no candidate's objective is clipped at a θ-grid edge." % counts)
     ranked = sorted(cands, key=lambda c: (score(c), -c["epoch"], -c["encoder_lr"]), reverse=True)
     runner = ranked[1]["dump_run_id"] if len(ranked) > 1 else None
     rows = []

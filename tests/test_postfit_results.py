@@ -32,8 +32,12 @@ README tests.
   laya-postfit markers, and the block between them equals pilot.postfit.render_markdown of the committed record and
   final manifest, so the reported chosen settings cannot be edited by hand or go stale
 - test_render_discloses_the_selection: the rendered block names the single encoder LR 2e-05 against the approved
-  lr_grid of pilot.compute.MATRIX (fixed, not tuned), the grid-edge verdict of the chosen epoch, every candidate's
-  exact objective fraction and every final seed's train run id, and holds no local path
+  lr_grid of pilot.compute.MATRIX (fixed, not tuned), the grid-edge verdict of the chosen epoch (never "interior
+  optimum" while a candidate's shipped θ is clipped at a θ-grid edge), the θ-edge count over every candidate
+  (05-REVIEW CR-01, WR-04), every candidate's exact objective fraction and every final seed's train run id, and holds
+  no local path
+- test_render_names_an_interior_optimum_only_without_a_clipped_theta: a copy of the record with every global θ inside
+  the grid is an interior optimum without the margin-cutoff disclosure; the committed record is the reverse
 - test_render_refuses_a_berturk_record: render_markdown refuses the BERTurk record (BERTurk has its own renderer)
 - test_render_refuses_a_manifest_of_another_record: postfit.py --render of the Laya record with the BERTurk final
   manifest is refused with a message naming the Laya record's sha256 (not an argparse usage error)
@@ -311,8 +315,17 @@ def test_render_discloses_the_selection():
     assert "2e-05" in text and "not tuned" in text, "the single fixed encoder LR is not disclosed"
     assert "lr_grid %d" % compute.MATRIX["lr_grid"] in text, "the approved lr_grid is not named"
     epoch, top = record["chosen"]["epoch"], record["protocol"]["epochs"]
-    edge = "upper edge" if epoch == top else "lower edge" if epoch == 1 else "interior optimum"
+    up, lo = postfit.theta_edges(record["candidates"], "shipped")
+    clipped = bool(up or lo)
+    edge = ("upper edge" if epoch == top else "lower edge" if epoch == 1 else
+            "interior in the epoch grid" if clipped else "interior optimum")
     assert edge in text, "the grid-edge verdict %r is missing" % edge
+    assert ("interior optimum" in text) is (not clipped and 1 < epoch < top), \
+        "an epoch is called an interior optimum while a candidate's θ is clipped at a θ-grid edge (05-REVIEW CR-01)"
+    n = len(record["candidates"])
+    assert "%d of %d candidates choose the shipped global θ on the upper edge" % (len(up), n) in text, \
+        "the θ-edge count over every candidate is missing (05-REVIEW WR-04)"
+    assert ("T-dependent margin cutoff" in text) is clipped
     assert "max_epochs %d" % compute.MATRIX["max_epochs"] in text, "the approved max_epochs is not named"
     for c in record["candidates"]:
         s = postfit.score(c)
@@ -320,6 +333,23 @@ def test_render_discloses_the_selection():
     for e in load(FINAL)["seeds"]:
         assert e["train_run_id"] in text, "final seed %d's train run id is missing" % e["seed"]
     assert "/Users/" not in text and "/home/" not in text, "the rendered block holds a local path"
+
+
+def test_render_names_an_interior_optimum_only_without_a_clipped_theta():
+    """The committed record (every shipped θ on the upper edge) and a copy with every global θ inside the grid: only
+    the copy is called an interior optimum, and only the committed one gets the margin-cutoff disclosure."""
+    import copy
+    record = _laya_record()
+    inside = copy.deepcopy(record)
+    for c in inside["candidates"]:
+        for name in ("shipped", "raw"):
+            c["theta"][name]["global"] = 0.5
+    inside["chosen"]["theta"] = inside["candidates"][[c["dump_run_id"] for c in inside["candidates"]].index(
+        inside["chosen"]["dump_run_id"])]["theta"]
+    text = postfit.render_markdown(inside)
+    assert "interior optimum" in text and "0 of 4 candidates" in text and "margin cutoff" not in text
+    clipped = postfit.render_markdown(record)
+    assert "interior optimum" not in clipped and "4 of 4 candidates" in clipped and "margin cutoff" in clipped
 
 
 def test_render_refuses_a_berturk_record():

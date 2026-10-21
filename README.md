@@ -276,10 +276,16 @@ final Laya seeds were trained with those settings fixed (LAYA-05, LAYA-08).
 - **θ and the selection rule.** θ uses the same val rule as the baselines (global θ over 0.05..0.95, a tag's own θ
   only with 10 or more val positives), for the shipped variant (after T) and the raw one (T = 1). The objective is
   val micro-F1 at the global θ after T, compared exactly as a fraction; ties go to fewer epochs, then the lower LR.
-- **Bounds.** The chosen shipped global θ, 0.95, sits on the top edge of the 0.05..0.95 θ grid (the raw global θ,
-  0.33, does not), so a higher θ might score higher on val. Every fitted T is close to the upper bound 5.0 (epoch 1's
-  is on it), because the raw margins are overconfident on val. Both grids are part of the pre-declared rule and were
-  not changed. The block below shows both.
+- **Bounds.** Every candidate's shipped global θ, not only the chosen one, sits on the top edge 0.95 of the
+  0.05..0.95 θ grid (the chosen raw global θ, 0.33, does not). Every fitted T is close to the upper bound 5.0 (epoch
+  1's is on it), because the raw margins are overconfident on val. So each candidate is scored at its own margin
+  cutoff T x logit(0.95), set by its fitted T, and not at its best θ: the epoch ranking is a ranking at that clipped
+  cutoff, not a clean optimum. Past the edge the ranking flips. Recomputed from the committed val dumps (these numbers
+  are not in the record; the command is below the list), val micro-F1 at θ 0.95 / 0.96 / 0.97 is
+  0.8107 / 0.8178 / 0.8260 for epoch 3 and 0.8033 / 0.8129 / 0.8294 for epoch 4, so at θ 0.97, two grid steps past
+  the edge, epoch 4 would win. Both grids are part of the pre-declared rule. On 2026-10-21 the user decided to keep
+  the rule and disclose this (05-REVIEW CR-01), so epoch 3 stands as the rule's result. The block below shows the
+  θ-edge count and the margin cutoffs.
 - **In-sample caveat.** The epoch, T and θ were all chosen on the same 208 val messages, so the val numbers below are
   optimistic. They are not test results.
 - **Final seeds.** Seeds 0, 1 and 2 train on `final_train` (folds 0-15) with the same 4-epoch schedule, stopped after
@@ -289,6 +295,20 @@ final Laya seeds were trained with those settings fixed (LAYA-05, LAYA-08).
   record: `make laya-postfit` rebuilds `results/postfit/laya.json` from them byte for byte, without a model.
 - **Nothing fine-tuned is scored on test before Phase 8.** `score.py` refuses a fine-tuned checkpoint on test, and
   `postfit.py` reads val dumps only.
+
+The θ-edge numbers in the Bounds bullet, recomputed from the committed val dumps (needs `make data`, no model):
+
+```bash
+python - <<'EOF'
+import json
+from pilot import dumps, metrics
+from pilot.data import DEFAULT_MANIFEST as M
+for c in json.load(open("results/postfit/laya.json"))["candidates"]:
+    logits, uids, _, entry = dumps.load_dump("results/dumps/" + c["dump_run_id"], "val", M)
+    Y, P = dumps.read_gold(entry, M, uids), metrics.probabilities(logits, c["temperature"])
+    print(c["epoch"], *("%.4f" % metrics.metrics(Y, P, t)["micro_f1"] for t in (0.95, 0.96, 0.97)))
+EOF
+```
 
 ```bash
 # the selection run: one LR, 4 epochs, an uncalibrated export per epoch under ray_results/<run_id>/exports/
@@ -331,8 +351,9 @@ fails if it is edited by hand or goes stale.
 
 - Rule: val micro-F1 at the val-selected global θ on probabilities after the val-fitted T, compared exactly as 2TP / (2TP + FP + FN) of the summed counts; tie order: equal objectives: fewer epochs first, then the lower encoder LR.
 - Encoder LR grid: 2e-05 (one value, fixed, not tuned; the approved budget allows lr_grid 3).
-- Grid edge: interior optimum: epoch 3 of the epoch grid 1..4 (approved max_epochs 4).
+- Grid edge: interior in the epoch grid: epoch 3 of the epoch grid 1..4 (approved max_epochs 4); θ clipped at the grid edge (see the θ-edge line), so the epoch is not a clean optimum of the objective.
 - Bounds: on the θ grid 0.05..0.95 the chosen global θ is shipped 0.95 (at the upper edge) and raw 0.33 (inside); the candidates' fitted T span 4.7698..5.0000 in laya's band [0.5, 5.0] (1 of 4 on a bound), and the chosen T 4.7698 is 0.2302 below the upper bound 5.0.
+- θ grid edge: 4 of 4 candidates choose the shipped global θ on the upper edge 0.95 and 0 on the lower edge 0.05 (raw: 1 upper, 0 lower), so the epoch ranking is a ranking at a T-dependent margin cutoff (T x logit(θ): 14.04..14.72 over the clipped candidates), not at each candidate's best θ; the objective is clipped at the edge, and a θ outside the pre-declared grid may rank the epochs differently.
 
 **Candidates** (one full val dump per epoch export; the objective is micro-F1 at the global θ)
 
