@@ -20,7 +20,9 @@ Superseded runs (pilot.berturk.SUPERSEDED, the BASE-03 fixes of the 06-10 and 06
 discarded selections, the tied-LR run and the head-LR, 10-epoch-grid run, each living byte for byte under
 results/superseded/<name>/. For each one, its record's sha256 is the pinned postfit_sha256, its protocol is the pinned
 protocol, its reference check still reads investigate with no resolution (so check_reference_for_final refuses it as
-the gate of any final seed), and the record rebuilds from the moved dumps. test_no_superseded_run_is_current proves none of it is current: no tracked
+the gate of any final seed), and the record rebuilds from the moved dumps.
+test_superseded_runs_change_one_recorded_key_per_step proves consecutive entries differ in exactly the recorded delta
+(canonical config, run id and protocol). test_no_superseded_run_is_current proves none of it is current: no tracked
 results/dumps dir holds one of its dumps or is named after one of its candidates, no tracked results/postfit file
 carries its sha256, and results/dumps holds BERTurk selection dumps of at most one train run.
 
@@ -210,6 +212,37 @@ def test_no_superseded_run_is_current():
     records = [rel for rel in tracked("results/postfit/") if rel.endswith(".json") and os.path.isfile(path(rel))]
     stale = [rel for rel in records if sha256_file(path(rel)) in shas]
     assert stale == [], "results/postfit holds a superseded record: %s" % stale
+
+
+def _sorted_json(v):
+    return json.dumps(as_json(v), sort_keys=True)
+
+
+def test_superseded_runs_change_one_recorded_key_per_step():
+    """R2-2: SUPERSEDED is an ordered chain, oldest gate first, and each step changes exactly its recorded delta: the
+    next run's chosen canonical config is the previous one's with delta applied and nothing else changed, its run id
+    follows, and the protocol blocks differ only where delta touches a protocol key."""
+    gates = [tuple(int(p) for p in s["gate"]["plan"].split("-")) for s in berturk.SUPERSEDED]
+    assert gates == sorted(gates) and len(set(gates)) == len(gates), "SUPERSEDED is not ordered by its gate plan"
+    for s in berturk.SUPERSEDED:
+        d = s["delta"]
+        assert isinstance(d, dict) and d, "%s: delta must be a non-empty dict" % s["name"]
+        assert set(d) <= set(berturk.IDENTITY), "%s: delta keys %s are not run identity keys" % (s["name"], sorted(d))
+        fixed = set(d) & {"split", "seed", "data_sha256", "base_model_sha256"}
+        assert not fixed, "%s: delta changes %s, which no recipe fix may change" % (s["name"], sorted(fixed))
+    for a, b in zip(berturk.SUPERSEDED, berturk.SUPERSEDED[1:]):
+        old, new = (dict(load(s["record"])["chosen"]["canonical"]) for s in (a, b))
+        assert berturk.run_id(old) == a["train_run_id"] and berturk.run_id(new) == b["train_run_id"]
+        changed = sorted(k for k in set(old) | set(new) if as_json(old.get(k)) != as_json(new.get(k)))
+        assert changed == sorted(a["delta"]), "%s -> %s changed %s, but its recorded delta is %s" % (
+            a["name"], b["name"], changed, sorted(a["delta"]))
+        applied = dict(old, **a["delta"])
+        assert _sorted_json(applied) == _sorted_json(new), "%s with its delta applied is not %s's canonical config" % (
+            a["name"], b["name"])
+        assert berturk.run_id(applied) == b["train_run_id"]
+        proto = dict(a["protocol"], **{k: v for k, v in a["delta"].items() if k in a["protocol"]})
+        assert _sorted_json(proto) == _sorted_json(b["protocol"]), \
+            "%s's protocol with its delta applied is not %s's protocol" % (a["name"], b["name"])
 
 
 def _canonical_of_chosen(record):

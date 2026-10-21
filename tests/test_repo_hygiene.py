@@ -18,8 +18,9 @@ Phase 6 BERTurk postfit records and BERTurk dump sidecars. Training outputs (Ray
 berturk_runs/, every ckpt*/ checkpoint including ckpt-berturk-final-s*) are proven gitignored. The generic home-path
 test skips binary files, so the .npz check is the guard there. The two legacy reports (100 test messages, no
 no-intent rows) sit under results/legacy/ next to a README that labels them as not comparable (D-08). The superseded
-BERTurk tied-LR selection (BASE-03 fix) sits under results/superseded/ next to a README that labels it superseded and
-not comparable, and gets the same dump and sidecar checks.
+BERTurk selections (BASE-03 fixes of the 06-10 and 06-16 gates, pilot.berturk.SUPERSEDED) sit under
+results/superseded/, each next to a README that labels it superseded and not comparable, and get the same dump and
+sidecar checks.
 """
 import io
 import json
