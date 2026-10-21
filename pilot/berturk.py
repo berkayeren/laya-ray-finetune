@@ -192,7 +192,8 @@ RECORD = "berturk_train.json"
 CHECKPOINT_FILES = BASE_FILES + (RECORD,)
 RECORD_SCHEMA = "berturk-train/1"
 DONE = "done.json"                          # <storage>/<run_id>/done.json: a finished run
-# one row per completed epoch; peak_driver_bytes is None on cpu (never 0), where peak_total_bytes is the peak RSS
+# one row per completed epoch; peak_driver_bytes is None on cpu (never 0), where peak_total_bytes is the peak RSS; loss
+# is the unweighted mean of the epoch's per-step batch losses (diagnostic only; 06-REVIEW IN-05)
 EPOCH_FIELDS = ("epoch", "loss", "train_s", "optimizer_steps", "n_messages", "peak_total_bytes", "peak_driver_bytes",
                 "peak_rss_bytes", "swap_delta_bytes")
 LOGIT_NOTE = "classifier logit per tag; P(tag) = sigmoid(logit / T)"

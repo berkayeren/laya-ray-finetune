@@ -40,7 +40,9 @@ temperature 1.0, postfit None, the run record and provenance). The run record ho
 dtype, versions, optimizer and its groups (optimizer_groups: group, decay, lr, weight_decay, n_tensors; counts, never
 parameter names or values), n_messages, n_truncated, max_len, bit_reproducible (true on cpu only: MPS is not bitwise
 deterministic), the load time, one row per completed epoch with exactly pilot.berturk.EPOCH_FIELDS
-(mean loss, device-synchronised training seconds, optimizer steps, peak memory, swap delta) and the code state
+(loss: the unweighted mean of the epoch's per-step batch losses, so the last, partial batch counts as much as a full
+one; diagnostic only, no selection reads it, and kept so for comparability with the committed records (06-REVIEW
+IN-05); device-synchronised training seconds, optimizer steps, peak memory, swap delta) and the code state
 (git sha, dirty flag, diff digest). A finished run writes <storage>/<run_id>/done.json. Records hold ids, digests,
 numbers and repo-relative paths only, never a local path or message text.
 
@@ -424,6 +426,7 @@ def main(argv=None):
     ep = {"epoch": 0, "loss_sum": 0.0, "loss_n": 0, "steps": 0, "t0": 0.0, "swap0": 0}
 
     def loss_fn(outputs, labels, num_items_in_batch=None):
+        # the epoch row's loss is the mean over steps, not over items (IN-05: documented, unchanged, diagnostic only)
         loss = masked_bce(outputs, labels, num_items_in_batch)
         ep["loss_sum"] += float(loss.detach())
         ep["loss_n"] += 1
