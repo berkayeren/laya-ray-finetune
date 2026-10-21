@@ -65,7 +65,8 @@ e.g. berturk-selection_train-s0-1a2b3c4d. --print-run-id prints it after the spl
 creating anything.
 
 --data must be a split registered in the manifest with role train and a matching sha256, read once and parsed from the
-verified bytes. --base berturk (default) fetches the pinned, sha256-verified weights (pilot.weights.fetch); any other
+verified bytes, and holding no committed held-out content under any manifest (pilot.data.refuse_held_out, shared with
+ray_train.py; 06-REVIEW WR-02). --base berturk (default) fetches the pinned, sha256-verified weights (pilot.weights.fetch); any other
 value must be a local dir holding config.json, model.safetensors, tokenizer_config.json and vocab.txt (its tokenizer
 files enter the run identity by digest). Every refusal comes before any model load. Module-level imports stay
 torch-free: torch, transformers and the ray_train helpers are imported in main after the MPS env is set (torch reads
@@ -87,8 +88,8 @@ import shutil
 import time
 
 from pilot import berturk, pins, postfit, runs, spike
-from pilot.data import (DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file, write_atomic,
-                        verify_split_file)
+from pilot.data import (DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, refuse_held_out, repo_relpath,
+                        sha256_file, write_atomic, verify_split_file)
 from pilot import dumps
 
 
@@ -278,6 +279,7 @@ def main(argv=None):
         raw = f.read()                                      # hash and parse the same bytes (no reread window)
     entry = verify_split_file(a.data, manifest_path=a.manifest, roles=("train",), data=raw)
     rows = parse_jsonl(raw)
+    refuse_held_out(a.data, entry, rows)                    # every row, keyed on the content (06-REVIEW WR-02)
     if a.max_messages is not None:
         rows = rows[:a.max_messages]
     if not rows:

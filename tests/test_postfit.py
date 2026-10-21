@@ -194,7 +194,7 @@ def snap(tmp_path, synthetic_raw):
 
 
 def write_candidate(root, snap, lr, epoch, seed=0, split="selection_train", calibrated=False, shipped=1.0,
-                    n=None, rng_seed=None, postfit_sha256=None):
+                    n=None, rng_seed=None, postfit_sha256=None, data_sha256=None):
     """A candidate val dump under root/<run_id>: random margins, a fake local identity and a training block shaped
     like score.training_block's. Returns the run dir."""
     _, manifest, entry, uids = snap
@@ -206,7 +206,8 @@ def write_candidate(root, snap, lr, epoch, seed=0, split="selection_train", cali
              "config_sha256": sha256_bytes(("config " + tag).encode()),
              "files_sha256": {"encoder/config.json": "e" * 64, "tokenizer/tokenizer_config.json#normalized": "t" * 64}}
     rid = dumps.run_id("laya", ident)
-    canon = _canon(lr, split=split, seed=seed, neg_seed=seed)
+    canon = _canon(lr, split=split, seed=seed, neg_seed=seed, **({} if data_sha256 is None else
+                                                                  {"data_sha256": data_sha256}))
     training = {"run_id": "laya-%s-neg8-s%d-%08x" % (split, seed, int(lr * 1e6)), "split": split, "epoch": epoch,
                 "epochs_schedule": 4, "stop_after_epoch": None, "encoder_lr": lr, "head_lr": 0.0001,
                 "neg_seed": seed, "rung": "none", "fallback": False, "weaker": False,
@@ -332,6 +333,23 @@ def test_postfit_refuses_test_input(tmp_path, snap):
         postfit.candidate(str(empty), manifest)
     with pytest.raises(SystemExit):
         postfit_cli.main(["--manifest", manifest])           # no run dir at all: argparse error
+
+
+def test_postfit_binds_the_training_bytes_on_the_committed_manifest(tmp_path, snap, monkeypatch):
+    """06-REVIEW WR-02: on the committed manifest a candidate must have trained on the committed selection_train
+    bytes (canonical data_sha256), not on any split a manifest copy named selection_train. The synthetic manifest
+    stands in for the committed one; another manifest leaves data_sha256 free, as before."""
+    out_dir, manifest = snap[0], snap[1]
+    with open(manifest, encoding="utf-8") as f:
+        want = json.load(f)["splits"]["selection_train"]["sha256"]
+    ok = write_candidate(tmp_path / "ok", snap, 2e-05, 1, data_sha256=want)
+    other = write_candidate(tmp_path / "other", snap, 2e-05, 1, data_sha256="v" * 64)
+    postfit.candidate(other, manifest)                       # not the committed manifest: unchanged
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", manifest)
+    monkeypatch.setattr(postfit, "DEFAULT_MANIFEST", manifest)
+    postfit.candidate(ok, manifest)
+    with pytest.raises(SystemExit, match="trained on data sha256 v{64}, not the committed selection_train"):
+        postfit.candidate(other, manifest)
 
 
 @pytest.mark.parametrize("kw, match", [

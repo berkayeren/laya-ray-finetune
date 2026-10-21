@@ -91,7 +91,9 @@ stop_after_epoch and postfit_sha256 are run-identity keys left out when None (ev
 postfit.py --print-final-commands prints the commands.
 
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
-(tampered, unregistered, val/test/probe) is refused before Ray starts. --base multilingual fetches the pinned,
+(tampered, unregistered, val/test/probe) is refused before Ray starts, and so is a train split under any manifest that
+holds committed held-out content (pilot.data.refuse_held_out: committed test content, or committed val content in
+selection_train; 06-REVIEW WR-02). --base multilingual fetches the pinned,
 sha256-verified Laya weights (pilot.weights) before Ray starts; any other value must be a local checkpoint dir. A base
 whose tokenizer/tokenizer_config.json laya would have to rewrite on load in a read-only tokenizer/ (or that is not a
 JSON object) is refused before Ray starts too (pilot.weights.check_tokenizer_config_rewritable, 04-REVIEW CR-01); the
@@ -131,8 +133,8 @@ from ray.train.torch import TorchTrainer
 
 from pilot import laya_adapter as la
 from pilot import dumps, pins, postfit, runs, spike
-from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, repo_relpath, sha256_file,
-                        verify_split_file)
+from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, refuse_held_out,
+                        repo_relpath, sha256_file, verify_split_file)
 from pilot.weights import (check_tokenizer_config_rewritable, check_tokenizer_config_rewritten, checkpoint_digests,
                            fetch, identity, verify_files)
 
@@ -910,6 +912,7 @@ def main(argv=None):
     if a.amp and r["device"] in ("mps", "cpu"):
         ap.error("--amp is CUDA-only (the MPS fine-tune is measured with AMP off); drop --amp")
     entry = verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))   # before ray.init (D-03)
+    refuse_held_out(a.data, entry, read_verified_rows(a.data, entry["sha256"]))   # keyed on the content (WR-02)
     # the postfit record (torch-free read: schema and sha256 of the parsed bytes) before any fetch or ray.init
     record, record_sha = postfit.read_record(a.postfit) if a.postfit else (None, None)
     if not a.print_run_id and os.path.exists(a.out) and (not os.path.isdir(a.out) or os.listdir(a.out)):

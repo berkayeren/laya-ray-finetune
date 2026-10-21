@@ -5,7 +5,9 @@ Ray or laya, so BERTurk (Phase 6) runs the same functions on its own val dumps.
 Inputs are val dumps only. candidate() reads a run dir through pilot.dumps.load_dump(run_dir, "val", manifest) and
 never takes a split argument; it refuses a path that is a file (a .jsonl, an .npz), a run dir that holds a test dump,
 a --n subset val dump, a candidate trained on another split than selection_train (a final_train model has seen the
-val folds, so its val outputs are in-sample), a calibrated candidate and one whose shipped T is not 1.0. Test never
+val folds, so its val outputs are in-sample), on the committed manifest a candidate whose canonical data_sha256 is not
+the committed selection_train sha256 (06-REVIEW WR-02: the bytes, not the split name), a calibrated candidate and one
+whose shipped T is not 1.0. Test never
 shapes T, θ or the selection (ROADMAP Phase 5 criterion 3).
 
 Protocol (05-RESEARCH Open Questions 1-4, confirmed by the user at plan 05-10: "Protocol decision: confirm"):
@@ -167,6 +169,14 @@ def candidate(run_dir, manifest_path=DEFAULT_MANIFEST):
     if tr.get("split") != SELECTION_SPLIT:
         raise SystemExit("%s: trained on %s; postfit selects only on %s runs (a %s model's val is in-sample)"
                          % (run_dir, tr.get("split"), SELECTION_SPLIT, FINAL_SPLIT))
+    if manifest_is_committed(manifest_path):                 # 06-REVIEW WR-02: the bytes, not the split name
+        with open(DEFAULT_MANIFEST, encoding="utf-8") as f:
+            want = ((json.load(f).get("splits") or {}).get(SELECTION_SPLIT) or {}).get("sha256")
+        have = (tr.get("canonical") or {}).get("data_sha256")
+        if have != want:
+            raise SystemExit("%s: trained on data sha256 %s, not the committed %s sha256 %s (data/splits.json); a "
+                             "record on the committed manifest selects only runs trained on it"
+                             % (run_dir, have, SELECTION_SPLIT, want))
     if tr.get("calibrated") is not False:
         raise SystemExit("%s: calibrated %r; postfit fits T on the raw margins of uncalibrated exports only"
                          % (run_dir, tr.get("calibrated")))

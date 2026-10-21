@@ -359,6 +359,22 @@ def holds_committed(entry, cases, name):
         any((c.get("uid"), c.get("state")) in pairs for c in cases)
 
 
+HELD_OUT = {"selection_train": ("val", "test"), "final_train": ("test",)}   # final_train holds the val folds by design
+
+
+def refuse_held_out(path, entry, cases):
+    """SystemExit when a train split (its entry in any manifest, and its parsed rows `cases`) holds committed held-out
+    content (holds_committed): committed test content in any train split, and committed val content in
+    selection_train too. A manifest copy that registers the val or test bytes as a train split therefore cannot train
+    a model on them (06-REVIEW WR-02). Shared by ray_train.py and berturk_train.py, before any fetch, load or Ray."""
+    name = os.path.splitext(os.path.basename(entry["path"]))[0]
+    for held in HELD_OUT.get(name, ("val", "test")):
+        if holds_committed(entry, cases, held):
+            raise SystemExit("%s (%s) holds committed %s content; no model trains on a held-out split, so a manifest "
+                             "may not register it as a train split; train on the committed %s (drop --manifest, or "
+                             "run `make data`)" % (path, name, held, name))
+
+
 def _registered(path, manifest_path, section, what, data=None):
     """Shared lookup: `path` must be registered under manifest[section] (safe relative paths) with a matching sha256.
 

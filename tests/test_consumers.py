@@ -178,6 +178,40 @@ def test_score_interlock_is_keyed_on_the_test_content(tmp_repo, synthetic_raw):
     assert r.returncode == 0, r.stderr
 
 
+def _relabel(repo, name, raw):
+    """A manifest copy (copy/splits.json) whose `name` entry registers the bytes `raw`; returns the split path."""
+    import json
+    shutil.copytree(str(repo / "data" / "splits"), str(repo / "copy" / "splits"), dirs_exist_ok=True)
+    (repo / "copy" / "splits" / (name + ".jsonl")).write_bytes(raw)
+    path = repo / "copy" / "splits.json"
+    m = json.loads((path if path.exists() else repo / "data" / "splits.json").read_text(encoding="utf-8"))
+    rows = pilot.data.parse_jsonl(raw)
+    m["splits"][name].update(sha256=pilot.data.sha256_bytes(raw), n_messages=len(rows),
+                             uids_sha256=pilot.data.sha256_bytes("\n".join(r["uid"] for r in rows).encode("utf-8")))
+    path.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+    return "copy/splits/%s.jsonl" % name
+
+
+@pytest.mark.parametrize("script", ["ray_train.py", "berturk_train.py"])
+@pytest.mark.parametrize("name, held, cut", [
+    ("selection_train", "val", 0),           # the whole committed val bytes: the entry's hashes
+    ("selection_train", "val", 1),           # all but one row: the (uid, message) pairs
+    ("selection_train", "test", 1),
+    ("final_train", "test", 0),
+])
+def test_trainers_refuse_held_out_content_under_any_manifest(tmp_repo, script, name, held, cut):
+    """06-REVIEW WR-02: a manifest copy that registers committed val or test content as a train split is refused by
+    both trainers before any fetch, load or Ray start (pilot.data.refuse_held_out; final_train keeps the val folds)."""
+    shutil.copyfile(os.path.join(REPO, "berturk_train.py"), str(tmp_repo / "berturk_train.py"))
+    lines = (tmp_repo / "data" / "splits" / (held + ".jsonl")).read_bytes().splitlines(keepends=True)
+    data = _relabel(tmp_repo, name, b"".join(lines[cut:]))
+    r = _run(tmp_repo, script, "--data", data, "--manifest", "copy/splits.json", "--out", "ckpt",
+             "--base", str(tmp_repo / "no_such_base"), "--storage", "runs")
+    assert r.returncode != 0 and "holds committed %s content" % held in r.stderr, r.stderr
+    assert "Traceback" not in r.stderr, r.stderr
+    assert not (tmp_repo / "runs").exists() and not (tmp_repo / "ckpt").exists()
+
+
 @pytest.mark.parametrize("n", ["0", "-5"])
 def test_evaluate_refuses_non_positive_n(tmp_repo, n):
     r = _run(tmp_repo, "evaluate.py", "data/splits/test.jsonl", "--workers", "0", "--n", n)
