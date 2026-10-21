@@ -28,6 +28,8 @@ The user's gate reply, verbatim (2026-10-21): `fix: head LR 1e-4 (Recommended)`.
 A new selection run in which the classifier head trains at 1e-4 (Laya's head LR, `pilot.postfit.HEAD_LR`), while the
 encoder stays at 2e-05 and every other setting is unchanged (replan decision RP-3). This recipe change was made after
 a val outcome had been seen. It is a disclosed protocol change, recorded in code as `pilot.berturk.SUPERSEDED`.
+That head-LR run (`berturk-selection_train-s0-8c033154`) was itself superseded at the plan 06-16 BASE-03 gate; see
+`results/superseded/berturk-10-epoch-grid/`.
 
 ## Why it is kept
 

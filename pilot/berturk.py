@@ -30,14 +30,17 @@ and final seeds (A4). postfit.py
 runs Laya's own functions on BERTurk val dumps under it. prune_export deletes one berturk_train.py epoch export only
 after a verified full val dump of exactly that export exists (postfit.py --prune picks it for a dir holding RECORD).
 
-Superseded runs (BASE-03 fix, plan 06-10 gate): SUPERSEDED is the one code record of a BERTurk selection that was
-discarded after its val outcome. Its dumps and records moved byte for byte (git renames) from results/dumps and
-results/postfit to its own labelled dir under results/superseded/, so results/dumps and results/postfit only ever
-hold the current BERTurk run. One pinned digest anchors the whole chain: postfit_sha256 is the record's sha256, the
-reference check binds that sha256 and the record binds every candidate's dump_sha256. The protocol it ran under is
-kept as literals, never as a reference to PROTOCOL. A superseded run is never current: no tracked current dump or
-record may belong to it, and its reference reads investigate without a resolution, so check_reference_for_final
-refuses it as the gate of any final seed (tests/test_berturk_results.py enforces both).
+Superseded runs (BASE-03 fixes, plan 06-10 and 06-16 gates): SUPERSEDED is an ordered chain, oldest first, of the
+BERTurk selections discarded after their val outcome. Each entry's delta holds the canonical keys and values the run
+that replaced it changed, and nothing else changed (the replacing run is the next entry, or the current run for the
+last entry; tests/test_berturk_results.py enforces both). Each run's dumps and records moved byte for byte (git
+renames) from results/dumps and results/postfit to its own labelled dir under results/superseded/, so results/dumps
+and results/postfit only ever hold the current BERTurk run. One pinned digest anchors each run's chain:
+postfit_sha256 is the record's sha256, the reference check binds that sha256 and the record binds every candidate's
+dump_sha256. The protocol each ran under is kept as literals, never as a reference to PROTOCOL. A superseded run is
+never current: no tracked current dump or record may belong to it, and its reference reads investigate without a
+resolution, so check_reference_for_final refuses it as the gate of any final seed (tests/test_berturk_results.py
+enforces both).
 
 Reference check (BASE-03, fixed in code before any BERTurk val score): reference_check(record, ...) compares the chosen
 candidate's val micro-F1 at its val-selected global θ after T (the selection objective, A5) with THRESHOLD = 707/1000,
@@ -74,7 +77,7 @@ usage: from pilot import berturk; rid = berturk.run_id(berturk.canonical(values)
        berturk.final_command(record, seed, record_path, reference_path, storage, out_prefix)
        berturk.final_manifest(record_path, ckpt_dirs)
        berturk.optimizer_groups(param_names, decay_names, new_names, encoder_lr, head_lr, weight_decay)
-       for s in berturk.SUPERSEDED: s["record"], s["postfit_sha256"], s["protocol"]
+       for s in berturk.SUPERSEDED: s["record"], s["postfit_sha256"], s["protocol"], s["delta"]
 """
 import hashlib
 import json
@@ -108,9 +111,11 @@ LR_GRID = (2e-05,)                          # A1: explicit; equal to pilot.postf
 PROTOCOL = {"lr_grid": LR_GRID, "epochs": EPOCHS, "head_lr": HEAD_LR, "selection_seed": postfit.SELECTION_SEED,
             "final_seeds": postfit.FINAL_SEEDS}       # head_lr: Laya's fixed head LR (BASE-03 fix); seeds Laya's (A4)
 
-# ---- superseded selection runs (BASE-03 fix, plan 06-10 gate; RP-2) ----
-# kept as disclosed history under results/superseded/<name>/, never current; protocol values are literals on purpose
+# ---- superseded selection runs (BASE-03 fixes, plan 06-10 and 06-16 gates; RP-2, R2-2) ----
+# an ordered chain, oldest first, kept as disclosed history under results/superseded/<name>/, never current; protocol
+# values and deltas are literals on purpose (delta: the canonical change of the run that replaced the entry)
 _TIED = "results/superseded/berturk-tied-head-lr"
+_GRID10 = "results/superseded/berturk-10-epoch-grid"
 SUPERSEDED = (
     {"name": "berturk-tied-head-lr", "dir": _TIED, "record": _TIED + "/postfit/berturk.json",
      "reference": _TIED + "/postfit/berturk-reference.json", "dumps": _TIED + "/dumps",
@@ -120,7 +125,19 @@ SUPERSEDED = (
      "protocol": {"lr_grid": (2e-05,), "epochs": 10, "head_lr": None, "selection_seed": 0, "final_seeds": (0, 1, 2)},
      "gate": {"plan": "06-10", "date": "2026-10-21", "decision": "fix", "reply": "fix: head LR 1e-4 (Recommended)"},
      "change": ("the classifier head's LR stops being tied to the encoder LR 2e-05 and becomes 1e-4, Laya's head LR "
-                "(pilot.postfit.HEAD_LR); the encoder LR and every other setting are unchanged")},
+                "(pilot.postfit.HEAD_LR); the encoder LR and every other setting are unchanged"),
+     "delta": {"head_lr": 0.0001}},
+    {"name": "berturk-10-epoch-grid", "dir": _GRID10, "record": _GRID10 + "/postfit/berturk.json",
+     "reference": _GRID10 + "/postfit/berturk-reference.json", "dumps": _GRID10 + "/dumps",
+     "record_path_at_check": "results/postfit/berturk.json",
+     "postfit_sha256": "7086c7f100007c1ab812e1f473a537cb460d0b911962b12de3940618ffd40d58",
+     "train_run_id": "berturk-selection_train-s0-8c033154",
+     "protocol": {"lr_grid": (2e-05,), "epochs": 10, "head_lr": 0.0001, "selection_seed": 0, "final_seeds": (0, 1, 2)},
+     "gate": {"plan": "06-16", "date": "2026-10-21", "decision": "fix", "reply": "fix: extend epochs (Recommended)"},
+     "change": ("the epoch grid of the selection schedule grows from 10 to 30 epochs, the user's choice at the 06-16 "
+                "gate, while the encoder LR 2e-05, the head LR 1e-4 and every other setting stay; the linear schedule "
+                "and its warm-up then span 30 epochs"),
+     "delta": {"epochs": 30}},
 )
 
 # ---- the published reference check (BASE-03, A5, OQ2), confirmed at plan 06-02 ----
