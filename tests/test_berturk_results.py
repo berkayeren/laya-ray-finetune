@@ -179,15 +179,22 @@ def test_superseded_record_is_complete_and_consistent(s):
 
 
 @pytest.mark.parametrize("s", berturk.SUPERSEDED, ids=SUPERSEDED_IDS)
-def test_superseded_reference_check_equals_its_recompute(s):
+def test_superseded_reference_check_equals_its_recompute(s, tmp_path):
     ref = _check_reference(s["record"], s["reference"], s["record_path_at_check"])
     assert ref["postfit"] == {"path": s["record_path_at_check"], "sha256": s["postfit_sha256"]}
     want = SUPERSEDED_VALUE[s["name"]]
     assert ref["status"] == want["status"] and ref["value"]["fraction"] == want["fraction"]
     assert ref["resolution"] is None
-    # a superseded run can never gate a final seed
+    # a superseded run can never gate a final seed, not even with its status and fraction edited together (WR-01)
+    record, sha = postfit.read_record(path(s["record"]))
     with pytest.raises(SystemExit, match="BASE-03"):
-        berturk.check_reference_for_final(path(s["reference"]), s["postfit_sha256"])
+        berturk.check_reference_for_final(path(s["reference"]), s["postfit_sha256"], record)
+    edited = dict(ref, status="ok", below_threshold=False, value=dict(ref["value"], fraction=[800, 1000]))
+    edited_path = os.path.join(str(tmp_path), "berturk-reference.json")
+    with open(edited_path, "w", encoding="utf-8") as f:
+        json.dump(edited, f, ensure_ascii=False, indent=2)
+    with pytest.raises(SystemExit, match="is not pilot.berturk.reference_check"):
+        berturk.check_reference_for_final(edited_path, sha, record)
 
 
 @pytest.mark.data
@@ -309,6 +316,9 @@ def test_committed_reference_check_equals_its_recompute():
             "the BASE-03 check reads investigate with no resolution, yet %s is tracked (a final seed trained)" % FINAL
     else:
         assert ref["resolution"] is None
+    # the committed check passes the final-seed gate, which recomputes it from the record (06-REVIEW WR-01)
+    rec, sha = postfit.read_record(path(RECORD))
+    assert berturk.check_reference_for_final(path(REFERENCE), sha, rec) == ref
 
 
 @pytest.mark.data

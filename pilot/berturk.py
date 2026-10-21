@@ -54,7 +54,8 @@ resolution, which is allowed only on "investigate" (OQ2: an investigate result m
 Final seeds (BASE-01/02/03, plan 06-08; A4, A9 and OQ2 confirmed at plan 06-02): berturk_train.py --postfit RECORD
 --reference REF trains one final seed on final_train with the val-chosen settings and stops after the chosen epoch of
 the selection schedule. check_reference_for_final refuses it unless REF is the reference check of exactly that record
-(its sha256) and reads ok or carries a recorded resolution; pilot.postfit.check_final refuses any other setting. The
+(its sha256), equals reference_check recomputed from that record (06-REVIEW WR-01) and reads ok or carries a recorded
+resolution; pilot.postfit.check_final refuses any other setting. The
 final checkpoint serves the record's T (calibrated true, postfit = pilot.postfit.final_block). final_command prints the
 argv of each final seed from the record; final_manifest (pilot.postfit.FINAL_SCHEMA) lists the finished checkpoints only
 when they are exactly the record's final seeds, each bound to its sha256, at the chosen epoch and T.
@@ -81,7 +82,7 @@ usage: from pilot import berturk; rid = berturk.run_id(berturk.canonical(values)
        ident = berturk.identity(ckpt); berturk.dump_run_id(ident); seed, training = berturk.training_block(
        berturk.read_record(ckpt, ident)); berturk.prune_export(export_dir, dump_root, manifest_path)
        berturk.reference_check(record, record_path, record_sha256, resolution=None)
-       berturk.check_reference_for_final(reference_path, record_sha256)
+       berturk.check_reference_for_final(reference_path, record_sha256, record)
        berturk.final_command(record, seed, record_path, reference_path, storage, out_prefix)
        berturk.final_manifest(record_path, ckpt_dirs)
        berturk.optimizer_groups(param_names, decay_names, new_names, encoder_lr, head_lr, weight_decay)
@@ -459,11 +460,13 @@ def reference_check(record, record_path, record_sha256, resolution=None):
             "caveats": CAVEATS, "resolution": resolution}
 
 
-def check_reference_for_final(reference_path, record_sha256):
+def check_reference_for_final(reference_path, record_sha256, record):
     """The BASE-03 gate of a final seed (OQ2): the parsed reference check at reference_path, refused (SystemExit) when
     it is missing, not valid JSON, of another schema, of another postfit record than record_sha256, its status
-    disagrees with its own exact fraction, or it reads "investigate" without a non-empty resolution. No final seed is
-    trained (or printed) before the shortfall is investigated and then fixed or documented."""
+    disagrees with its own exact fraction, it reads "investigate" without a non-empty resolution, or it is not
+    reference_check of `record` (the parsed record of that sha256) at its recorded path and resolution: the gate
+    recomputes the value from the record and never trusts the file's own (06-REVIEW WR-01). No final seed is trained
+    (or printed) before the shortfall is investigated and then fixed or documented."""
     if not os.path.isfile(reference_path):
         raise SystemExit("%s not found; build the BASE-03 reference check with postfit.py --reference-check RECORD "
                          "--out %s before any final seed" % (reference_path, reference_path))
@@ -495,6 +498,11 @@ def check_reference_for_final(reference_path, record_sha256):
         raise SystemExit("BASE-03: BERTurk's val micro-F1 %s is below 0.707 and no resolution is recorded; investigate, "
                          "then fix (a new selection run) or document it (postfit.py --reference-check --resolution) "
                          "before any final seed" % value.get("val_micro_f1_at_global_theta"))
+    got = reference_check(record, os.path.join(REPO_ROOT, ref["postfit"].get("path") or ""), record_sha256, res)
+    if postfit._json(got) != postfit._json(ref):
+        raise SystemExit("%s is not pilot.berturk.reference_check of the postfit record %s (its value, status or "
+                         "another field was edited); rebuild it with postfit.py --reference-check"
+                         % (reference_path, record_sha256))
     return ref
 
 

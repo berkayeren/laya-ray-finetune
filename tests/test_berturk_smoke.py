@@ -148,7 +148,7 @@ def test_berturk_final_seed_chain(tmp_path, synthetic_raw, capsys):
         ref = str(tmp_path / "postfit" / "berturk-reference.json")
         check = postfit_cli.main(["--reference-check", path, "--resolution", "tiny offline test model", "--out", ref])
         assert check["status"] == "investigate" and check["postfit"]["sha256"] == sha
-        assert berturk.check_reference_for_final(ref, sha)["resolution"] == "tiny offline test model"
+        assert berturk.check_reference_for_final(ref, sha, record)["resolution"] == "tiny offline test model"
 
         prefix, final_storage = str(tmp_path / "ckpt" / "berturk-final"), str(tmp_path / "final_runs")
         final_train = os.path.join(splits, "final_train.jsonl")

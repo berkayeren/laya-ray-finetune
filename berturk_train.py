@@ -50,7 +50,8 @@ trajectory's epoch K; K in 1..--epochs - 1, K = --epochs has one spelling, the o
 trained epoch as the final checkpoint (a temp sibling, then one rename; the same files as an export). --postfit RECORD
 --reference REF (each needs the other, and --out) binds a final seed by refusal, never by transcription: before any
 fetch, load or run dir, also with --print-run-id, pilot.berturk.check_reference_for_final refuses unless REF is the
-BASE-03 reference check of exactly that record (its sha256) and reads ok or carries a recorded resolution, and
+BASE-03 reference check of exactly that record (its sha256), recomputed from the record (06-REVIEW WR-01), and reads
+ok or carries a recorded resolution, and
 pilot.postfit.check_final refuses unless --data is the record's final split, --seed one of its final seeds,
 --stop-after-epoch the chosen one and every other canonical value the chosen selection run's (naming the first
 differing key). The final berturk_train.json serves the val-fitted T: calibrated true, temperature the record's chosen
@@ -289,7 +290,7 @@ def main(argv=None):
         if pf_record.get("system_kind") != "berturk":
             raise SystemExit("--postfit %s: system kind %r; berturk_train.py trains the final seeds of a BERTurk "
                              "record" % (a.postfit, pf_record.get("system_kind")))
-        berturk.check_reference_for_final(a.reference, record_sha)
+        berturk.check_reference_for_final(a.reference, record_sha, pf_record)
     if (a.out is not None and not a.print_run_id and os.path.lexists(a.out)
             and (not os.path.isdir(a.out) or os.listdir(a.out))):
         raise SystemExit("--out %s exists and is not empty; choose a new dir" % a.out)

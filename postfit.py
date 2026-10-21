@@ -178,7 +178,7 @@ def main(argv=None):
         if record.get("system_kind") == "berturk":
             if a.reference is None:
                 ap.error("--print-final-commands of a BERTurk record needs --reference REF (its BASE-03 check)")
-            berturk.check_reference_for_final(a.reference, sha)      # no command printed before the gate passes
+            berturk.check_reference_for_final(a.reference, sha, record)   # no command printed before the gate passes
             argvs = [berturk.final_command(record, seed, a.print_final_commands, a.reference, a.storage, a.out_prefix,
                                            base=a.base or "berturk", manifest=a.manifest, **data)
                      for seed in record["final"]["seeds"]]

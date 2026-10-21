@@ -504,6 +504,10 @@ REFERENCE = [  # (the --reference given, the refusal)
     ("invalid_json", lambda s, d: d.joinpath("bad.json").write_text("{") and str(d / "bad.json"), "not valid JSON"),
     ("status_edited", lambda s, d: write_json(d / "edited.json", dict(_json(s["unresolved"]), status="ok")),
      "disagrees"),
+    # 06-REVIEW WR-01: a status and fraction edited together agree with each other, but not with the record
+    ("value_edited", lambda s, d: write_json(d / "value.json", dict(
+        _json(s["unresolved"]), status="ok", value=dict(_json(s["unresolved"])["value"], fraction=[800, 1000]))),
+     "is not pilot.berturk.reference_check of the postfit record"),
 ]
 
 
