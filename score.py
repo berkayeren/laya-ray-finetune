@@ -27,9 +27,12 @@ into metrics with numpy alone (D-05). Systems (--model, default laya):
   in any order, are reassembled by uid into split-file order (a duplicate, missing or unexpected uid is refused).
   --gpus-per-worker is the Ray actors' GPU resource (cuda).
 - berturk: a BERTurk checkpoint written by berturk_train.py (--checkpoint DIR: an epoch export or a final seed holding
-  pilot.berturk.CHECKPOINT_FILES), scored in-process only (--workers 0; seconds for a split) by score_berturk. The
-  driver refuses a split with role test before any hashing, file read or model load, under any manifest (every BERTurk
-  checkpoint is fine-tuned; Phase 8's protocol freeze decides test scoring), then checks the five files, names the
+  pilot.berturk.CHECKPOINT_FILES), scored in-process only (--workers 0; seconds for a split) by score_berturk. Once
+  the split is parsed, before any hashing, checkpoint file read or model load, the driver refuses a split with role
+  test under any manifest and any split holding committed test content, keyed on the content as for Laya (the sha256
+  or uids_sha256 of the committed test entry, or any (uid, message) pair of the committed test.jsonl:
+  pilot.data.holds_committed; 06-REVIEW CR-01), since every BERTurk checkpoint is fine-tuned and Phase 8's protocol
+  freeze decides test scoring (refuse_berturk_test). It then checks the five files, names the
   dump by pilot.berturk.dump_run_id (berturk-<model sha256[:12]>-<berturk_train.json sha256[:8]>-<digest of
   config.json and the tokenizer files[:8]>), refuses an existing dump, reads config.json and berturk_train.json from
   the bytes the identity hashed, and refuses a config.json whose labels are not the 48 INTENTS tags in INTENTS order
@@ -71,7 +74,7 @@ argument check and before any hashing, fetch, model load or Ray start (refuse_fi
 score.main and inherits it). It is keyed on the scored content, not on the manifest bytes (05-REVIEW CR-02): refused
 are a split with role test under the committed manifest, a split (any role, any manifest) whose sha256 or uids_sha256
 is the committed test entry's in data/splits.json, and any scored (uid, message) pair of the committed
-data/splits/test.jsonl when that file exists (committed_test_pairs), so a byte-different manifest copy or the
+data/splits/test.jsonl when that file exists (pilot.data.holds_committed), so a byte-different manifest copy or the
 --no-include-no-intent variant cannot turn it off. A uid alone is not the key: the synthetic splits of the tests reuse
 the uid scheme with other messages, so the CPU smoke test (tests/test_smoke_cpu.py) stays outside it. Val scoring of
 the same checkpoint, and the pinned zero-shot or a not fine-tuned checkpoint on test, are unaffected; hotels_probe is
@@ -96,8 +99,8 @@ import numpy as np
 from intents import INTENTS, QUESTIONS
 from pilot import berturk, dumps
 from pilot import laya_adapter as la
-from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, manifest_is_committed, parse_jsonl, questions_sha256,
-                        repo_relpath, sha256_bytes, sha256_file, verify_split_file)
+from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, holds_committed, manifest_is_committed, parse_jsonl,
+                        questions_sha256, repo_relpath, sha256_bytes, sha256_file, verify_split_file)
 
 SUBSET_SEED = 0                                             # fixed shuffle before --n, so subsets are comparable
 TAGS = list(INTENTS)
@@ -183,19 +186,6 @@ def is_finetuned(checkpoint):
     return cfg.get("fine_tuned") is True or bool(isinstance(tr, dict) and tr.get("ray_train"))
 
 
-def committed_test_pairs():
-    """(committed test entry of the repo's data/splits.json, the set of (uid, message) pairs of the committed
-    data/splits/test.jsonl). The set is empty when that file is absent (no `make data`); the entry's hashes still key
-    the interlock then."""
-    with open(DEFAULT_MANIFEST, encoding="utf-8") as f:
-        committed = json.load(f)["splits"]["test"]
-    path = os.path.join(os.path.dirname(DEFAULT_MANIFEST), committed["path"])
-    if not os.path.isfile(path):
-        return committed, set()
-    with open(path, "rb") as f:
-        return committed, {(c.get("uid"), c.get("state")) for c in parse_jsonl(f.read())}
-
-
 def refuse_finetuned_test(checkpoint, entry, manifest_path, cases=()):
     """The Phase 5 test interlock (RESEARCH A6, ROADMAP Phase 5 criterion 4): SystemExit when a fine-tuned Laya
     checkpoint would be scored on committed test content: a split with role test under the committed manifest, a split
@@ -204,10 +194,7 @@ def refuse_finetuned_test(checkpoint, entry, manifest_path, cases=()):
     Runs before any hashing, fetch, model load or Ray start; Phase 8 replaces it with the protocol-hash gate."""
     if not is_finetuned(checkpoint):
         return
-    committed, pairs = committed_test_pairs()
-    if (entry["role"] == "test" and manifest_is_committed(manifest_path)) or \
-            entry["sha256"] == committed["sha256"] or entry["uids_sha256"] == committed["uids_sha256"] or \
-            any((c.get("uid"), c.get("state")) in pairs for c in cases):
+    if (entry["role"] == "test" and manifest_is_committed(manifest_path)) or holds_committed(entry, cases, "test"):
         raise SystemExit("%s is a fine-tuned Laya checkpoint and %s holds committed test content; no fine-tuned model "
                          "is scored on test before the Phase 8 protocol freeze (protocol.json); score val instead"
                          % (_shown(checkpoint), entry["path"]))
@@ -491,13 +478,17 @@ def score_laya(a, checkpoint, cases, device, ident):
     return logits, fields
 
 
-def refuse_berturk_test(checkpoint, entry):
-    """No BERTurk checkpoint is scored on a split with role test in Phase 6, under any manifest (ROADMAP Phase 6
-    criterion 4): every BERTurk checkpoint is fine-tuned. Runs right after the split verification, before any hashing,
-    checkpoint file read or model load; hotels_probe is already refused by the role gate."""
-    if entry["role"] == "test":
-        raise SystemExit("%s is a BERTurk checkpoint; no fine-tuned model is scored on test before the Phase 8 "
-                         "protocol freeze (protocol.json); score val instead" % _shown(checkpoint))
+def refuse_berturk_test(checkpoint, entry, cases=()):
+    """No BERTurk checkpoint is scored on test content in Phase 6 (ROADMAP Phase 6 criterion 4): every BERTurk
+    checkpoint is fine-tuned. Refused are a split with role test under any manifest and, keyed on the content as for
+    Laya (pilot.data.holds_committed; 06-REVIEW CR-01), a split of any role whose sha256 or uids_sha256 is the
+    committed test entry's or any scored (uid, message) pair (`cases`, the parsed rows) of the committed test.jsonl.
+    Runs right after the split is parsed, before any hashing, checkpoint file read or model load; hotels_probe is
+    already refused by the role gate."""
+    if entry["role"] == "test" or holds_committed(entry, cases, "test"):
+        raise SystemExit("%s is a BERTurk checkpoint and %s is a test split or holds committed test content; no "
+                         "fine-tuned model is scored on test before the Phase 8 protocol freeze (protocol.json); "
+                         "score val instead" % (_shown(checkpoint), entry["path"]))
 
 
 def _bound_bytes(path, sha256):
@@ -635,10 +626,10 @@ def main(argv=None):
     with open(a.split_jsonl, "rb") as f:
         raw = f.read()                                       # hash and parse the same bytes (no reread window)
     entry = verify_split_file(a.split_jsonl, manifest_path=a.manifest, roles=("test", "val"), data=raw)
-    if a.model == "berturk":
-        refuse_berturk_test(a.checkpoint, entry)             # before any hashing, file read or model load
     split_name = os.path.splitext(os.path.basename(entry["path"]))[0]
     cases = parse_jsonl(raw)                                 # split-file order: a full dump verifies by uids_sha256
+    if a.model == "berturk":
+        refuse_berturk_test(a.checkpoint, entry, cases)      # every row, before any hashing, file read or model load
     if a.n is not None:
         random.Random(SUBSET_SEED).shuffle(cases)
         cases = cases[:a.n]

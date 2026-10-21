@@ -116,6 +116,52 @@ def test_berturk_test_role_refused_before_hashing(built, ckpt, tmp_path, monkeyp
     assert _no_dump(tmp_path / "dumps")
 
 
+def _relabelled(built, dst, lines):
+    """A manifest copy under dst whose val entry registers `lines` (raw JSONL lines) as splits/val.jsonl; every other
+    split keeps its bytes. Returns (val path, manifest path)."""
+    splits, manifest, _ = built
+    shutil.copytree(splits, str(dst / "splits"))
+    raw = b"".join(lines)
+    (dst / "splits" / "val.jsonl").write_bytes(raw)
+    with open(manifest, encoding="utf-8") as f:
+        m = json.load(f)
+    rows = pilot.data.parse_jsonl(raw)
+    m["splits"]["val"].update(sha256=pilot.data.sha256_bytes(raw), n_messages=len(rows),
+                              n_no_intent=sum(not any(r["expected"].values()) for r in rows),
+                              uids_sha256=pilot.data.sha256_bytes("\n".join(r["uid"] for r in rows).encode("utf-8")))
+    (dst / "splits.json").write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(dst / "splits" / "val.jsonl"), str(dst / "splits.json")
+
+
+def test_berturk_interlock_is_keyed_on_the_test_content(built, ckpt, tmp_path, monkeypatch, no_load):
+    """06-REVIEW CR-01: a manifest copy that registers the committed test bytes (or a part of them) as val is refused
+    before any load, as for Laya (05-REVIEW CR-02). The module's synthetic data stands in for the committed split."""
+    splits, manifest, _ = built
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", manifest)
+    with open(os.path.join(splits, "test.jsonl"), "rb") as f:
+        lines = f.read().splitlines(keepends=True)
+    for name, part in (("whole", lines), ("part", lines[1:])):   # the entry's hashes, then the (uid, message) pairs
+        val, other = _relabelled(built, tmp_path / name, part)
+        assert pilot.data.verify_split_file(val, manifest_path=other, roles=("val",))["role"] == "val"
+        with pytest.raises(SystemExit, match="committed test content"):
+            score.main([val, "--model", "berturk", "--checkpoint", ckpt, "--workers", "0", "--manifest", other,
+                        "--out-root", str(tmp_path / "dumps")])
+        assert _no_dump(tmp_path / "dumps")
+
+
+def test_berturk_val_under_a_manifest_copy_still_scores(built, ckpt, tmp_path, monkeypatch):
+    """The content key leaves val alone: the module's val bytes under a byte-different manifest copy score."""
+    splits, manifest, _ = built
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", manifest)
+    with open(os.path.join(splits, "val.jsonl"), "rb") as f:
+        val, other = _relabelled(built, tmp_path / "copy", f.read().splitlines(keepends=True))
+    with open(other, "ab") as f:
+        f.write(b"\n")
+    run_dir, _ = score.main([val, "--model", "berturk", "--checkpoint", ckpt, "--workers", "0", "--manifest", other,
+                             "--out-root", str(tmp_path / "dumps")])
+    assert os.path.isfile(os.path.join(run_dir, "val.npz"))
+
+
 def test_berturk_ood_probe_refused(built, ckpt, tmp_path, no_load):
     with pytest.raises(SystemExit, match="role ood_probe"):
         _score(built, ckpt, tmp_path / "dumps", "hotels_probe")

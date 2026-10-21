@@ -337,6 +337,28 @@ def manifest_is_committed(manifest_path):
     return os.path.isfile(DEFAULT_MANIFEST) and sha256_file(manifest_path) == sha256_file(DEFAULT_MANIFEST)
 
 
+def committed_content(name):
+    """(the `name` entry of the repo's data/splits.json, the set of (uid, message) pairs of that committed split file
+    under data/). The set is empty when the file is absent (no `make data`); the entry's hashes still key the check."""
+    with open(DEFAULT_MANIFEST, encoding="utf-8") as f:
+        committed = json.load(f)["splits"][name]
+    path = os.path.join(os.path.dirname(DEFAULT_MANIFEST), committed["path"])
+    if not os.path.isfile(path):
+        return committed, set()
+    with open(path, "rb") as f:
+        return committed, {(c.get("uid"), c.get("state")) for c in parse_jsonl(f.read())}
+
+
+def holds_committed(entry, cases, name):
+    """True when a split (its entry in any manifest, and its parsed rows `cases`) holds the committed `name` split's
+    content: its sha256 or uids_sha256 is the committed entry's, or any (uid, message) pair of `cases` is in the
+    committed file. Keyed on the content, never on the manifest bytes or the role (05-REVIEW CR-02, 06-REVIEW CR-01,
+    WR-02). A uid alone is not the key: the tests' synthetic splits reuse the uid scheme with other messages."""
+    committed, pairs = committed_content(name)
+    return entry.get("sha256") == committed["sha256"] or entry.get("uids_sha256") == committed["uids_sha256"] or \
+        any((c.get("uid"), c.get("state")) in pairs for c in cases)
+
+
 def _registered(path, manifest_path, section, what, data=None):
     """Shared lookup: `path` must be registered under manifest[section] (safe relative paths) with a matching sha256.
 

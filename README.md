@@ -432,7 +432,9 @@ the well-known baseline that fine-tuned Laya is compared against in Phase 8.
 - **Audit record.** MPS runs are not bit-reproducible, so the committed val dumps under `results/dumps/` are the audit
   record: `make berturk-postfit` rebuilds `results/postfit/berturk.json` from them byte for byte, without a model.
 - **Nothing fine-tuned is scored on test before Phase 8.** `score.py --model berturk` refuses any split with role
-  test, and `postfit.py` reads val dumps only. No BERTurk test number exists yet.
+  test and, under any manifest, any split that holds committed test content (the committed test sha256 or uid list,
+  or any of its (uid, message) pairs), as for Laya. `postfit.py` reads val dumps only. No BERTurk test number exists
+  yet.
 
 ```bash
 # the selection run: 30 epochs, encoder LR 2e-05, head LR 1e-4, an export per epoch under berturk_runs/<run_id>/exports/
