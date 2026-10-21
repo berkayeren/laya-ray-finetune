@@ -35,6 +35,12 @@ caveat. A Laya record is refused; --resolution (the user's documented reason) on
 positions, the candidates and, with the manifest, the final seeds). A manifest bound to another record (its
 postfit.sha256) and a record of another system kind are refused.
 
+--render-berturk RECORD REFERENCE [FINAL_MANIFEST] prints the README's Phase 6 block of a BERTurk postfit record
+(pilot.berturk.render_markdown with pilot.berturk.load_superseded(), which this mode adds itself: the chosen settings,
+the LR and epoch-grid lines, the BASE-03 reference check with its differences and caveats, the candidates, the
+"Protocol changes after a val outcome (BASE-03 fixes)" table and the final seeds). A Laya record, a reference check or
+manifest bound to another record and a reference check that is not the recompute of the record are refused.
+
 usage: python postfit.py results/dumps/RUN_ID [RUN_ID2 ...] [--out results/postfit/laya.json] [--manifest splits.json]
        python postfit.py --prune ray_results/RUN_ID/exports/epoch-001 [...] [--dump-root results/dumps]
        python postfit.py --print-final-commands results/postfit/laya.json --storage ray_results \
@@ -47,6 +53,8 @@ usage: python postfit.py results/dumps/RUN_ID [RUN_ID2 ...] [--out results/postf
        python postfit.py --reference-check results/postfit/berturk.json [--resolution TEXT] \
                          [--out results/postfit/berturk-reference.json]
        python postfit.py --render results/postfit/laya.json results/postfit/laya-final.json
+       python postfit.py --render-berturk results/postfit/berturk.json results/postfit/berturk-reference.json \
+                         results/postfit/berturk-final.json
 """
 import argparse
 import json
@@ -90,23 +98,54 @@ def main(argv=None):
                     help="--reference-check: the documented resolution of an investigate status")
     ap.add_argument("--render", nargs="+", metavar="RECORD [FINAL_MANIFEST]", default=None,
                     help="print the README's Phase 5 block of a Laya postfit record (and its final manifest)")
+    ap.add_argument("--render-berturk", nargs="+", metavar="RECORD REFERENCE [FINAL_MANIFEST]", default=None,
+                    help="print the README's Phase 6 block of a BERTurk postfit record, its BASE-03 reference check "
+                         "(and its final manifest), with the superseded history")
     a = ap.parse_args(argv)
     modes = (bool(a.run_dir), a.prune is not None, a.print_final_commands is not None, a.final_manifest is not None,
-             a.reference_check is not None, a.render is not None)
+             a.reference_check is not None, a.render is not None, a.render_berturk is not None)
     if sum(modes) != 1:
         ap.error("give exactly one of RUN_DIR [RUN_DIR ...], --prune EXPORT_DIR [...], --print-final-commands RECORD, "
-                 "--final-manifest RECORD CKPT [...], --reference-check RECORD or --render RECORD [FINAL_MANIFEST]")
+                 "--final-manifest RECORD CKPT [...], --reference-check RECORD, --render RECORD [FINAL_MANIFEST] or "
+                 "--render-berturk RECORD REFERENCE [FINAL_MANIFEST]")
     if a.resolution is not None and a.reference_check is None:
         ap.error("--resolution applies only to --reference-check")
     if a.print_final_commands is None and (a.storage is not None or a.out_prefix is not None or a.base is not None):
         ap.error("--storage, --out-prefix and --base apply only to --print-final-commands")
     if a.print_final_commands is None and a.reference is not None:
         ap.error("--reference applies only to --print-final-commands of a BERTurk record")
-    if a.manifest is not None and (a.render is not None or a.final_manifest is not None or a.reference_check is not None):
+    if a.manifest is not None and (a.render is not None or a.render_berturk is not None or a.final_manifest is not None
+                                   or a.reference_check is not None):
         ap.error("--manifest applies only to RUN_DIR mode, --prune and --print-final-commands")   # 05-REVIEW IN-04
     if a.dump_root is not None and a.prune is None:
         ap.error("--dump-root applies only to --prune")
     manifest = a.manifest or DEFAULT_MANIFEST
+    if a.render_berturk is not None:
+        if not 2 <= len(a.render_berturk) <= 3:
+            ap.error("--render-berturk takes RECORD, REFERENCE and at most one FINAL_MANIFEST")
+        if a.out is not None:
+            ap.error("--out does not apply to --render-berturk (it prints the markdown)")
+        record, sha = postfit.read_record(a.render_berturk[0])
+        if record.get("system_kind") != "berturk":
+            raise SystemExit("%s: system kind %r; --render-berturk renders a BERTurk record (Laya: --render)"
+                             % (a.render_berturk[0], record.get("system_kind")))
+        bound = []
+        for p, what in zip(a.render_berturk[1:], ("reference check", "final manifest")):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    obj = json.load(f)
+            except (OSError, ValueError) as e:
+                raise SystemExit("%s cannot be read as a %s (%s); build it with postfit.py --%s"
+                                 % (p, what, e, "reference-check" if what == "reference check" else "final-manifest"))
+            got = (obj.get("postfit") or {}).get("sha256") if isinstance(obj, dict) else None
+            if got != sha:
+                raise SystemExit("%s is bound to postfit record %s, not %s (%s); render a record with its own %s"
+                                 % (p, got, sha, a.render_berturk[0], what))
+            bound.append(obj)
+        text = berturk.render_markdown(record, bound[0], bound[1] if len(bound) == 2 else None,
+                                       berturk.load_superseded())
+        print(text, end="")
+        return text
     if a.render is not None:
         if len(a.render) > 2:
             ap.error("--render takes RECORD and at most one FINAL_MANIFEST")

@@ -46,6 +46,13 @@ Final seeds (plan 06-11): test_committed_berturk_final_manifest checks results/p
 settings (30-epoch schedule, the chosen stop epoch and T), seeds exactly [0, 1, 2] on final_train with distinct train
 run ids, one config_sha256_sans_seed, each seed serving the chosen T over the chosen number of epochs, bare checkpoint
 names, and no tracked results/dumps dir named after any seed's dump run id (no final seed is scored in Phase 6).
+
+README block (plan 06-12): test_readme_berturk_block_matches_the_records proves the block between the berturk-postfit
+markers is pilot.berturk.render_markdown of the committed record, reference check and final manifest plus
+pilot.berturk.load_superseded(); test_render_discloses_the_protocol_change proves every SUPERSEDED entry's run id,
+exact fraction, gate reply, change and history dir, the extra-run count, the reference check's differences and
+caveats and the epoch-grid deviation reach it; test_load_superseded_refuses_a_changed_history refuses a history
+record with one byte changed, naming the file.
 """
 import glob
 import json
@@ -384,3 +391,86 @@ def test_committed_berturk_final_manifest():
         assert e["dump_run_id"] == berturk.dump_run_id(e["checkpoint_identity"])
     scored = sorted({f.split("/")[2] for f in tracked(DUMPS + "/")} & {e["dump_run_id"] for e in seeds})
     assert scored == [], "a BERTurk final seed was scored in Phase 6: %s" % scored
+
+
+# ---- the README Phase 6 block (plan 06-12, BASE-03 disclosure, T-06-36, T-06-55, T-06-74) ----
+README = "README.md"
+BERTURK_START, BERTURK_END = "<!-- berturk-postfit:start -->", "<!-- berturk-postfit:end -->"
+
+
+def _rendered_berturk():
+    return berturk.render_markdown(_current_record(), load(REFERENCE), load(FINAL), berturk.load_superseded())
+
+
+def test_readme_berturk_block_matches_the_records():
+    """The README block between the berturk-postfit markers is render_markdown of the committed record, reference
+    check and final manifest plus the superseded history; a hand edit or a stale block fails."""
+    with open(path(README), encoding="utf-8") as f:
+        text = f.read()
+    assert text.count(BERTURK_START) == 1 and text.count(BERTURK_END) == 1, \
+        "README.md must hold exactly one pair of the berturk-postfit markers"
+    i, j = text.index(BERTURK_START), text.index(BERTURK_END)
+    assert i < j, "the berturk-postfit end marker comes before the start marker"
+    assert text[i + len(BERTURK_START):j].strip() == _rendered_berturk().strip(), (
+        "the README berturk-postfit block differs from pilot.berturk.render_markdown of the committed records; "
+        "regenerate it with `python postfit.py --render-berturk %s %s %s`" % (RECORD, REFERENCE, FINAL))
+    assert text.index("## BERTurk baseline (Phase 6)") < i, "the block is not in the BERTurk baseline section"
+
+
+def test_render_discloses_the_protocol_change():
+    """Every SUPERSEDED entry's train run id, exact fraction, gate reply and history dir reach the block, with the
+    count of extra selection runs; the reference check's value, threshold, status, differences and caveats too."""
+    text = _rendered_berturk()
+    assert "Protocol changes after a val outcome (BASE-03 fixes)" in text
+    for s in berturk.SUPERSEDED:
+        num, den = SUPERSEDED_VALUE[s["name"]]["fraction"]
+        for want in (s["train_run_id"], "%d/%d" % (num, den), "`%s`" % s["gate"]["reply"], s["dir"], s["change"]):
+            assert want in text, "%s: %r is missing from the rendered block" % (s["name"], want)
+    assert "150/551" in text and "113/238" in text
+    assert "results/superseded/berturk-tied-head-lr" in text and "results/superseded/berturk-10-epoch-grid" in text
+    assert "head_lr: tied to the encoder LR (2e-05) -> 0.0001" in text and "epochs: 10 -> 30" in text
+    n = len(berturk.SUPERSEDED)
+    assert ("BERTurk had %d more selection runs than Laya: %d in all" % (n, n + 1)) in text
+    ref = load(REFERENCE)
+    num, den = ref["value"]["fraction"]
+    assert "%d/%d" % (num, den) in text and "0.707" in text and ref["status"] in text
+    for line in ref["differences"] + ref["caveats"]:
+        assert line in text, "the reference check's %r is missing" % line
+    assert "berturk_epochs 10" in text and "max_epochs 4" in text, "the epoch-grid deviation is not disclosed"
+    assert "not tuned" in text and "2e-05" in text
+    for c in _current_record()["candidates"]:
+        o = c["objective"]
+        assert "%d/%d" % (2 * o["tp"], 2 * o["tp"] + o["fp"] + o["fn"]) in text, "epoch %d is missing" % c["epoch"]
+    for e in load(FINAL)["seeds"]:
+        assert e["train_run_id"] in text
+    assert "/Users/" not in text and "/home/" not in text, "the rendered block holds a local path"
+    assert "test" not in text.replace("no BERTurk test number exists", "").replace("test portion", ""), \
+        "the rendered block mentions a test number"
+
+
+def test_load_superseded_refuses_a_changed_history(tmp_path):
+    """A history record with one byte changed (a tmp copy of results/superseded/) is refused, naming the file."""
+    import shutil
+    shutil.copytree(path("results/superseded"), tmp_path / "results" / "superseded")
+    got = berturk.load_superseded(str(tmp_path))
+    assert [g["entry"]["name"] for g in got] == SUPERSEDED_IDS
+    s = berturk.SUPERSEDED[0]
+    target = tmp_path / s["record"]
+    raw = bytearray(target.read_bytes())
+    raw[raw.index(b"0.0001") if b"0.0001" in raw else -2] ^= 1
+    target.write_bytes(bytes(raw))
+    with pytest.raises(SystemExit) as e:
+        berturk.load_superseded(str(tmp_path))
+    assert s["record"] in str(e.value.code), e.value.code
+
+
+def test_render_berturk_refuses_a_laya_record_and_another_records_reference():
+    import postfit as postfit_cli
+    with pytest.raises(SystemExit, match="BERTurk"):
+        berturk.render_markdown(load("results/postfit/laya.json"), load(REFERENCE))
+    sha = sha256_file(path(RECORD))
+    with pytest.raises(SystemExit) as e:
+        postfit_cli.main(["--render-berturk", path(RECORD), path(berturk.SUPERSEDED[-1]["reference"])])
+    assert isinstance(e.value.code, str) and sha in e.value.code, e.value.code
+    with pytest.raises(SystemExit):
+        postfit_cli.main(["--render-berturk", path(RECORD), path(REFERENCE), "--out", "x.md"])

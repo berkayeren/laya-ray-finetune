@@ -106,8 +106,10 @@ are hash-registered too, so later phases can trust the flag list.
 | `mps_spike.py` | Phase 2 MPS feasibility spike (`results/spike/`) |
 | `compute_checkpoint.py` | Phase 4 compute checkpoint: a measured MPS fine-tune probe and the projected experiment-matrix runtime (`results/compute/`) |
 | `pilot/postfit.py` | torch-free Phase 5 postfit: the val-fitted T, θ and the chosen epoch in one byte-reproducible record; the final-seed binding and manifest; the README Phase 5 block |
-| `postfit.py` | Phase 5 CLI: val dumps → `results/postfit/laya.json`, `--prune`, `--print-final-commands`, `--final-manifest`, `--render` |
-| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`), postfit records (`postfit/`) |
+| `postfit.py` | Phase 5 and 6 CLI: val dumps → `results/postfit/laya.json` or `berturk.json` (the protocol by system kind), `--prune`, `--print-final-commands`, `--final-manifest`, `--render`, `--reference-check` and `--render-berturk` (BERTurk) |
+| `berturk_train.py` | Phase 6 BERTurk trainer: the HF Trainer, masked BCE, encoder LR `--lr` and head LR `--head-lr` in their own param groups, `--epochs` (default 30), a per-epoch export, `--stop-after-epoch`, `--postfit` and `--reference` for the final seeds; one process, no Ray |
+| `pilot/berturk.py` | torch-free BERTurk bookkeeping: the recipe and run id, labels in `INTENTS` order, the checkpoint identity, the postfit protocol, the BASE-03 reference check, the final commands and manifest, the superseded chain (`SUPERSEDED`, `load_superseded`) and the README Phase 6 block |
+| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`), postfit records (`postfit/`: `laya*.json`, and `berturk.json`, `berturk-reference.json`, `berturk-final.json`), the two discarded BERTurk selection runs kept as disclosed history (`superseded/berturk-tied-head-lr/`, `superseded/berturk-10-epoch-grid/`, never current) |
 | `tests/` | pytest suite (markers `unit`, `data`, `weights`, `ray`, `mps`) |
 
 ## Run
@@ -124,6 +126,15 @@ python ray_train.py ... --print-run-id     # the run id: its Ray dir ray_results
 python postfit.py --print-final-commands results/postfit/laya.json --storage ray_results --out-prefix ckpt-final
 python ray_train.py --data data/splits/final_train.jsonl ... --epochs 4 --stop-after-epoch 3 --seed 0 \
     --postfit results/postfit/laya.json --no-export-epochs --storage ray_results --out ckpt-final-s0
+
+# Phase 6 BERTurk baseline: the 30-epoch selection run, val scoring of each export, postfit and the BASE-03 check
+python berturk_train.py --data data/splits/selection_train.jsonl --device mps --epochs 30 --lr 2e-05 --head-lr 0.0001
+python score.py data/splits/val.jsonl --model berturk --checkpoint berturk_runs/RUN_ID/exports/epoch-001 \
+    --device mps --workers 0                     # BERTurk is refused on test until Phase 8
+make berturk-postfit                             # results/postfit/berturk.json from the 30 committed val dumps
+python postfit.py --reference-check results/postfit/berturk.json --out results/postfit/berturk-reference.json
+python postfit.py --print-final-commands results/postfit/berturk.json \
+    --reference results/postfit/berturk-reference.json --storage berturk_runs --out-prefix ckpt-berturk-final
 
 # CPU smoke fine-tune (CUDA: drop --freeze-encoder/--max-messages, add --device cuda; --gpu is the same)
 python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
@@ -372,6 +383,179 @@ fails if it is edited by hand or goes stale.
 | 1 | laya-final_train-neg8-s1-07a1ee59 | 3 | 0.2936 | 8.75 | 0 | none | False |
 | 2 | laya-final_train-neg8-s2-bbb5230e | 3 | 0.2591 | 8.95 | 0 | none | False |
 <!-- laya-postfit:end -->
+
+## BERTurk baseline (Phase 6)
+
+How the BERTurk baseline (`dbmdz/bert-base-turkish-cased`, pinned) was trained, selected on validation messages only,
+checked against the published Multi3NLU++ numbers and kept as three final seeds (BASE-01, BASE-02, BASE-03). It is
+the well-known baseline that fine-tuned Laya is compared against in Phase 8.
+
+- **Recipe.** `berturk_train.py` fine-tunes a `BertForSequenceClassification` with the HF Trainer as a 48-label
+  multi-label classifier, labels in `INTENTS` order (the dump's column order), with a masked BCE loss. It uses batch
+  32, max_len 128 WordPiece tokens, fp32 and AdamW with weight decay 0.01. The encoder trains at 2e-05 and the freshly
+  initialised classifier head at 1e-4, in their own param groups. A linear schedule with a 10% warm-up spans the 30
+  epochs of the selection schedule. One process on MPS, no Ray; the HF Trainer needs `accelerate`, so
+  `accelerate==1.15.0` was added to the lock.
+- **Equal settings.** Both models use the same encoder LR, 2e-05. It is fixed, not tuned: the user decided on
+  2026-10-15 to run one LR for both models. Both also use the same head LR 1e-4, the same split (`selection_train` for
+  selection, `final_train` for the final seeds), the same seeds (0 for selection; 0, 1 and 2 for the final seeds),
+  the same max_len and the same postfit: `postfit.py` runs Laya's own functions, objective, tie order, T rule and θ
+  rule on BERTurk's val dumps.
+- **Two protocol changes after a val outcome.** BERTurk's recipe was changed twice after its val numbers had been
+  seen. First, the first selection run tied the head LR to the encoder LR (2e-05). It scored 0.272 at val, below the
+  0.707 floor, and was discarded under the BASE-03 fix the user chose at the 06-10 gate: train the head at 1e-4.
+  Second, that head-LR run scored 0.475 at the upper edge of its 10-epoch grid, still rising, and was discarded under
+  the second fix the user chose at the 06-16 gate: raise the epoch grid to 30. So BERTurk had three selection runs
+  while Laya had one. This is a disclosed deviation from equal tuning effort. Both discarded runs are kept byte for
+  byte under `results/superseded/` (`berturk-tied-head-lr/`, `berturk-10-epoch-grid/`), each with its own README, and
+  the generated table below lists them.
+- **The epoch grid.** BERTurk has 30 epoch candidates; Laya has 4 (max_epochs 4). Picking the best of 30 in-sample
+  candidates is more optimistic than picking the best of 4. 30 also exceeds the approved compute budget
+  berturk_epochs 10 (approved 2026-10-14), which `pilot/compute.py` and `results/compute/` still record as approved.
+  The linear schedule and its warm-up span all 30 epochs, so the 30-epoch run's epoch 10 is not the 10-epoch run's
+  epoch 10. The warm-up now takes 138 of 1,380 optimizer steps (epochs 1-3, against 1 epoch before). At the end of
+  epoch 10 the 30-epoch run still trains at about 0.74 of the peak LR, while the 10-epoch run had decayed to 0.
+- **Selection on val only.** The candidates are epochs 1..30 of one run on `selection_train` with seed 0, each scored
+  on val (fp32 on MPS). `postfit.py` fits one T and the θ on val and picks the epoch by Laya's rule. The chosen epoch
+  29 sits next to the upper edge of the grid: epoch 30 is the runner-up, 0.0003 lower, so the objective has flattened
+  at the top. The chosen T (0.7430) and both global θ (0.19 shipped, 0.26 raw) are inside their bounds and grids.
+  The epoch, T and θ were all chosen on the same 208 val messages, so the val numbers below are optimistic. They
+  are not test results.
+- **The BASE-03 reference check.** The chosen candidate's val micro-F1 at its val-selected global θ is compared with
+  0.707, more than 10 points below the lower published reference 80.7 (Moghe et al., Table 12, Turkish BANKING,
+  frozen-encoder MLPs at θ 0.3). It reads 389/478 = 0.8138, status ok, so no resolution was needed. It is not a
+  like-for-like comparison: the block lists every setup difference and the in-sample caveat next to the value.
+- **Final seeds.** Seeds 0, 1 and 2 train on `final_train` with the 30-epoch schedule, stopped after the chosen epoch
+  29 (`--stop-after-epoch 29`), and serve the val-fitted T. `berturk_train.py --postfit --reference` refuses to train
+  unless the reference check is of that record and reads ok (or records a resolution). The checkpoints are kept
+  outside git for Phase 8; `results/postfit/berturk-final.json` binds them to the record's sha256.
+- **Audit record.** MPS runs are not bit-reproducible, so the committed val dumps under `results/dumps/` are the audit
+  record: `make berturk-postfit` rebuilds `results/postfit/berturk.json` from them byte for byte, without a model.
+- **Nothing fine-tuned is scored on test before Phase 8.** `score.py --model berturk` refuses any split with role
+  test, and `postfit.py` reads val dumps only. No BERTurk test number exists yet.
+
+```bash
+# the selection run: 30 epochs, encoder LR 2e-05, head LR 1e-4, an export per epoch under berturk_runs/<run_id>/exports/
+python berturk_train.py --data data/splits/selection_train.jsonl --base berturk --device mps --epochs 30 \
+    --lr 2e-05 --head-lr 0.0001 --seed 0 --storage berturk_runs
+# score each epoch export on val (fp32 on MPS, in-process), then delete the export once its verified val dump exists
+python score.py data/splits/val.jsonl --model berturk --checkpoint berturk_runs/RUN_ID/exports/epoch-001 \
+    --device mps --workers 0
+python postfit.py --prune berturk_runs/RUN_ID/exports/epoch-001
+# fit T and θ and choose the epoch over the 30 val dumps (make berturk-postfit rebuilds the committed record)
+python postfit.py results/dumps/DUMP_1 ... results/dumps/DUMP_30 --out results/postfit/berturk.json
+make berturk-postfit
+# the BASE-03 reference check of the record (--resolution TEXT only on an investigate status)
+python postfit.py --reference-check results/postfit/berturk.json --out results/postfit/berturk-reference.json
+# the 3 final-seed commands, printed from the record behind the BASE-03 gate; each one stops after the chosen epoch
+python postfit.py --print-final-commands results/postfit/berturk.json \
+    --reference results/postfit/berturk-reference.json --storage berturk_runs --out-prefix ckpt-berturk-final
+python berturk_train.py --data data/splits/final_train.jsonl ... --epochs 30 --lr 2e-05 --head-lr 0.0001 \
+    --stop-after-epoch 29 --seed 0 --postfit results/postfit/berturk.json \
+    --reference results/postfit/berturk-reference.json --no-export-epochs --storage berturk_runs \
+    --out ckpt-berturk-final-s0
+# the manifest of the finished checkpoints, then the generated block below
+python postfit.py --final-manifest results/postfit/berturk.json ckpt-berturk-final-s0 ckpt-berturk-final-s1 \
+    ckpt-berturk-final-s2 --out results/postfit/berturk-final.json
+python postfit.py --render-berturk results/postfit/berturk.json results/postfit/berturk-reference.json \
+    results/postfit/berturk-final.json
+```
+
+The block between the markers is generated by the last command from the committed record, reference check and final
+manifest, plus the superseded history under `results/superseded/` (read and sha256-checked by
+`pilot.berturk.load_superseded`); a test fails if it is edited by hand or goes stale.
+
+<!-- berturk-postfit:start -->
+**Chosen on val** (selection run on selection_train, seed 0, 208 val messages x 48 tags; val numbers, in-sample; no BERTurk test number exists before Phase 8)
+
+| setting | value |
+|---|---|
+| train run id | berturk-selection_train-s0-4f36ae05 |
+| encoder LR / head LR | 2e-05 / 0.0001 |
+| epoch | 29 of 30, --stop-after-epoch 29 |
+| val-fitted T | 0.7430 (bounds [0.5, 5.0]) |
+| val NLL at T / at T = 1 | 0.05821 / 0.06491 |
+| global θ shipped / raw | 0.19 / 0.26 |
+| tags with their own θ (shipped / raw) | 13 / 13 |
+| val micro-F1 at the global θ | 0.8138 (778/956) |
+| val micro-F1 at θ 0.5 | 0.7570 |
+
+- Rule: val micro-F1 at the val-selected global θ on probabilities after the val-fitted T, compared exactly as 2TP / (2TP + FP + FN) of the summed counts; tie order: equal objectives: fewer epochs first, then the lower encoder LR (Laya's rule, run by pilot.postfit on BERTurk's val dumps).
+- LRs: encoder LR grid 2e-05 (one value, fixed, not tuned; Laya's grid 2e-05), head LR 0.0001 (Laya's 0.0001).
+- Epoch grid: 1..30, every epoch of one run a candidate; Laya's is 1..4 (approved max_epochs 4), and the approved compute budget for BERTurk is berturk_epochs 10, so this grid is a disclosed deviation from both, and a selection over 30 in-sample candidates is more optimistic than over 4.
+- Grid edge: next to the upper edge: epoch 29 of the epoch grid 1..30, one epoch below it; runner-up epoch 30 at 0.8135 (772/949), 0.0003 below the chosen.
+- Bounds: on the θ grid 0.05..0.95 the chosen global θ is shipped 0.19 (inside) and raw 0.26 (inside); the candidates' fitted T span 0.5000..0.9862 in laya's band [0.5, 5.0] (1 of 30 on a bound), and the chosen T 0.7430 is 0.2430 above the lower bound 0.5 and 4.2570 below the upper bound 5.0.
+- θ grid edge: 0 of 30 candidates choose the shipped global θ on the upper edge 0.95 and 0 on the lower edge 0.05 (raw: 0 upper, 0 lower); no candidate's objective is clipped at a θ-grid edge.
+
+**Published reference check (BASE-03)** (Moghe et al., Multi3NLU++ (multilingual, multi-intent, multi-domain NLU dataset), ACL Findings 2023; https://arxiv.org/abs/2212.10455)
+
+| check | value |
+|---|---|
+| BERTurk val micro-F1 at the global θ (epoch 29, T 0.7430) | 0.8138 (389/478) |
+| threshold | 0.707: below 0.707 (more than 10 micro-F1 points below the lower published reference 80.7) triggers an investigation; exactly 0.707 passes |
+| status | ok (below the threshold: False) |
+| resolution | none recorded (nothing to resolve when the status is ok) |
+| checked record | results/postfit/berturk.json (sha256 83b34dfb524e) |
+
+- Quoted source, Table 12 (In-language in-domain results for intent detection with MLP-based setup (F1 x100); Turkish, in-language, BANKING; Large: 10-fold cross-validation, train on 9 of 10 folds (about 1,860 messages)): MLP on frozen LaBSE (frozen encoder, θ 0.3) 82.8; MLP on frozen mpnet (frozen encoder, θ 0.3) 80.7.
+- Quoted source, Table 18 (QA-based intent detection): QA mDeBERTa 90.1; lower reference 80.7.
+- Not like-for-like. Setup differences: a fixed split (selection train folds 0–13 with about 1,450 messages; final train folds 0–15 with about 1,658); a different test portion (folds 16–19); a fine-tuned BERTurk rather than a frozen encoder; a single split rather than cross-validation averages; this check itself reads val folds 14-15.
+- Caveats: θ and T were chosen on the same val messages, so the value is in-sample and optimistic; the paper uses a fixed θ 0.3 on frozen-encoder MLPs; neither of our numbers is like-for-like.
+
+**Candidates** (one full val dump per epoch export of berturk-selection_train-s0-4f36ae05, encoder LR 2e-05; the objective is micro-F1 at the global θ, as 2TP/(2TP + FP + FN) unreduced; the reference check above reduces it)
+
+| epoch | T | NLL at T | NLL at T = 1 | micro-F1 @0.5 | micro-F1 @global θ | θ shipped | θ raw | pick |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 0.5000 | 0.45520 | 0.54154 | 0.1252 | 0.1320 (352/2666) | 0.46 | 0.48 |  |
+| 2 | 0.6665 | 0.18027 | 0.20944 | 0.0000 | 0.2393 (190/794) | 0.13 | 0.22 |  |
+| 3 | 0.9353 | 0.17364 | 0.17444 | 0.0000 | 0.2654 (280/1055) | 0.10 | 0.11 |  |
+| 4 | 0.9862 | 0.17101 | 0.17104 | 0.0000 | 0.2696 (272/1009) | 0.12 | 0.12 |  |
+| 5 | 0.9263 | 0.16343 | 0.16441 | 0.0000 | 0.3197 (290/907) | 0.15 | 0.16 |  |
+| 6 | 0.8890 | 0.15192 | 0.15414 | 0.1147 | 0.3979 (382/960) | 0.13 | 0.15 |  |
+| 7 | 0.8226 | 0.13590 | 0.14153 | 0.2768 | 0.4736 (494/1043) | 0.11 | 0.16 |  |
+| 8 | 0.8316 | 0.12473 | 0.12952 | 0.3609 | 0.5349 (506/946) | 0.13 | 0.17 |  |
+| 9 | 0.8079 | 0.11338 | 0.11943 | 0.4071 | 0.6043 (510/844) | 0.16 | 0.18 |  |
+| 10 | 0.8136 | 0.10631 | 0.11174 | 0.4606 | 0.6536 (632/967) | 0.12 | 0.17 |  |
+| 11 | 0.7486 | 0.09490 | 0.10468 | 0.5433 | 0.6985 (672/962) | 0.13 | 0.19 |  |
+| 12 | 0.7754 | 0.09054 | 0.09785 | 0.5581 | 0.7224 (700/969) | 0.12 | 0.18 |  |
+| 13 | 0.7283 | 0.08254 | 0.09309 | 0.6240 | 0.7418 (698/941) | 0.16 | 0.23 |  |
+| 14 | 0.7361 | 0.07963 | 0.08913 | 0.6451 | 0.7460 (696/933) | 0.17 | 0.24 |  |
+| 15 | 0.7610 | 0.07786 | 0.08525 | 0.6433 | 0.7550 (718/951) | 0.16 | 0.22 |  |
+| 16 | 0.7274 | 0.07239 | 0.08190 | 0.6789 | 0.7697 (722/938) | 0.18 | 0.25 |  |
+| 17 | 0.7411 | 0.07097 | 0.07918 | 0.6824 | 0.7734 (710/918) | 0.21 | 0.27 |  |
+| 18 | 0.7416 | 0.06879 | 0.07673 | 0.6918 | 0.7761 (714/920) | 0.21 | 0.28 |  |
+| 19 | 0.7262 | 0.06581 | 0.07463 | 0.7141 | 0.7861 (702/893) | 0.27 | 0.33 |  |
+| 20 | 0.7508 | 0.06553 | 0.07251 | 0.6933 | 0.7978 (734/920) | 0.21 | 0.27 |  |
+| 21 | 0.7254 | 0.06274 | 0.07120 | 0.7241 | 0.7954 (766/963) | 0.17 | 0.24 |  |
+| 22 | 0.7439 | 0.06276 | 0.06989 | 0.7236 | 0.7978 (742/930) | 0.21 | 0.27 |  |
+| 23 | 0.7572 | 0.06258 | 0.06881 | 0.7250 | 0.8047 (750/932) | 0.20 | 0.26 |  |
+| 24 | 0.7476 | 0.06099 | 0.06767 | 0.7336 | 0.8017 (744/928) | 0.22 | 0.28 |  |
+| 25 | 0.7487 | 0.06025 | 0.06679 | 0.7398 | 0.8051 (764/949) | 0.20 | 0.26 |  |
+| 26 | 0.7474 | 0.05951 | 0.06608 | 0.7383 | 0.8082 (784/970) | 0.17 | 0.24 |  |
+| 27 | 0.7488 | 0.05923 | 0.06567 | 0.7469 | 0.8115 (762/939) | 0.21 | 0.24 |  |
+| 28 | 0.7493 | 0.05888 | 0.06525 | 0.7488 | 0.8128 (764/940) | 0.21 | 0.27 |  |
+| 29 | 0.7430 | 0.05821 | 0.06491 | 0.7570 | 0.8138 (778/956) | 0.19 | 0.26 | chosen |
+| 30 | 0.7416 | 0.05808 | 0.06485 | 0.7600 | 0.8135 (772/949) | 0.20 | 0.26 | runner-up |
+
+**Protocol changes after a val outcome (BASE-03 fixes)** (each discarded run below scored under 0.707 at val; the user chose the fix at its gate; the run is kept as disclosed history, never current)
+
+| discarded train run | changed by the fix (old -> new) | chosen epoch | val micro-F1 at the global θ | status | gate plan, date and reply | history |
+|---|---|---|---|---|---|---|
+| berturk-selection_train-s0-c0c9505e | head_lr: tied to the encoder LR (2e-05) -> 0.0001 | 10 of 10 | 0.2722 (150/551) | investigate (resolution: none) | 06-10, 2026-10-21: `fix: head LR 1e-4 (Recommended)` | results/superseded/berturk-tied-head-lr/ |
+| berturk-selection_train-s0-8c033154 | epochs: 10 -> 30 | 10 of 10 | 0.4748 (113/238) | investigate (resolution: none) | 06-16, 2026-10-21: `fix: extend epochs (Recommended)` | results/superseded/berturk-10-epoch-grid/ |
+
+- berturk-selection_train-s0-c0c9505e: the classifier head's LR stops being tied to the encoder LR 2e-05 and becomes 1e-4, Laya's head LR (pilot.postfit.HEAD_LR); the encoder LR and every other setting are unchanged.
+- berturk-selection_train-s0-8c033154: the epoch grid of the selection schedule grows from 10 to 30 epochs, the user's choice at the 06-16 gate, while the encoder LR 2e-05, the head LR 1e-4 and every other setting stay; the linear schedule and its warm-up then span 30 epochs.
+- BERTurk had 2 more selection runs than Laya: 3 in all (the current berturk-selection_train-s0-4f36ae05 and the 2 discarded above), against Laya's 1; every recipe change above was made after a val outcome, a disclosed deviation from equal tuning effort.
+
+**Final seeds** (final_train, --epochs 30 stopped after epoch 29, serving T 0.7430; not scored before Phase 8)
+
+| seed | train run id | epochs trained | final-epoch loss | peak GiB | largest swap delta MiB |
+|---|---|---|---|---|---|
+| 0 | berturk-final_train-s0-8a167355 | 29 | 0.0416 | 6.26 | 0 |
+| 1 | berturk-final_train-s1-3c44e7ff | 29 | 0.0391 | 6.07 | 0 |
+| 2 | berturk-final_train-s2-44f81396 | 29 | 0.0401 | 5.26 | 0 |
+<!-- berturk-postfit:end -->
 
 ## Results (Phase 3: baselines and zero-shot, full test split)
 

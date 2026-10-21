@@ -70,6 +70,13 @@ encoder LR and the head at the head LR, each with the HF Trainer's own weight-de
 (the HEAD_PREFIX names) is exactly the set of parameters from_pretrained newly initialised. berturk_train.py hands the
 optimizer to the Trainer, which still builds the linear schedule and its warm-up over it (both LRs scale alike).
 
+README block (BASE-03 disclosure, plan 06-12): load_superseded() reads every SUPERSEDED entry's history record and
+reference check, refused unless both are bound to its postfit_sha256; render_markdown(record, reference, final,
+superseded) renders the README's Phase 6 block (postfit.py --render-berturk): the chosen settings, the LR and epoch-grid
+lines against Laya's protocol and the approved compute budget, the grid-edge, θ and T bound positions, the reference
+check with every difference and caveat, the 30 candidates, one "Protocol changes after a val outcome" row per
+superseded entry from its delta (with the count of extra selection runs against Laya's) and the final seeds.
+
 usage: from pilot import berturk; rid = berturk.run_id(berturk.canonical(values)); berturk.label_vector(row)
        ident = berturk.identity(ckpt); berturk.dump_run_id(ident); seed, training = berturk.training_block(
        berturk.read_record(ckpt, ident)); berturk.prune_export(export_dir, dump_root, manifest_path)
@@ -79,6 +86,7 @@ usage: from pilot import berturk; rid = berturk.run_id(berturk.canonical(values)
        berturk.final_manifest(record_path, ckpt_dirs)
        berturk.optimizer_groups(param_names, decay_names, new_names, encoder_lr, head_lr, weight_decay)
        for s in berturk.SUPERSEDED: s["record"], s["postfit_sha256"], s["protocol"], s["delta"]
+       berturk.render_markdown(record, reference, final_manifest, berturk.load_superseded())
 """
 import hashlib
 import json
@@ -88,7 +96,7 @@ from fractions import Fraction
 
 from intents import INTENTS
 from pilot import dumps, pins, postfit
-from pilot.data import DEFAULT_MANIFEST, repo_relpath, sha256_bytes, sha256_file
+from pilot.data import DEFAULT_MANIFEST, REPO_ROOT, repo_relpath, sha256_bytes, sha256_file
 
 # ---- the recipe (A1-A3, A7), confirmed at plan 06-02 ----
 LR = 2e-05                                  # A1: the encoder LR, equal to Laya's single encoder LR
@@ -580,6 +588,242 @@ def final_manifest(record_path, ckpt_dirs):
             "config_sha256_sans_seed": digests[0],
             "seeds": [{k: v for k, v in e.items() if k != "config_sha256_sans_seed"}
                       for e in sorted(entries, key=lambda e: e["seed"])]}
+
+
+# ---- the README block (BASE-03 disclosure, plan 06-12) ----
+
+def load_superseded(repo_root=REPO_ROOT):
+    """The disclosed history of every SUPERSEDED entry, in chain order: [{"entry", "record", "reference"}], the parsed
+    history record and its reference check. SystemExit naming the file unless it exists, is JSON, the record's sha256
+    is the entry's postfit_sha256 and the reference check's postfit.sha256 is that sha256 too (the history is read
+    from the committed bytes only, never retyped)."""
+    out = []
+    for s in SUPERSEDED:
+        parsed = {}
+        for key in ("record", "reference"):
+            p = os.path.join(repo_root, s[key])
+            try:
+                with open(p, "rb") as f:
+                    raw = f.read()
+                parsed[key] = json.loads(raw.decode("utf-8"))
+            except (OSError, ValueError) as e:
+                raise SystemExit("%s cannot be read (%s); the superseded history under results/superseded/ is "
+                                 "committed, restore it with git" % (s[key], e))
+            if key == "record" and sha256_bytes(raw) != s["postfit_sha256"]:
+                raise SystemExit("%s is not the superseded record pinned in pilot.berturk.SUPERSEDED (sha256 %s, "
+                                 "pinned %s); restore it with git" % (s[key], sha256_bytes(raw), s["postfit_sha256"]))
+        bound = (parsed["reference"].get("postfit") or {}).get("sha256") if isinstance(parsed["reference"], dict) \
+            else None
+        if bound != s["postfit_sha256"]:
+            raise SystemExit("%s is bound to postfit record %s, not the pinned %s; restore it with git"
+                             % (s["reference"], bound, s["postfit_sha256"]))
+        out.append({"entry": s, "record": parsed["record"], "reference": parsed["reference"]})
+    return out
+
+
+def _ref_f1(ref):
+    """A reference check's value with its exact fraction in lowest terms, e.g. "0.8138 (389/478)"."""
+    v = ref["value"]
+    return "%.4f (%d/%d)" % (v["val_micro_f1_at_global_theta"], v["fraction"][0], v["fraction"][1])
+
+
+def _old_value(key, canon):
+    """A delta key's value in the run it replaced; a head LR equal to the encoder LR is the tied recipe."""
+    if key == "head_lr" and canon.get("head_lr") == canon.get("encoder_lr"):
+        return "tied to the encoder LR (%g)" % canon.get("encoder_lr")
+    v = canon.get(key)
+    return "%g" % v if isinstance(v, float) else str(v)
+
+
+def _gib(e):
+    """(final-epoch loss, peak GiB, largest swap delta MiB) of a final-manifest seed; an unmeasured value is n/a."""
+    ep = e.get("epochs") or []
+    peaks = [r["peak_total_bytes"] for r in ep if r.get("peak_total_bytes") is not None]
+    swaps = [r["swap_delta_bytes"] for r in ep if r.get("swap_delta_bytes") is not None]
+    loss = ep[-1].get("loss") if ep else None
+    return ("n/a" if loss is None else "%.4f" % loss, "n/a" if not peaks else "%.2f" % (max(peaks) / 2 ** 30),
+            "n/a" if not swaps else "%.0f" % (max(swaps) / 2 ** 20))
+
+
+def render_markdown(record, reference, final=None, superseded=()):
+    """The README's Phase 6 block (markdown) of the BERTurk postfit record, its BASE-03 reference check, optionally its
+    final manifest and the superseded history (load_superseded()): the chosen settings, the rule line, the LR and
+    epoch-grid lines against Laya's protocol and the approved pilot.compute.MATRIX, the grid-edge, θ and T bound
+    positions, the reference check (value against 0.707, status, the quoted source values, every difference, every
+    caveat, the resolution), the candidates, one "Protocol changes after a val outcome" row per superseded entry (its
+    delta's old and new value, its chosen epoch, its val micro-F1, status, gate and reply verbatim, its history dir)
+    with the count of extra selection runs, and the final seeds. Display rounding only; every number comes from the
+    records; no timestamp, no local path, no test number. SystemExit on a record of another system kind, a reference
+    check that is not the recompute of this record's chosen candidate, or a manifest whose chosen block or final split
+    is not the record's."""
+    from pilot import compute                               # torch-free; lazy like pilot.postfit's render
+    if record.get("system_kind") != "berturk":
+        raise SystemExit("pilot.berturk.render_markdown renders BERTurk postfit records only (Laya: postfit.py "
+                         "--render); this record's system kind is %r" % (record.get("system_kind"),))
+    chosen, proto, rules = record["chosen"], record["protocol"], record.get("rules") or {}
+    bound = (reference.get("postfit") or {}) if isinstance(reference, dict) else {}
+    got = reference_check(record, os.path.join(REPO_ROOT, bound.get("path") or ""), bound.get("sha256"),
+                          reference.get("resolution") if isinstance(reference, dict) else None)
+    if json.dumps(got, sort_keys=True, ensure_ascii=False) != json.dumps(reference, sort_keys=True, ensure_ascii=False):
+        raise SystemExit("the reference check is not pilot.berturk.reference_check of this record's chosen candidate; "
+                         "rebuild it with postfit.py --reference-check")
+    if final is not None:
+        for key in postfit.FINAL_CHOSEN_KEYS:
+            if postfit._json((final.get("chosen") or {}).get(key)) != postfit._json(chosen.get(key)):
+                raise SystemExit("the final manifest's chosen %s is %r, the record's %r; it belongs to another record"
+                                 % (key, (final.get("chosen") or {}).get(key), chosen.get(key)))
+        if final.get("final_split") != record["final"]["split"]:
+            raise SystemExit("the final manifest's final split is %r, the record's %r"
+                             % (final.get("final_split"), record["final"]["split"]))
+        if (final.get("postfit") or {}).get("sha256") != bound.get("sha256"):
+            raise SystemExit("the final manifest is bound to postfit record %s, the reference check to %s"
+                             % ((final.get("postfit") or {}).get("sha256"), bound.get("sha256")))
+    cands = record["candidates"]
+    by_id = {c["dump_run_id"]: c for c in cands}
+    if chosen["dump_run_id"] not in by_id:
+        raise SystemExit("the record's chosen dump %s is not among its candidates" % chosen["dump_run_id"])
+    cc, th, canon = by_id[chosen["dump_run_id"]], chosen["theta"], chosen["canonical"]
+    epoch, sched, stop, top = chosen["epoch"], chosen["epochs_schedule"], chosen["stop_after_epoch"], proto["epochs"]
+    md = postfit._md
+    out = ["**Chosen on val** (selection run on %s, seed %s, %d val messages x %d tags; val numbers, in-sample; no "
+           "BERTurk test number exists before Phase 8)"
+           % (proto["selection_split"], proto["selection_seed"], record["split"]["n_messages"], len(TAGS)), ""]
+    out.append(md(("setting", "value"), [
+        ("train run id", chosen["train_run_id"]),
+        ("encoder LR / head LR", "%g / %g" % (canon["encoder_lr"], canon["head_lr"])),
+        ("epoch", "%d of %d, %s" % (epoch, sched, "--stop-after-epoch omitted (last epoch)" if stop is None
+                                    else "--stop-after-epoch %d" % stop)),
+        ("val-fitted T", "%.4f (bounds [%s, %s])" % (chosen["temperature"], postfit.T_MIN, postfit.T_MAX)),
+        ("val NLL at T / at T = 1", "%.5f / %.5f" % (cc["nll_fitted"], cc["nll_raw"])),
+        ("global θ shipped / raw", "%.2f / %.2f" % (th["shipped"]["global"], th["raw"]["global"])),
+        ("tags with their own θ (shipped / raw)", "%d / %d" % (len(th["shipped"]["per_tag"]), len(th["raw"]["per_tag"]))),
+        ("val micro-F1 at the global θ", postfit._f1(cc)),
+        ("val micro-F1 at θ 0.5", "%.4f" % cc["val_micro_f1_at_0_5"])]))
+    out += ["", "- Rule: %s; tie order: %s (Laya's rule, run by pilot.postfit on BERTurk's val dumps)."
+            % (rules.get("objective"), rules.get("tie_order"))]
+    lr_grid, laya = proto["lr_grid"], postfit.protocol("laya")
+    out.append("- LRs: encoder LR grid %s (%s; Laya's grid %s), head LR %g (Laya's %g)."
+               % (", ".join("%g" % x for x in lr_grid), "one value, fixed, not tuned" if len(lr_grid) == 1
+                  else "%d values, val-selected" % len(lr_grid), ", ".join("%g" % x for x in laya["lr_grid"]),
+                  proto["head_lr"], laya["head_lr"]))
+    out.append("- Epoch grid: 1..%d, every epoch of one run a candidate; Laya's is 1..%d (approved max_epochs %d), and "
+               "the approved compute budget for BERTurk is berturk_epochs %d, so this grid is a disclosed deviation "
+               "from both, and a selection over %d in-sample candidates is more optimistic than over %d."
+               % (top, laya["epochs"], compute.MATRIX["max_epochs"], compute.MATRIX["berturk_epochs"], top,
+                  laya["epochs"]))
+    edges = {name: postfit.theta_edges(cands, name) for name in ("shipped", "raw")}
+    clipped = edges["shipped"][0] + edges["shipped"][1]
+    ranked = sorted(cands, key=lambda c: (postfit.score(c), -c["epoch"], -c["encoder_lr"]), reverse=True)
+    runner = ranked[1] if len(ranked) > 1 else None
+    edge = "epoch %d of the epoch grid 1..%d" % (epoch, top)
+    if epoch == top:
+        line = ("upper edge: %s; the objective may still rise beyond it, and extending the grid would be a protocol "
+                "change after a val outcome, decided only by the user" % edge)
+    elif epoch == 1:
+        line = "lower edge: %s" % edge
+    elif clipped:
+        line = ("interior in the epoch grid: %s; θ clipped at the grid edge (see the θ-edge line), so the epoch is not "
+                "a clean optimum of the objective" % edge)
+    elif top - epoch == 1:
+        line = "next to the upper edge: %s, one epoch below it" % edge
+    elif epoch == 2:
+        line = "next to the lower edge: %s, one epoch above it" % edge
+    else:
+        line = "interior optimum: %s, %d epochs below the upper edge" % (edge, top - epoch)
+    if runner is not None:
+        line += "; runner-up epoch %d at %s, %.4f below the chosen" % (
+            runner["epoch"], postfit._f1(runner), cc["val_micro_f1_at_global_theta"] -
+            runner["val_micro_f1_at_global_theta"])
+    out.append("- Grid edge: %s." % line)
+    pos = []
+    for name in ("shipped", "raw"):
+        g, grid = th[name]["global"], th[name]["grid"]
+        pos.append("%s %.2f (%s)" % (name, g, "at the upper edge" if g == grid["stop"] else "at the lower edge"
+                                     if g == grid["start"] else "inside"))
+    temps = [c["temperature"] for c in cands]
+    on_bound = sum(t in (postfit.T_MIN, postfit.T_MAX) for t in temps)
+    t = chosen["temperature"]
+    out.append("- Bounds: on the θ grid %s..%s the chosen global θ is %s; the candidates' fitted T span %.4f..%.4f in "
+               "laya's band [%s, %s] (%d of %d on a bound), and the chosen T %.4f is %.4f above the lower bound %s and "
+               "%.4f below the upper bound %s."
+               % (th["shipped"]["grid"]["start"], th["shipped"]["grid"]["stop"], " and ".join(pos), min(temps),
+                  max(temps), postfit.T_MIN, postfit.T_MAX, on_bound, len(temps), t, t - postfit.T_MIN, postfit.T_MIN,
+                  postfit.T_MAX - t, postfit.T_MAX))
+    (s_up, s_lo), (r_up, r_lo) = edges["shipped"], edges["raw"]
+    grid = th["shipped"]["grid"]
+    out.append("- θ grid edge: %d of %d candidates choose the shipped global θ on the upper edge %.2f and %d on the "
+               "lower edge %.2f (raw: %d upper, %d lower)%s." % (
+                   len(s_up), len(cands), grid["stop"], len(s_lo), grid["start"], len(r_up), len(r_lo),
+                   "; the objective is clipped at a θ-grid edge for those candidates" if clipped
+                   else "; no candidate's objective is clipped at a θ-grid edge"))
+    # the published reference check (BASE-03)
+    v, ref = reference["value"], reference["reference"]
+    t12, t18 = ref["table_12"], ref["table_18"]
+    out += ["", "**Published reference check (BASE-03)** (%s, %s; %s)" % (ref["paper"], ref["venue"], ref["url"]), "",
+            md(("check", "value"), [
+                ("BERTurk val micro-F1 at the global θ (epoch %d, T %.4f)" % (v["epoch"], v["temperature"]),
+                 _ref_f1(reference)),
+                ("threshold", "%s: %s" % (reference["threshold"], reference["threshold_rule"])),
+                ("status", "%s (below the threshold: %s)" % (reference["status"], reference["below_threshold"])),
+                ("resolution", reference["resolution"] or "none recorded (nothing to resolve when the status is ok)"),
+                ("checked record", "%s (sha256 %s)" % (bound["path"], bound["sha256"][:12]))]), ""]
+    out.append("- Quoted source, Table 12 (%s; %s, %s; %s): %s." % (
+        t12["title"], t12["language"], t12["domain"], t12["setting"],
+        "; ".join("%s (%s encoder, θ %s) %s" % (x["model"], x["encoder"], x["theta"], x["micro_f1"])
+                  for x in t12["values"])))
+    out.append("- Quoted source, Table 18 (%s): %s %s; lower reference %s." % (t18["setup"], t18["model"],
+                                                                             t18["micro_f1"], ref["lower_reference"]))
+    out.append("- Not like-for-like. Setup differences: %s." % "; ".join(reference["differences"]))
+    out.append("- Caveats: %s." % "; ".join(reference["caveats"]))
+    # the candidates
+    rows = []
+    for c in cands:
+        mark = ("chosen" if c["dump_run_id"] == chosen["dump_run_id"] else
+                "runner-up" if runner is not None and c["dump_run_id"] == runner["dump_run_id"] else "")
+        rows.append(("%d" % c["epoch"], "%.4f" % c["temperature"], "%.5f" % c["nll_fitted"], "%.5f" % c["nll_raw"],
+                     "%.4f" % c["val_micro_f1_at_0_5"], postfit._f1(c), "%.2f" % c["theta"]["shipped"]["global"],
+                     "%.2f" % c["theta"]["raw"]["global"], mark))
+    out += ["", "**Candidates** (one full val dump per epoch export of %s, encoder LR %g; the objective is micro-F1 at "
+                "the global θ, as 2TP/(2TP + FP + FN) unreduced; the reference check above reduces it)"
+            % (chosen["train_run_id"], chosen["encoder_lr"]), "",
+            md(("epoch", "T", "NLL at T", "NLL at T = 1", "micro-F1 @0.5", "micro-F1 @global θ", "θ shipped", "θ raw",
+                "pick"), rows)]
+    # the protocol changes after a val outcome (BASE-03 fixes)
+    items = list(superseded)
+    if items:
+        prows, notes = [], []
+        for it in items:
+            s, rec, sref = it["entry"], it["record"], it["reference"]
+            sc = rec["chosen"]
+            change = "; ".join("%s: %s -> %s" % (k, _old_value(k, sc["canonical"]),
+                                                 "%g" % d if isinstance(d, float) else d)
+                               for k, d in sorted(s["delta"].items()))
+            g = s["gate"]
+            prows.append((s["train_run_id"], change, "%d of %d" % (sc["epoch"], rec["protocol"]["epochs"]),
+                          _ref_f1(sref), "%s (resolution: %s)" % (sref["status"], sref["resolution"] or "none"),
+                          "%s, %s: `%s`" % (g["plan"], g["date"], g["reply"]), "%s/" % s["dir"]))
+            notes.append("- %s: %s." % (s["train_run_id"], s["change"]))
+        n_laya, n_bert = len(laya["lr_grid"]), len(items) + 1   # Laya: one selection run per encoder LR
+        out += ["", "**Protocol changes after a val outcome (BASE-03 fixes)** (each discarded run below scored under "
+                    "0.707 at val; the user chose the fix at its gate; the run is kept as disclosed history, never "
+                    "current)", "",
+                md(("discarded train run", "changed by the fix (old -> new)", "chosen epoch", "val micro-F1 at the "
+                    "global θ", "status", "gate plan, date and reply", "history"), prows), ""]
+        out += notes
+        more = n_bert - n_laya
+        out.append("- BERTurk had %d more selection run%s than Laya: %d in all (the current %s and the %d discarded "
+                   "above), against Laya's %d; every recipe change above was made after a val outcome, a disclosed "
+                   "deviation from equal tuning effort."
+                   % (more, "" if more == 1 else "s", n_bert, chosen["train_run_id"], len(items), n_laya))
+    if final is not None:
+        frows = []
+        for e in final["seeds"]:
+            frows.append(("%d" % e["seed"], e["train_run_id"], "%d" % len(e.get("epochs") or []), *_gib(e)))
+        out += ["", "**Final seeds** (%s, --epochs %d stopped after epoch %d, serving T %.4f; not scored before Phase 8)"
+                % (final["final_split"], chosen["epochs_schedule"], epoch, chosen["temperature"]), "",
+                md(("seed", "train run id", "epochs trained", "final-epoch loss", "peak GiB", "largest swap delta MiB"),
+                   frows)]
+    return "\n".join(out) + "\n"
 
 
 def disk_need_bytes(model_bytes, epochs, export_epochs, final):
