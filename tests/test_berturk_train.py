@@ -13,7 +13,13 @@ trajectory (byte-identical to the uninterrupted run's epoch K on CPU), the --pos
 checkpoint serving the record's T bit for bit. The record here is a hand-built postfit/1 record whose chosen canonical
 is the tiny selection command's own (captured from berturk_train.py --print-run-id), chosen epoch 1 of 2.
 
-No marker: it runs in `make test` (no Ray, no weights, no data download; seconds).
+The optimizer (plan 06-14, the BASE-03 fix): four AdamW groups with the fresh head at --head-lr and the encoder at
+--lr, the Trainer's own class, kwargs and weight-decay rule, a constant head/encoder LR ratio under the Trainer's
+linear schedule and warm-up, byte-identical weights to the Trainer's own optim adamw_torch when the head LR equals the
+encoder LR, and the refusal of a base whose head is not freshly initialised.
+
+No marker: it runs in `make test` (no Ray, no weights, no data download; seconds), except the one weights-marked
+check of the pinned BERTurk base's head (HF_HUB_OFFLINE=1 reuses the local Hub cache).
 """
 import json
 import math
@@ -257,7 +263,8 @@ def test_refuses_an_incomplete_or_lowercasing_base(inputs, tmp_path, no_load, fa
     refused(train_argv(data, manifest, bad, tmp_path / "runs"), tmp_path / "runs", match)
 
 
-@pytest.mark.parametrize("flag", ["--epochs", "--batch", "--max-len", "--max-messages", "--cpus", "--lr"])
+@pytest.mark.parametrize("flag", ["--epochs", "--batch", "--max-len", "--max-messages", "--cpus", "--lr",
+                                  "--head-lr"])
 def test_refuses_bad_numbers(inputs, tmp_path, no_load, capsys, flag):
     import berturk_train
     data, manifest, base = inputs
@@ -545,3 +552,221 @@ def test_selection_identity_has_no_final_keys(two_runs, selection_canon):
         assert "stop_after_epoch" not in canon and "postfit_sha256" not in canon
     assert rec["run_id"] == rid == berturk.run_id(rec["canonical"]) == selection_canon[0]
     assert rec["stop_after_epoch"] is None and rec["postfit"] is None
+
+
+# ---- the optimizer: the head at --head-lr, the encoder at --lr (plan 06-14, the BASE-03 fix) ----
+
+ENC_LR, HEAD_LR = 2e-05, berturk.HEAD_LR
+
+
+def test_optimizer_groups_split_head_and_encoder():
+    """Torch-free, on names: four groups in the fixed order, the head is exactly the classifier.* names, decay follows
+    the given names, every name in exactly one group; refused unless the head is exactly the fresh names."""
+    names = ["bert.embeddings.word_embeddings.weight", "bert.embeddings.LayerNorm.weight",
+             "bert.encoder.layer.0.attention.self.query.weight", "bert.encoder.layer.0.attention.self.query.bias",
+             "bert.pooler.dense.weight", "bert.pooler.dense.bias", "classifier.weight", "classifier.bias"]
+    decay = [n for n in names if n.endswith(".weight") and "LayerNorm" not in n]
+    fresh = ["classifier.bias", "classifier.weight"]
+    groups = berturk.optimizer_groups(names, decay, fresh, ENC_LR, HEAD_LR, 0.01)
+    assert [(g["group"], g["decay"], g["lr"], g["weight_decay"]) for g in groups] == [
+        ("encoder", True, ENC_LR, 0.01), ("encoder", False, ENC_LR, 0.0), ("head", True, HEAD_LR, 0.01),
+        ("head", False, HEAD_LR, 0.0)]
+    assert groups[0]["params"] == ["bert.embeddings.word_embeddings.weight",
+                                   "bert.encoder.layer.0.attention.self.query.weight", "bert.pooler.dense.weight"]
+    assert groups[1]["params"] == ["bert.embeddings.LayerNorm.weight", "bert.encoder.layer.0.attention.self.query.bias",
+                                   "bert.pooler.dense.bias"]
+    assert groups[2]["params"] == ["classifier.weight"] and groups[3]["params"] == ["classifier.bias"]
+    placed = [n for g in groups for n in g["params"]]
+    assert sorted(placed) == sorted(names) and len(placed) == len(names)          # each name exactly once
+    for bad in (fresh + ["bert.pooler.dense.weight"],    # a pretrained parameter reported as newly initialised
+                ["classifier.weight"],                   # a head parameter that was loaded, not fresh
+                []):                                     # nothing fresh: the base already holds a head
+        with pytest.raises(SystemExit, match="the classifier head must be exactly the newly initialised parameters"):
+            berturk.optimizer_groups(names, decay, bad, ENC_LR, HEAD_LR, 0.01)
+    with pytest.raises(SystemExit, match="head none"):
+        berturk.optimizer_groups([n for n in names if not n.startswith("classifier.")], decay, [], ENC_LR, HEAD_LR,
+                                 0.01)
+
+
+def _rows(data, tok, n=None):
+    """The tokenised training rows berturk_train.main builds from the synthetic selection split."""
+    with open(data, "rb") as f:
+        rows = pilot.data.parse_jsonl(f.read())
+    out = []
+    for r in rows[:n]:
+        enc = tok(r["state"], truncation=True, max_length=MAX_LEN)
+        out.append({"input_ids": enc["input_ids"], "token_type_ids": enc["token_type_ids"],
+                    "attention_mask": enc["attention_mask"], "labels": berturk.label_vector(r)})
+    return out
+
+
+def _load(base, seed=0):
+    """(model, newly initialised names) of the tiny base, loaded exactly as berturk_train.main loads a base."""
+    import torch
+    import transformers
+    transformers.set_seed(seed)
+    model, info = transformers.BertForSequenceClassification.from_pretrained(
+        base, num_labels=len(berturk.TAGS), problem_type=berturk.PROBLEM_TYPE, id2label=berturk.id2label(),
+        label2id=berturk.label2id(), dtype=torch.float32, local_files_only=True, output_loading_info=True)
+    return model, info["missing_keys"]
+
+
+def _args(out, epochs=1):
+    """The TrainingArguments berturk_train.main builds (the recipe constants, the smoke batch, CPU)."""
+    import transformers
+    return transformers.TrainingArguments(
+        output_dir=str(out), per_device_train_batch_size=BATCH, gradient_accumulation_steps=1, num_train_epochs=epochs,
+        learning_rate=ENC_LR, weight_decay=berturk.WEIGHT_DECAY, warmup_steps=berturk.WARMUP_RATIO,
+        lr_scheduler_type=berturk.LR_SCHEDULER, max_grad_norm=berturk.MAX_GRAD_NORM, optim=berturk.OPTIM, seed=0,
+        data_seed=0, use_cpu=True, fp16=False, bf16=False, save_strategy="no", eval_strategy="no",
+        logging_strategy="epoch", report_to="none", disable_tqdm=True, dataloader_num_workers=0,
+        dataloader_pin_memory=False)
+
+
+@pytest.fixture
+def keep_threads():
+    import torch
+    threads = torch.get_num_threads()
+    yield
+    torch.set_num_threads(threads)
+
+
+def test_head_lr_param_groups_in_the_trainer(inputs, tmp_path, keep_threads):
+    import berturk_train
+    import torch
+    import transformers
+    data, _, base = inputs
+    model, fresh = _load(base)
+    assert sorted(fresh) == ["classifier.bias", "classifier.weight"]
+    args = _args(tmp_path / "t")
+    optimizer, groups = berturk_train.build_optimizer(model, args, HEAD_LR, fresh)
+    pg = optimizer.param_groups
+    assert [(g["group"], g["decay"]) for g in groups] == [("encoder", True), ("encoder", False), ("head", True),
+                                                          ("head", False)]
+    assert [g["lr"] for g in pg] == [ENC_LR, ENC_LR, HEAD_LR, HEAD_LR]
+    assert [g["weight_decay"] for g in pg] == [0.01, 0.0, 0.01, 0.0]
+    assert pg[2]["params"][0] is model.classifier.weight and len(pg[2]["params"]) == 1
+    assert pg[3]["params"][0] is model.classifier.bias and len(pg[3]["params"]) == 1
+    named = dict(model.named_parameters())
+    assert all(p is named[n] for g, q in zip(groups, pg) for n, p in zip(g["params"], q["params"]))
+    tok = transformers.AutoTokenizer.from_pretrained(base, local_files_only=True)
+    trainer = transformers.Trainer(model=model, args=args, train_dataset=_rows(data, tok),
+                                   data_collator=transformers.DataCollatorWithPadding(tok),
+                                   compute_loss_func=berturk_train.masked_bce, optimizers=(optimizer, None))
+    decay = set(trainer.get_decay_parameter_names(model))              # the Trainer's own rule, on an instance
+    assert {n for g in groups if g["decay"] for n in g["params"]} == decay
+    assert {n for g in groups if not g["decay"] for n in g["params"]} == set(named) - decay
+    cls, kwargs = transformers.Trainer.get_optimizer_cls_and_kwargs(args)
+    assert type(optimizer) is cls is torch.optim.AdamW
+    assert all(g["betas"] == kwargs["betas"] and g["eps"] == kwargs["eps"] for g in pg)
+    assert trainer.optimizer is optimizer
+    n_steps = 20
+    sched = trainer.create_scheduler(num_training_steps=n_steps)
+    warm = args.get_warmup_steps(n_steps)
+    assert warm == 2
+    enc, head = [], []
+    for _ in range(n_steps):
+        enc.append(pg[0]["lr"])
+        head.append(pg[2]["lr"])
+        assert pg[1]["lr"] == pg[0]["lr"] and pg[3]["lr"] == pg[2]["lr"]
+        assert math.isclose(head[-1], enc[-1] * (HEAD_LR / ENC_LR), rel_tol=1e-12, abs_tol=0.0)
+        optimizer.step()                                                # no gradients: no parameter moves
+        sched.step()
+    assert enc[0] == 0.0 and enc[1] < ENC_LR and enc[warm] == ENC_LR and head[warm] == HEAD_LR   # the warm-up
+    assert all(enc[k] > enc[k + 1] for k in range(warm, n_steps - 1))                          # then linear decay
+    assert math.isclose(HEAD_LR / ENC_LR, 5.0, rel_tol=1e-12)
+
+
+def _train_one_epoch(base, data, out, own_optimizer):
+    """The tiny base trained for one epoch with berturk_train's optimizer at head LR = encoder LR (own_optimizer
+    False) or with the Trainer's own optim adamw_torch (True); the trained state_dict."""
+    import berturk_train
+    import transformers
+    model, fresh = _load(base)
+    args = _args(out)
+    tok = transformers.AutoTokenizer.from_pretrained(base, local_files_only=True)
+    opt = (None, None) if own_optimizer else (berturk_train.build_optimizer(model, args, ENC_LR, fresh)[0], None)
+    trainer = transformers.Trainer(model=model, args=args, train_dataset=_rows(data, tok),
+                                   data_collator=transformers.DataCollatorWithPadding(tok),
+                                   compute_loss_func=berturk_train.masked_bce, optimizers=opt)
+    trainer.train()
+    if own_optimizer:
+        assert len(trainer.optimizer.param_groups) == 2              # the Trainer's own decay / no-decay split
+    else:
+        assert len(trainer.optimizer.param_groups) == 4
+    return {k: v.detach().clone() for k, v in trainer.model.state_dict().items()}
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_tied_head_lr_equals_the_trainers_own_adamw(inputs, tmp_path, keep_threads):
+    """The param groups change nothing but the head LR: tied, they train to exactly the Trainer's own weights."""
+    import torch
+    data, _, base = inputs
+    ours = _train_one_epoch(base, data, tmp_path / "ours", own_optimizer=False)
+    own = _train_one_epoch(base, data, tmp_path / "own", own_optimizer=True)
+    assert sorted(ours) == sorted(own)
+    differ = [k for k in ours if not torch.equal(ours[k], own[k])]
+    assert not differ, "tensors differ from the Trainer's own adamw_torch: %s" % differ
+    model, _ = _load(base)
+    start = model.state_dict()
+    assert not torch.equal(ours["classifier.weight"], start["classifier.weight"])               # it trained
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_head_lr_reaches_the_record_and_the_weights(inputs, two_runs, tmp_path):
+    data, manifest, base = inputs
+    rid, (a, _) = two_runs
+    default = _json(os.path.join(exports(a)[0], berturk.RECORD))
+    assert default["canonical"]["head_lr"] == HEAD_LR
+    assert [g["lr"] for g in default["record"]["optimizer_groups"]] == [ENC_LR, ENC_LR, HEAD_LR, HEAD_LR]
+    argv = train_argv(data, manifest, base, tmp_path / "tied", "--head-lr", "2e-05")
+    tied_rid = run_train(argv + ["--print-run-id"]).stdout.strip()
+    assert tied_rid != rid and tied_rid.startswith("berturk-selection_train-s0-")
+    run_train(argv)
+    tied = _json(os.path.join(str(tmp_path / "tied" / tied_rid), "exports", "epoch-001", berturk.RECORD))
+    assert tied["canonical"]["head_lr"] == ENC_LR and tied["canonical"]["encoder_lr"] == ENC_LR
+    groups = tied["record"]["optimizer_groups"]
+    assert [g["lr"] for g in groups] == [ENC_LR] * 4
+    assert [g["n_tensors"] for g in groups] == [g["n_tensors"] for g in default["record"]["optimizer_groups"]]
+    assert set(groups[0]) == {"group", "decay", "lr", "weight_decay", "n_tensors"}            # counts, never names
+    assert _bytes(os.path.join(str(tmp_path / "tied" / tied_rid), "exports", "epoch-001", "model.safetensors")) \
+        != _bytes(os.path.join(exports(a)[0], "model.safetensors"))
+
+
+def test_refuses_a_base_whose_head_is_not_fresh(inputs, tmp_path, keep_threads):
+    """A base that already holds a classifier (saved as BertForSequenceClassification) is refused before the run dir:
+    its head would not be the freshly initialised parameters the head LR is meant for."""
+    import shutil
+    import torch
+    import transformers
+    data, manifest, base = inputs
+    bad = str(tmp_path / "base-with-head")
+    model, _ = _load(base)
+    model.save_pretrained(bad)
+    for f in berturk.TOKENIZER_FILES:
+        shutil.copyfile(os.path.join(base, f), os.path.join(bad, f))
+    loaded, info = transformers.BertForSequenceClassification.from_pretrained(
+        bad, num_labels=len(berturk.TAGS), dtype=torch.float32, local_files_only=True, output_loading_info=True)
+    assert not info["missing_keys"]                                    # nothing is newly initialised (a set in 5.19)
+    refused(train_argv(data, manifest, bad, tmp_path / "runs"), tmp_path / "runs",
+            "the classifier head must be exactly the newly initialised parameters")
+
+
+@pytest.mark.weights
+def test_pinned_base_head_is_the_fresh_classifier(keep_threads):
+    """The pinned BERTurk base: from_pretrained newly initialises exactly classifier.weight and classifier.bias, and
+    optimizer_groups accepts them as the head (06-RESEARCH probe 4)."""
+    import torch
+    import transformers
+    from pilot import pins
+    from pilot.weights import fetch
+    model, info = transformers.BertForSequenceClassification.from_pretrained(
+        fetch(pins.BERTURK), num_labels=len(berturk.TAGS), problem_type=berturk.PROBLEM_TYPE,
+        id2label=berturk.id2label(), label2id=berturk.label2id(), dtype=torch.float32, local_files_only=True,
+        output_loading_info=True)
+    assert sorted(info["missing_keys"]) == ["classifier.bias", "classifier.weight"]
+    names = [n for n, _ in model.named_parameters()]
+    decay = transformers.Trainer.get_decay_parameter_names(None, model)
+    groups = berturk.optimizer_groups(names, decay, info["missing_keys"], ENC_LR, HEAD_LR, berturk.WEIGHT_DECAY)
+    assert groups[2]["params"] == ["classifier.weight"] and groups[3]["params"] == ["classifier.bias"]
+    assert sum(len(g["params"]) for g in groups[:2]) == len(names) - 2
