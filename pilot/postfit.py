@@ -505,12 +505,13 @@ def final_data(record, manifest):
 
 def _final_entry(record, sha, ckpt_dir):
     """One final_manifest entry of a finished --postfit checkpoint, or SystemExit naming what does not bind it."""
-    from pilot.weights import identity                      # torch-free; imported here, like prune_export
+    from pilot.weights import checkpoint_digests, identity  # torch-free; imported here, like prune_export
     chosen, name = record["chosen"], os.path.basename(os.path.normpath(ckpt_dir))
-    ident = identity(ckpt_dir)
     path = os.path.join(ckpt_dir, "rl_agent_config.json")
-    if not os.path.isfile(path):
+    if not os.path.isfile(path):                            # checked before any hashing (05-REVIEW IN-03)
         raise SystemExit("%s has no rl_agent_config.json; pass the final checkpoint dirs ray_train.py wrote" % name)
+    ident = identity(ckpt_dir)
+    checkpoint_digests(ckpt_dir, ident)                     # refuses missing weights, tokenizer/ or encoder/ files
     with open(path, "rb") as f:
         raw = f.read()
     if sha256_bytes(raw) != ident["config_sha256"]:

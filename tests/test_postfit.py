@@ -601,6 +601,24 @@ def test_final_manifest_lists_the_three_seeds(finals, tmp_path, capsys):
     assert postfit.final_manifest(path, list(reversed(dirs))) == man                 # order-independent
 
 
+def test_final_manifest_refuses_an_incomplete_checkpoint(finals, tmp_path):
+    """05-REVIEW IN-03: a dir without rl_agent_config.json is refused before any hashing, and one without the files
+    laya.load reads (the weights, encoder/config.json) is refused by name, never as an unknown system."""
+    import shutil
+    path, record, sha, make = finals
+    s0, s1, s2 = make("s0", 0), make("s1", 1), make("s2", 2)
+    empty = tmp_path / "ckpt" / "empty"
+    empty.mkdir()
+    with pytest.raises(SystemExit, match="empty has no rl_agent_config.json"):
+        postfit.final_manifest(path, [s0, s1, str(empty)])
+    os.remove(os.path.join(s2, "model.safetensors"))
+    with pytest.raises(SystemExit, match="s2 lacks model.safetensors"):
+        postfit.final_manifest(path, [s0, s1, s2])
+    shutil.rmtree(os.path.join(s1, "encoder"))
+    with pytest.raises(SystemExit, match="s1 lacks encoder/config.json"):
+        postfit.final_manifest(path, [s0, s1])
+
+
 @pytest.mark.parametrize("case, match", [
     ("another_sha", "bound to postfit record"),
     ("duplicate_seed", "seeds \\[0, 0, 1\\]"),
