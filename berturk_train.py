@@ -201,9 +201,12 @@ def check_float32(model):
 
 def _write_checkpoint(model, base_dir, final, rec):
     """A checkpoint dir at `final`: model.save_pretrained (config.json + model.safetensors, fp32), the base's tokenizer
-    files byte for byte, then the record; written to a temp sibling and renamed, so it is whole or absent."""
+    files byte for byte, then the record; written to a temp sibling and renamed, so it is whole or absent. A temp
+    sibling that already exists is refused, never deleted: this process did not make it (06-REVIEW IN-04)."""
     tmp = final + ".tmp"
-    shutil.rmtree(tmp, ignore_errors=True)
+    if os.path.lexists(tmp):
+        raise SystemExit("%s exists (another run's, or one interrupted while writing); inspect it and remove it, then "
+                         "rerun" % tmp)
     os.makedirs(tmp)
     model.save_pretrained(tmp)
     for f in berturk.TOKENIZER_FILES:
@@ -296,6 +299,9 @@ def main(argv=None):
     if (a.out is not None and not a.print_run_id and os.path.lexists(a.out)
             and (not os.path.isdir(a.out) or os.listdir(a.out))):
         raise SystemExit("--out %s exists and is not empty; choose a new dir" % a.out)
+    if a.out is not None and not a.print_run_id and os.path.lexists(os.path.abspath(a.out) + ".tmp"):
+        raise SystemExit("%s.tmp exists (another run's, or one interrupted while writing --out); inspect it and remove "
+                         "it, then rerun" % os.path.abspath(a.out))  # before training, as the --out check (IN-04)
 
     if a.base == "berturk":                                 # the pin names the digests; fetched after the binding
         base_dir = None

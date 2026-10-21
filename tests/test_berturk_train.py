@@ -526,6 +526,23 @@ def test_reference_gate_refuses(inputs, final_setup, tmp_path, monkeypatch, no_l
     refused(argv + (["--print-run-id"] if print_run_id else []), storage, re.escape(match))
 
 
+def test_a_leftover_out_tmp_is_refused_never_deleted(inputs, final_setup, tmp_path, no_load):
+    """06-REVIEW IN-04: a <out>.tmp sibling this process did not make is refused before training, and by
+    _write_checkpoint itself (an export's or --out's temp dir), never silently deleted."""
+    import berturk_train
+    storage = tmp_path / "runs"
+    argv = final_argv(inputs, final_setup, storage)
+    out = argv[argv.index("--out") + 1]
+    os.makedirs(out + ".tmp")
+    keep = os.path.join(out + ".tmp", "keep.txt")
+    with open(keep, "w", encoding="utf-8") as f:
+        f.write("not ours")
+    refused(argv, storage, re.escape("%s.tmp exists" % os.path.abspath(out)))
+    with pytest.raises(SystemExit, match=re.escape("%s.tmp exists" % out)):
+        berturk_train._write_checkpoint(None, None, out, None)
+    assert os.path.isfile(keep) and not os.path.exists(out)
+
+
 @pytest.mark.parametrize("drop", ["--reference", "--out", "--postfit"])
 def test_postfit_needs_out_and_reference(inputs, final_setup, tmp_path, capsys, no_load, drop):
     storage = tmp_path / "runs"
