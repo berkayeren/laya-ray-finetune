@@ -149,6 +149,35 @@ def test_score_refuses_a_finetuned_checkpoint_on_test_before_any_load(tmp_repo):
     assert r.returncode == 0, r.stderr
 
 
+@pytest.mark.timeout(900)
+def test_score_interlock_is_keyed_on_the_test_content(tmp_repo, synthetic_raw):
+    """05-REVIEW CR-02: the interlock follows the scored content, not the manifest bytes. A copy of the committed
+    manifest with one extra newline next to the committed split bytes, and the --no-include-no-intent variant (other
+    bytes and uids, the same (uid, message) pairs minus the no-intent rows), both still refuse a fine-tuned checkpoint
+    on test before any load; val under the edited manifest copy still scores."""
+    import json
+    from tiny_laya import tiny_checkpoint
+    shutil.copytree(tiny_checkpoint(tmp_repo / "plain"), str(tmp_repo / "ckpt"))
+    cfg_path = tmp_repo / "ckpt" / "rl_agent_config.json"
+    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    cfg["fine_tuned"] = True
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    shutil.copytree(str(tmp_repo / "data" / "splits"), str(tmp_repo / "copy" / "splits"))
+    (tmp_repo / "copy" / "splits.json").write_bytes((tmp_repo / "data" / "splits.json").read_bytes() + b"\n")
+    root, raw_sha256 = synthetic_raw()
+    pilot.data.prepare(root, str(tmp_repo / "noint"), raw_sha256, include_no_intent=False)
+    for d in ("copy", "noint"):
+        r = _run(tmp_repo, "score.py", "%s/splits/test.jsonl" % d, "--checkpoint", "ckpt", "--workers", "0",
+                 "--manifest", "%s/splits.json" % d, "--out-root", "out")
+        assert r.returncode != 0, (d, r.stdout, r.stderr)
+        assert "committed test content" in r.stderr and "Phase 8" in r.stderr, (d, r.stderr)
+        assert "Traceback" not in r.stderr, (d, r.stderr)
+    assert not (tmp_repo / "out").exists()
+    r = _run(tmp_repo, "score.py", "copy/splits/val.jsonl", "--checkpoint", "ckpt", "--workers", "0",
+             "--manifest", "copy/splits.json", "--out-root", "out")
+    assert r.returncode == 0, r.stderr
+
+
 @pytest.mark.parametrize("n", ["0", "-5"])
 def test_evaluate_refuses_non_positive_n(tmp_repo, n):
     r = _run(tmp_repo, "evaluate.py", "data/splits/test.jsonl", "--workers", "0", "--n", n)

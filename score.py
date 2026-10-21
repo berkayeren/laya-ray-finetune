@@ -66,12 +66,16 @@ when they are distinct seeds of one recipe by that digest. The pinned zero-shot 
 training.ray_train and the baselines record seed None and training None.
 
 The Phase 5 test interlock (RESEARCH A6; ROADMAP Phase 5 criterion 4): a fine-tuned Laya checkpoint (rl_agent_config
-.json fine_tuned true or a training.ray_train block) is refused on a split with role test under the committed manifest,
-right after the checkpoint argument check and before any hashing, fetch, model load or Ray start (refuse_finetuned_test;
-evaluate.py forwards to score.main and inherits it). Val scoring of the same checkpoint, and the pinned zero-shot or
-a not fine-tuned checkpoint on test, are unaffected; hotels_probe is already refused by the role gate. A
-non-committed manifest (the synthetic CPU smoke test, tests/test_smoke_cpu.py) is outside the interlock. Phase 8
-replaces it with the protocol-hash gate (protocol.json).
+.json fine_tuned true or a training.ray_train block) is refused on committed test content, right after the checkpoint
+argument check and before any hashing, fetch, model load or Ray start (refuse_finetuned_test; evaluate.py forwards to
+score.main and inherits it). It is keyed on the scored content, not on the manifest bytes (05-REVIEW CR-02): refused
+are a split with role test under the committed manifest, a split (any role, any manifest) whose sha256 or uids_sha256
+is the committed test entry's in data/splits.json, and any scored (uid, message) pair of the committed
+data/splits/test.jsonl when that file exists (committed_test_pairs), so a byte-different manifest copy or the
+--no-include-no-intent variant cannot turn it off. A uid alone is not the key: the synthetic splits of the tests reuse
+the uid scheme with other messages, so the CPU smoke test (tests/test_smoke_cpu.py) stays outside it. Val scoring of
+the same checkpoint, and the pinned zero-shot or a not fine-tuned checkpoint on test, are unaffected; hotels_probe is
+already refused by the role gate. Phase 8 replaces it with the protocol-hash gate (protocol.json).
 
 Module-level imports stay torch-, Ray- and laya-free.
 
@@ -173,14 +177,34 @@ def is_finetuned(checkpoint):
     return cfg.get("fine_tuned") is True or bool(isinstance(tr, dict) and tr.get("ray_train"))
 
 
-def refuse_finetuned_test(checkpoint, entry, manifest_path):
+def committed_test_pairs():
+    """(committed test entry of the repo's data/splits.json, the set of (uid, message) pairs of the committed
+    data/splits/test.jsonl). The set is empty when that file is absent (no `make data`); the entry's hashes still key
+    the interlock then."""
+    with open(DEFAULT_MANIFEST, encoding="utf-8") as f:
+        committed = json.load(f)["splits"]["test"]
+    path = os.path.join(os.path.dirname(DEFAULT_MANIFEST), committed["path"])
+    if not os.path.isfile(path):
+        return committed, set()
+    with open(path, "rb") as f:
+        return committed, {(c.get("uid"), c.get("state")) for c in parse_jsonl(f.read())}
+
+
+def refuse_finetuned_test(checkpoint, entry, manifest_path, cases=()):
     """The Phase 5 test interlock (RESEARCH A6, ROADMAP Phase 5 criterion 4): SystemExit when a fine-tuned Laya
-    checkpoint would be scored on a split with role test under the committed manifest. Runs before any hashing, fetch,
-    model load or Ray start. A non-committed manifest (the synthetic CPU smoke test) is outside it; Phase 8 replaces it
-    with the protocol-hash gate."""
-    if entry["role"] == "test" and manifest_is_committed(manifest_path) and is_finetuned(checkpoint):
-        raise SystemExit("%s is a fine-tuned Laya checkpoint; no fine-tuned model is scored on test before the Phase 8 "
-                         "protocol freeze (protocol.json); score val instead" % _shown(checkpoint))
+    checkpoint would be scored on committed test content: a split with role test under the committed manifest, a split
+    whose sha256 or uids_sha256 is the committed test entry's, or any scored case (`cases`, the parsed rows) whose
+    (uid, message) pair is in the committed test.jsonl (05-REVIEW CR-02: keyed on the content, not the manifest bytes).
+    Runs before any hashing, fetch, model load or Ray start; Phase 8 replaces it with the protocol-hash gate."""
+    if not is_finetuned(checkpoint):
+        return
+    committed, pairs = committed_test_pairs()
+    if (entry["role"] == "test" and manifest_is_committed(manifest_path)) or \
+            entry["sha256"] == committed["sha256"] or entry["uids_sha256"] == committed["uids_sha256"] or \
+            any((c.get("uid"), c.get("state")) in pairs for c in cases):
+        raise SystemExit("%s is a fine-tuned Laya checkpoint and %s holds committed test content; no fine-tuned model "
+                         "is scored on test before the Phase 8 protocol freeze (protocol.json); score val instead"
+                         % (_shown(checkpoint), entry["path"]))
 
 
 def training_block(checkpoint, ident):
@@ -622,7 +646,7 @@ def main(argv=None):
     if a.model == "laya":
         from pilot.weights import identity
         check_checkpoint_arg(checkpoint)
-        refuse_finetuned_test(checkpoint, entry, a.manifest)  # Phase 5: before any hashing, fetch, load or Ray
+        refuse_finetuned_test(checkpoint, entry, a.manifest, cases)   # Phase 5: before any hash, fetch, load, Ray
         ident = identity(checkpoint)
         seed, training = training_block(checkpoint, ident)   # WR-05: the training seed and recipe, bound by ident
         rid = dumps.run_id("laya", ident)
