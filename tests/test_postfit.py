@@ -511,6 +511,25 @@ def test_print_final_commands_cli(tmp_path, capsys):
     assert r.returncode != 0 and "nonexistent.json not found" in r.stderr, r.stderr
 
 
+def test_print_final_commands_with_a_manifest_verify_against_it(tmp_path, synthetic_raw, capsys):
+    """05-REVIEW WR-03: with --manifest M (outside data/), every printed command's --data is the final_train split M
+    registers, and it verifies against M through pilot.data.verify_split_file (the check ray_train.py runs)."""
+    import shlex
+    ray_train = pytest.importorskip("ray_train")
+    path, record = _selection_record(ray_train, SELECTION_COMMANDS[0], tmp_path)
+    out_dir, manifest = prepared(tmp_path, synthetic_raw, name="elsewhere")
+    lines = postfit_cli.main(["--print-final-commands", path, "--storage", "s", "--out-prefix", "o",
+                              "--manifest", manifest])
+    for ln in lines:
+        a = ray_train.parser().parse_args(shlex.split(ln)[1:])
+        assert a.manifest == manifest and a.data == os.path.join(out_dir, "splits", "final_train.jsonl")
+        assert pilot.data.verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))["path"] == \
+            "splits/final_train.jsonl"
+    with pytest.raises(SystemExit, match="cannot be read"):
+        postfit_cli.main(["--print-final-commands", path, "--storage", "s", "--out-prefix", "o",
+                          "--manifest", str(tmp_path / "missing.json")])
+
+
 @pytest.fixture
 def finals(tmp_path):
     """(record path, record, sha, make) where make(name, seed, **change) writes a tiny checkpoint whose config carries

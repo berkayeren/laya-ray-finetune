@@ -49,6 +49,7 @@ positions, the candidates and the final seeds, rounded for display only (it chan
 usage: from pilot import postfit; record = postfit.fit(run_dirs, manifest_path); postfit.write_record(record, path)
        record, sha = postfit.read_record(path); postfit.prune_export(export_dir, dump_root, manifest_path)
        postfit.final_command(record, seed, record_path, storage, out_prefix); postfit.final_manifest(path, ckpt_dirs)
+       postfit.final_data(record, manifest_path)
        postfit.protocol("laya" | "berturk"); text = postfit.render_markdown(record, final_manifest)
        python postfit.py RUN_DIR [RUN_DIR ...] [--out results/postfit/laya.json] [--manifest splits.json]
        python postfit.py --prune EXPORT_DIR [EXPORT_DIR ...] [--dump-root results/dumps] [--manifest splits.json]
@@ -485,6 +486,21 @@ def final_command(record, seed, record_path, storage, out_prefix, base="multilin
     if manifest is not None:
         argv += ["--manifest", manifest]
     return argv
+
+
+def final_data(record, manifest):
+    """The --data of a final-seed command printed with --manifest M (05-REVIEW WR-03): the path M registers for the
+    record's final split, joined to M's directory (pilot.data resolves split paths relative to the manifest), so the
+    printed command verifies against M. SystemExit when M is unreadable or registers no such split."""
+    split = record["final"]["split"]
+    try:
+        with open(manifest, encoding="utf-8") as f:
+            entry = ((json.load(f).get("splits") or {}).get(split) or {})
+    except (OSError, ValueError) as e:
+        raise SystemExit("--manifest %s cannot be read (%s); pass a splits.json written by `make data`" % (manifest, e))
+    if not isinstance(entry.get("path"), str):
+        raise SystemExit("--manifest %s registers no %s split; regenerate it with `make data`" % (manifest, split))
+    return os.path.join(os.path.dirname(manifest), entry["path"])
 
 
 def _final_entry(record, sha, ckpt_dir):

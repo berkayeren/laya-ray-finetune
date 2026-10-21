@@ -66,7 +66,8 @@ def main(argv=None):
                     help="write the record (with --final-manifest the manifest, with --reference-check the check) here")
     ap.add_argument("--manifest", default=None,
                     help="splits.json to verify against (default: the committed data/splits.json); with "
-                         "--print-final-commands it is passed on to ray_train.py only when given")
+                         "--print-final-commands it is passed on to the trainer only when given, with --data the "
+                         "final split it registers")
     ap.add_argument("--prune", nargs="+", metavar="EXPORT_DIR", default=None,
                     help="delete these epoch exports, each only after its verified full val dump exists")
     ap.add_argument("--dump-root", default=dumps.DUMP_ROOT, help="--prune: where the val dumps are (results/dumps)")
@@ -125,18 +126,20 @@ def main(argv=None):
         if a.storage is None or a.out_prefix is None:
             ap.error("--print-final-commands needs --storage DIR and --out-prefix PATH")
         record, sha = postfit.read_record(a.print_final_commands)
+        # with --manifest M, --data is the final split M registers (relative to M's dir), so the commands verify
+        data = {} if a.manifest is None else {"data": postfit.final_data(record, a.manifest)}
         if record.get("system_kind") == "berturk":
             if a.reference is None:
                 ap.error("--print-final-commands of a BERTurk record needs --reference REF (its BASE-03 check)")
             berturk.check_reference_for_final(a.reference, sha)      # no command printed before the gate passes
             argvs = [berturk.final_command(record, seed, a.print_final_commands, a.reference, a.storage, a.out_prefix,
-                                           base=a.base or "berturk", manifest=a.manifest)
+                                           base=a.base or "berturk", manifest=a.manifest, **data)
                      for seed in record["final"]["seeds"]]
         else:
             if a.reference is not None:
                 ap.error("--reference applies only to --print-final-commands of a BERTurk record")
             argvs = [postfit.final_command(record, seed, a.print_final_commands, a.storage, a.out_prefix,
-                                           base=a.base or "multilingual", manifest=a.manifest)
+                                           base=a.base or "multilingual", manifest=a.manifest, **data)
                      for seed in record["final"]["seeds"]]
         lines = [shlex.join(argv) for argv in argvs]
         print("\n".join(lines))
