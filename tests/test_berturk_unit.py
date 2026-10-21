@@ -231,25 +231,62 @@ def test_identity_resolves_lr_to_the_encoder_only():
     assert len(ids) == 2
 
 
+def _superseded_canonical(entry):
+    """The chosen canonical config of a SUPERSEDED entry's committed postfit record."""
+    with open(os.path.join(REPO_ROOT, entry["record"]), encoding="utf-8") as f:
+        return json.load(f)["chosen"]["canonical"]
+
+
+RECIPE_KEYS = ("encoder_lr", "batch", "max_len", "weight_decay", "warmup_ratio", "lr_scheduler", "max_grad_norm",
+               "optim", "loss", "seed")
+
+
+def _recipe():
+    """The current recipe constants other than the epoch grid and the head LR, keyed like the canonical config."""
+    return {"encoder_lr": berturk.LR, "batch": berturk.BATCH, "max_len": berturk.MAX_LEN,
+            "weight_decay": berturk.WEIGHT_DECAY, "warmup_ratio": berturk.WARMUP_RATIO,
+            "lr_scheduler": berturk.LR_SCHEDULER, "max_grad_norm": berturk.MAX_GRAD_NORM, "optim": berturk.OPTIM,
+            "loss": berturk.LOSS, "seed": 0}
+
+
 def test_head_lr_is_the_only_change_from_the_superseded_run():
-    """RP-3: the new selection command's canonical config is the superseded run's with head_lr HEAD_LR, nothing else;
-    its run id is therefore known offline (checked again when plan 06-15 trains it)."""
-    s = berturk.SUPERSEDED[0]
-    with open(os.path.join(REPO_ROOT, s["record"]), encoding="utf-8") as f:
-        old = json.load(f)["chosen"]["canonical"]
-    assert berturk.run_id(old) == s["train_run_id"] == "berturk-selection_train-s0-c0c9505e"
+    """RP-3 (plan 06-14): the head-LR run's canonical config is the tied run's with its recorded delta (head_lr
+    HEAD_LR), nothing else; the tied run's recipe is compared with its own protocol literals (epochs 10), never with
+    the current EPOCHS."""
+    tied, head = berturk.SUPERSEDED[0], berturk.SUPERSEDED[1]
+    old = _superseded_canonical(tied)
+    assert berturk.run_id(old) == tied["train_run_id"] == "berturk-selection_train-s0-c0c9505e"
     assert old["head_lr"] == old["encoder_lr"]                         # the superseded run tied the head LR
-    new = dict(old, head_lr=berturk.HEAD_LR)
+    assert old["epochs"] == tied["protocol"]["epochs"] == 10            # its own grid, a literal
+    assert tied["delta"] == {"head_lr": berturk.HEAD_LR}
+    new = dict(old, **tied["delta"])
     assert berturk.canonical(dict({k: None for k in berturk.DROPPED_WHEN_NONE}, **new)) == new
-    assert sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k)) == ["head_lr"]
-    assert berturk.run_id(new) == "berturk-selection_train-s0-8c033154"
-    recipe = {"encoder_lr": berturk.LR, "epochs": berturk.EPOCHS, "batch": berturk.BATCH, "max_len": berturk.MAX_LEN,
-              "weight_decay": berturk.WEIGHT_DECAY, "warmup_ratio": berturk.WARMUP_RATIO,
-              "lr_scheduler": berturk.LR_SCHEDULER, "max_grad_norm": berturk.MAX_GRAD_NORM, "optim": berturk.OPTIM,
-              "loss": berturk.LOSS, "seed": 0}
-    assert {k: old[k] for k in recipe} == recipe                       # every other recipe value is unchanged
+    changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+    assert changed == sorted(tied["delta"]) == ["head_lr"]
+    assert berturk.run_id(new) == head["train_run_id"] == "berturk-selection_train-s0-8c033154"
+    assert {k: old[k] for k in RECIPE_KEYS} == _recipe()                # every other recipe value is unchanged
     assert berturk.HEAD_LR == 0.0001 and berturk.THRESHOLD == __import__("fractions").Fraction(707, 1000)
     assert berturk.PROTOCOL["final_seeds"] == (0, 1, 2) and berturk.PROTOCOL["lr_grid"] == (berturk.LR,)
+
+
+def test_epochs_is_the_only_change_from_the_head_lr_run():
+    """R2-3 (plan 06-18, the second BASE-03 fix): the 30-epoch selection command's canonical config is the head-LR
+    run's (SUPERSEDED[-1]) with its recorded delta, epochs EPOCHS = 30, and nothing else, so its run id is known offline
+    (checked again when plan 06-19 trains it); every other recipe constant equals the head-LR run's canonical value."""
+    last = berturk.SUPERSEDED[-1]
+    old = _superseded_canonical(last)
+    assert berturk.run_id(old) == last["train_run_id"] == "berturk-selection_train-s0-8c033154"
+    assert old["epochs"] == last["protocol"]["epochs"] == 10 and old["head_lr"] == berturk.HEAD_LR
+    new = dict(old, **last["delta"])
+    changed = sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+    assert changed == sorted(last["delta"]) == ["epochs"]               # the delta names exactly what changed
+    assert new["epochs"] == berturk.EPOCHS == 30
+    assert berturk.canonical(dict({k: None for k in berturk.DROPPED_WHEN_NONE}, **new)) == new
+    assert berturk.run_id(new) == "berturk-selection_train-s0-4f36ae05"
+    assert {k: old[k] for k in RECIPE_KEYS} == _recipe()                # the LRs and the recipe stay
+    assert old["head_lr"] == berturk.HEAD_LR == 0.0001
+    dests = {act.dest: act for act in berturk_train.parser()._actions}
+    assert dests["epochs"].default == berturk.EPOCHS
 
 
 def test_identity_canonical_refuses_missing_and_unexpected_keys():

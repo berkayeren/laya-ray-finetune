@@ -16,9 +16,10 @@ Protocol (05-RESEARCH Open Questions 1-4, confirmed by the user at plan 05-10: "
 - A4: SELECTION_SEED for every selection run, FINAL_SEEDS for the final runs
 Per system kind (protocol(kind), the one source of a selection grid): "laya" is the constants above; "berturk" is
 pilot.berturk.PROTOCOL (Phase 6, confirmed at plan 06-02): the same LR grid and the same fixed head LR as Laya (HEAD_LR,
-since the BASE-03 fix of 2026-10-21; tests keep both equal), epochs 1..10 and the same seeds. select's head_lr None
-(each candidate's head LR tied to its own encoder LR) is kept only for the superseded protocol in
-pilot.berturk.SUPERSEDED, whose record still reproduces. fit() with no grid arguments takes the protocol of its
+since the BASE-03 fix of 2026-10-21; tests keep both equal), epochs 1..pilot.berturk.EPOCHS (30 since the second BASE-03
+fix of 2026-10-21) and the same seeds. The superseded protocols (pilot.berturk.SUPERSEDED, epochs 10, the first with
+head_lr None: each candidate's head LR tied to its own encoder LR, which select still accepts) are kept only so their
+records still reproduce. fit() with no grid arguments takes the protocol of its
 candidates' system kind (one kind, else refused), so BERTurk runs exactly these functions, objective, tie order, T and
 θ rules on its own val dumps (BASE-02), and the Laya record is byte for byte what it was before the dispatch.
 rules.epoch_transfer names the kind's schedule (EPOCH_TRANSFER_TEMPLATE).
