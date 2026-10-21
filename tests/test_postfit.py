@@ -530,6 +530,23 @@ def test_print_final_commands_with_a_manifest_verify_against_it(tmp_path, synthe
                           "--manifest", str(tmp_path / "missing.json")])
 
 
+def test_cli_refuses_flags_outside_their_mode_and_a_bad_final_manifest(tmp_path):
+    """05-REVIEW IN-04: --manifest outside RUN_DIR, --prune and --print-final-commands, and --dump-root outside --prune,
+    are usage errors; a non-JSON final manifest given to --render is a refusal, not a traceback."""
+    record = os.path.join(REPO_ROOT, "results", "postfit", "laya.json")
+    for bad in (["--render", record, "--manifest", "m.json"], ["--final-manifest", record, "c", "--manifest", "m.json"],
+                ["--reference-check", record, "--manifest", "m.json"], ["--render", record, "--dump-root", "d"],
+                [str(tmp_path), "--dump-root", "d"]):
+        with pytest.raises(SystemExit) as e:
+            postfit_cli.main(bad)
+        assert e.value.code == 2, bad
+    broken = tmp_path / "final.json"
+    broken.write_text("{not json", encoding="utf-8")
+    with pytest.raises(SystemExit, match="cannot be read as a final manifest") as e:
+        postfit_cli.main(["--render", record, str(broken)])
+    assert isinstance(e.value.code, str)
+
+
 @pytest.fixture
 def finals(tmp_path):
     """(record path, record, sha, make) where make(name, seed, **change) writes a tiny checkpoint whose config carries

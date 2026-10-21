@@ -70,7 +70,7 @@ def main(argv=None):
                          "final split it registers")
     ap.add_argument("--prune", nargs="+", metavar="EXPORT_DIR", default=None,
                     help="delete these epoch exports, each only after its verified full val dump exists")
-    ap.add_argument("--dump-root", default=dumps.DUMP_ROOT, help="--prune: where the val dumps are (results/dumps)")
+    ap.add_argument("--dump-root", default=None, help="--prune: where the val dumps are (default results/dumps)")
     ap.add_argument("--print-final-commands", metavar="RECORD", default=None,
                     help="print the ray_train.py command of every final seed of this postfit record")
     ap.add_argument("--storage", default=None, help="--print-final-commands: the Ray storage dir of the final runs")
@@ -102,6 +102,10 @@ def main(argv=None):
         ap.error("--storage, --out-prefix and --base apply only to --print-final-commands")
     if a.print_final_commands is None and a.reference is not None:
         ap.error("--reference applies only to --print-final-commands of a BERTurk record")
+    if a.manifest is not None and (a.render is not None or a.final_manifest is not None or a.reference_check is not None):
+        ap.error("--manifest applies only to RUN_DIR mode, --prune and --print-final-commands")   # 05-REVIEW IN-04
+    if a.dump_root is not None and a.prune is None:
+        ap.error("--dump-root applies only to --prune")
     manifest = a.manifest or DEFAULT_MANIFEST
     if a.render is not None:
         if len(a.render) > 2:
@@ -111,8 +115,12 @@ def main(argv=None):
         record, sha = postfit.read_record(a.render[0])
         final = None
         if len(a.render) == 2:
-            with open(a.render[1], encoding="utf-8") as f:
-                final = json.load(f)
+            try:
+                with open(a.render[1], encoding="utf-8") as f:
+                    final = json.load(f)
+            except (OSError, ValueError) as e:              # a refusal, never a traceback (05-REVIEW IN-04)
+                raise SystemExit("%s cannot be read as a final manifest (%s); build it with postfit.py "
+                                 "--final-manifest" % (a.render[1], e))
             bound = (final.get("postfit") or {}).get("sha256") if isinstance(final, dict) else None
             if bound != sha:
                 raise SystemExit("%s is bound to postfit record %s, not %s (%s); render a record with its own final "
@@ -171,7 +179,7 @@ def main(argv=None):
         pruned = []
         for d in a.prune:
             prune = berturk.prune_export if os.path.isfile(os.path.join(d, berturk.RECORD)) else postfit.prune_export
-            rid = prune(d, a.dump_root, manifest)
+            rid = prune(d, a.dump_root or dumps.DUMP_ROOT, manifest)
             real = os.path.normpath(os.path.abspath(d))
             print("pruned %s/exports/%s (val dump %s)"
                   % (os.path.basename(os.path.dirname(os.path.dirname(real))), os.path.basename(real), rid))
