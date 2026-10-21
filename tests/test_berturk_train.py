@@ -455,6 +455,7 @@ def final_argv(inputs, final_setup, storage, seed=0):
 
 BINDING = [  # (edit of the printed final command, the refusal that names the key)
     ("lr", lambda v, d: set_flag(v, "--lr", "3e-05"), "encoder_lr is 3e-05"),
+    ("head_lr", lambda v, d: set_flag(v, "--head-lr", "2e-05"), "head_lr is 2e-05"),
     ("batch", lambda v, d: set_flag(v, "--batch", 8), "batch is 8"),
     ("max_len", lambda v, d: set_flag(v, "--max-len", 16), "max_len is 16"),
     ("epochs", lambda v, d: set_flag(v, "--epochs", 3), "epochs is 3"),
@@ -475,6 +476,16 @@ def test_postfit_binding_refuses_other_settings(inputs, final_setup, tmp_path, n
     argv = edit(final_argv(inputs, final_setup, storage), data) + (["--print-run-id"] if print_run_id else [])
     refused(argv, storage, re.escape(match))
     assert not os.path.exists(str(storage) + "-ckpt")       # no --out either
+
+
+def test_final_command_prints_the_head_lr(inputs, final_setup, tmp_path):
+    """The head LR is bound, not transcribed: final_command prints the chosen canonical head_lr after --head-lr."""
+    rec, _ = postfit.read_record(final_setup["record"])
+    head_lr = rec["chosen"]["canonical"]["head_lr"]
+    assert head_lr == berturk.HEAD_LR
+    argv = final_argv(inputs, final_setup, tmp_path / "runs")
+    assert argv.count("--head-lr") == 1 and argv[argv.index("--head-lr") + 1] == repr(head_lr) == "0.0001"
+    assert argv[argv.index("--lr") + 1] == repr(rec["chosen"]["canonical"]["encoder_lr"])
 
 
 def test_postfit_binding_accepts_the_printed_command(inputs, final_setup, tmp_path, capsys, no_load):

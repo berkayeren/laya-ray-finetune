@@ -203,7 +203,7 @@ def _values(**over):
     v = {"split": "selection_train", "data_sha256": "a" * 64, "data_role": "train", "base_model_sha256": "b" * 64,
          "base_config_sha256": "c" * 64, "base_files_sha256": None, "transformers_version": "5.19.0",
          "accelerate_version": "1.15.0", "device": "mps", "epochs": 10, "batch": 32, "encoder_lr": 2e-05,
-         "head_lr": 2e-05, "weight_decay": 0.01, "warmup_ratio": 0.1, "lr_scheduler": "linear", "max_grad_norm": 1.0,
+         "head_lr": 0.0001, "weight_decay": 0.01, "warmup_ratio": 0.1, "lr_scheduler": "linear", "max_grad_norm": 1.0,
          "optim": "adamw_torch", "loss": "masked_bce", "max_len": 128, "max_messages": None, "mask_tags": None,
          "seed": 0, "stop_after_epoch": None, "postfit_sha256": None}
     v.update(over)
@@ -218,6 +218,38 @@ def test_identity_classifies_every_flag():
     assert all(k in berturk.IDENTITY for keys in berturk.RESOLVED.values() for k in keys)
     assert set(berturk.DROPPED_WHEN_NONE) <= set(berturk.IDENTITY)
     assert not set(berturk.NOT_IDENTITY) & set(berturk.IDENTITY)
+
+
+def test_identity_resolves_lr_to_the_encoder_only():
+    """The BASE-03 fix: --lr is the encoder LR only; the head LR is its own flag and IDENTITY key, so two runs that
+    differ only in it never share a run dir."""
+    assert berturk.RESOLVED == {"lr": ("encoder_lr",)}
+    dests = {act.dest: act for act in berturk_train.parser()._actions}
+    assert "head_lr" in dests and "head_lr" in berturk.IDENTITY and dests["head_lr"].default == berturk.HEAD_LR
+    assert dests["lr"].default == berturk.LR
+    ids = {berturk.run_id(berturk.canonical(_values(head_lr=h))) for h in (berturk.HEAD_LR, 2e-05)}
+    assert len(ids) == 2
+
+
+def test_head_lr_is_the_only_change_from_the_superseded_run():
+    """RP-3: the new selection command's canonical config is the superseded run's with head_lr HEAD_LR, nothing else;
+    its run id is therefore known offline (checked again when plan 06-15 trains it)."""
+    s = berturk.SUPERSEDED[0]
+    with open(os.path.join(REPO_ROOT, s["record"]), encoding="utf-8") as f:
+        old = json.load(f)["chosen"]["canonical"]
+    assert berturk.run_id(old) == s["train_run_id"] == "berturk-selection_train-s0-c0c9505e"
+    assert old["head_lr"] == old["encoder_lr"]                         # the superseded run tied the head LR
+    new = dict(old, head_lr=berturk.HEAD_LR)
+    assert berturk.canonical(dict({k: None for k in berturk.DROPPED_WHEN_NONE}, **new)) == new
+    assert sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k)) == ["head_lr"]
+    assert berturk.run_id(new) == "berturk-selection_train-s0-8c033154"
+    recipe = {"encoder_lr": berturk.LR, "epochs": berturk.EPOCHS, "batch": berturk.BATCH, "max_len": berturk.MAX_LEN,
+              "weight_decay": berturk.WEIGHT_DECAY, "warmup_ratio": berturk.WARMUP_RATIO,
+              "lr_scheduler": berturk.LR_SCHEDULER, "max_grad_norm": berturk.MAX_GRAD_NORM, "optim": berturk.OPTIM,
+              "loss": berturk.LOSS, "seed": 0}
+    assert {k: old[k] for k in recipe} == recipe                       # every other recipe value is unchanged
+    assert berturk.HEAD_LR == 0.0001 and berturk.THRESHOLD == __import__("fractions").Fraction(707, 1000)
+    assert berturk.PROTOCOL["final_seeds"] == (0, 1, 2) and berturk.PROTOCOL["lr_grid"] == (berturk.LR,)
 
 
 def test_identity_canonical_refuses_missing_and_unexpected_keys():
@@ -318,7 +350,7 @@ def test_identity_training_block_has_the_laya_keys(tmp_path):
     seed, tr = berturk.training_block(_record())
     assert set(tr) == set(want)
     assert seed == 0 and tr["epoch"] == 1 and tr["epochs_schedule"] == 2 and tr["loss_by_epoch"] == [0.5]
-    assert tr["encoder_lr"] == tr["head_lr"] == 2e-05 and tr["calibrated"] is False
+    assert tr["encoder_lr"] == 2e-05 and tr["head_lr"] == 0.0001 and tr["calibrated"] is False
     assert tr["config_sha256_sans_seed"] == dumps.training_digest(tr["canonical"], 1)
 
 

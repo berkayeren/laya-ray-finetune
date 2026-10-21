@@ -7,7 +7,8 @@ a file path (a .jsonl, an .npz), a run dir holding a test dump, a --n subset val
 final_train (its val is in-sample), a calibrated candidate and one whose shipped T is not 1.0 (pilot.postfit).
 The rules are the constants of pilot.postfit, as the user confirmed them at plan 05-10; the grid and the seeds are
 pilot.postfit.protocol of the candidates' system kind (laya: pilot.postfit's constants; berturk: pilot.berturk.PROTOCOL,
-1 LR x epochs 1..10, plan 06-04), so BERTurk val dumps go through exactly Laya's functions. Mixed kinds are refused.
+1 LR x epochs 1..10, head LR 1e-4, plans 06-04 and 06-14), so BERTurk val dumps go through exactly Laya's functions.
+Mixed kinds are refused.
 
 --prune EXPORT_DIR... deletes epoch exports (<storage>/<run_id>/exports/epoch-NNN) to free disk, each only after a
 verified full val dump of exactly that export exists under --dump-root: a dir holding berturk_train.json goes to

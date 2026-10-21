@@ -143,6 +143,26 @@ def test_berturk_grid_equals_laya_grid():
                                         "head_lr": postfit.HEAD_LR, "selection_seed": 0, "final_seeds": (0, 1, 2)}
 
 
+def test_berturk_and_laya_share_both_lrs():
+    """Equal tuning: since the BASE-03 fix BERTurk and Laya share the encoder LR grid and the fixed head LR."""
+    b, laya = postfit.protocol("berturk"), postfit.protocol("laya")
+    assert b["lr_grid"] == laya["lr_grid"] == postfit.LR_GRID
+    assert b["head_lr"] == laya["head_lr"] == postfit.HEAD_LR == berturk.HEAD_LR == 0.0001
+
+
+def test_superseded_protocol_still_ties_the_head_lr(tmp_path, snap):
+    """The superseded protocol keeps its tied head LR (head_lr None), so its history record still selects and
+    reproduces; under it an untied candidate is refused."""
+    kw = {k: v for k, v in berturk.SUPERSEDED[0]["protocol"].items() if k != "final_seeds"}
+    assert kw["head_lr"] is None
+    tied = [postfit.candidate(write_berturk_candidate(tmp_path / "tied", snap, e, head_lr=LR), snap[1])
+            for e in range(1, EPOCHS + 1)]
+    assert postfit.select(tied, **kw)["dump_sha256"] in {c["dump_sha256"] for c in tied}
+    untied = postfit.candidate(write_berturk_candidate(tmp_path / "untied", snap, 5), snap[1])
+    with pytest.raises(SystemExit, match="is not its encoder_lr"):
+        postfit.select([c for c in tied if c["epoch"] != 5] + [untied], **kw)
+
+
 def test_berturk_grid_must_be_complete(tmp_path, snap):
     run_dirs = _ten(tmp_path, snap)
     with pytest.raises(SystemExit, match="missing \\[\\(2e-05, 10\\)\\], unexpected \\[\\]"):

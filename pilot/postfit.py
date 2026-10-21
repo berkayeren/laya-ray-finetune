@@ -15,12 +15,13 @@ Protocol (05-RESEARCH Open Questions 1-4, confirmed by the user at plan 05-10: "
 - A3: EPOCH_TRANSFER: the final seeds run the EPOCHS schedule and stop after the chosen epoch
 - A4: SELECTION_SEED for every selection run, FINAL_SEEDS for the final runs
 Per system kind (protocol(kind), the one source of a selection grid): "laya" is the constants above; "berturk" is
-pilot.berturk.PROTOCOL (Phase 6, confirmed at plan 06-02): the same LR grid (a test keeps them equal), epochs 1..10, the
-head LR tied to the encoder LR (head_lr None: one HF Trainer LR, recorded as both encoder_lr and head_lr), the same
-seeds. fit() with no grid arguments takes the protocol of its candidates' system kind (one kind, else refused), so
-BERTurk runs exactly these functions, objective, tie order, T and θ rules on its own val dumps (BASE-02), and the Laya
-record is byte for byte what it was before the dispatch. rules.epoch_transfer names the kind's schedule
-(EPOCH_TRANSFER_TEMPLATE).
+pilot.berturk.PROTOCOL (Phase 6, confirmed at plan 06-02): the same LR grid and the same fixed head LR as Laya (HEAD_LR,
+since the BASE-03 fix of 2026-10-21; tests keep both equal), epochs 1..10 and the same seeds. select's head_lr None
+(each candidate's head LR tied to its own encoder LR) is kept only for the superseded protocol in
+pilot.berturk.SUPERSEDED, whose record still reproduces. fit() with no grid arguments takes the protocol of its
+candidates' system kind (one kind, else refused), so BERTurk runs exactly these functions, objective, tie order, T and
+θ rules on its own val dumps (BASE-02), and the Laya record is byte for byte what it was before the dispatch.
+rules.epoch_transfer names the kind's schedule (EPOCH_TRANSFER_TEMPLATE).
 Temperature (TEMPERATURE_RULE): one noul T for every (message, tag) pair of val (all 48 tags of every message), the
 minimiser of the mean binary cross-entropy of sigmoid(m / T) over log T in [T_MIN, T_MAX] (scipy's bounded scalar
 minimiser); the two bounds are scored with the optimiser's point and a bound wins an exact tie, so an optimum outside
@@ -88,7 +89,8 @@ EXPORT_RE = re.compile(r"^epoch-[0-9]{3}$")              # ray_train.py's <stora
 
 def protocol(kind):
     """The selection grid of a system kind: {lr_grid, epochs, head_lr, selection_seed, final_seeds}, the keyword
-    arguments of select and build_record. head_lr None ties each candidate's head LR to its own encoder LR."""
+    arguments of select and build_record. head_lr None ties each candidate's head LR to its own encoder LR (only the
+    superseded BERTurk protocol, pilot.berturk.SUPERSEDED, uses it)."""
     if kind == "laya":
         return {"lr_grid": LR_GRID, "epochs": EPOCHS, "head_lr": HEAD_LR, "selection_seed": SELECTION_SEED,
                 "final_seeds": FINAL_SEEDS}
