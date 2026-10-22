@@ -10,11 +10,13 @@ scored the dumps (07-RESEARCH Pattern 5):
 - berturk: score.check_berturk (label order, casing, record bytes), score.load_bert (the loader score.py --model
   berturk uses: every digest verified right before the fp32 load, check_bert), then per message the tokenizer of the
   one text (truncated at the record's max_len), one forward, the logits copied to the host and probabilities at T.
-Per seed, pilot.latency.WARMUP (10) warm-up messages run first and are excluded; every val message is then timed with
+Warm-up (pilot.latency.WARMUP_POLICY, full_pass_per_seed; G-07-6): after each seed's load, every val message runs once
+untimed, in split-file order, then the device is synced once; then every message, those included, is timed with
 time.perf_counter between a device sync right before t0 and one right after the host copy (torch.mps.synchronize on
-mps, torch.cuda.synchronize on cuda, nothing on cpu), under torch.no_grad; fp32 with autocast off is checked after the
-load and after the loop. --threads sets the torch threads (default 4). Never score.py's batch-of-16 inference seconds:
-those carry no sync and no warm-up.
+mps, torch.cuda.synchronize on cuda, nothing on cpu), under torch.no_grad. So every input a seed times has already run
+once on that seed's model in this process, whatever the seed's position in the run. fp32 with autocast off is checked
+after the load and after the loop. --threads sets the torch threads (default 4). Never score.py's batch-of-16
+inference seconds: those carry no sync and no warm-up.
 
 Refusals, each a SystemExit before torch is imported or any model loads: a split not registered with role val
 (verify_split_file), a split holding committed test or HOTELS content, keyed on the content whatever its manifest says
@@ -27,14 +29,15 @@ The latency/1 report (pilot.latency.build_report) holds, per seed, the seed, tra
 dump run id, served T, load seconds, the checked {device, dtype, amp_enabled} state, the per-message seconds in
 split-file order and their summary; a summary pooled over every seed; the split's name, registered path, sha256 and the
 uids_sha256 of the timed messages; the final manifest's repo-relative path, sha256 and is_committed; device, threads,
-warm-up, versions, PYTORCH_ENABLE_MPS_FALLBACK as set, the git code state, the quiet-machine preflight
-(compute_checkpoint.preflight, --min-available-gib; 0 records a busy-machine run) and swap in use before and after the
-timed loops. No message text, uid list, timestamp or local path. --render DIR prints pilot.latency.render_markdown of
-DIR's latency/1 reports without importing torch (with --out, writes the same bytes). Run one MPS job at a time.
+warmup_policy and warmup (the untimed forwards per seed: every timed message), versions, PYTORCH_ENABLE_MPS_FALLBACK
+as set, the git code state, the quiet-machine preflight (compute_checkpoint.preflight, --min-available-gib; 0 records
+a busy-machine run) and swap in use before and after the timed loops. No message text, uid list, timestamp or local
+path (the warm-up pass keeps no output). --render DIR prints pilot.latency.render_markdown of DIR's latency/1 reports
+without importing torch (with --out, writes the same bytes). Run one MPS job at a time.
 
 usage: python latency.py --system laya --device mps --out results/latency/laya-mps.json
        python latency.py --system berturk --device cpu [--final-manifest M] [--checkpoint-root DIR] [--split S]
-                         [--manifest SPLITS_JSON] [--threads 4] [--warmup 10] [--min-available-gib 7.0] [--out PATH]
+                         [--manifest SPLITS_JSON] [--threads 4] [--min-available-gib 7.0] [--out PATH]
        python latency.py --render results/latency [--out results/latency/latency.md]
 """
 import argparse
@@ -77,8 +80,6 @@ def parser():
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST,
                     help="splits.json to verify against (default: the committed data/splits.json)")
     ap.add_argument("--threads", type=int, default=latency.THREADS, help="torch threads (default 4)")
-    ap.add_argument("--warmup", type=int, default=latency.WARMUP,
-                    help="warm-up messages per seed, excluded (default 10)")
     ap.add_argument("--min-available-gib", type=float, default=latency.MIN_AVAILABLE_GIB,
                     help="quiet-machine preflight threshold; 0 records a busy-machine run")
     ap.add_argument("--out", default=None, help="write the report (or, with --render, the markdown) here")
@@ -138,7 +139,7 @@ def check_temperature(served, s):
                          "manifest binds" % (s["checkpoint_name"], served, s["temperature"], s["seed"]))
 
 
-def time_laya(s, ckpt, ident, device, threads, texts, warmup, sync):
+def time_laya(s, ckpt, ident, device, threads, texts, sync):
     """(load seconds, served T, per-message seconds, checked state) of one Laya seed, through score.py's load path."""
     import torch
     t = time.perf_counter()
@@ -153,11 +154,11 @@ def time_laya(s, ckpt, ident, device, threads, texts, warmup, sync):
     def fn(text):
         return metrics.probabilities(la.noul_logits(agent, [text], QUESTIONS), temp)
     with torch.no_grad():
-        times = latency.time_messages(fn, texts, warmup, sync)
+        times = latency.time_messages(fn, texts, sync)       # warm-up pass over every text, then the timed loop
     return load_s, temp, times, score.check_agent(agent, device)
 
 
-def time_berturk(s, ckpt, ident, device, threads, texts, warmup, sync):
+def time_berturk(s, ckpt, ident, device, threads, texts, sync):
     """(load seconds, served T, per-message seconds, checked state) of one BERTurk seed, through score.load_bert."""
     import torch
     t = time.perf_counter()
@@ -173,7 +174,7 @@ def time_berturk(s, ckpt, ident, device, threads, texts, warmup, sync):
         logits = model(**{k: v.to(device) for k, v in enc.items()}).logits.float().cpu().numpy()
         return metrics.probabilities(logits, temp)
     with torch.no_grad():
-        times = latency.time_messages(fn, texts, warmup, sync)
+        times = latency.time_messages(fn, texts, sync)       # warm-up pass over every text, then the timed loop
     return load_s, temp, times, score.check_bert(model, device)
 
 
@@ -201,7 +202,7 @@ def measure(a):
     run = time_laya if system == "laya" else time_berturk
     rows = []
     for s, ckpt, ident in bound:
-        load_s, temp, times, state = run(s, ckpt, ident, device, a.threads, texts, a.warmup, sync)
+        load_s, temp, times, state = run(s, ckpt, ident, device, a.threads, texts, sync)
         rows.append({"seed": s["seed"], "train_run_id": s["train_run_id"], "checkpoint_name": s["checkpoint_name"],
                      "checkpoint_identity": ident, "dump_run_id": s["dump_run_id"], "temperature": temp,
                      "load_s": load_s, "state": state, "times_s": times,
@@ -220,7 +221,7 @@ def measure(a):
         versions["laya"] = laya.__version__
     default = default_final_manifest(system)
     meta = {"system": system, "device": device, "dtype": "torch.float32", "amp_enabled": False, "threads": a.threads,
-            "warmup": a.warmup, "batch": 1, "versions": versions,
+            "warmup_policy": latency.WARMUP_POLICY, "warmup": len(texts), "batch": 1, "versions": versions,
             "mps_fallback_env": os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK"), "code": code_state(),
             "preflight": pf, "swap_used_bytes": {"before": swap0, "after": swap1},
             "split": {"name": os.path.splitext(os.path.basename(entry["path"]))[0], "path": entry["path"],
@@ -250,8 +251,6 @@ def main(argv=None):
         ap.error("pass exactly one of --system (time the final seeds) or --render DIR (markdown of saved reports)")
     if a.threads < 1:
         ap.error("--threads must be >= 1")
-    if a.warmup < 0:
-        ap.error("--warmup must be >= 0")
     if a.min_available_gib < 0:
         ap.error("--min-available-gib must be >= 0 (0 records a busy-machine run)")
     if a.render is not None:

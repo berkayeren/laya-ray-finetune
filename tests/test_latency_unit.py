@@ -54,7 +54,8 @@ def _write(path, obj):
 def _toy_report(**meta):
     """A latency/1 report of two seeds with known times (no model): seed 0 at 1..20 ms, seed 1 at 21..40 ms."""
     base = {"system": "laya", "device": "cpu", "dtype": "torch.float32", "amp_enabled": False, "threads": 4,
-            "warmup": 20, "warmup_policy": plat.WARMUP_POLICY, "batch": 1, "versions": {"torch": "x", "numpy": "y"}, "mps_fallback_env": None,
+            "warmup": 20, "warmup_policy": plat.WARMUP_POLICY, "batch": 1, "versions": {"torch": "x", "numpy": "y"},
+            "mps_fallback_env": None,
             "code": {"git_sha": "a" * 40, "git_dirty": False, "git_diff_sha256": "b" * 64},
             "preflight": dict(PREFLIGHT), "swap_used_bytes": {"before": 100, "after": 100},
             "split": {"name": "val", "path": "splits/val.jsonl", "sha256": "c" * 64, "uids_sha256": "d" * 64,
