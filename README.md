@@ -620,15 +620,16 @@ definitions in its protocol; nothing here is a test or held-out result.
   manifest order (0, 1, 2), so a residual seed-order effect is not separated from a seed effect. The committed Laya
   reports show such a difference: seed 0 is slower than the mean of seeds 1 and 2 on 144/208 messages on CPU (mean
   +5.94 ms, +0.86%) and on 151/208 on MPS (mean +0.44 ms, +0.13%), both far beyond chance (two-sided sign test, p <
-  1e-7). This design cannot tell whether it comes from seed 0's weights or from running first. BERTurk shows none
-  (100/208 on CPU, 104/208 on MPS). The four reports were regenerated under this policy. The first runs warmed each
-  seed on 10 messages only, so the first seed in each process paid one-time costs such as MPS kernel compilation for
-  each new input shape. The `rules` field of each of the four reports keeps the rules text in force when it was timed:
-  its warm-up line (rule 3) still says that a seed's times do not depend on when the seed runs, a claim this design
-  cannot support (see above). The reports are the audit record and stay as timed; the rules in the generated block
-  below are the current wording, and the block marks every report whose recorded rules differ from them. Laya's own
-  fp16 autocast default on MPS is not what is timed. Latency is reported, not gated: it is not a decision criterion in
-  this pilot. The Laya CPU report (`laya-cpu.json`) records uncommitted changes.
+  1e-7). This design cannot tell whether it comes from seed 0's weights or from running first. BERTurk shows no
+  consistent direction: seed 0 is slower on 100/208 messages on CPU and 104/208 on MPS (sign test p 0.63 and 1.00;
+  mean -0.02 ms, -0.09%, and +0.04 ms, +0.45%). The four reports were regenerated under this policy. The first runs
+  warmed each seed on 10 messages only, so the first seed in each process paid one-time costs such as MPS kernel
+  compilation for each new input shape. The `rules` field of each of the four reports keeps the rules text in force
+  when it was timed: its warm-up line (rule 3) still says that a seed's times do not depend on when the seed runs, a
+  claim this design cannot support (see above). The reports are the audit record and stay as timed; the rules in the
+  generated block below are the current wording, and the block marks every report whose recorded rules differ from
+  them. Laya's own fp16 autocast default on MPS is not what is timed. Latency is reported, not gated: it is not a
+  decision criterion in this pilot. The Laya CPU report (`laya-cpu.json`) records uncommitted changes.
 
 ```bash
 # the three val confidence records and their reliability diagrams, rebuilt from the committed dumps (no model)
