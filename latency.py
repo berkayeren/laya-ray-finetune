@@ -122,7 +122,9 @@ def bind_seed(system, root, s):
         ident = identity(ckpt)
         rid = dumps.run_id("laya", ident)
     else:
-        raise SystemExit("--system berturk is not wired yet; time --system laya")
+        berturk.require_files(ckpt, where)
+        ident = berturk.identity(ckpt)
+        rid = berturk.dump_run_id(ident)
     if ident != s["checkpoint_identity"] or rid != s["dump_run_id"]:
         raise SystemExit("%s is not the checkpoint the final manifest names for seed %d (identity or dump run id "
                          "differs: %s, manifest %s); time only the final seeds the manifest binds"
@@ -155,6 +157,26 @@ def time_laya(s, ckpt, ident, device, threads, texts, warmup, sync):
     return load_s, temp, times, score.check_agent(agent, device)
 
 
+def time_berturk(s, ckpt, ident, device, threads, texts, warmup, sync):
+    """(load seconds, served T, per-message seconds, checked state) of one BERTurk seed, through score.load_bert."""
+    import torch
+    t = time.perf_counter()
+    rec = score.check_berturk(ckpt, ident)
+    temp = float(rec["temperature"])
+    check_temperature(temp, s)
+    tok, model, _ = score.load_bert(ckpt, ident, device, threads)
+    load_s = time.perf_counter() - t
+    max_len = rec["canonical"]["max_len"]
+
+    def fn(text):
+        enc = tok([text], truncation=True, max_length=max_len, return_tensors="pt")
+        logits = model(**{k: v.to(device) for k, v in enc.items()}).logits.float().cpu().numpy()
+        return metrics.probabilities(logits, temp)
+    with torch.no_grad():
+        times = latency.time_messages(fn, texts, warmup, sync)
+    return load_s, temp, times, score.check_bert(model, device)
+
+
 def _no_sync():
     return None
 
@@ -176,7 +198,7 @@ def measure(a):
         raise SystemExit("--device cuda, but CUDA is not available here; use --device cpu or mps")
     sync = {"mps": torch.mps.synchronize, "cuda": torch.cuda.synchronize}.get(device, _no_sync)
     texts = [c["state"] for c in cases]                     # unchanged: no lowercasing, folding or normalization
-    run = time_laya
+    run = time_laya if system == "laya" else time_berturk
     rows = []
     for s, ckpt, ident in bound:
         load_s, temp, times, state = run(s, ckpt, ident, device, a.threads, texts, a.warmup, sync)

@@ -39,7 +39,8 @@ into metrics with numpy alone (D-05). Systems (--model, default laya):
   (pilot.berturk.check_label_order) or a tokenizer that lowercases (check_cased). Right before the load every file is
   verified against its digest (pilot.weights.verify_files); the tokenizer and BertForSequenceClassification load from
   the checkpoint dir with local_files_only and fp32, and check_bert refuses parameters off the device or not float32,
-  or autocast on, after the load and after every batch. The logits are the classifier's raw logits (P = sigmoid(logit
+  or autocast on, after the load and after every batch. That load is load_bert, which latency.py shares, so the
+  latency harness times the checkpoint exactly as it is scored. The logits are the classifier's raw logits (P = sigmoid(logit
   / T)); the shipped T is berturk_train.json's temperature (1.0 for an export); seed and training come from that
   record (pilot.berturk.training_block, the keys pilot.postfit reads).
 - prior: p_t = messages carrying tag t / all messages, no-intent rows counted, in the training split the scored
@@ -530,10 +531,12 @@ def check_bert(model, device):
     return {"device": device, "dtype": "torch.float32", "amp_enabled": False}
 
 
-def score_berturk(a, checkpoint, cases, device, ident, rec):
-    """(float32 [n, 48] logits in `cases` order, sidecar fields) of a BERTurk checkpoint, in-process on `device`.
-    Every file is verified against ident right before the load; batches of BATCH messages in split-file order,
-    padded to the longest, truncated at the record's max_len."""
+def load_bert(checkpoint, ident, device, threads):
+    """(tokenizer, model, checked state) of a BERTurk checkpoint on `device`, the one loader of score_berturk and
+    latency.py: every file is verified against ident (its five digests) right before the load, mps or cuda must be
+    available, torch runs `threads` threads, and the tokenizer and BertForSequenceClassification load from the dir with
+    local_files_only in fp32, moved to `device` in eval mode; check_bert refuses anything but fp32 on `device` with
+    autocast off."""
     from pilot.weights import verify_files
     verify_files(checkpoint, dict(ident["files_sha256"], **{"model.safetensors": ident["model_sha256"],
                                                             "config.json": ident["config_sha256"],
@@ -545,13 +548,22 @@ def score_berturk(a, checkpoint, cases, device, ident, rec):
         raise SystemExit("--device mps, but MPS is not available here; use --device cpu")
     if device == "cuda" and not torch.cuda.is_available():
         raise SystemExit("--device cuda, but CUDA is not available here; use --device cpu or mps")
-    torch.set_num_threads(a.cpus_per_worker)
+    torch.set_num_threads(threads)
     model_dir = os.path.abspath(checkpoint)
     tok = transformers.AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
     model = transformers.BertForSequenceClassification.from_pretrained(model_dir, dtype=torch.float32,
                                                                        local_files_only=True)
     model = model.to(device).eval()
-    state = check_bert(model, device)
+    return tok, model, check_bert(model, device)
+
+
+def score_berturk(a, checkpoint, cases, device, ident, rec):
+    """(float32 [n, 48] logits in `cases` order, sidecar fields) of a BERTurk checkpoint, in-process on `device`.
+    Every file is verified against ident right before the load (load_bert); batches of BATCH messages in split-file
+    order, padded to the longest, truncated at the record's max_len."""
+    import torch
+    import transformers
+    tok, model, state = load_bert(checkpoint, ident, device, a.cpus_per_worker)
     max_len = rec["canonical"]["max_len"]
     out, infer = [], 0.0
     t0 = time.time()

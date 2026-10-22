@@ -8,13 +8,15 @@ preflight is replaced by a recorded dict (no 5 s sleep). Offline, no Ray, no wei
 """
 import json
 import os
+import subprocess
+import sys
 
 import pytest
 
 import latency
 import pilot.data
-from conftest import prepared
-from pilot import dumps
+from conftest import make_raw, prepared
+from pilot import berturk, dumps
 from pilot import latency as plat
 from pilot.weights import identity
 from tiny_laya import tiny_checkpoint
@@ -22,6 +24,7 @@ from tiny_laya import tiny_checkpoint
 pytestmark = pytest.mark.unit
 
 REPO = pilot.data.REPO_ROOT
+TIMEOUT = 600
 TINY_T = 1.3
 PREFLIGHT = {"available_gib": 12.0, "min_available_gib": 7.0, "swap_used_bytes": [0, 0],
              "swap_grew_while_idle": False, "swapouts": [None, None], "swapouts_grew_while_idle": None,
@@ -107,3 +110,65 @@ def test_tiny_laya_latency_on_cpu(tmp_path, synthetic_raw, capsys):
     assert capsys.readouterr().out == md
     assert "reported, not gated" in md and "| pooled |" in md and "Busy-machine" not in md
 
+
+# ---- BERTurk ----
+
+@pytest.fixture(scope="module")
+def berturk_built(tmp_path_factory):
+    """(splits dir, splits manifest, a 1-epoch CPU export of the tiny BERTurk base), built once for the module."""
+    from tiny_berturk import tiny_base
+    tmp = tmp_path_factory.mktemp("latency_berturk")
+    root, raw_sha256 = make_raw(str(tmp / "raw"))
+    out_dir = str(tmp / "data")
+    pilot.data.prepare(root, out_dir, raw_sha256)
+    manifest = os.path.join(out_dir, "splits.json")
+    splits = os.path.join(out_dir, "splits")
+    base = tiny_base(tmp / "base")
+    storage = tmp / "runs"
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    argv = [sys.executable, "berturk_train.py", "--data", os.path.join(splits, "selection_train.jsonl"),
+            "--manifest", manifest, "--base", base, "--device", "cpu", "--epochs", "1", "--batch", "4",
+            "--max-len", "32", "--seed", "0", "--storage", str(storage)]
+    rid = subprocess.run(argv + ["--print-run-id"], cwd=REPO, env=env, capture_output=True, text=True,
+                         timeout=TIMEOUT, check=True).stdout.strip()
+    r = subprocess.run(argv, cwd=REPO, env=env, capture_output=True, text=True, timeout=TIMEOUT)
+    assert r.returncode == 0, r.stderr[-4000:]
+    return splits, manifest, str(storage / rid / "exports")
+
+
+def berturk_setup(berturk_built, tmp_path, change=None):
+    """(final manifest, checkpoint root) of the module's export as seed 0 "epoch-001" (T 1.0); `change` edits the
+    recorded identity."""
+    _, _, root = berturk_built
+    ckpt = os.path.join(root, "epoch-001")
+    ident = berturk.identity(ckpt)
+    rid = berturk.dump_run_id(ident)
+    if change is not None:
+        ident = json.loads(json.dumps(ident))
+        change(ident)
+    m = final_manifest(tmp_path / "berturk-final.json", [(0, "epoch-001", ident, rid, 1.0)], system="berturk")
+    return m, root
+
+
+def test_tiny_berturk_latency_on_cpu(berturk_built, tmp_path):
+    splits, manifest, _ = berturk_built
+    m, root = berturk_setup(berturk_built, tmp_path)
+    out = tmp_path / "latency" / "berturk-cpu.json"
+    report = latency.main(run_args("berturk", splits, manifest, m, root, out))
+    check_report(report, out, splits, "berturk")
+    assert report["seeds"][0]["temperature"] == 1.0 and "laya" not in report["versions"]
+    assert report["timed_path"] == plat.TIMED_PATH["berturk"]
+
+
+def test_berturk_identity_mismatch_refused_before_load(berturk_built, tmp_path, monkeypatch):
+    """One digest of the recorded identity changed: refused before score.load_bert (or any check of the files)."""
+    def boom(*a, **k):
+        raise AssertionError("a BERTurk checkpoint was loaded before the refusal")
+    monkeypatch.setattr(latency.score, "load_bert", boom)
+    monkeypatch.setattr(latency.score, "check_berturk", boom)
+    splits, manifest, _ = berturk_built
+    m, root = berturk_setup(berturk_built, tmp_path, change=lambda ident: ident.update(model_sha256="0" * 64))
+    out = tmp_path / "latency" / "berturk-cpu.json"
+    with pytest.raises(SystemExit, match="not the checkpoint the final manifest names for seed 0"):
+        latency.main(run_args("berturk", splits, manifest, m, root, out))
+    assert not out.exists()
