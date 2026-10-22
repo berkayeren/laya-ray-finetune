@@ -22,7 +22,9 @@ without gold among the scored columns, restricts predictions and a per-tag θ to
 The --confidence binding (where T and θ come from) is exercised on synthetic dumps of the conftest snapshot: selection
 candidates written like score.py's (tests/test_postfit.py write_candidate) with a postfit/1 record built by postfit.py
 over them, final seeds bound by training.postfit_sha256, and prior baselines scored by score.py. Every wrong
-combination is refused before a metric is computed; `import report` stays numpy only.
+combination is refused before a metric is computed; `import report` stays numpy only. A final seed reports on test and
+hotels_probe only (_write_split_dump): it is refused on val and, under a manifest copy whose test entry holds val or
+final_train content, on that content too, because final_train holds the val folds (07-REVIEW WR-01).
 
 The relabelled-manifest tests (07-REVIEW CR-01) copy the snapshot's splits with val replaced by its test or HOTELS
 content (_relabel_copy, all of it or all but one row) and monkeypatch pilot.data.DEFAULT_MANIFEST to the snapshot's
@@ -513,37 +515,89 @@ def test_confidence_binding_refuses_candidate_off_val(snap, fitted):
         report.confidence_binding(d, "test", side, snap[1], fitted[1])
 
 
+def _write_split_dump(run_dir, manifest, split, rng_seed=5):
+    """A dump of `split` in a run dir that holds a val dump, of the same source (the tests/test_ood.py write_hotels_run
+    recipe): score.sidecar_base of the verified split with the val sidecar's run_id, system, temperature, scorer, seed
+    and training, and seeded float32 logits. Returns the run dir."""
+    _, _, vside, _ = dumps.load_dump(run_dir, "val", manifest)
+    path = os.path.join(os.path.dirname(manifest), "splits", "%s.jsonl" % split)
+    with open(path, "rb") as f:
+        raw = f.read()
+    entry = pilot.data.verify_split_file(path, manifest_path=manifest, roles=dumps.READ_ROLES, data=raw)
+    uids = [r["uid"] for r in pilot.data.parse_jsonl(raw)]
+    side = score.sidecar_base(entry, split, manifest, None)
+    side.update({k: vside[k] for k in ("run_id", "system", "temperature", "scorer", "seed", "training")})
+    logits = np.random.default_rng(rng_seed).normal(0.0, 3.0, size=(len(uids), 48)).astype(np.float32)
+    dumps.write_dump(run_dir, split, logits, uids, side)
+    return run_dir
+
+
+def _final_seed(root, snap, record, sha, shipped=None, epoch=None):
+    return write_candidate(root, snap, 2e-05, record["chosen"]["epoch"] if epoch is None else epoch,
+                           split="final_train", calibrated=True,
+                           shipped=record["chosen"]["temperature"] if shipped is None else shipped, postfit_sha256=sha)
+
+
 def test_confidence_binding_final_seed_by_postfit_sha256(tmp_path, snap, fitted):
+    """A final seed reports on test and hotels_probe (Phase 8's paths) with its record's T and θ, held-out."""
     _, path, record, sha = fitted
     T = record["chosen"]["temperature"]
-    final = write_candidate(tmp_path / "final", snap, 2e-05, record["chosen"]["epoch"], split="final_train",
-                            calibrated=True, shipped=T, postfit_sha256=sha)
-    rep = report.confidence_report(final, "val", snap[1], path)
+    final = _write_split_dump(_final_seed(tmp_path / "final", snap, record, sha), snap[1], "test")
+    rep = report.confidence_report(final, "test", snap[1], path)
     assert rep["binding"]["kind"] == "final_seed"
     assert rep["binding"]["theta_source"]["postfit_sha256"] == sha
     assert rep["variants"]["headline"]["temperature"] == T
     assert rep["variants"]["headline"]["theta"] == record["chosen"]["theta"]["shipped"]
     assert rep["variants"]["raw"]["temperature"] == 1.0
     assert rep["variants"]["raw"]["theta"] == record["chosen"]["theta"]["raw"]
+    assert rep["in_sample"] is False and rep["caveat"] is None
     with pytest.raises(SystemExit, match="final seed .* is reported only with --postfit"):
-        report.confidence_report(final, "val", snap[1])
+        report.confidence_report(final, "test", snap[1])
+    _write_split_dump(final, snap[1], "hotels_probe")
+    ood = report.confidence_report(final, "hotels_probe", snap[1], path)
+    assert ood["binding"]["kind"] == "final_seed" and ood["in_sample"] is False
+    assert ood["variants"]["headline"]["theta"] == record["chosen"]["theta"]["shipped"]
+    for v in ood["variants"].values():
+        assert set(v["ood_fp"]) == {"0.5", "theta"} and "calibration" not in v
 
 
 def test_confidence_binding_final_seed_refuses_other_record_or_t(tmp_path, snap, fitted):
     _, path, record, sha = fitted
     T = record["chosen"]["temperature"]
-    final = write_candidate(tmp_path / "final", snap, 2e-05, 3, split="final_train", calibrated=True, shipped=T,
-                            postfit_sha256=sha)
+    final = _write_split_dump(_final_seed(tmp_path / "final", snap, record, sha, epoch=3), snap[1], "test")
     copy = tmp_path / "copy.json"
     copy.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")   # same content, other bytes
     copy = str(copy)
     assert pilot.data.sha256_file(copy) != sha
     with pytest.raises(SystemExit, match="final seed was bound to record"):
-        report.confidence_report(final, "val", snap[1], copy)
-    off = write_candidate(tmp_path / "off", snap, 2e-05, 3, split="final_train", calibrated=True, shipped=T + 0.5,
-                          postfit_sha256=sha)
+        report.confidence_report(final, "test", snap[1], copy)
+    off = _write_split_dump(_final_seed(tmp_path / "off", snap, record, sha, shipped=T + 0.5, epoch=3), snap[1],
+                            "test")
     with pytest.raises(SystemExit, match="record's chosen T"):
-        report.confidence_report(off, "val", snap[1], path)
+        report.confidence_report(off, "test", snap[1], path)
+
+
+def test_final_seed_is_never_reported_on_val(tmp_path, snap, fitted):
+    """07-REVIEW WR-01: a final seed trained on final_train, which holds the val folds; its val numbers are
+    training-set numbers, refused with or without --postfit (before the record is read)."""
+    _, path, record, sha = fitted
+    final = _final_seed(tmp_path / "final", snap, record, sha)
+    for args in ((path,), ()):
+        with pytest.raises(SystemExit, match="trained on final_train, which holds the val folds"):
+            report.confidence_report(final, "val", snap[1], *args)
+
+
+@pytest.mark.parametrize("source, held", [("val", "val"), ("selection_train", "final_train")])
+def test_final_seed_refuses_training_content_under_any_manifest(tmp_path, snap, fitted, monkeypatch, source, held):
+    """07-REVIEW WR-01, keyed on the content: a manifest copy whose test entry holds the val content, or content of
+    final_train (selection_train's rows are final_train's), cannot present a final seed's training-set numbers as
+    held-out test numbers; refused before the postfit record is read."""
+    _, path, record, sha = fitted
+    rsnap = _relabel_copy(snap[0], snap[1], tmp_path / "r", "test", source)
+    final = _write_split_dump(_final_seed(tmp_path / "final", rsnap, record, sha), rsnap[1], "test")
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", snap[1])     # after every dump: see the CR-01 tests
+    with pytest.raises(SystemExit, match="holds committed %s content" % held):
+        report.confidence_report(final, "test", rsnap[1], path)
 
 
 def _prior(snap, root, splits=("val", "test"), model="prior"):

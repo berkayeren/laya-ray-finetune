@@ -2,8 +2,10 @@
 
 - every tracked results/confidence/*.json is a val record (schema confidence/1, split val) that carries in_sample
   true and report.IN_SAMPLE_CAVEAT, both temperature variants with a calibration block, and, for a dump of a trained
-  model that is not a final seed, the postfit_candidate binding (its T and θ come from the postfit record, never from
-  the sidecar's shipped T = 1)
+  model, the postfit_candidate binding of a selection_train candidate (its T and θ come from the postfit record, never
+  from the sidecar's shipped T = 1). No committed record is a final seed's (val_record_problems, planted case
+  included): a final seed trained on final_train, which holds the val folds, so its val numbers are training-set
+  numbers, and report.py refuses them (07-REVIEW WR-01)
 - the Makefile's LAYA_CHOSEN and BERTURK_CHOSEN are the chosen dumps of results/postfit/laya.json and berturk.json,
   and the tracked records are exactly those two and zero-shot Laya (LAYA_ZS, a reference row bound by report.py's
   val rule, val_selected): the two chosen ones bound to their own system kind's postfit record (07-RESEARCH Open
@@ -72,6 +74,22 @@ def _postfit_path(rec):
     return None if pf is None else os.path.join(REPO_ROOT, pf["path"])
 
 
+def val_record_problems(r):
+    """Problems of one confidence record as a committed val record (07-REVIEW WR-01): a final_seed binding (training-set
+    numbers), or a trained model's record that is not a selection_train candidate bound postfit_candidate to its
+    postfit record. [] when none."""
+    problems = []
+    kind = (r.get("binding") or {}).get("kind")
+    if kind == "final_seed":
+        problems.append("a final seed's val record holds training-set numbers (07-REVIEW WR-01)")
+    tr = r.get("training")
+    if tr is not None and not (kind == "postfit_candidate" and r["binding"].get("postfit") is not None
+                               and tr.get("split") == "selection_train"):
+        problems.append("a trained model's val record must be a selection_train candidate bound postfit_candidate to "
+                        "its postfit record (binding %s, training split %s)" % (kind, tr.get("split")))
+    return problems
+
+
 def test_committed_records_are_val_and_in_sample():
     records = committed()
     assert records, "no tracked confidence records under results/confidence/"
@@ -86,10 +104,19 @@ def test_committed_records_are_val_and_in_sample():
             assert {"brier", "nll", "classwise_ece", "per_tag", "reliability"} <= set(cal), (rel, name)
             assert sum(b["count"] for b in cal["reliability"]["pooled"]) == r["n_messages"] * 48, (rel, name)
         assert r["variants"]["raw"]["temperature"] == 1.0, rel
-        tr = r["training"]
-        if tr is not None and r["binding"]["kind"] != "final_seed":
-            assert r["binding"]["kind"] == "postfit_candidate", rel
-            assert r["binding"]["postfit"] is not None, rel
+        assert val_record_problems(r) == [], rel
+
+
+def test_val_record_check_flags_a_final_seed_record():
+    import copy
+    rel, rec = [(rel, r) for rel, r in committed() if r["binding"]["kind"] == "postfit_candidate"][0]
+    assert val_record_problems(rec) == [], rel
+    planted = copy.deepcopy(rec)
+    planted["binding"]["kind"] = "final_seed"
+    planted["training"]["split"] = "final_train"
+    problems = val_record_problems(planted)
+    assert len(problems) == 2, problems
+    assert "07-REVIEW WR-01" in problems[0] and "selection_train candidate" in problems[1], problems
 
 
 def makefile():
