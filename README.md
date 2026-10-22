@@ -615,12 +615,16 @@ definitions in its protocol; nothing here is a test or held-out result.
 - **Latency, reported, not gated.** `latency.py` times each of the three final seeds of each model per message, at
   batch 1, in-process (no Ray), fp32 with autocast off, through the load path that scored the dumps. After each seed's
   load, one untimed warm-up pass runs every one of the 208 val messages, and then all 208 are timed between device
-  syncs. Every timed input has therefore already run once on that seed's model in the process, and no seed's row
-  depends on its position in the run (warm-up policy `full_pass_per_seed`, recorded in every report). The four reports
-  were regenerated under this policy. The first runs warmed each seed on 10 messages only, so the first seed in each
-  process paid one-time costs such as MPS kernel compilation for each new input shape. Laya's own fp16 autocast
-  default on MPS is not what is timed. Latency is reported, not gated: it is not a decision criterion in this pilot.
-  The Laya CPU report (`laya-cpu.json`) records uncommitted changes.
+  syncs. Every seed therefore follows the same sequence, and every timed input has already run once on that seed's
+  model in the process (warm-up policy `full_pass_per_seed`, recorded in every report). The seeds always run in
+  manifest order (0, 1, 2), so a residual seed-order effect is not separated from a seed effect. The committed Laya
+  reports show such a difference: seed 0 is slower than the mean of seeds 1 and 2 on 144/208 messages on CPU (mean
+  +5.94 ms, +0.86%) and on 151/208 on MPS (mean +0.44 ms, +0.13%), both far beyond chance (two-sided sign test, p <
+  1e-7). This design cannot tell whether it comes from seed 0's weights or from running first. BERTurk shows none
+  (100/208 on CPU, 104/208 on MPS). The four reports were regenerated under this policy. The first runs warmed each
+  seed on 10 messages only, so the first seed in each process paid one-time costs such as MPS kernel compilation for
+  each new input shape. Laya's own fp16 autocast default on MPS is not what is timed. Latency is reported, not gated:
+  it is not a decision criterion in this pilot. The Laya CPU report (`laya-cpu.json`) records uncommitted changes.
 
 ```bash
 # the three val confidence records and their reliability diagrams, rebuilt from the committed dumps (no model)
