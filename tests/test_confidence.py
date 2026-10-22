@@ -312,6 +312,26 @@ def test_confidence_refuses_subset_dump(tmp_path, snap, capsys):
         report.confidence_report(run_dir, "val", manifest)
 
 
+def test_confidence_out_writes_the_svg_next_to_the_json(tmp_path, snap, capsys):
+    d = _prior(snap, tmp_path / "base")
+    out = tmp_path / "conf" / "prior-val.json"
+    report.main(["--confidence", d, "--split", "val", "--manifest", snap[1], "--out", str(out)])
+    capsys.readouterr()
+    rec = json.loads(out.read_text(encoding="utf-8"))
+    assert (tmp_path / "conf" / "prior-val.svg").read_bytes() == report.render_svg(rec).encode("utf-8")
+    md = tmp_path / "conf.md"
+    text = report.main(["--confidence-table", str(tmp_path / "conf"), "--out", str(md)])
+    assert capsys.readouterr().out == text == report.render_confidence([rec])
+    assert md.read_bytes() == text.encode("utf-8")
+    assert "![reliability diagram prior (val)](results/confidence/prior-val.svg)" in text
+    with pytest.raises(SystemExit) as e:
+        report.main(["--confidence", d, "--split", "val", "--manifest", snap[1], "--out", str(tmp_path / "x.svg")])
+    assert e.value.code == 2 and "--out must name a .json file" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as e:
+        report.main(["--confidence-table", str(tmp_path / "conf"), "--table", str(tmp_path / "conf")])
+    assert e.value.code == 2 and "exactly one of" in capsys.readouterr().err
+
+
 def test_confidence_argument_errors(tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
         report.main(["--postfit", "x.json", "results/dumps/prior"])

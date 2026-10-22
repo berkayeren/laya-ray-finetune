@@ -8,6 +8,12 @@
   and the tracked records are exactly those two and zero-shot Laya (LAYA_ZS, a reference row bound by report.py's
   val rule, val_selected): the two chosen ones bound to their own system kind's postfit record (07-RESEARCH Open
   Question 1, A10)
+- every tracked record has its reliability diagram results/confidence/<run_id>-val.svg, equal byte for byte to
+  report.render_svg of the committed JSON (and every tracked SVG has its JSON); the SVG is plain (only g, rect, line,
+  circle and text elements; no script, metadata, href or timestamp) and renders identically twice (A8, T-07-11, T-07-13)
+- report.render_confidence of the committed records names every run id with both variants (headline and raw: the
+  favourable variant is never shown alone, T-07-12), links each record's SVG, and carries the in-sample caveat and
+  every calibration definition text; it refuses anything that is not a confidence/1 record
 - data marker: every committed record equals report.confidence_report recomputed from the committed dump, the
   committed manifest and the record it is bound to (needs `make data`, because the gold labels come from the verified
   splits), and a record bound to a postfit candidate reproduces that candidate's nll_fitted (headline) and nll_raw
@@ -154,3 +160,78 @@ def test_nll_matches_postfit_record():
         assert abs(r["variants"]["headline"]["calibration"]["nll"] - c["nll_fitted"]) <= NLL_TOL, r["run_id"]
         assert abs(r["variants"]["raw"]["calibration"]["nll"] - c["nll_raw"]) <= NLL_TOL, r["run_id"]
         assert r["variants"]["headline"]["temperature"] == c["temperature"], r["run_id"]
+
+
+def committed_svgs():
+    return sorted(f for f in tracked("results/confidence/") if f.endswith(".svg"))
+
+
+def test_svg_matches_render():
+    records = committed()
+    svgs = committed_svgs()
+    assert svgs == sorted(rel[:-len(".json")] + ".svg" for rel, _ in records), "every record needs exactly its SVG"
+    for rel, r in records:
+        with open(os.path.join(REPO_ROOT, rel[:-len(".json")] + ".svg"), "rb") as f:
+            assert f.read() == report.render_svg(r).encode("utf-8"), "%s.svg is not render_svg of its JSON" % rel
+
+
+ALLOWED_SVG_ELEMENTS = {"svg", "g", "rect", "line", "circle", "text"}
+
+
+def test_svg_is_plain_and_reproducible():
+    for rel, r in committed():
+        text = report.render_svg(r)
+        assert text == report.render_svg(json.loads(json.dumps(r))), rel
+        low = text.lower()
+        for banned in ("<script", "<metadata", "href", "<style", "<image", "<foreignobject", "@import", "url("):
+            assert banned not in low, (rel, banned)
+        assert not re.search(r"\d:\d", text), "%s: a timestamp-like digit:digit pattern in the SVG" % rel
+        assert set(re.findall(r"<([A-Za-z][A-Za-z0-9]*)", text)) <= ALLOWED_SVG_ELEMENTS, rel
+        assert text.startswith('<svg xmlns="http://www.w3.org/2000/svg" ') and text.endswith("</svg>\n"), rel
+        for name in ("headline", "raw"):
+            v = r["variants"][name]
+            title = "%s %s, T = %.4f, classwise ECE = %.4f" % (r["run_id"], name, v["temperature"],
+                                                               v["calibration"]["classwise_ece"])
+            assert ">%s</text>" % title in text, (rel, name)
+            for b in v["calibration"]["reliability"]["pooled"]:
+                if b["count"]:
+                    assert ">%d</text>" % b["count"] in text, (rel, name, b)
+
+
+def test_render_has_tables_links_and_caveat():
+    records = [r for _, r in committed()]
+    text = report.render_confidence(records)
+    assert text == report.render_confidence(json.loads(json.dumps(records)))
+    assert text.startswith("### Calibration on val (θ-free)\n")
+    for line in text.split("\n"):
+        assert not line.startswith(("# ", "## ")), "only level-3 headings: %r" % line
+    for r in records:
+        for name in ("headline", "raw"):
+            cal = r["variants"][name]["calibration"]
+            row = "| %s | %s | %.4f | %.4f | %.4f | %.4f |" % (r["run_id"], name, r["variants"][name]["temperature"],
+                                                              cal["brier"], cal["nll"], cal["classwise_ece"])
+            assert row in text, (r["run_id"], name)
+        image = "![reliability diagram %s (val)](results/confidence/%s-val.svg)" % (r["run_id"], r["run_id"])
+        assert text.count(image) == 1, r["run_id"]
+    assert text.count("![reliability diagram ") == len(records)
+    assert text.count(report.IN_SAMPLE_CAVEAT) == 1
+    for rule in records[0]["definitions"]["calibration"].values():
+        assert rule in text, rule
+    for t1 in [r["run_id"] for r in records if r["variants"]["headline"]["temperature"] == 1.0]:
+        assert "%s: headline temperature is 1.0" % t1 in text
+
+
+def test_confidence_table_cli_prints_render(capsys):
+    out = report.main(["--confidence-table", os.path.join(REPO_ROOT, "results", "confidence")])
+    assert out == report.render_confidence([r for _, r in committed()])
+    assert capsys.readouterr().out == out
+
+
+@pytest.mark.parametrize("bad", [{"schema": "postfit/1"}, {"variants": {}}, [], "confidence/1"])
+def test_render_refuses_a_non_confidence_record(bad):
+    with pytest.raises(SystemExit, match="not a confidence/1 record"):
+        report.render_confidence([bad])
+    with pytest.raises(SystemExit, match="not a confidence/1 record"):
+        report.render_svg(bad)
+    with pytest.raises(SystemExit, match="no confidence records"):
+        report.render_confidence([])

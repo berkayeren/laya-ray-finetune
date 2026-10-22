@@ -60,13 +60,22 @@ eligible tag) on sigmoid(logit / T) and the θ that goes with it: `headline` (th
   is not val); without a full val dump it is refused (θ is chosen on val only)
 A --n subset dump is refused. A val record carries in_sample true and IN_SAMPLE_CAVEAT; the record holds the dump,
 manifest and record hashes, the binding, the rule texts (pilot.metrics.CALIBRATION_RULES), no timestamps or timings and
-no rounded value, so it rebuilds byte for byte (make confidence-reports).
+no rounded value, so it rebuilds byte for byte (make confidence-reports). With --out X.json the record's reliability
+diagram is written next to it as X.svg: render_svg of the re-parsed JSON (A8: plain SVG text, the pooled bins of both
+variants side by side with the diagonal and every bin's pair count; no plotting dependency, no timestamp or metadata).
+
+--confidence-table PATH [PATH ...] (EVAL-03): the markdown of saved confidence/1 records (a directory expands to its
+sorted *.json; any other JSON is refused), rendered in the given order by render_confidence: one level-3 section per
+block (a calibration table with the headline and raw rows of every record, a link to each record's SVG, then the
+in-sample caveat and the definition texts). Values are rounded for display only. The README confidence block is this
+output (plan 07-08).
 
 usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.json] [--manifest splits.json]
        python report.py --compare A_RUN[,A_RUN2...] B_RUN[,B_RUN2...] [--split test] [--B 10000] [--seed 0] [--out x.json]
        python report.py --table results/reports [--out table.md]
        python report.py --confidence results/dumps/RUN_ID --split val [--postfit results/postfit/laya.json]
                         [--out results/confidence/RUN_ID-val.json]
+       python report.py --confidence-table results/confidence [--out confidence.md]
 """
 import argparse
 import json
@@ -524,6 +533,159 @@ def table_inputs(paths):
     return out
 
 
+CONFIDENCE_VARIANTS = ("headline", "raw")
+SVG_PANEL = 400                                             # side of one unit-square plot, px
+SVG_LEFT, SVG_TOP, SVG_GAP = 70, 60, 120                    # left margin, top margin, gap between the two panels
+SVG_WIDTH = SVG_LEFT + 2 * SVG_PANEL + SVG_GAP + 130        # the right panel's title runs past its plot
+SVG_HEIGHT = SVG_TOP + SVG_PANEL + 90
+SVG_TICKS = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+SVG_FONT = 'font-family="sans-serif"'
+
+
+def _confidence_record(r):
+    """r if it is a confidence/1 record, else a refusal (the renderers draw only what a record holds)."""
+    if not isinstance(r, dict) or r.get("schema") != CONFIDENCE_SCHEMA:
+        raise SystemExit("not a confidence/1 record: %s" % (sorted(r)[:6] if isinstance(r, dict) else type(r).__name__))
+    return r
+
+
+def _xml(text):
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _svg_panel(r, name, x0):
+    """One reliability panel: frame, ticks, per non-empty pooled bin an outlined bar of height freq over [lo, hi), a dot
+    at (mean_p, freq) and its pair count, the dashed diagonal drawn over the bars; the title names the run, variant, T
+    and classwise ECE."""
+    v = r["variants"][name]
+    cal = v["calibration"]
+    S, y0 = SVG_PANEL, SVG_TOP
+
+    def X(p):
+        return x0 + p * S
+
+    def Y(f):
+        return y0 + S - f * S
+
+    out = ['<g>',
+           '<text x="%.2f" y="%.2f" font-size="11" %s>%s</text>'
+           % (x0, y0 - 14, SVG_FONT, _xml("%s %s, T = %.4f, classwise ECE = %.4f"
+                                         % (r["run_id"], name, v["temperature"], cal["classwise_ece"]))),
+           '<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="none" stroke="#000000" stroke-width="1"/>'
+           % (x0, y0, S, S)]
+    for t in SVG_TICKS:
+        out.append('<line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" stroke="#000000" stroke-width="1"/>'
+                   % (X(t), Y(0.0), X(t), Y(0.0) + 5))
+        out.append('<text x="%.2f" y="%.2f" font-size="10" text-anchor="middle" %s>%.1f</text>'
+                   % (X(t), Y(0.0) + 18, SVG_FONT, t))
+        out.append('<line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" stroke="#000000" stroke-width="1"/>'
+                   % (x0 - 5, Y(t), x0, Y(t)))
+        out.append('<text x="%.2f" y="%.2f" font-size="10" text-anchor="end" %s>%.1f</text>'
+                   % (x0 - 8, Y(t) + 3, SVG_FONT, t))
+    for b in cal["reliability"]["pooled"]:
+        if not b["count"]:
+            continue
+        out.append('<rect x="%.2f" y="%.2f" width="%.2f" height="%.2f" fill="#c6dbef" fill-opacity="0.6" '
+                   'stroke="#08519c" stroke-width="1"/>' % (X(b["lo"]), Y(b["freq"]), (b["hi"] - b["lo"]) * S,
+                                                            b["freq"] * S))
+        out.append('<circle cx="%.2f" cy="%.2f" r="3.00" fill="#08519c"/>' % (X(b["mean_p"]), Y(b["freq"])))
+        out.append('<text x="%.2f" y="%.2f" font-size="8" text-anchor="middle" %s>%d</text>'
+                   % (X((b["lo"] + b["hi"]) / 2), Y(b["freq"]) - 8, SVG_FONT, b["count"]))
+    out.append('<line x1="%.2f" y1="%.2f" x2="%.2f" y2="%.2f" stroke="#555555" stroke-width="1" '
+               'stroke-dasharray="5 4"/>' % (X(0.0), Y(0.0), X(1.0), Y(1.0)))
+    out.append('<text x="%.2f" y="%.2f" font-size="11" text-anchor="middle" %s>mean predicted p (%d equal-width '
+               'bins)</text>' % (X(0.5), Y(0.0) + 36, SVG_FONT, cal["n_bins"]))
+    out.append('<text x="%.2f" y="%.2f" font-size="11" text-anchor="middle" transform="rotate(-90 %.2f %.2f)" '
+               '%s>observed frequency</text>' % (x0 - 40, Y(0.5), x0 - 40, Y(0.5), SVG_FONT))
+    out.append('</g>')
+    return out
+
+
+def render_svg(report):
+    """The reliability diagram of one confidence/1 record as plain SVG text: the pooled bins of the headline (left)
+    and raw (right) variants, with the diagonal and every non-empty bin's pair count (A8: no plotting dependency).
+    Only g, rect, line, circle and text elements, every number %-formatted with fixed decimals, no timestamp, no
+    metadata, no script and no external reference, so it rebuilds byte for byte from the JSON."""
+    r = _confidence_record(report)
+    n = r["n_messages"]
+    out = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">'
+           % (SVG_WIDTH, SVG_HEIGHT, SVG_WIDTH, SVG_HEIGHT),
+           '<rect x="0" y="0" width="%d" height="%d" fill="#ffffff"/>' % (SVG_WIDTH, SVG_HEIGHT),
+           '<text x="%.2f" y="%.2f" font-size="13" %s>%s</text>'
+           % (SVG_LEFT, 22, SVG_FONT, _xml("reliability diagram, %s, %d messages x 48 tags = %d (message, tag) "
+                                            "pairs, pooled" % (r["split"]["name"], n, n * 48)))]
+    for i, name in enumerate(CONFIDENCE_VARIANTS):
+        out.extend(_svg_panel(r, name, SVG_LEFT + i * (SVG_PANEL + SVG_GAP)))
+    out.append('<text x="%.2f" y="%.2f" font-size="10" %s>%s</text>'
+               % (SVG_LEFT, SVG_HEIGHT - 12, SVG_FONT,
+                  _xml("bars: observed frequency of y = 1 per bin; dots: (mean p, observed frequency); numbers: pairs "
+                       "per bin; dashed: perfect calibration")))
+    out.append('</svg>')
+    return "\n".join(out) + "\n"
+
+
+def _confidence_label(r):
+    tr = r["training"]
+    if tr is not None:
+        return "%s (train run %s, epoch %s)" % (r["system"]["kind"], tr["run_id"], tr["epoch"])
+    return _system_label(r["system"])
+
+
+def _calibration_section(records):
+    header = ("system", "run_id", "variant", "T", "Brier", "NLL", "classwise ECE (%d bins)" % metrics.ECE_BINS)
+    rows, notes = [], []
+    for r in records:
+        for name in CONFIDENCE_VARIANTS:
+            v = r["variants"][name]
+            cal = v["calibration"]
+            if cal["n_bins"] != metrics.ECE_BINS:
+                raise SystemExit("%s: %s has %d bins, not %d" % (r["run_id"], name, cal["n_bins"], metrics.ECE_BINS))
+            rows.append((_confidence_label(r), r["run_id"], name, "%.4f" % v["temperature"], "%.4f" % cal["brier"],
+                         "%.4f" % cal["nll"], "%.4f" % cal["classwise_ece"]))
+        if r["variants"]["headline"]["temperature"] == 1.0:
+            notes.append("- %s: headline temperature is 1.0, so its raw rows equal its headline rows." % r["run_id"])
+    parts = ["### Calibration on %s (θ-free)" % "/".join(sorted({r["split"]["name"] for r in records})),
+             _md(header, rows)]
+    if notes:
+        parts.append("\n".join(notes))
+    return "\n\n".join(parts)
+
+
+def _diagram_section(records):
+    return "\n\n".join(["### Reliability diagrams"] + [
+        "![reliability diagram %s (%s)](results/confidence/%s-%s.svg)"
+        % (r["run_id"], r["split"]["name"], r["run_id"], r["split"]["name"]) for r in records])
+
+
+def _definitions_section(records):
+    defs = {json.dumps(r["definitions"]["calibration"], sort_keys=True) for r in records}
+    if len(defs) != 1:
+        raise SystemExit("the confidence records disagree on the calibration definitions; rebuild them with "
+                         "`make confidence-reports`")
+    parts = ["### Caveat and definitions"]
+    in_sample = [r["run_id"] for r in records if r["in_sample"]]
+    if in_sample:
+        parts.append("**Caveat:** %s (%s)." % (IN_SAMPLE_CAVEAT, ", ".join(in_sample)))
+    parts.append("\n".join("- %s: %s" % (k, t) for k, t in sorted(records[0]["definitions"]["calibration"].items())))
+    return "\n\n".join(parts)
+
+
+# render_confidence's sections in order, each a builder of the record list returning markdown that opens with a
+# level-3 heading (the README carries it inside its own section, plan 07-08); later Phase 7 plans add theirs before
+# the definitions.
+CONFIDENCE_SECTIONS = [_calibration_section, _diagram_section, _definitions_section]
+
+
+def render_confidence(reports):
+    """Markdown of saved confidence/1 records, in the given order (callers pass them in sorted path order): the
+    calibration table (headline then raw per record), a link to each record's reliability diagram, the in-sample
+    caveat and the definition texts. Values are rounded for display only; identical input gives identical text."""
+    records = [_confidence_record(r) for r in reports]
+    if not records:
+        raise SystemExit("no confidence records to render")
+    return "\n\n".join(build(records) for build in CONFIDENCE_SECTIONS) + "\n"
+
+
 def _run_dirs(ap, text):
     dirs = text.split(",")
     if not all(dirs):
@@ -549,20 +711,24 @@ def main(argv=None):
                     help="confidence/1 report (Brier, NLL, classwise ECE, reliability) of RUN_DIR's --split dump")
     ap.add_argument("--postfit", metavar="RECORD", default=None,
                     help="with --confidence: the postfit record binding a selection candidate's or final seed's T, θ")
+    ap.add_argument("--confidence-table", nargs="+", metavar="PATH", default=None,
+                    help="markdown of saved confidence/1 records (a directory expands to its sorted *.json)")
     a = ap.parse_args(argv)
-    if sum(x is not None for x in (a.run_dir, a.compare, a.table, a.confidence)) != 1:
-        ap.error("give exactly one of RUN_DIR, --compare A_DIRS B_DIRS, --table PATH [PATH ...] or "
-                 "--confidence RUN_DIR")
+    if sum(x is not None for x in (a.run_dir, a.compare, a.table, a.confidence, a.confidence_table)) != 1:
+        ap.error("give exactly one of RUN_DIR, --compare A_DIRS B_DIRS, --table PATH [PATH ...], "
+                 "--confidence RUN_DIR or --confidence-table PATH [PATH ...]")
     if a.postfit is not None and a.confidence is None:
         ap.error("--postfit applies only to --confidence")
     if a.confidence is not None and a.split is None:
         ap.error("--confidence needs an explicit --split val|test")
-    if a.table is not None:
+    if a.confidence is not None and a.out is not None and not a.out.endswith(".json"):
+        ap.error("--confidence --out must name a .json file (the reliability diagram is written next to it as .svg)")
+    if a.table is not None or a.confidence_table is not None:
         reports = []
-        for p in table_inputs(a.table):
+        for p in table_inputs(a.table if a.table is not None else a.confidence_table):
             with open(p, encoding="utf-8") as f:
                 reports.append(json.load(f))
-        text = render_table(reports)
+        text = render_table(reports) if a.table is not None else render_confidence(reports)
         print(text, end="")
         if a.out:
             os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
@@ -581,6 +747,8 @@ def main(argv=None):
         parent = os.path.dirname(os.path.abspath(a.out))
         os.makedirs(parent, exist_ok=True)
         write_atomic(a.out, (text + "\n").encode("utf-8"))
+        if a.confidence is not None:
+            write_atomic(a.out[:-len(".json")] + ".svg", render_svg(json.loads(text)).encode("utf-8"))
     return report
 
 
