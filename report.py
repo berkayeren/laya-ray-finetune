@@ -21,10 +21,11 @@ same way, with no system-specific branch (D-10, D-12):
   (refuse_final_seed_training_content, 07-REVIEW WR-01, 07-09 review CR-01). A θ-source val split holding committed
   test, HOTELS or selection_train content is refused, keyed on the content under any manifest (refuse_held_out_theta
   over pilot.data.holds_committed, 07-REVIEW CR-01, 07-09 review WR-01), here, in --compare and in the --confidence
-  val_selected and postfit_candidate bindings. A subset (--n) val dump next to a reported test dump is refused;
-  without a val dump the val-selected row is null with a reason; on the val split itself the val-selected row is
-  labelled in_sample, and a --n subset val dump reported on val gets its θ 0.5 rows with the val-selected row null and
-  SUBSET_VAL_REASON (03-REVIEW WR-04)
+  val_selected and postfit_candidate bindings. Both content checks fail closed while a committed split file they read
+  is missing, under a non-committed manifest of the pinned dataset (require_committed_files, 07-09 review WR-02). A
+  subset (--n) val dump next to a reported test dump is refused; without a val dump the val-selected row is null with
+  a reason; on the val split itself the val-selected row is labelled in_sample, and a --n subset val dump reported on
+  val gets its θ 0.5 rows with the val-selected row null and SUBSET_VAL_REASON (03-REVIEW WR-04)
 - the full θ (global, per tag, eligible tags, grid, objective, tie rule) and its val dump's hashes are disclosed
 The report holds no timestamps or timings and no rounded value. A dump whose split is not role val or test (a
 hotels_probe dump, role ood_probe) is refused naming its role, here and in --compare (refuse_ood_role): its gold is
@@ -113,9 +114,9 @@ import argparse
 import json
 import os
 
-from pilot import dumps, metrics
-from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, holds_committed, manifest_is_committed, parse_jsonl, repo_relpath,
-                        sha256_bytes, sha256_file, verify_split_file, write_atomic)
+from pilot import data, dumps, metrics                     # data.DEFAULT_MANIFEST: the committed one, at call time
+from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, committed_content, holds_committed, manifest_is_committed,
+                        parse_jsonl, repo_relpath, sha256_bytes, sha256_file, verify_split_file, write_atomic)
 
 SCHEMA_VERSION = 1
 COMPARE_PROCEDURE = ("EVAL-07: per-seed probabilities averaged per message and tag, then thresholded; test messages "
@@ -241,13 +242,39 @@ def _split_content(entry, manifest_path, roles):
     return verify_split_file(path, manifest_path=manifest_path, roles=roles, data=raw), parse_jsonl(raw)
 
 
+def require_committed_files(where, manifest_path, names):
+    """SystemExit when a content check could not key on the (uid, message) pairs (07-09 review WR-02, fail closed):
+    holds_committed reads them from the committed data/splits/<name>.jsonl and, when that file is absent, keys only on
+    the entry hashes, which a relabel of all rows but one changes. Refused for a non-committed manifest prepared from
+    the pinned dataset (its dataset.raw_sha256 is the committed manifest's: a manifest copy, or prepare_data.py --out
+    OTHER without `make data`) while any committed `names` file is missing. The committed manifest needs none (its
+    splits are the committed bytes); a manifest of another snapshot (the offline suite's synthetic data) keys on the
+    hashes as before. Like the pair key itself (07-09 review IN-01), this catches relabelled bytes, not a forged
+    manifest. pilot.data.DEFAULT_MANIFEST is read at call time."""
+    if manifest_is_committed(manifest_path):
+        return
+    with open(manifest_path, encoding="utf-8") as f:
+        raw = (json.load(f).get("dataset") or {}).get("raw_sha256")
+    with open(data.DEFAULT_MANIFEST, encoding="utf-8") as f:
+        if raw != (json.load(f).get("dataset") or {}).get("raw_sha256"):
+            return
+    for name in names:
+        committed, pairs = committed_content(name)
+        if not pairs:
+            raise SystemExit("%s: the committed %s is missing, so %s (prepared from the pinned dataset, not the "
+                             "committed manifest) cannot be content-checked against the committed splits; run `make "
+                             "data` (or drop --manifest)" % (where, committed["path"], manifest_path))
+
+
 def refuse_held_out_theta(where, entry, manifest_path):
     """SystemExit when the θ-source val split holds committed test, HOTELS or selection_train content (THETA_HELD_OUT),
     keyed on the content under any manifest by pilot.data.holds_committed (the entry's sha256 or uids_sha256 is the
     committed entry's, or any (uid, message) pair is in the committed file), never on the manifest's role label
     (07-REVIEW CR-01, 07-09 review WR-01; the precedents are score.py's test interlock, 05-REVIEW CR-02, the trainers'
     pilot.data.refuse_held_out, 06-REVIEW CR-01/WR-02, and latency.read_split). `entry` is a manifest entry or a
-    sidecar's split block; both name the registered path. Runs before read_gold and any metric."""
+    sidecar's split block; both name the registered path. Fails closed without the committed files
+    (require_committed_files, 07-09 review WR-02). Runs before read_gold and any metric."""
+    require_committed_files(where, manifest_path, THETA_HELD_OUT)
     verified, rows = _split_content(entry, manifest_path, ("val",))
     for held in THETA_HELD_OUT:
         if holds_committed(verified, rows, held):
@@ -272,12 +299,13 @@ def refuse_final_seed_training_content(where, split, entry, manifest_path):
     under any manifest, keyed on the content by pilot.data.holds_committed, so a manifest copy cannot present
     training-set numbers as held-out under the test name. Every report mode applies it to the reported dump of a final
     seed (is_final_seed): run_report (so evaluate.py), --compare (_load_side) and the --confidence final_seed binding
-    (07-09 review CR-01). Runs before the postfit record is read and before any metric; `entry` is the dump sidecar's
-    split block."""
+    (07-09 review CR-01). Fails closed without the committed files (require_committed_files, 07-09 review WR-02). Runs
+    before the postfit record is read and before any metric; `entry` is the dump sidecar's split block."""
     if split == "val":
         raise SystemExit("%s: a final seed was trained on final_train, which holds the val folds, so its val numbers "
                          "are training-set numbers (neither held-out nor in-sample); report a final seed on test or "
                          "hotels_probe (Phase 8) with its postfit record" % where)
+    require_committed_files(where, manifest_path, FINAL_SEED_TRAINED)
     verified, rows = _split_content(entry, manifest_path, dumps.READ_ROLES)
     for held in FINAL_SEED_TRAINED:
         if holds_committed(verified, rows, held):

@@ -33,6 +33,9 @@ monkeypatch pilot.data.DEFAULT_MANIFEST to the snapshot's manifest inside the te
 so the snapshot plays the committed data for pilot.data.holds_committed: every report mode that selects or applies
 θ (run_report, --confidence val_selected and postfit_candidate, --compare) refuses such a θ source, the snapshot's own
 val still passes with the same θ, and one data-marked test repeats the verifier's repro on the real committed splits.
+With the committed files absent (DEFAULT_MANIFEST patched to a bare copy of the snapshot's manifest) both content
+checks fail closed for a manifest of the same raw snapshot, and not for the committed or another snapshot's manifest
+(07-09 review WR-02).
 """
 import json
 import os
@@ -803,6 +806,42 @@ def test_heldout_theta_check_passes_the_committed_val(tmp_path, snap, monkeypatc
     assert thetas() == before
     c = report.compare([prior], [majority], "test", snap[1], B=10)
     assert c["a"]["theta"] == before[0][1]
+
+
+def test_content_checks_fail_closed_without_the_committed_files(tmp_path, snap, fitted, monkeypatch, capsys):
+    """07-09 review WR-02: without the committed split files on disk pilot.data.holds_committed keys only on the
+    entry hashes, so a relabel of all rows but one would pass. Under a non-committed manifest prepared from the pinned
+    dataset (dataset.raw_sha256 is the committed manifest's), both content checks refuse until `make data` writes the
+    committed files: the θ source (run_report, --confidence, --compare) and a final seed's reported split (run_report,
+    --confidence). The committed manifest, and a manifest of another snapshot (the offline suite's synthetic data, its
+    rows never the committed ones), need no committed file."""
+    import shutil
+    _, path, record, sha = fitted
+    rsnap = _relabel_copy(snap[0], snap[1], tmp_path / "r", "val", "test", cut=1)
+    prior = _prior(rsnap, tmp_path / "d")
+    fsnap = _relabel_copy(snap[0], snap[1], tmp_path / "f", "test", "val", cut=1)
+    final = _drop_val(_write_split_dump(_final_seed(tmp_path / "final", fsnap, record, sha), fsnap[1], "test"))
+    ok = _prior(snap, tmp_path / "ok")
+    capsys.readouterr()
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    shutil.copy(snap[1], str(bare / "splits.json"))          # the committed manifest without its split files
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", str(bare / "splits.json"))
+    want = "committed splits/%s.jsonl is missing.*make data"
+    for call, held in ((lambda: report.run_report(prior, "test", rsnap[1]), "test"),
+                       (lambda: report.confidence_report(prior, "test", rsnap[1]), "test"),
+                       (lambda: report.compare([prior], [prior], "test", rsnap[1], B=10), "test"),
+                       (lambda: report.run_report(final, "test", fsnap[1]), "val"),
+                       (lambda: report.confidence_report(final, "test", fsnap[1], path), "val")):
+        with pytest.raises(SystemExit, match=want % held):
+            call()
+    before = report.run_report(ok, "test", snap[1])              # snap[1] has the committed bytes: no file needed
+    assert before["theta_source"]["n_messages"] == len(snap[3])
+    m = json.loads((bare / "splits.json").read_text(encoding="utf-8"))
+    m["dataset"]["raw_sha256"] = {k: "0" * 64 for k in m["dataset"]["raw_sha256"]}      # another snapshot
+    _write_json(bare / "splits.json", m)
+    assert not pilot.data.manifest_is_committed(snap[1])
+    assert report.run_report(ok, "test", snap[1]) == dict(before, manifest=dict(before["manifest"], is_committed=False))
 
 
 @pytest.mark.data
