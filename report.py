@@ -102,8 +102,8 @@ import json
 import os
 
 from pilot import dumps, metrics
-from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, manifest_is_committed, repo_relpath, sha256_bytes, sha256_file,
-                        write_atomic)
+from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, holds_committed, manifest_is_committed, parse_jsonl, repo_relpath,
+                        sha256_bytes, sha256_file, verify_split_file, write_atomic)
 
 SCHEMA_VERSION = 1
 COMPARE_PROCEDURE = ("EVAL-07: per-seed probabilities averaged per message and tag, then thresholded; test messages "
@@ -210,12 +210,44 @@ def refuse_ood_role(run_dir, split, entry, what):
                          "rate" % (run_dir, split, entry["role"], what))
 
 
+# The committed splits whose content never shapes θ or T, whatever the manifest says (07-REVIEW CR-01)
+THETA_HELD_OUT = ("test", "hotels_probe")
+
+
+def _split_content(entry, manifest_path, roles):
+    """(verified manifest entry, parsed rows) of the split file a manifest entry (or a sidecar's split block) names, at
+    dirname(realpath(manifest)) + entry["path"], the path rule of pilot.dumps.read_gold. The bytes are read once,
+    verified against the manifest (sha256, registration, role) and parsed, so the rows checked are the rows verified."""
+    path = os.path.join(os.path.dirname(os.path.realpath(manifest_path)), entry["path"])
+    if not os.path.isfile(path):
+        raise SystemExit("%s not found; run `make data` to write the registered splits" % path)
+    with open(path, "rb") as f:
+        raw = f.read()
+    return verify_split_file(path, manifest_path=manifest_path, roles=roles, data=raw), parse_jsonl(raw)
+
+
+def refuse_held_out_theta(where, entry, manifest_path):
+    """SystemExit when the θ-source val split holds committed test or HOTELS content (THETA_HELD_OUT), keyed on the
+    content under any manifest by pilot.data.holds_committed (the entry's sha256 or uids_sha256 is the committed
+    entry's, or any (uid, message) pair is in the committed file), never on the manifest's role label (07-REVIEW
+    CR-01; the precedents are score.py's test interlock, 05-REVIEW CR-02, the trainers' pilot.data.refuse_held_out,
+    06-REVIEW CR-01/WR-02, and latency.read_split). `entry` is a manifest entry or a sidecar's split block; both name
+    the registered path. Runs before read_gold and any metric."""
+    verified, rows = _split_content(entry, manifest_path, ("val",))
+    for held in THETA_HELD_OUT:
+        if holds_committed(verified, rows, held):
+            raise SystemExit("%s: the θ-source val split %s holds committed %s content; θ is selected on banking val "
+                             "only, never on test or HOTELS content, whatever the manifest says (drop --manifest, or "
+                             "run `make data`)" % (where, verified["path"], held))
+
+
 def theta_source(run_dir, manifest_path):
     """(val logits, gold, sidecar, disclosure) of the run dir's full val dump, or None when it has no val dump.
 
     load_dump proves the dump is untampered, belongs to this run (run_id == run dir name) and, for a full dump, covers
     the registered val split in order (uids_sha256). A subset val dump is refused: θ is never chosen on part of val.
-    run_report does not call it when the reported dump is itself a subset val dump (SUBSET_VAL_REASON).
+    run_report does not call it when the reported dump is itself a subset val dump (SUBSET_VAL_REASON). A val split
+    holding committed test or HOTELS content is refused, keyed on the content (refuse_held_out_theta, 07-REVIEW CR-01).
     """
     npz = os.path.join(run_dir, "val.npz")
     if not (os.path.exists(npz) or os.path.exists(os.path.join(run_dir, "val.json"))):
@@ -223,6 +255,7 @@ def theta_source(run_dir, manifest_path):
     logits, uids, side, entry = dumps.load_dump(run_dir, "val", manifest_path)
     if side["n_subset"] is not None:
         raise SystemExit("%s: θ is selected only on a full val dump; rescore val without --n" % npz)
+    refuse_held_out_theta(run_dir, entry, manifest_path)
     refuse_in_sample_theta(side, run_dir)
     return logits, dumps.read_gold(entry, manifest_path, uids), side, {
         "run_id": side["run_id"], "split": "val", "dump_sha256": side["dump_sha256"],
