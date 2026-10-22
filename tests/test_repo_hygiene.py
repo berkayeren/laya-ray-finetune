@@ -22,6 +22,9 @@ BERTurk selections (BASE-03 fixes of the 06-10 and 06-16 gates, pilot.berturk.SU
 results/superseded/, each next to a README that labels it superseded and not comparable, and get the same dump and
 sidecar checks. The Phase 7 confidence records under results/confidence/ (EVAL-03: ids, digests, repo-relative paths
 and numbers only) get the sidecar check too, and only <run_id>-val.json and <run_id>-val.svg may be tracked there.
+A HOTELS dump results/dumps/<run_id>/hotels_probe.{npz,json} is an allowed path for Phase 8 (hotel_<fold>_<index> uids
+only there, bank uids only in val and test dumps), but none may be tracked in Phase 7: score.py scores nothing on HOTELS
+until Phase 8 opens it behind its protocol gate (test_no_hotels_probe_dump_before_phase_8, 07-RESEARCH A7).
 """
 import io
 import json
@@ -37,9 +40,10 @@ pytestmark = pytest.mark.unit
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MESSAGE_TEXT_KEYS = ("state", "text")
 UID_RE = re.compile(r"^bank_[0-9]+_[0-9]+$")       # split uids are bank_<fold>_<index>; never text-like
+HOTEL_UID_RE = re.compile(r"^hotel_[0-9]+_[0-9]+$")  # hotels_probe uids are hotel_<fold>_<index>, only in hotels dumps
 DUMP_KEYS = {"logits", "uids"}
 DUMP_COLUMNS = 48                                   # one logit per INTENTS tag
-DUMP_PATH_RE = re.compile(r"^results/dumps/[^/]+/(val|test)\.(npz|json)$")
+DUMP_PATH_RE = re.compile(r"^results/dumps/[^/]+/(val|test|hotels_probe)\.(npz|json)$")
 # a superseded dir (pilot.berturk.SUPERSEDED) holds its README, its records and its val dumps only (RP-2)
 SUPERSEDED_PATH_RE = re.compile(r"^results/superseded/[^/]+/(README\.md|postfit/[^/]+\.json|dumps/[^/]+/val\.(npz|json))$")
 # Phase 7 commits val confidence records only (no test or HOTELS confidence numbers before Phase 8); Phase 8 widens
@@ -89,7 +93,9 @@ def local_split_texts():
 
 
 def dump_problems(path):
-    """Findings for one dump .npz: pickles, keys, dtypes, shapes and uids that could carry text (D-03)."""
+    """Findings for one dump .npz: pickles, keys, dtypes, shapes and uids that could carry text (D-03). A file named
+    hotels_probe.npz must hold hotel_<fold>_<index> uids (HOTEL_UID_RE), every other dump bank uids (UID_RE)."""
+    uid_re = HOTEL_UID_RE if os.path.basename(path) == "hotels_probe.npz" else UID_RE
     with open(path, "rb") as f:
         raw = f.read()
     try:
@@ -124,10 +130,10 @@ def dump_problems(path):
         else:
             if logits is not None and logits.ndim >= 1 and len(uids) != logits.shape[0]:
                 problems.append("%d uids for %d logit rows" % (len(uids), logits.shape[0]))
-            bad = [u for u in uids.tolist() if not UID_RE.match(u)]
+            bad = [u for u in uids.tolist() if not uid_re.match(u)]
             if bad:                     # at most 3, each cut short: a bad uid may be message text
                 problems.append("%d uids do not match %s, e.g. %s" % (
-                    len(bad), UID_RE.pattern, ", ".join(repr(u[:12] + "...") for u in bad[:3])))
+                    len(bad), uid_re.pattern, ", ".join(repr(u[:12] + "...") for u in bad[:3])))
     return problems
 
 
@@ -279,7 +285,30 @@ def test_confidence_path_pin_flags_planted_paths(rel, ok):
 
 def test_only_dump_files_under_results_dumps():
     bad = [f for f in tracked("results/dumps/") if not DUMP_PATH_RE.match(f)]
-    assert bad == [], "only results/dumps/<run_id>/(val|test).(npz|json) may be tracked: %s" % bad
+    assert bad == [], "only results/dumps/<run_id>/(val|test|hotels_probe).(npz|json) may be tracked: %s" % bad
+
+
+@pytest.mark.parametrize("rel,ok", [
+    ("results/dumps/x/hotels_probe.npz", True),
+    ("results/dumps/x/hotels_probe.json", True),
+    ("results/dumps/x/val.npz", True),
+    ("results/dumps/x/hotels.npz", False),
+    ("results/dumps/x/train.npz", False),
+    ("results/dumps/x/y/hotels_probe.npz", False),
+])
+def test_dump_path_pin_flags_planted_paths(rel, ok):
+    assert bool(DUMP_PATH_RE.match(rel)) is ok, rel
+
+
+HOTELS_DUMP_FILES = ("hotels_probe.npz", "hotels_probe.json")
+
+
+def test_no_hotels_probe_dump_before_phase_8():
+    # Phase 7 opens the dump reader and this hygiene for hotels_probe, never the scorer (07-RESEARCH A7). Phase 8
+    # removes this guard when it opens score.py for hotels_probe behind its protocol gate (which replaces
+    # refuse_finetuned_test and refuse_berturk_test) and scores each final checkpoint on HOTELS exactly once.
+    found = [f for f in tracked("results/dumps/", "results/superseded/") if os.path.basename(f) in HOTELS_DUMP_FILES]
+    assert found == [], "no HOTELS dump may be tracked before Phase 8: %s" % found
 
 
 def _logits(n=2, cols=DUMP_COLUMNS, dtype=np.float32):
@@ -296,8 +325,21 @@ def _bad_logits(value):
     return x
 
 
-PLANTED_DUMPS = {               # name -> (arrays to save, expected finding fragment or None for clean)
+def _hotel_uids(n=2):
+    return np.asarray(["hotel_16_%d" % i for i in range(n)], dtype=str)
+
+
+PLANTED_DUMPS = {               # name -> (arrays to save, expected finding fragment or None for clean[, file name])
     "clean": (lambda: {"logits": _logits(), "uids": _uids()}, None),
+    "hotel_uid_in_test": (lambda: {"logits": _logits(), "uids": _hotel_uids()}, "do not match ^bank_",
+                          "test.npz"),
+    "hotel_uid_in_val": (lambda: {"logits": _logits(), "uids": np.asarray(["bank_14_0", "hotel_14_0"])},
+                         "1 uids do not match ^bank_", "val.npz"),
+    "bank_uid_in_hotels_probe": (lambda: {"logits": _logits(), "uids": _uids()}, "do not match ^hotel_",
+                                 "hotels_probe.npz"),
+    "hotel_uids_in_hotels_probe": (lambda: {"logits": _logits(), "uids": _hotel_uids()}, None, "hotels_probe.npz"),
+    "hotel_text_uid_in_hotels_probe": (lambda: {"logits": _logits(), "uids": np.asarray(["hotel_16_0", "Peki"])},
+                                       "1 uids do not match ^hotel_", "hotels_probe.npz"),
     "text_uid": (lambda: {"logits": _logits(), "uids": np.asarray(["bank_16_0", "Kartım kayboldu"])},
                  "uids do not match"),
     "extra_text_array": (lambda: {"logits": _logits(), "uids": _uids(), "text": np.asarray(["a", "b"])},
@@ -313,8 +355,8 @@ PLANTED_DUMPS = {               # name -> (arrays to save, expected finding frag
 
 @pytest.mark.parametrize("name", sorted(PLANTED_DUMPS))
 def test_dump_checker_flags_planted_violations(tmp_path, name):
-    build, expected = PLANTED_DUMPS[name]
-    path = tmp_path / "test.npz"
+    build, expected = PLANTED_DUMPS[name][:2]
+    path = tmp_path / (PLANTED_DUMPS[name][2] if len(PLANTED_DUMPS[name]) > 2 else "test.npz")
     np.savez(path, **build())           # np.savez pickles object arrays, as a careless writer would
     problems = dump_problems(str(path))
     if expected is None:
