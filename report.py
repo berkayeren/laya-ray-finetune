@@ -49,7 +49,9 @@ report is refused: the table shows full-split numbers only. The README results b
 eligible tag) on sigmoid(logit / T) and the θ that goes with it: `headline` (the val-fitted or shipped T) and `raw`
 (T = 1). Each variant also carries a selective block (EVAL-04, pilot.metrics.selective) at θ 0.5 and at its θ:
 precision and exact-match accuracy at 50/70/80/90 % coverage and the AURC under the one message-confidence rule
-(pilot.metrics.CONFIDENCE_RULE, COVERAGE_RULE and AURC_RULE are in the record's definitions).
+(pilot.metrics.CONFIDENCE_RULE, COVERAGE_RULE and AURC_RULE are in the record's definitions), and a no_intent_fp
+block (EVAL-05, pilot.metrics.fp_rate over all 48 tags) at θ 0.5 and at its θ: k of the n no-intent messages predicting
+at least one tag, the rate and its Wilson 95% interval (pilot.metrics.FP_RULE and WILSON_TEXT are in the definitions).
 Where T and θ come from (confidence_binding; every other case is refused before any metric is computed):
 - postfit_candidate: a selection candidate's dump (a training block without postfit_sha256) ships T = 1, so its
   "after T" numbers need the postfit record: only on val and only with --postfit RECORD (schema postfit/1, read as
@@ -70,8 +72,9 @@ variants side by side with the diagonal and every bin's pair count; no plotting 
 --confidence-table PATH [PATH ...] (EVAL-03): the markdown of saved confidence/1 records (a directory expands to its
 sorted *.json; any other JSON is refused), rendered in the given order by render_confidence: one level-3 section per
 block (a calibration table with the headline and raw rows of every record, a link to each record's SVG, the
-abstention table (EVAL-04) with the confidence, coverage and AURC rule texts and CONFIDENCE_DISCLOSURE, then the
-in-sample caveat and the definition texts). Values are rounded for display only. The README confidence block is this
+abstention table (EVAL-04) with the confidence, coverage and AURC rule texts and CONFIDENCE_DISCLOSURE, the
+no-intent false-positive table (EVAL-05: k/n, rate and Wilson 95% interval per row, the rule texts and the sample size
+line), then the in-sample caveat and the definition texts). Values are rounded for display only. The README confidence block is this
 output (plan 07-08).
 
 usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.json] [--manifest splits.json]
@@ -111,6 +114,10 @@ CONFIDENCE_DISCLOSURE = ("The message-confidence rule (the joint decision probab
                          "order of the two fine-tuned models' val AURC differs between the two rules (at T = 1 it does "
                          "not); the rule was not chosen by that outcome, and Phase 8 freezes it in protocol.json "
                          "knowing both directions.")
+# EVAL-05: the interval text in every confidence record, and the test split's no-intent count (data/splits.json
+# test n_no_intent, test-pinned) that the no-intent section names next to the val count it reads from the records.
+WILSON_TEXT = "95%% Wilson score interval, z = %r, no continuity correction" % metrics.WILSON_Z
+TEST_NO_INTENT = 15
 T_MATCH = 1e-12                                             # a final seed's shipped T vs its record's chosen T
 # Sidecar keys the θ-source val dump and the reported dump must share (03-REVIEW WR-01): θ chosen on one checkpoint's,
 # temperature's or device's / precision's val probabilities is never applied to another's dump. system.baseline_source
@@ -332,8 +339,9 @@ def confidence_binding(run_dir, split, side, manifest_path, postfit=None):
 
 
 def confidence_report(run_dir, split, manifest_path=DEFAULT_MANIFEST, postfit=None):
-    """The confidence/1 report of one verified full dump (EVAL-03, EVAL-04): the binding, and per variant its T, θ,
-    pilot.metrics.calibration on sigmoid(logit / T) and pilot.metrics.selective at θ 0.5 and at the variant's θ."""
+    """The confidence/1 report of one verified full dump (EVAL-03, EVAL-04, EVAL-05): the binding, and per variant its T, θ,
+    pilot.metrics.calibration on sigmoid(logit / T), and pilot.metrics.selective and pilot.metrics.fp_rate (no-intent,
+    EVAL-05) at θ 0.5 and at the variant's θ."""
     logits, uids, side, entry = dumps.load_dump(run_dir, split, manifest_path)
     if side["n_subset"] is not None:
         raise SystemExit("%s: a --n subset dump is never reported; rescore %s without --n" % (run_dir, split))
@@ -345,7 +353,9 @@ def confidence_report(run_dir, split, manifest_path=DEFAULT_MANIFEST, postfit=No
         P = metrics.probabilities(logits, v["temperature"])
         variants[name] = dict(v, calibration=metrics.calibration(Y, P, v["theta"]["eligible_tags"]),
                               selective={"0.5": metrics.selective(Y, P, 0.5),
-                                         "theta": metrics.selective(Y, P, metrics.theta_vector(v["theta"]))})
+                                         "theta": metrics.selective(Y, P, metrics.theta_vector(v["theta"]))},
+                              no_intent_fp={"0.5": metrics.fp_rate(Y, P, 0.5),
+                                            "theta": metrics.fp_rate(Y, P, metrics.theta_vector(v["theta"]))})
     tr = side.get("training")
     in_sample = split == "val"
     return {"schema": CONFIDENCE_SCHEMA, "schema_version": SCHEMA_VERSION, "run_id": side["run_id"],
@@ -358,7 +368,8 @@ def confidence_report(run_dir, split, manifest_path=DEFAULT_MANIFEST, postfit=No
             "binding": {k: v for k, v in binding.items() if k != "variants"},
             "in_sample": in_sample, "caveat": IN_SAMPLE_CAVEAT if in_sample else None,
             "definitions": {"calibration": metrics.CALIBRATION_RULES, "confidence": metrics.CONFIDENCE_RULE,
-                            "coverage": metrics.COVERAGE_RULE, "aurc": metrics.AURC_RULE},
+                            "coverage": metrics.COVERAGE_RULE, "aurc": metrics.AURC_RULE,
+                            "false_positive": metrics.FP_RULE, "wilson": WILSON_TEXT},
             "variants": variants}
 
 def _load_side(run_dirs, split, manifest_path):
@@ -709,6 +720,41 @@ def _abstention_section(records):
     return "\n\n".join(parts)
 
 
+NO_INTENT_RULES = ("false_positive", "wilson")
+
+
+def _no_intent_section(records):
+    """EVAL-05: the no-intent false-positive rate per record, variant and θ row, always as k/n with its rate and Wilson
+    95% interval (a rate is never shown alone), then the rule texts (one set, shared by every record) and the sample
+    size line: the no-intent set is tiny, so every interval is wide."""
+    rules = {json.dumps([r["definitions"].get(k) for k in NO_INTENT_RULES]) for r in records}
+    texts = [records[0]["definitions"].get(k) for k in NO_INTENT_RULES]
+    if len(rules) != 1 or None in texts:
+        raise SystemExit("the confidence records disagree on (or lack) the false-positive definitions; rebuild them "
+                         "with `make confidence-reports`")
+    rows, sizes = [], {}
+    for r in records:
+        for name in CONFIDENCE_VARIANTS:
+            v = r["variants"][name]
+            for key, label in SELECTIVE_ROWS:
+                f = v["no_intent_fp"][key]
+                sizes.setdefault(r["split"]["name"], set()).add(f["n"])
+                theta = label % v["theta"]["global"] if "%" in label else label
+                ci = "n/a" if f["wilson95"] is None else "[%.3f, %.3f]" % tuple(f["wilson95"])
+                rows.append((_confidence_label(r), r["run_id"], name, theta, "%d/%d" % (f["k"], f["n"]),
+                             _num(f["rate"]), ci))
+    if any(len(n) != 1 for n in sizes.values()):
+        raise SystemExit("the confidence records of one split disagree on the no-intent message count %s; rebuild "
+                         "them with `make confidence-reports`" % {s: sorted(n) for s, n in sizes.items()})
+    splits = sorted(sizes)
+    header = ("system", "run_id", "variant", "θ", "k/n", "rate", "Wilson 95%")
+    lines = ["The %s no-intent set holds %d messages%s, so every interval is wide."
+             % (s, next(iter(sizes[s])), " (%d on test)" % TEST_NO_INTENT if s == "val" else "") for s in splits]
+    parts = ["### No-intent false positives on %s" % "/".join(splits), _md(header, rows),
+             "\n".join("- %s: %s" % (k, t) for k, t in zip(NO_INTENT_RULES, texts)), "\n".join(lines)]
+    return "\n\n".join(parts)
+
+
 def _definitions_section(records):
     defs = {json.dumps(r["definitions"]["calibration"], sort_keys=True) for r in records}
     if len(defs) != 1:
@@ -725,13 +771,15 @@ def _definitions_section(records):
 # render_confidence's sections in order, each a builder of the record list returning markdown that opens with a
 # level-3 heading (the README carries it inside its own section, plan 07-08); later Phase 7 plans add theirs before
 # the definitions.
-CONFIDENCE_SECTIONS = [_calibration_section, _diagram_section, _abstention_section, _definitions_section]
+CONFIDENCE_SECTIONS = [_calibration_section, _diagram_section, _abstention_section, _no_intent_section,
+                       _definitions_section]
 
 
 def render_confidence(reports):
     """Markdown of saved confidence/1 records, in the given order (callers pass them in sorted path order): the
     calibration table (headline then raw per record), a link to each record's reliability diagram, the abstention
-    table with its rule texts and CONFIDENCE_DISCLOSURE, the in-sample caveat and the definition texts. Values are rounded for display only; identical input gives identical text."""
+    table with its rule texts and CONFIDENCE_DISCLOSURE, the no-intent false-positive table, the in-sample caveat
+    and the definition texts. Values are rounded for display only; identical input gives identical text."""
     records = [_confidence_record(r) for r in reports]
     if not records:
         raise SystemExit("no confidence records to render")

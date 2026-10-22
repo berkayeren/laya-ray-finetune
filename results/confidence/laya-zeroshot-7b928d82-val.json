@@ -53,7 +53,9 @@
     },
     "confidence": "message confidence = sum over the 48 tags of log q, q = p if p >= θ (predicted) else 1 - p: the model's probability that every tag decision is right, assuming tag independence",
     "coverage": "keep the k = ceil(c * n / 100) most confident messages, k computed as (c * n + 99) // 100; ties in confidence keep split-file order (stable sort)",
-    "aurc": "mean over k = 1..n of 1 - exact-match rate of the k most confident messages (Geifman et al. 2019); lower is better"
+    "aurc": "mean over k = 1..n of 1 - exact-match rate of the k most confident messages (Geifman et al. 2019); lower is better",
+    "false_positive": "a counted message has no gold tag among the scored columns; it is a false positive when at least one scored column is predicted at θ (P >= θ). No-intent: all 48 columns. Out-of-domain: the 22 banking-only columns (the manifest's ood_scoring_tags)",
+    "wilson": "95% Wilson score interval, z = 1.959963984540054, no continuity correction"
   },
   "variants": {
     "headline": {
@@ -1883,6 +1885,80 @@
           },
           "aurc": 0.9186064859755554
         }
+      },
+      "no_intent_fp": {
+        "0.5": {
+          "k": 4,
+          "n": 7,
+          "rate": 0.5714285714285714,
+          "wilson95": [
+            0.2504583645276572,
+            0.8417801447485302
+          ],
+          "per_tag_fp": {
+            "transfer_payment_deposit": 2,
+            "make_open_apply_setup_get_activate": 1,
+            "account": 1,
+            "balance": 1,
+            "savings": 2,
+            "loan": 1,
+            "when": 1,
+            "handoff": 1,
+            "contactless": 2,
+            "thank": 1,
+            "mortgage": 2,
+            "debit": 1,
+            "how": 1,
+            "refund": 2,
+            "direct_debit": 4,
+            "pin": 4,
+            "credit": 1,
+            "end_call": 1,
+            "standing_order": 1,
+            "business": 2,
+            "existing": 1
+          },
+          "cols": "all"
+        },
+        "theta": {
+          "k": 5,
+          "n": 7,
+          "rate": 0.7142857142857143,
+          "wilson95": [
+            0.35893445183261935,
+            0.9177810759959433
+          ],
+          "per_tag_fp": {
+            "transfer_payment_deposit": 3,
+            "request_info": 1,
+            "card": 2,
+            "make_open_apply_setup_get_activate": 1,
+            "account": 3,
+            "affirm": 2,
+            "less_lower_before": 1,
+            "balance": 1,
+            "current": 1,
+            "savings": 2,
+            "loan": 1,
+            "when": 1,
+            "handoff": 1,
+            "contactless": 3,
+            "thank": 1,
+            "mortgage": 2,
+            "debit": 2,
+            "how": 1,
+            "refund": 2,
+            "direct_debit": 4,
+            "arrival": 1,
+            "pin": 5,
+            "credit": 1,
+            "end_call": 1,
+            "standing_order": 1,
+            "business": 2,
+            "existing": 1
+          },
+          "cols": "all"
+        }
       }
     },
     "raw": {
@@ -3711,6 +3787,80 @@
             }
           },
           "aurc": 0.9186064859755554
+        }
+      },
+      "no_intent_fp": {
+        "0.5": {
+          "k": 4,
+          "n": 7,
+          "rate": 0.5714285714285714,
+          "wilson95": [
+            0.2504583645276572,
+            0.8417801447485302
+          ],
+          "per_tag_fp": {
+            "transfer_payment_deposit": 2,
+            "make_open_apply_setup_get_activate": 1,
+            "account": 1,
+            "balance": 1,
+            "savings": 2,
+            "loan": 1,
+            "when": 1,
+            "handoff": 1,
+            "contactless": 2,
+            "thank": 1,
+            "mortgage": 2,
+            "debit": 1,
+            "how": 1,
+            "refund": 2,
+            "direct_debit": 4,
+            "pin": 4,
+            "credit": 1,
+            "end_call": 1,
+            "standing_order": 1,
+            "business": 2,
+            "existing": 1
+          },
+          "cols": "all"
+        },
+        "theta": {
+          "k": 5,
+          "n": 7,
+          "rate": 0.7142857142857143,
+          "wilson95": [
+            0.35893445183261935,
+            0.9177810759959433
+          ],
+          "per_tag_fp": {
+            "transfer_payment_deposit": 3,
+            "request_info": 1,
+            "card": 2,
+            "make_open_apply_setup_get_activate": 1,
+            "account": 3,
+            "affirm": 2,
+            "less_lower_before": 1,
+            "balance": 1,
+            "current": 1,
+            "savings": 2,
+            "loan": 1,
+            "when": 1,
+            "handoff": 1,
+            "contactless": 3,
+            "thank": 1,
+            "mortgage": 2,
+            "debit": 2,
+            "how": 1,
+            "refund": 2,
+            "direct_debit": 4,
+            "arrival": 1,
+            "pin": 5,
+            "credit": 1,
+            "end_call": 1,
+            "standing_order": 1,
+            "business": 2,
+            "existing": 1
+          },
+          "cols": "all"
         }
       }
     }

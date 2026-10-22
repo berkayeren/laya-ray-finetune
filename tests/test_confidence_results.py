@@ -232,7 +232,8 @@ def test_committed_records_carry_selective_blocks():
     from pilot import metrics
     for rel, r in committed():
         assert r["definitions"] == {"calibration": metrics.CALIBRATION_RULES, "confidence": metrics.CONFIDENCE_RULE,
-                                    "coverage": metrics.COVERAGE_RULE, "aurc": metrics.AURC_RULE}, rel
+                                    "coverage": metrics.COVERAGE_RULE, "aurc": metrics.AURC_RULE,
+                                    "false_positive": metrics.FP_RULE, "wilson": report.WILSON_TEXT}, rel
         n = r["n_messages"]
         for name in ("headline", "raw"):
             sel = r["variants"][name]["selective"]
@@ -252,7 +253,8 @@ def test_render_has_abstention_table_and_disclosure():
     text = report.render_confidence(records)
     head = "### Abstention on val (message confidence)"
     assert text.count(head) == 1
-    section = text[text.index(head):text.index("### Caveat and definitions")]
+    start = text.index(head)
+    section = text[start:text.index("\n### ", start)]         # up to the next section
     covs = [str(c) for c in metrics.COVERAGES]
     header = ("| system | run_id | variant | θ | " + " | ".join("precision@%s%%" % c for c in covs) + " | "
               + " | ".join("accuracy@%s%%" % c for c in covs) + " | AURC |")

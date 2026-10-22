@@ -363,7 +363,8 @@ def test_confidence_binding_selection_candidate_uses_record_t_and_theta(snap, fi
         assert abs(head["calibration"]["nll"] - c["nll_fitted"]) <= 1e-8
         assert abs(raw["calibration"]["nll"] - c["nll_raw"]) <= 1e-8
         assert rep["definitions"] == {"calibration": metrics.CALIBRATION_RULES, "confidence": metrics.CONFIDENCE_RULE,
-                                      "coverage": metrics.COVERAGE_RULE, "aurc": metrics.AURC_RULE}
+                                      "coverage": metrics.COVERAGE_RULE, "aurc": metrics.AURC_RULE,
+                                      "false_positive": metrics.FP_RULE, "wilson": report.WILSON_TEXT}
         assert sorted(head["calibration"]["reliability"]["per_tag"]) == sorted(c["theta"]["shipped"]["eligible_tags"])
 
 

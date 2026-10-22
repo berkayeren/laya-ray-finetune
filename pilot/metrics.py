@@ -68,12 +68,28 @@ before any fine-tuned test number (the rule texts CONFIDENCE_RULE, COVERAGE_RULE
 - AURC (Geifman et al. 2019): the mean over k = 1..n of 1 - the exact-match rate of the k most confident messages;
   lower is better
 
+False positives (EVAL-05): one definition (fp_rate, FP_RULE) serves the no-intent rate and the out-of-domain rate:
+- the counted messages are those with no gold tag among the scored columns `cols` (all 48 tags for no-intent; the 22
+  banking-only ood_scoring_tags of the manifest for the out-of-domain probe); a counted message is a false positive
+  when at least one `cols` tag is predicted at θ (P >= θ, the inclusive rule of metrics(); a per-tag θ is restricted
+  to `cols`); k false positives of n counted messages, rate k / n (None when n is 0), per-tag counts of the `cols`
+  tags predicted on counted messages (nonzero only, INTENTS order)
+- every rate carries its integer k and n and the 95% Wilson score interval (wilson, Wilson 1927): z = WILSON_Z (the
+  0.975 standard normal quantile), no continuity correction, bounds clamped to [0, 1] and exact at the extremes
+  (k = 0 gives a lower bound of 0.0, k = n an upper bound of 1.0), None when n is 0; written with math only, so the
+  module stays numpy-only (scipy's binomtest(k, n).proportion_ci(method="wilson") is its test oracle). The val
+  no-intent set holds 7 messages and the test set 15, so the interval is always wide: 2/7 reads as 29 % with an
+  interval of about 8 % to 64 %
+
 usage: from pilot import metrics; metrics.metrics(Y, metrics.probabilities(logits, T), 0.5)
        sel = metrics.select_theta(Y_val, P_val); metrics.metrics(Y, P, metrics.theta_vector(sel))
        metrics.paired_bootstrap(Y, metrics.seed_average([PA0, PA1]), thA, PB, thB, B=10000, seed=0)
        metrics.calibration(Y, metrics.probabilities(logits, T), sel["eligible_tags"])
        metrics.selective(Y, metrics.probabilities(logits, T), metrics.theta_vector(sel))
+       metrics.fp_rate(Y, metrics.probabilities(logits, T), metrics.theta_vector(sel))   # no-intent, all 48 tags
 """
+import math
+
 import numpy as np
 
 from intents import INTENTS
@@ -102,6 +118,10 @@ COVERAGE_RULE = ("keep the k = ceil(c * n / 100) most confident messages, k comp
                  "confidence keep split-file order (stable sort)")
 AURC_RULE = ("mean over k = 1..n of 1 - exact-match rate of the k most confident messages (Geifman et al. 2019); "
              "lower is better")
+WILSON_Z = 1.959963984540054                                # the 0.975 standard normal quantile: a 95% interval
+FP_RULE = ("a counted message has no gold tag among the scored columns; it is a false positive when at least one "
+           "scored column is predicted at θ (P >= θ). No-intent: all 48 columns. Out-of-domain: the 22 banking-only "
+           "columns (the manifest's ood_scoring_tags)")
 
 
 def probabilities(logits, temperature):
@@ -425,3 +445,44 @@ def selective(Y, P, theta, coverages=COVERAGES):
                           "accuracy": float(exact[:k].mean()), "n_tied_at_cut": int((c == c[order[k - 1]]).sum())}
     aurc = float(np.mean(1.0 - np.cumsum(exact) / np.arange(1, n + 1)))
     return {"n": int(n), "coverages": rows, "aurc": aurc}
+
+
+def wilson(k, n, z=WILSON_Z):
+    """[lo, hi] of the Wilson score interval of k successes in n trials (95% at the default z), no continuity
+    correction, clamped to [0, 1], with lo = 0.0 exactly at k = 0 and hi = 1.0 exactly at k = n; None when n <= 0.
+    k must be an integer in 0..n."""
+    if n <= 0:
+        return None
+    if isinstance(k, bool) or not isinstance(k, (int, np.integer)) or not 0 <= k <= n:
+        raise SystemExit("wilson: k = %r is not an integer in 0..%r" % (k, n))
+    k, n = int(k), int(n)
+    p, z2 = k / n, z * z
+    den = 1.0 + z2 / n
+    center = (p + z2 / (2 * n)) / den
+    half = z / den * math.sqrt(p * (1.0 - p) / n + z2 / (4 * n * n))
+    return [0.0 if k == 0 else max(0.0, center - half), 1.0 if k == n else min(1.0, center + half)]
+
+
+def fp_rate(Y, P, theta, cols=None):
+    """FP_RULE at θ (one float or one value per tag; a 48-vector is restricted to `cols`): k false positives of the n
+    counted messages (no gold among `cols`; all 48 tags when cols is None), the rate k / n (None when n is 0), its
+    Wilson 95% interval, and per_tag_fp, the `cols` tags predicted on counted messages (nonzero counts, INTENTS
+    order)."""
+    Y, P = _arrays(Y, P, "no messages to score")
+    if cols is not None:
+        cols = list(cols)
+        unknown = [t for t in cols if t not in TAGS]
+        if not cols or unknown or len(set(cols)) != len(cols):
+            raise SystemExit("cols must be a non-empty list of distinct INTENTS tags, got %r" % (cols,))
+    th = np.asarray(theta, dtype=np.float64)
+    if th.shape not in ((), (len(TAGS),)) or not np.isfinite(th).all():
+        raise SystemExit("theta must be one finite float or %d finite per-tag values, got shape %s"
+                         % (len(TAGS), th.shape))
+    idx = sorted(TAGS.index(t) for t in cols) if cols is not None else list(range(len(TAGS)))
+    pred = P[:, idx] >= np.broadcast_to(th, (len(TAGS),))[idx]
+    counted = ~Y[:, idx].any(axis=1)
+    k, n = int((pred.any(axis=1) & counted).sum()), int(counted.sum())
+    per_tag = (pred & counted[:, None]).sum(axis=0)
+    return {"k": k, "n": n, "rate": k / n if n else None, "wilson95": wilson(k, n),
+            "per_tag_fp": {TAGS[j]: int(c) for j, c in zip(idx, per_tag) if c},
+            "cols": cols if cols is not None else "all"}
