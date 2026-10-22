@@ -47,7 +47,10 @@ report is refused: the table shows full-split numbers only. The README results b
 (run_report and the committed results/reports/ stay as they are). Two variants, each with pilot.metrics.calibration
 (Brier, NLL, classwise ECE over 15 equal-width bins with per-tag ECE and support, reliability bins pooled and per
 eligible tag) on sigmoid(logit / T) and the θ that goes with it: `headline` (the val-fitted or shipped T) and `raw`
-(T = 1). Where T and θ come from (confidence_binding; every other case is refused before any metric is computed):
+(T = 1). Each variant also carries a selective block (EVAL-04, pilot.metrics.selective) at θ 0.5 and at its θ:
+precision and exact-match accuracy at 50/70/80/90 % coverage and the AURC under the one message-confidence rule
+(pilot.metrics.CONFIDENCE_RULE, COVERAGE_RULE and AURC_RULE are in the record's definitions).
+Where T and θ come from (confidence_binding; every other case is refused before any metric is computed):
 - postfit_candidate: a selection candidate's dump (a training block without postfit_sha256) ships T = 1, so its
   "after T" numbers need the postfit record: only on val and only with --postfit RECORD (schema postfit/1, read as
   JSON plus the sha256 of the same bytes, never through the scipy-based pilot.postfit) whose system_kind is the
@@ -66,7 +69,8 @@ variants side by side with the diagonal and every bin's pair count; no plotting 
 
 --confidence-table PATH [PATH ...] (EVAL-03): the markdown of saved confidence/1 records (a directory expands to its
 sorted *.json; any other JSON is refused), rendered in the given order by render_confidence: one level-3 section per
-block (a calibration table with the headline and raw rows of every record, a link to each record's SVG, then the
+block (a calibration table with the headline and raw rows of every record, a link to each record's SVG, the
+abstention table (EVAL-04) with the confidence, coverage and AURC rule texts and CONFIDENCE_DISCLOSURE, then the
 in-sample caveat and the definition texts). Values are rounded for display only. The README confidence block is this
 output (plan 07-08).
 
@@ -98,6 +102,14 @@ CONFIDENCE_SCHEMA = "confidence/1"
 POSTFIT_SCHEMA = "postfit/1"
 IN_SAMPLE_CAVEAT = ("in-sample: θ (and, for a fine-tuned model, T and the epoch) were chosen on these val messages, so "
                     "these numbers are not held-out estimates")
+# EVAL-04: the message-confidence rule (pilot.metrics.CONFIDENCE_RULE) was fixed at planning time and its val
+# sensitivity disclosed with it (07-04-PLAN definition lock; 07-RESEARCH Pitfall 1); render_confidence prints this text.
+CONFIDENCE_DISCLOSURE = ("The message-confidence rule (the joint decision probability) was fixed at planning time on "
+                         "principle, because it is the model's own probability of the event the abstention accuracy "
+                         "scores (exact match), after the Phase 7 research had computed val AURC under it and under a "
+                         "weakest-tag rule (the minimum over tags of q). The order of the two fine-tuned models' val "
+                         "AURC differs between the two rules; the rule was not chosen by that outcome, and Phase 8 "
+                         "freezes it in protocol.json knowing both directions.")
 T_MATCH = 1e-12                                             # a final seed's shipped T vs its record's chosen T
 # Sidecar keys the θ-source val dump and the reported dump must share (03-REVIEW WR-01): θ chosen on one checkpoint's,
 # temperature's or device's / precision's val probabilities is never applied to another's dump. system.baseline_source
@@ -319,8 +331,8 @@ def confidence_binding(run_dir, split, side, manifest_path, postfit=None):
 
 
 def confidence_report(run_dir, split, manifest_path=DEFAULT_MANIFEST, postfit=None):
-    """The confidence/1 report of one verified full dump (EVAL-03): the binding, and per variant its T, θ and
-    pilot.metrics.calibration on sigmoid(logit / T)."""
+    """The confidence/1 report of one verified full dump (EVAL-03, EVAL-04): the binding, and per variant its T, θ,
+    pilot.metrics.calibration on sigmoid(logit / T) and pilot.metrics.selective at θ 0.5 and at the variant's θ."""
     logits, uids, side, entry = dumps.load_dump(run_dir, split, manifest_path)
     if side["n_subset"] is not None:
         raise SystemExit("%s: a --n subset dump is never reported; rescore %s without --n" % (run_dir, split))
@@ -330,7 +342,9 @@ def confidence_report(run_dir, split, manifest_path=DEFAULT_MANIFEST, postfit=No
     for name in ("headline", "raw"):
         v = binding["variants"][name]
         P = metrics.probabilities(logits, v["temperature"])
-        variants[name] = dict(v, calibration=metrics.calibration(Y, P, v["theta"]["eligible_tags"]))
+        variants[name] = dict(v, calibration=metrics.calibration(Y, P, v["theta"]["eligible_tags"]),
+                              selective={"0.5": metrics.selective(Y, P, 0.5),
+                                         "theta": metrics.selective(Y, P, metrics.theta_vector(v["theta"]))})
     tr = side.get("training")
     in_sample = split == "val"
     return {"schema": CONFIDENCE_SCHEMA, "schema_version": SCHEMA_VERSION, "run_id": side["run_id"],
@@ -342,7 +356,9 @@ def confidence_report(run_dir, split, manifest_path=DEFAULT_MANIFEST, postfit=No
                          "is_committed": manifest_is_committed(manifest_path)},
             "binding": {k: v for k, v in binding.items() if k != "variants"},
             "in_sample": in_sample, "caveat": IN_SAMPLE_CAVEAT if in_sample else None,
-            "definitions": {"calibration": metrics.CALIBRATION_RULES}, "variants": variants}
+            "definitions": {"calibration": metrics.CALIBRATION_RULES, "confidence": metrics.CONFIDENCE_RULE,
+                            "coverage": metrics.COVERAGE_RULE, "aurc": metrics.AURC_RULE},
+            "variants": variants}
 
 def _load_side(run_dirs, split, manifest_path):
     """[(run_dir, split dump, val dump)] of one system's per-seed run dirs, each dump verified by load_dump."""
@@ -657,6 +673,41 @@ def _diagram_section(records):
         % (r["run_id"], r["split"]["name"], r["run_id"], r["split"]["name"]) for r in records])
 
 
+ABSTENTION_RULES = ("confidence", "coverage", "aurc")
+SELECTIVE_ROWS = (("0.5", "0.5"), ("theta", "val-selected, global %.2f"))
+
+
+def _abstention_section(records):
+    """EVAL-04: precision and accuracy at every coverage and the AURC per record, variant and θ row, then the rule
+    texts (one set, shared by every record) and CONFIDENCE_DISCLOSURE."""
+    rules = {json.dumps([r["definitions"].get(k) for k in ABSTENTION_RULES]) for r in records}
+    texts = [records[0]["definitions"].get(k) for k in ABSTENTION_RULES]
+    if len(rules) != 1 or None in texts:
+        raise SystemExit("the confidence records disagree on (or lack) the abstention definitions; rebuild them with "
+                         "`make confidence-reports`")
+    covs = [str(c) for c in metrics.COVERAGES]
+    header = (("system", "run_id", "variant", "θ") + tuple("precision@%s%%" % c for c in covs)
+              + tuple("accuracy@%s%%" % c for c in covs) + ("AURC",))
+    rows = []
+    for r in records:
+        for name in CONFIDENCE_VARIANTS:
+            v = r["variants"][name]
+            for key, label in SELECTIVE_ROWS:
+                s = v["selective"][key]
+                if sorted(s["coverages"]) != sorted(covs):
+                    raise SystemExit("%s: %s has coverages %s, not %s; rebuild with `make confidence-reports`"
+                                     % (r["run_id"], name, sorted(s["coverages"]), covs))
+                theta = label % v["theta"]["global"] if "%" in label else label
+                rows.append((_confidence_label(r), r["run_id"], name, theta)
+                            + tuple("%.3f" % s["coverages"][c]["precision"] for c in covs)
+                            + tuple("%.3f" % s["coverages"][c]["accuracy"] for c in covs) + ("%.3f" % s["aurc"],))
+    parts = ["### Abstention on %s (message confidence)" % "/".join(sorted({r["split"]["name"] for r in records})),
+             _md(header, rows),
+             "\n".join("- %s: %s" % (k, t) for k, t in zip(ABSTENTION_RULES, texts)),
+             "**Definition disclosure:** %s" % CONFIDENCE_DISCLOSURE]
+    return "\n\n".join(parts)
+
+
 def _definitions_section(records):
     defs = {json.dumps(r["definitions"]["calibration"], sort_keys=True) for r in records}
     if len(defs) != 1:
@@ -673,13 +724,13 @@ def _definitions_section(records):
 # render_confidence's sections in order, each a builder of the record list returning markdown that opens with a
 # level-3 heading (the README carries it inside its own section, plan 07-08); later Phase 7 plans add theirs before
 # the definitions.
-CONFIDENCE_SECTIONS = [_calibration_section, _diagram_section, _definitions_section]
+CONFIDENCE_SECTIONS = [_calibration_section, _diagram_section, _abstention_section, _definitions_section]
 
 
 def render_confidence(reports):
     """Markdown of saved confidence/1 records, in the given order (callers pass them in sorted path order): the
-    calibration table (headline then raw per record), a link to each record's reliability diagram, the in-sample
-    caveat and the definition texts. Values are rounded for display only; identical input gives identical text."""
+    calibration table (headline then raw per record), a link to each record's reliability diagram, the abstention
+    table with its rule texts and CONFIDENCE_DISCLOSURE, the in-sample caveat and the definition texts. Values are rounded for display only; identical input gives identical text."""
     records = [_confidence_record(r) for r in reports]
     if not records:
         raise SystemExit("no confidence records to render")

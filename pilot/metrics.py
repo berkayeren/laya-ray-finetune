@@ -53,10 +53,26 @@ named), computes in float64 and never rounds. The rule texts are CALIBRATION_RUL
 - reliability: per bin the pair count, the mean p and the observed frequency (None for an empty bin), pooled over
   every pair and per tag for the caller's eligible tags; vectorised with np.bincount, no Python loop over messages
 
+Abstention (EVAL-04): one message-confidence definition for every system and for seed-averaged probabilities, fixed
+before any fine-tuned test number (the rule texts CONFIDENCE_RULE, COVERAGE_RULE and AURC_RULE go into every record):
+- message confidence (message_confidence): c_i = the sum over the 48 tags of log q, q = p when p >= θ (the inclusive
+  decision rule of metrics()) else 1 - p; the model's own probability, under tag independence, that all 48 of its
+  decisions at θ are right, which is the event exact match scores. A log-sum, because a product of 48 factors
+  underflows; finite for every θ in (0, 1) since q >= min(θ, 1 - θ) wherever p is in [0, 1], so θ outside the open
+  interval (0, 1) is refused
+- coverage cut (selective): messages ordered by c with a stable sort (ties keep split-file order); at coverage c
+  percent (COVERAGES: 50, 70, 80, 90) the k = (c * n + 99) // 100 most confident are kept, integer arithmetic so
+  70 % of 100 keeps 70, never the 71 of a float ceil; precision = micro precision tp / (tp + fp) of their tag
+  predictions (0/0 = 0.0), accuracy = their exact-match rate, n_tied_at_cut = the messages whose c equals the k-th
+  kept message's (a disclosure: a baseline ties everywhere)
+- AURC (Geifman et al. 2019): the mean over k = 1..n of 1 - the exact-match rate of the k most confident messages;
+  lower is better
+
 usage: from pilot import metrics; metrics.metrics(Y, metrics.probabilities(logits, T), 0.5)
        sel = metrics.select_theta(Y_val, P_val); metrics.metrics(Y, P, metrics.theta_vector(sel))
        metrics.paired_bootstrap(Y, metrics.seed_average([PA0, PA1]), thA, PB, thB, B=10000, seed=0)
        metrics.calibration(Y, metrics.probabilities(logits, T), sel["eligible_tags"])
+       metrics.selective(Y, metrics.probabilities(logits, T), metrics.theta_vector(sel))
 """
 import numpy as np
 
@@ -79,6 +95,13 @@ CALIBRATION_RULES = {
                       "|sum of y - sum of p| / n; averaged over all 48 tags, zero-support tags included"),
     "bins": "15 equal-width bins [k/15, (k+1)/15), p = 1.0 in the last bin (Guo et al. 2017, M = 15)",
 }
+COVERAGES = (50, 70, 80, 90)                                # integer percent; Phase 8 criterion (d) reads 80
+CONFIDENCE_RULE = ("message confidence = sum over the 48 tags of log q, q = p if p >= θ (predicted) else 1 - p: the "
+                   "model's probability that every tag decision is right, assuming tag independence")
+COVERAGE_RULE = ("keep the k = ceil(c * n / 100) most confident messages, k computed as (c * n + 99) // 100; ties in "
+                 "confidence keep split-file order (stable sort)")
+AURC_RULE = ("mean over k = 1..n of 1 - exact-match rate of the k most confident messages (Geifman et al. 2019); "
+             "lower is better")
 
 
 def probabilities(logits, temperature):
@@ -361,3 +384,44 @@ def calibration(Y, P, eligible_tags=()):
             "per_tag": {t: {"ece": float(per_tag[j]), "support": int(support[j])} for j, t in enumerate(TAGS)},
             "reliability": {"pooled": reliability(Y, P),
                             "per_tag": {t: reliability(Y, P, tags=[t]) for t in eligible_tags}}}
+
+
+def message_confidence(P, theta):
+    """(c float64 [n], pred bool [n, 48]): CONFIDENCE_RULE, c_i = sum over the tags of log q, q = p where p >= θ
+    (predicted, the inclusive rule of metrics()) else 1 - p. θ is one float or one value per tag, every value finite
+    and strictly between 0 and 1 (so q > 0 and c is finite)."""
+    P = np.asarray(P, dtype=np.float64)
+    if P.ndim != 2 or P.shape[0] == 0 or P.shape[1] != len(TAGS):
+        raise SystemExit("probabilities %s must be a non-empty [n, %d]" % (P.shape, len(TAGS)))
+    th = np.asarray(theta, dtype=np.float64)
+    if th.shape not in ((), (len(TAGS),)):
+        raise SystemExit("theta must be one float or %d per-tag values, got shape %s" % (len(TAGS), th.shape))
+    if not (np.isfinite(th).all() and (th > 0.0).all() and (th < 1.0).all()):
+        raise SystemExit("theta must be finite and strictly between 0 and 1 for a message confidence, got %r"
+                         % (th.tolist(),))
+    pred = P >= th
+    return np.log(np.where(pred, P, 1.0 - P)).sum(axis=1), pred
+
+
+def selective(Y, P, theta, coverages=COVERAGES):
+    """The EVAL-04 block of one probability array at one θ: per coverage (integer percent) the kept message count,
+    tp, fp, micro precision, exact-match accuracy and n_tied_at_cut (COVERAGE_RULE), and the AURC (AURC_RULE), all
+    under message_confidence."""
+    Y, P = _arrays(Y, P, "no messages to score")
+    c, pred = message_confidence(P, theta)
+    n = Y.shape[0]
+    order = np.argsort(-c, kind="stable")                   # most confident first; ties keep split-file order
+    exact = (pred == Y).all(axis=1)[order]
+    rows = {}
+    for cov in coverages:
+        k = (int(cov) * n + 99) // 100                      # ceil(cov * n / 100) without float error
+        if not 1 <= k <= n:
+            raise SystemExit("coverage %r%% keeps %d of %d messages; a coverage is an integer percent in 1..100"
+                             % (cov, k, n))
+        idx = order[:k]
+        tp = int((pred[idx] & Y[idx]).sum())
+        fp = int((pred[idx] & ~Y[idx]).sum())
+        rows[str(cov)] = {"n_kept": int(k), "tp": tp, "fp": fp, "precision": _prf(tp, fp, 0)[0],
+                          "accuracy": float(exact[:k].mean()), "n_tied_at_cut": int((c == c[order[k - 1]]).sum())}
+    aurc = float(np.mean(1.0 - np.cumsum(exact) / np.arange(1, n + 1)))
+    return {"n": int(n), "coverages": rows, "aurc": aurc}

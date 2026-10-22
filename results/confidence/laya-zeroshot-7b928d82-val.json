@@ -50,7 +50,10 @@
       "nll": "mean binary cross-entropy over every (message, tag) pair, p clipped to [1e-12, 1 - 1e-12]",
       "classwise_ece": "Kull et al. 2019 Eq. 4: per tag, the sum over the 15 equal-width bins of |sum of y - sum of p| / n; averaged over all 48 tags, zero-support tags included",
       "bins": "15 equal-width bins [k/15, (k+1)/15), p = 1.0 in the last bin (Guo et al. 2017, M = 15)"
-    }
+    },
+    "confidence": "message confidence = sum over the 48 tags of log q, q = p if p >= θ (predicted) else 1 - p: the model's probability that every tag decision is right, assuming tag independence",
+    "coverage": "keep the k = ceil(c * n / 100) most confident messages, k computed as (c * n + 99) // 100; ties in confidence keep split-file order (stable sort)",
+    "aurc": "mean over k = 1..n of 1 - exact-match rate of the k most confident messages (Geifman et al. 2019); lower is better"
   },
   "variants": {
     "headline": {
@@ -1802,6 +1805,84 @@
             ]
           }
         }
+      },
+      "selective": {
+        "0.5": {
+          "n": 208,
+          "coverages": {
+            "50": {
+              "n_kept": 104,
+              "tp": 38,
+              "fp": 147,
+              "precision": 0.20540540540540542,
+              "accuracy": 0.057692307692307696,
+              "n_tied_at_cut": 1
+            },
+            "70": {
+              "n_kept": 146,
+              "tp": 78,
+              "fp": 301,
+              "precision": 0.20580474934036938,
+              "accuracy": 0.0410958904109589,
+              "n_tied_at_cut": 1
+            },
+            "80": {
+              "n_kept": 167,
+              "tp": 105,
+              "fp": 450,
+              "precision": 0.1891891891891892,
+              "accuracy": 0.03592814371257485,
+              "n_tied_at_cut": 1
+            },
+            "90": {
+              "n_kept": 188,
+              "tp": 129,
+              "fp": 625,
+              "precision": 0.17108753315649866,
+              "accuracy": 0.031914893617021274,
+              "n_tied_at_cut": 1
+            }
+          },
+          "aurc": 0.9243913891548821
+        },
+        "theta": {
+          "n": 208,
+          "coverages": {
+            "50": {
+              "n_kept": 104,
+              "tp": 72,
+              "fp": 234,
+              "precision": 0.23529411764705882,
+              "accuracy": 0.04807692307692308,
+              "n_tied_at_cut": 1
+            },
+            "70": {
+              "n_kept": 146,
+              "tp": 133,
+              "fp": 528,
+              "precision": 0.20121028744326777,
+              "accuracy": 0.03424657534246575,
+              "n_tied_at_cut": 1
+            },
+            "80": {
+              "n_kept": 167,
+              "tp": 169,
+              "fp": 695,
+              "precision": 0.19560185185185186,
+              "accuracy": 0.029940119760479042,
+              "n_tied_at_cut": 1
+            },
+            "90": {
+              "n_kept": 188,
+              "tp": 214,
+              "fp": 960,
+              "precision": 0.18228279386712096,
+              "accuracy": 0.026595744680851064,
+              "n_tied_at_cut": 1
+            }
+          },
+          "aurc": 0.9186064859755554
+        }
       }
     },
     "raw": {
@@ -3552,6 +3633,84 @@
               }
             ]
           }
+        }
+      },
+      "selective": {
+        "0.5": {
+          "n": 208,
+          "coverages": {
+            "50": {
+              "n_kept": 104,
+              "tp": 38,
+              "fp": 147,
+              "precision": 0.20540540540540542,
+              "accuracy": 0.057692307692307696,
+              "n_tied_at_cut": 1
+            },
+            "70": {
+              "n_kept": 146,
+              "tp": 78,
+              "fp": 301,
+              "precision": 0.20580474934036938,
+              "accuracy": 0.0410958904109589,
+              "n_tied_at_cut": 1
+            },
+            "80": {
+              "n_kept": 167,
+              "tp": 105,
+              "fp": 450,
+              "precision": 0.1891891891891892,
+              "accuracy": 0.03592814371257485,
+              "n_tied_at_cut": 1
+            },
+            "90": {
+              "n_kept": 188,
+              "tp": 129,
+              "fp": 625,
+              "precision": 0.17108753315649866,
+              "accuracy": 0.031914893617021274,
+              "n_tied_at_cut": 1
+            }
+          },
+          "aurc": 0.9243913891548821
+        },
+        "theta": {
+          "n": 208,
+          "coverages": {
+            "50": {
+              "n_kept": 104,
+              "tp": 72,
+              "fp": 234,
+              "precision": 0.23529411764705882,
+              "accuracy": 0.04807692307692308,
+              "n_tied_at_cut": 1
+            },
+            "70": {
+              "n_kept": 146,
+              "tp": 133,
+              "fp": 528,
+              "precision": 0.20121028744326777,
+              "accuracy": 0.03424657534246575,
+              "n_tied_at_cut": 1
+            },
+            "80": {
+              "n_kept": 167,
+              "tp": 169,
+              "fp": 695,
+              "precision": 0.19560185185185186,
+              "accuracy": 0.029940119760479042,
+              "n_tied_at_cut": 1
+            },
+            "90": {
+              "n_kept": 188,
+              "tp": 214,
+              "fp": 960,
+              "precision": 0.18228279386712096,
+              "accuracy": 0.026595744680851064,
+              "n_tied_at_cut": 1
+            }
+          },
+          "aurc": 0.9186064859755554
         }
       }
     }
