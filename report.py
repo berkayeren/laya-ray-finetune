@@ -107,9 +107,10 @@ IN_SAMPLE_CAVEAT = ("in-sample: θ (and, for a fine-tuned model, T and the epoch
 CONFIDENCE_DISCLOSURE = ("The message-confidence rule (the joint decision probability) was fixed at planning time on "
                          "principle, because it is the model's own probability of the event the abstention accuracy "
                          "scores (exact match), after the Phase 7 research had computed val AURC under it and under a "
-                         "weakest-tag rule (the minimum over tags of q). The order of the two fine-tuned models' val "
-                         "AURC differs between the two rules; the rule was not chosen by that outcome, and Phase 8 "
-                         "freezes it in protocol.json knowing both directions.")
+                         "weakest-tag rule (the minimum over tags of q). At the headline (val-fitted) temperature the "
+                         "order of the two fine-tuned models' val AURC differs between the two rules (at T = 1 it does "
+                         "not); the rule was not chosen by that outcome, and Phase 8 freezes it in protocol.json "
+                         "knowing both directions.")
 T_MATCH = 1e-12                                             # a final seed's shipped T vs its record's chosen T
 # Sidecar keys the θ-source val dump and the reported dump must share (03-REVIEW WR-01): θ chosen on one checkpoint's,
 # temperature's or device's / precision's val probabilities is never applied to another's dump. system.baseline_source

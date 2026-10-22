@@ -14,6 +14,11 @@
 - report.render_confidence of the committed records names every run id with both variants (headline and raw: the
   favourable variant is never shown alone, T-07-12), links each record's SVG, and carries the in-sample caveat and
   every calibration definition text; it refuses anything that is not a confidence/1 record
+- EVAL-04: every record and variant carries a selective block at θ 0.5 and at its θ (coverages 50/70/80/90 with the
+  integer cut, AURC) and the confidence, coverage and AURC rule texts of pilot.metrics; render_confidence shows the
+  abstention table (one row per record, variant and θ), the three rule texts and report.CONFIDENCE_DISCLOSURE (the
+  val AURC order of the two fine-tuned models depends on the confidence rule, T-07-14), and refuses records whose
+  abstention definitions differ or are missing
 - data marker: every committed record equals report.confidence_report recomputed from the committed dump, the
   committed manifest and the record it is bound to (needs `make data`, because the gold labels come from the verified
   splits), and a record bound to a postfit candidate reproduces that candidate's nll_fitted (headline) and nll_raw
@@ -220,6 +225,60 @@ def test_render_has_tables_links_and_caveat():
     for t1 in [r["run_id"] for r in records if r["variants"]["headline"]["temperature"] == 1.0]:
         assert "%s: headline temperature is 1.0" % t1 in text
 
+
+
+def test_committed_records_carry_selective_blocks():
+    """EVAL-04: every record and variant has a selective block at θ 0.5 and at its θ, under the rule texts in code."""
+    from pilot import metrics
+    for rel, r in committed():
+        assert r["definitions"] == {"calibration": metrics.CALIBRATION_RULES, "confidence": metrics.CONFIDENCE_RULE,
+                                    "coverage": metrics.COVERAGE_RULE, "aurc": metrics.AURC_RULE}, rel
+        n = r["n_messages"]
+        for name in ("headline", "raw"):
+            sel = r["variants"][name]["selective"]
+            assert sorted(sel) == ["0.5", "theta"], (rel, name)
+            for key, s in sel.items():
+                assert s["n"] == n and list(s["coverages"]) == [str(c) for c in metrics.COVERAGES], (rel, name, key)
+                assert [s["coverages"][str(c)]["n_kept"] for c in metrics.COVERAGES] == [
+                    (c * n + 99) // 100 for c in metrics.COVERAGES], (rel, name, key)
+                assert 0.0 <= s["aurc"] <= 1.0
+                for row in s["coverages"].values():
+                    assert 1 <= row["n_tied_at_cut"] <= n and 0.0 <= row["accuracy"] <= 1.0
+
+
+def test_render_has_abstention_table_and_disclosure():
+    from pilot import metrics
+    records = [r for _, r in committed()]
+    text = report.render_confidence(records)
+    head = "### Abstention on val (message confidence)"
+    assert text.count(head) == 1
+    section = text[text.index(head):text.index("### Caveat and definitions")]
+    covs = [str(c) for c in metrics.COVERAGES]
+    header = ("| system | run_id | variant | θ | " + " | ".join("precision@%s%%" % c for c in covs) + " | "
+              + " | ".join("accuracy@%s%%" % c for c in covs) + " | AURC |")
+    assert header in section
+    for r in records:
+        for name in ("headline", "raw"):
+            v = r["variants"][name]
+            for key, label in (("0.5", "0.5"), ("theta", "val-selected, global %.2f" % v["theta"]["global"])):
+                s = v["selective"][key]
+                row = ("| %s | %s | %s | " % (r["run_id"], name, label)
+                       + " | ".join("%.3f" % s["coverages"][c]["precision"] for c in covs) + " | "
+                       + " | ".join("%.3f" % s["coverages"][c]["accuracy"] for c in covs)
+                       + " | %.3f |" % s["aurc"])
+                assert section.count(row) == 1, (r["run_id"], name, key)
+    table = [line for line in section.split("\n") if line.startswith("|")]
+    assert len(table) == 2 + 4 * len(records)               # header, separator, 2 variants x 2 θ rows each
+    for rule in (metrics.CONFIDENCE_RULE, metrics.COVERAGE_RULE, metrics.AURC_RULE, report.CONFIDENCE_DISCLOSURE):
+        assert text.count(rule) == 1, rule
+    assert "weakest-tag" in report.CONFIDENCE_DISCLOSURE and "Phase 8" in report.CONFIDENCE_DISCLOSURE
+    other = json.loads(json.dumps(records))
+    other[0]["definitions"]["aurc"] = "another risk"
+    with pytest.raises(SystemExit, match="abstention definitions"):
+        report.render_confidence(other)
+    del other[0]["definitions"]["aurc"]
+    with pytest.raises(SystemExit, match="abstention definitions"):
+        report.render_confidence(other[:1])
 
 def test_confidence_table_cli_prints_render(capsys):
     out = report.main(["--confidence-table", os.path.join(REPO_ROOT, "results", "confidence")])

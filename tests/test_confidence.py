@@ -6,6 +6,13 @@ to torchmetrics' binary_calibration_error(n_bins=15, norm="l1") (probabilities d
 torchmetrics puts an exact 1.0 into an extra bin). The bin edges, the NLL clipping, the zero-support tags in the
 48-tag mean, the reliability counts and the empty-input refusals are pinned on hand-built arrays.
 
+The EVAL-04 abstention metrics (pilot.metrics.message_confidence and selective) are pinned on hand-built arrays: the
+integer coverage cut (exact rational ceiling for every n up to 300, and 104/146/167/188 of 208), stable ties in
+split-file order with n_tied_at_cut, precision, accuracy, tp and fp on a 4-message toy with known confidences, the
+AURC closed form of a perfect ranking, the inclusive decision rule, finiteness at the grid edges, the refusal of θ
+outside (0, 1), the shared path for seed-averaged probabilities, and an AST guard that pilot/metrics.py names no
+system outside its module docstring (D-10).
+
 The --confidence binding (where T and θ come from) is exercised on synthetic dumps of the conftest snapshot: selection
 candidates written like score.py's (tests/test_postfit.py write_candidate) with a postfit/1 record built by postfit.py
 over them, final seeds bound by training.postfit_sha256, and prior baselines scored by score.py. Every wrong
@@ -133,6 +140,179 @@ def test_calibration_refuses_empty_or_misshaped_input(fn):
         fn(np.zeros((3, 47), dtype=bool), np.zeros((3, 47)))
     with pytest.raises(SystemExit, match="must both be"):
         fn(np.zeros((3, 48), dtype=bool), np.zeros((3, 47)))
+
+
+# --- abstention (EVAL-04): the one message-confidence rule, the coverage cut and AURC ---------------------------
+
+def _rows(n, p, gold_rows=()):
+    """P [n, 48] of one value p per row (a scalar or one per row) and Y with tag 0 gold on gold_rows only."""
+    P = np.broadcast_to(np.asarray(p, dtype=np.float64).reshape(-1, 1), (n, 48)).copy()
+    Y = np.zeros((n, 48), dtype=bool)
+    Y[list(gold_rows), 0] = True
+    return Y, P
+
+
+@pytest.mark.parametrize("n,kept", [(100, [50, 70, 80, 90]), (208, [104, 146, 167, 188]), (7, [4, 5, 6, 7])])
+def test_coverage_count_is_integer_ceiling(n, kept):
+    Y, P = _draw(n=n, seed=n)
+    s = metrics.selective(Y, P, 0.5)
+    assert metrics.COVERAGES == (50, 70, 80, 90) and list(s["coverages"]) == ["50", "70", "80", "90"]
+    assert [s["coverages"][c]["n_kept"] for c in ("50", "70", "80", "90")] == kept
+    assert s["n"] == n
+
+
+def test_coverage_count_is_the_exact_rational_ceiling_for_every_n():
+    # a float cut drifts: ceil(70 * 0.01 * 10) is 8, not 7; the integer cut equals ceil(c * n / 100) exactly
+    import math
+    from fractions import Fraction
+    for n in range(1, 301):
+        s = metrics.selective(np.zeros((n, 48), dtype=bool), np.full((n, 48), 0.2), 0.5)
+        got = [s["coverages"][str(c)]["n_kept"] for c in metrics.COVERAGES]
+        assert got == [math.ceil(Fraction(c * n, 100)) for c in metrics.COVERAGES], n
+
+
+def test_coverage_ties_keep_split_order_and_are_disclosed():
+    # every row is the same (a baseline): one confidence, so the cut keeps the first k rows in split-file order
+    n = 10
+    Y, P = _rows(n, 0.2, gold_rows=range(5))               # rows 0-4 have a gold tag nobody predicts: all wrong
+    s = metrics.selective(Y, P, 0.5)
+    exact = np.array([0.0] * 5 + [1.0] * 5)                 # split-file order of the exact-match hits
+    for c, row in s["coverages"].items():
+        k = row["n_kept"]
+        assert row["n_tied_at_cut"] == n
+        assert row["accuracy"] == exact[:k].mean(), c
+    assert s["coverages"]["50"]["accuracy"] == 0.0           # the first five, never the five right ones
+    assert s["aurc"] == np.mean(1.0 - np.cumsum(exact) / np.arange(1, n + 1))
+
+
+def _toy():
+    """4 messages with known confidences at θ 0.5, most confident first (rows 0, 1, 2, 3)."""
+    P = np.full((4, 48), 0.01)
+    P[0, 0] = 0.99                                          # predicts {0}, gold {0}: right
+    P[1, 1] = 0.9                                           # predicts {1}, gold {2}: wrong, one fp
+    P[2] = 0.02                                             # predicts nothing, gold nothing: right
+    P[3, 0], P[3, 1] = 0.6, 0.7                             # predicts {0, 1}, gold {0}: wrong, one tp and one fp
+    Y = np.zeros((4, 48), dtype=bool)
+    Y[0, 0] = Y[1, 2] = Y[3, 0] = True
+    c = np.array([48 * np.log(0.99), 47 * np.log(0.99) + np.log(0.9), 48 * np.log(0.98),
+                  46 * np.log(0.99) + np.log(0.6) + np.log(0.7)])
+    return Y, P, c
+
+
+def test_selective_precision_and_accuracy_on_toy():
+    Y, P, c = _toy()
+    got, pred = metrics.message_confidence(P, 0.5)
+    assert np.allclose(got, c, rtol=0, atol=1e-12) and (np.diff(c) < 0).all()
+    assert (pred == (P >= 0.5)).all()
+    s = metrics.selective(Y, P, 0.5, coverages=(25, 50, 75, 100))
+    want = {"25": (1, 1, 0, 1.0, 1.0), "50": (2, 1, 1, 0.5, 0.5), "75": (3, 1, 1, 0.5, 2 / 3),
+            "100": (4, 2, 2, 0.5, 0.5)}
+    for cov, (k, tp, fp, prec, acc) in want.items():
+        row = s["coverages"][cov]
+        assert (row["n_kept"], row["tp"], row["fp"], row["n_tied_at_cut"]) == (k, tp, fp, 1), cov
+        assert row["precision"] == prec and abs(row["accuracy"] - acc) <= TOL, cov
+    assert abs(s["aurc"] - (0 + 0.5 + 1 / 3 + 0.5) / 4) <= TOL
+    # the kept message predicts no tag: 0/0 precision is 0.0, and it is right (exact match on a no-intent row)
+    one = metrics.selective(Y[[2]], P[[2]], 0.5, coverages=(100,))["coverages"]["100"]
+    assert (one["tp"], one["fp"], one["precision"], one["accuracy"]) == (0, 0, 0.0, 1.0)
+
+
+@pytest.mark.parametrize("n,m", [(10, 3), (9, 0), (12, 12), (208, 61)])
+def test_aurc_of_a_perfect_ranking_has_closed_form(n, m):
+    # confidence falls with the row (p rises toward θ, nothing is predicted); the m right messages come first
+    p = np.linspace(0.01, 0.4, n)
+    Y, P = _rows(n, p, gold_rows=range(m, n))
+    k = np.arange(1, n + 1)
+    closed = float(np.mean(np.maximum(0, k - m) / k))
+    assert abs(metrics.selective(Y, P, 0.5)["aurc"] - closed) <= TOL
+    Yr, Pr = _rows(n, p, gold_rows=range(0, n - m))         # the same messages, the right ones ranked last
+    worse = metrics.selective(Yr, Pr, 0.5)["aurc"]
+    assert worse > closed if 0 < m < n else worse == closed
+
+
+def test_aurc_is_zero_when_every_message_is_right():
+    _, P = _draw(n=50, seed=3)
+    for theta in (0.5, 0.05, np.linspace(0.1, 0.9, 48)):
+        s = metrics.selective(P >= np.asarray(theta), P, theta)
+        assert s["aurc"] == 0.0
+        assert all(r["accuracy"] == 1.0 for r in s["coverages"].values())
+
+
+def test_confidence_is_finite_at_grid_edges_and_inclusive():
+    vals = np.array([1e-9, 0.5, 1 - 1e-9])
+    P = np.resize(vals, (6, 48))                            # every value in every row, in shifting positions
+    P[3:] = vals[:, None].repeat(48, axis=1)                # and rows of one value each
+    for theta in (0.05, 0.5, 0.95, np.linspace(0.05, 0.95, 48)):
+        c, _ = metrics.message_confidence(P, theta)
+        assert c.shape == (6,) and np.isfinite(c).all(), theta
+    c, pred = metrics.message_confidence(np.full((2, 48), 0.3), 0.3)
+    assert pred.all() and np.allclose(c, 48 * np.log(0.3), rtol=0, atol=1e-12)   # P == θ counts as predicted
+    c, pred = metrics.message_confidence(np.full((1, 48), 0.95), metrics.GRID[-1])
+    assert pred.all() and np.isfinite(c).all()
+
+
+@pytest.mark.parametrize("theta", [0.0, 1.0, float("nan"), -0.1, 1.5, float("inf"),
+                                   np.r_[np.full(47, 0.5), 0.0], np.r_[np.full(47, 0.5), np.nan]])
+def test_confidence_refuses_theta_outside_open_unit_interval(theta):
+    Y, P = _draw(n=5)
+    with pytest.raises(SystemExit, match="strictly between 0 and 1"):
+        metrics.message_confidence(P, theta)
+    with pytest.raises(SystemExit, match="strictly between 0 and 1"):
+        metrics.selective(Y, P, theta)
+
+
+def test_confidence_rule_serves_seed_averaged_probabilities():
+    Y, P1 = _draw(n=40, seed=11)
+    _, P2 = _draw(n=40, seed=12)
+    avg = metrics.seed_average([P1, P2])
+    for theta in (0.5, np.linspace(0.2, 0.8, 48)):
+        c, pred = metrics.message_confidence(avg, theta)
+        c_mean, pred_mean = metrics.message_confidence(np.mean([P1, P2], axis=0), theta)
+        assert (c == c_mean).all() and (pred == pred_mean).all()
+        assert metrics.selective(Y, avg, theta) == metrics.selective(Y, np.mean([P1, P2], axis=0), theta)
+    assert (metrics.message_confidence(metrics.seed_average([P1]), 0.5)[0]
+            == metrics.message_confidence(P1, 0.5)[0]).all()
+
+
+def test_selective_refuses_empty():
+    with pytest.raises(SystemExit, match="no messages"):
+        metrics.selective(np.zeros((0, 48), dtype=bool), np.zeros((0, 48)), 0.5)
+    with pytest.raises(SystemExit, match="must both be"):
+        metrics.selective(np.zeros((3, 47), dtype=bool), np.zeros((3, 47)), 0.5)
+    with pytest.raises(SystemExit, match="non-empty"):
+        metrics.message_confidence(np.zeros((0, 48)), 0.5)
+    with pytest.raises(SystemExit, match="theta must be one float"):
+        metrics.message_confidence(np.full((2, 48), 0.5), np.full(47, 0.5))
+
+
+def test_metrics_module_names_no_system():
+    """D-10: no code in pilot/metrics.py names a system; only the module docstring may (it lists them)."""
+    import ast
+    path = os.path.join(REPO_ROOT, "pilot", "metrics.py")
+    with open(path, encoding="utf-8") as f:
+        tree = ast.parse(f.read(), path)
+    doc = tree.body[0]
+    assert isinstance(doc, ast.Expr) and "laya" in doc.value.value.lower()   # the guard can see a name
+    words = []
+    for node in tree.body[1:]:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name):
+                words.append(sub.id)
+            elif isinstance(sub, ast.Attribute):
+                words.append(sub.attr)
+            elif isinstance(sub, ast.arg):
+                words.append(sub.arg)
+            elif isinstance(sub, (ast.FunctionDef, ast.ClassDef)):
+                words.append(sub.name)
+            elif isinstance(sub, ast.alias):
+                words += [sub.name, sub.asname or ""]
+            elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                words.append(getattr(sub, "module", None) or "")
+            elif isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                words.append(sub.value)
+    assert len(words) > 100
+    named = [w for w in words if "laya" in w.lower() or "berturk" in w.lower()]
+    assert named == []
 
 
 # --- report.py --confidence: where T and θ come from -----------------------------------------------------------
