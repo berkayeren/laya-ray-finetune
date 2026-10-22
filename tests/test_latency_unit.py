@@ -1,5 +1,6 @@
-"""Unit contracts of the latency harness (EVAL-06): integer nearest rank, summary edges, the warm-up and sync contract,
-the label and the render, every refusal before a model load, and torch-free imports.
+"""Unit contracts of the latency harness (EVAL-06): integer nearest rank, summary edges, the full-pass warm-up and sync
+contract (G-07-6: every timed message runs once untimed first; the policy is recorded and checked on build and render),
+the label and the render, every refusal before a model load (a removed --warmup flag included), and torch-free imports.
 
 The refusals run on the synthetic snapshot and a tiny Laya checkpoint (tests/test_latency_cpu.py's helpers). Each must
 come before the quiet-machine preflight (which runs right before torch is imported) and before any model load: the
@@ -53,7 +54,7 @@ def _write(path, obj):
 def _toy_report(**meta):
     """A latency/1 report of two seeds with known times (no model): seed 0 at 1..20 ms, seed 1 at 21..40 ms."""
     base = {"system": "laya", "device": "cpu", "dtype": "torch.float32", "amp_enabled": False, "threads": 4,
-            "warmup": 10, "batch": 1, "versions": {"torch": "x", "numpy": "y"}, "mps_fallback_env": None,
+            "warmup": 20, "warmup_policy": plat.WARMUP_POLICY, "batch": 1, "versions": {"torch": "x", "numpy": "y"}, "mps_fallback_env": None,
             "code": {"git_sha": "a" * 40, "git_dirty": False, "git_diff_sha256": "b" * 64},
             "preflight": dict(PREFLIGHT), "swap_used_bytes": {"before": 100, "after": 100},
             "split": {"name": "val", "path": "splits/val.jsonl", "sha256": "c" * 64, "uids_sha256": "d" * 64,
@@ -91,7 +92,9 @@ def test_summarize_single_and_empty():
     assert (s["min"], s["p50"], s["p95"], s["max"], s["n"]) == (0.1, 0.2, 0.3, 0.3, 3)
 
 
-def test_time_messages_excludes_warmup_and_syncs_around_each_message():
+def test_time_messages_warms_every_message_before_timing():
+    """G-07-6: every text runs once untimed, in order, before the clock is first read; then one sync; then each text
+    is timed between a sync before t0 and a sync after the host copy. A repeated text is warmed (and timed) too."""
     events, calls, syncs = [], [], []
     ticks = iter([0.0, 1.0, 10.0, 13.0, 20.0, 26.0, 30.0, 34.0, 40.0, 45.0])
 
@@ -106,14 +109,55 @@ def test_time_messages_excludes_warmup_and_syncs_around_each_message():
     def clock():
         events.append("clock")
         return next(ticks)
-    texts = ["a", "b", "c", "d", "e"]
-    out = plat.time_messages(fn, texts, 2, sync, clock=clock)
-    assert calls == ["a", "b"] + texts and len(calls) == 7
-    assert len(syncs) == 1 + 2 * 5
-    assert out == [1.0, 3.0, 6.0, 4.0, 5.0]                # warm-up calls are not timed
-    assert events[:3] == ["fn:a", "fn:b", "sync"]           # warm-up, then one sync
-    assert events[3:8] == ["sync", "clock", "fn:a", "sync", "clock"]   # sync before t0, sync after the host copy
-    assert plat.time_messages(fn, ["x"], 0, sync, clock=iter([5.0, 5.5]).__next__) == [0.5]
+    texts = ["a", "bb", "a", "ccc", "dd"]
+    out = plat.time_messages(fn, texts, sync, clock=clock)
+    assert calls == texts + texts
+    assert len(syncs) == 1 + 2 * len(texts)
+    assert out == [1.0, 3.0, 6.0, 4.0, 5.0]                # only the timed calls' clock differences
+    n = len(texts)
+    assert events[:n + 1] == ["fn:" + t for t in texts] + ["sync"]   # the full untimed pass, then one sync
+    first_clock = events.index("clock")
+    assert first_clock == n + 2                             # the clock is first read after the pass (and the t0 sync)
+    warmed = {e for e in events[:first_clock] if e.startswith("fn:")}
+    assert all("fn:" + t in warmed for t in texts)          # every timed text already ran before any clock read
+    for i, t in enumerate(texts):                           # sync before t0, sync after the host copy
+        assert events[n + 1 + 5 * i:n + 6 + 5 * i] == ["sync", "clock", "fn:" + t, "sync", "clock"]
+    del syncs[:]
+    assert plat.time_messages(fn, [], sync) == [] and len(syncs) == 1
+    assert plat.time_messages(fn, ["x"], sync, clock=iter([5.0, 5.5]).__next__) == [0.5]
+
+
+def test_build_report_records_the_warmup_policy():
+    """The policy is stated in RULES, recorded in every report with the warm-up count, and a meta without it, with
+    another policy, or with a count other than every seed's timed count is refused."""
+    r = _toy_report()
+    assert r["warmup_policy"] == plat.WARMUP_POLICY == "full_pass_per_seed" and r["warmup"] == 20
+    assert any(plat.WARMUP_POLICY in rule for rule in plat.RULES)
+    assert any(plat.WARMUP_POLICY in rule for rule in r["rules"])
+    md = plat.render_markdown([r])
+    assert "warm-up full_pass_per_seed: one untimed pass over all 20 message(s) per seed" in md
+    with pytest.raises(SystemExit, match="full_pass_per_seed"):
+        _toy_report(warmup_policy=None)
+    with pytest.raises(SystemExit, match="full_pass_per_seed"):
+        _toy_report(warmup_policy="first_10_messages")
+    with pytest.raises(SystemExit, match="warm-up"):
+        _toy_report(warmup=10)
+    with pytest.raises(SystemExit, match="warm-up"):
+        _toy_report(warmup=20.0)
+
+
+def test_render_refuses_a_report_without_the_warmup_policy(tmp_path):
+    """A latency/1 report timed before the full-pass policy is never rendered (next to a post-fix one or alone)."""
+    d = tmp_path / "latency"
+    d.mkdir()
+    _write(d / "berturk-mps.json", _toy_report(system="berturk", device="mps"))
+    stale = json.loads(json.dumps(_toy_report()))
+    del stale["warmup_policy"]
+    _write(d / "laya-cpu.json", stale)
+    with pytest.raises(SystemExit, match="warm-up"):
+        latency.main(["--render", str(d)])
+    with pytest.raises(SystemExit, match="laya-cpu.json"):
+        plat.load_reports(str(d))
 
 
 # ---- label and render ----
@@ -254,7 +298,7 @@ def test_refuses_served_temperature_other_than_the_manifest(laya, tmp_path, monk
 
 def test_argument_errors(capsys):
     for argv in (["--system", "laya", "--render", "x"], [], ["--system", "laya", "--threads", "0"],
-                 ["--system", "laya", "--warmup", "-1"], ["--system", "laya", "--min-available-gib", "-1"],
+                 ["--system", "laya", "--warmup", "10"], ["--system", "laya", "--min-available-gib", "-1"],
                  ["--system", "other"], ["--system", "laya", "--device", "tpu"]):
         with pytest.raises(SystemExit) as e:
             latency.main(argv)
@@ -273,13 +317,13 @@ def test_latency_modules_are_torch_free():
 
 def test_val_texts_reach_the_tokenizer_unchanged(laya, tmp_path, monkeypatch):
     """A message is the row's state string, unchanged (no lowercasing, folding or normalization), in split-file
-    order, after the warm-up: what the timed callable receives is exactly the val rows' texts."""
+    order: what time_messages receives (and so both warms and times) is exactly the val rows' texts."""
     import torch
     threads = torch.get_num_threads()
     seen = []
 
-    def spy(fn, texts, warmup, sync, clock=None):
-        seen.append((list(texts), warmup))
+    def spy(fn, texts, sync, clock=None):
+        seen.append(list(texts))
         return [0.001] * len(texts)
     monkeypatch.setattr(latency, "preflight", lambda g: dict(PREFLIGHT))
     monkeypatch.setattr(plat, "time_messages", spy)
@@ -288,4 +332,4 @@ def test_val_texts_reach_the_tokenizer_unchanged(laya, tmp_path, monkeypatch):
         latency.main(run_args("laya", splits, manifest, m, root, tmp_path / "out.json"))
     finally:
         torch.set_num_threads(threads)
-    assert seen == [([c["state"] for c in val_cases(splits)], 1)]
+    assert seen == [[c["state"] for c in val_cases(splits)]]

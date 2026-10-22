@@ -1,6 +1,7 @@
 """latency.py end to end on CPU, offline (EVAL-06): tiny final seeds bound to a synthetic postfit-final/1 manifest are
-timed per message through score.py's load path, with warm-up and sync, into a labelled latency/1 report that renders
-to markdown.
+timed per message through score.py's load path, each seed after its own untimed pass over every val message (the
+full-pass warm-up of G-07-6, shown on two seeds in one process) and with sync, into a labelled latency/1 report that
+renders to markdown.
 
 The tiny Laya checkpoint comes from tests/tiny_laya.py, the tiny BERTurk export from berturk_train.py on CPU (1 epoch,
 as tests/test_score_berturk.py builds it); the data is the synthetic snapshot of tests/conftest.py. The quiet-machine
@@ -10,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -56,20 +58,23 @@ def final_manifest(path, seeds, system="laya"):
     return str(path)
 
 
-def laya_setup(tmp_path, synthetic_raw):
-    """(splits dir, splits manifest, final manifest, checkpoint root) of one tiny Laya seed with T = 1.3."""
+def laya_setup(tmp_path, synthetic_raw, seeds=(0,)):
+    """(splits dir, splits manifest, final manifest, checkpoint root) of one tiny Laya seed per entry of `seeds`
+    (checkpoint ckpt-s<seed>, T = 1.3), listed in that order."""
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     root = tmp_path / "ckpts"
-    ckpt = tiny_checkpoint(root / "ckpt-s0", temperature=TINY_T)
-    ident = identity(ckpt)
-    m = final_manifest(tmp_path / "laya-final.json", [(0, "ckpt-s0", ident, dumps.run_id("laya", ident), TINY_T)])
+    rows = []
+    for seed in seeds:
+        name = "ckpt-s%d" % seed
+        ident = identity(tiny_checkpoint(root / name, temperature=TINY_T, seed=seed))
+        rows.append((seed, name, ident, dumps.run_id("laya", ident), TINY_T))
+    m = final_manifest(tmp_path / "laya-final.json", rows)
     return os.path.join(out_dir, "splits"), manifest, m, str(root)
 
 
 def run_args(system, splits, manifest, final, root, out, *extra):
     return ["--system", system, "--device", "cpu", "--final-manifest", final, "--checkpoint-root", root,
-            "--split", os.path.join(splits, "val.jsonl"), "--manifest", manifest, "--warmup", "1",
-            "--out", str(out)] + list(extra)
+            "--split", os.path.join(splits, "val.jsonl"), "--manifest", manifest, "--out", str(out)] + list(extra)
 
 
 def val_cases(splits):
@@ -80,7 +85,8 @@ def val_cases(splits):
 def check_report(report, out, splits, system):
     cases = val_cases(splits)
     assert report["schema"] == "latency/1" and report["label"] == "reported, not gated"
-    assert report["system"] == system and report["device"] == "cpu" and report["warmup"] == 1
+    assert report["system"] == system and report["device"] == "cpu"
+    assert report["warmup"] == len(cases) and report["warmup_policy"] == plat.WARMUP_POLICY
     assert len(report["seeds"]) == 1
     row = report["seeds"][0]
     assert row["state"] == {"device": "cpu", "dtype": "torch.float32", "amp_enabled": False}
@@ -109,6 +115,61 @@ def test_tiny_laya_latency_on_cpu(tmp_path, synthetic_raw, capsys):
     md = latency.main(["--render", str(out.parent)])
     assert capsys.readouterr().out == md
     assert "reported, not gated" in md and "| pooled |" in md and "Busy-machine" not in md
+
+
+def test_every_seed_warms_every_timed_message_first(tmp_path, synthetic_raw, monkeypatch):
+    """G-07-6 (07-REVIEW-01-08 WR-04): two tiny Laya seeds timed in one process each follow the identical sequence,
+    whatever their position: load, one untimed forward of exactly the val texts in split-file order, one sync, then
+    every message timed (sync, clock, forward, sync, clock). So no seed's timed loop absorbs a first-occurrence cost
+    that another seed's warm-up paid."""
+    splits, manifest, m, root = laya_setup(tmp_path, synthetic_raw, seeds=(0, 1))
+    texts = [c["state"] for c in val_cases(splits)]
+    n = len(texts)
+    events, forwards = [], []
+    real_time, real_predictor, real_noul = plat.time_messages, latency.score.Predictor, latency.la.noul_logits
+
+    def recorder(fn, texts_, sync, clock=time.perf_counter):
+        events.append(("seed",))
+
+        def fwd(t):
+            events.append(("fwd", t))
+            return fn(t)
+
+        def rsync():
+            events.append(("sync",))
+            return sync()
+
+        def rclock():
+            events.append(("clock",))
+            return clock()
+        return real_time(fwd, texts_, rsync, clock=rclock)
+
+    def predictor(*args, **kwargs):
+        events.append(("load",))
+        return real_predictor(*args, **kwargs)
+
+    def noul(*args, **kwargs):
+        forwards.append(1)
+        return real_noul(*args, **kwargs)
+    monkeypatch.setattr(plat, "time_messages", recorder)
+    monkeypatch.setattr(latency.score, "Predictor", predictor)
+    monkeypatch.setattr(latency.la, "noul_logits", noul)
+    report = latency.main(run_args("laya", splits, manifest, m, root, tmp_path / "out.json"))
+
+    starts = [i for i, e in enumerate(events) if e == ("load",)]
+    assert len(starts) == 2
+    blocks = [events[a:b] for a, b in zip(starts, starts[1:] + [len(events)])]
+    expected = [("load",), ("seed",)] + [("fwd", t) for t in texts] + [("sync",)]
+    for t in texts:
+        expected += [("sync",), ("clock",), ("fwd", t), ("sync",), ("clock",)]
+    for block in blocks:
+        assert block == expected                            # identical for seed 0 and seed 1
+        warmed = {e[1] for e in block[2:2 + n]}
+        assert all(t in warmed for t in texts)
+    assert len(forwards) == 2 * 2 * n                       # 2 seeds x (warm-up pass + timed loop) x n messages
+    assert [s["seed"] for s in report["seeds"]] == [0, 1]
+    assert all(len(s["times_s"]) == n for s in report["seeds"])
+    assert report["warmup"] == n and report["warmup_policy"] == plat.WARMUP_POLICY
 
 
 # ---- BERTurk ----
