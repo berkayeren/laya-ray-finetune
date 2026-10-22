@@ -38,9 +38,25 @@ Paired bootstrap (EVAL-07), the one interval procedure for every comparison:
 - the interval is the 95% percentile interval of the replicate deltas A - B (numpy linear interpolation);
   thresholds are inputs, never selected inside the bootstrap
 
+Calibration (EVAL-03): the 48 tags are 48 binary problems, every function takes gold Y and probabilities P [n, 48]
+(P, never logits, so Phase 8's seed-averaged probabilities go through the same code; D-10 still holds: no system is
+named), computes in float64 and never rounds. The rule texts are CALIBRATION_RULES, copied into every record:
+- Brier: the mean over every (message, tag) pair of (p - y)^2 (sklearn brier_score_loss on the flattened pairs); the
+  per-message sum over 48 tags is 48 x this
+- NLL: the mean binary cross-entropy over every pair, p clipped to [NLL_EPS, 1 - NLL_EPS] (sklearn log_loss on the
+  flattened pairs); equal to a postfit record's nll_fitted / nll_raw on the same dump and T
+- classwise ECE (Kull et al. 2019 Eq. 4): per tag, the sum over ECE_BINS (15) equal-width bins of |sum y - sum p| / n
+  (= |B|/n |ybar - pbar|, so an empty bin needs no division), averaged over all 48 tags, zero-support tags included,
+  so the definition does not depend on the split
+- bins: [k/15, (k+1)/15) from searchsorted on linspace(0, 1, 16), p = 1.0 in the last bin (Guo et al. 2017, M = 15);
+  ece_bins is the one bin helper
+- reliability: per bin the pair count, the mean p and the observed frequency (None for an empty bin), pooled over
+  every pair and per tag for the caller's eligible tags; vectorised with np.bincount, no Python loop over messages
+
 usage: from pilot import metrics; metrics.metrics(Y, metrics.probabilities(logits, T), 0.5)
        sel = metrics.select_theta(Y_val, P_val); metrics.metrics(Y, P, metrics.theta_vector(sel))
        metrics.paired_bootstrap(Y, metrics.seed_average([PA0, PA1]), thA, PB, thB, B=10000, seed=0)
+       metrics.calibration(Y, metrics.probabilities(logits, T), sel["eligible_tags"])
 """
 import numpy as np
 
@@ -54,6 +70,15 @@ MIN_VAL_POSITIVES = 10                                      # val positives a ta
 TIE_RULE = "closest to 0.5; between two equally close points, the lower θ"
 BOOT_METRICS = ("micro_f1", "macro_f1", "exact_match", "top1_hit")
 BOOT_METHOD = "percentile (numpy linear interpolation)"
+ECE_BINS = 15                                               # equal-width calibration bins (Guo et al. 2017, M = 15)
+NLL_EPS = 1e-12                                             # NLL clips p to [NLL_EPS, 1 - NLL_EPS]
+CALIBRATION_RULES = {
+    "brier": "mean over every (message, tag) pair of (p - y)^2; the per-message sum over 48 tags is 48 x this",
+    "nll": "mean binary cross-entropy over every (message, tag) pair, p clipped to [1e-12, 1 - 1e-12]",
+    "classwise_ece": ("Kull et al. 2019 Eq. 4: per tag, the sum over the 15 equal-width bins of "
+                      "|sum of y - sum of p| / n; averaged over all 48 tags, zero-support tags included"),
+    "bins": "15 equal-width bins [k/15, (k+1)/15), p = 1.0 in the last bin (Guo et al. 2017, M = 15)",
+}
 
 
 def probabilities(logits, temperature):
@@ -263,3 +288,76 @@ def paired_bootstrap(Y, PA, thA, PB, thB, B=10000, seed=0, level=0.95):
                      "ci": ci, "width": width, "n_undefined": int(undefined.sum())}
     return {"B": int(B), "seed": seed, "level": level, "method": BOOT_METHOD, "n": int(Y.shape[0]),
             "metrics": out}
+
+
+def ece_bins(P, n_bins=ECE_BINS):
+    """int bin index of every entry of P: bins [k/n_bins, (k+1)/n_bins), p = 1.0 (and above) in the last bin, p <= 0
+    in bin 0. The one bin helper of every calibration function (searchsorted on linspace, never floor(p * n_bins))."""
+    edges = np.linspace(0.0, 1.0, int(n_bins) + 1)
+    b = np.searchsorted(edges, np.asarray(P, dtype=np.float64), side="right") - 1
+    return np.clip(b, 0, int(n_bins) - 1)
+
+
+def brier(Y, P):
+    """CALIBRATION_RULES["brier"]: the mean over every (message, tag) pair of (p - y)^2."""
+    Y, P = _arrays(Y, P, "no messages to score")
+    return float(np.mean((P - Y) ** 2))
+
+
+def nll(Y, P):
+    """CALIBRATION_RULES["nll"]: the mean binary cross-entropy over every pair, p clipped to [NLL_EPS, 1 - NLL_EPS]."""
+    Y, P = _arrays(Y, P, "no messages to score")
+    p = np.clip(P, NLL_EPS, 1.0 - NLL_EPS)
+    return float(-np.mean(np.where(Y, np.log(p), np.log1p(-p))))
+
+
+def _bin_sums(Y, P, n_bins):
+    """(count, sum p, sum y), each float64 [48, n_bins], over the flat index tag * n_bins + bin."""
+    k = Y.shape[1]
+    flat = (np.arange(k)[None, :] * n_bins + ece_bins(P, n_bins)).ravel()
+    size = k * n_bins
+    cnt = np.bincount(flat, minlength=size).astype(np.float64).reshape(k, n_bins)
+    sp = np.bincount(flat, weights=P.ravel(), minlength=size).reshape(k, n_bins)
+    sy = np.bincount(flat, weights=Y.ravel().astype(np.float64), minlength=size).reshape(k, n_bins)
+    return cnt, sp, sy
+
+
+def classwise_ece(Y, P, n_bins=ECE_BINS):
+    """(mean over all 48 tags, float64 [48] per-tag ECE): CALIBRATION_RULES["classwise_ece"]; a tag with zero
+    support still counts in the mean."""
+    Y, P = _arrays(Y, P, "no messages to score")
+    _, sp, sy = _bin_sums(Y, P, int(n_bins))
+    per_tag = np.abs(sy - sp).sum(axis=1) / Y.shape[0]
+    return float(per_tag.mean()), per_tag
+
+
+def reliability(Y, P, n_bins=ECE_BINS, tags=None):
+    """[{"lo", "hi", "count", "mean_p", "freq"}] per bin over every (message, tag) pair, or over the given tag
+    columns only; mean_p and freq are None for an empty bin."""
+    Y, P = _arrays(Y, P, "no messages to score")
+    n_bins = int(n_bins)
+    cnt, sp, sy = _bin_sums(Y, P, n_bins)
+    if tags is not None:
+        unknown = [t for t in tags if t not in TAGS]
+        if unknown:
+            raise SystemExit("unknown tag(s) %s; tags must be INTENTS names" % unknown)
+        cols = [TAGS.index(t) for t in tags]
+        cnt, sp, sy = cnt[cols], sp[cols], sy[cols]
+    cnt, sp, sy = cnt.sum(axis=0), sp.sum(axis=0), sy.sum(axis=0)
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    return [{"lo": float(edges[b]), "hi": float(edges[b + 1]), "count": int(cnt[b]),
+             "mean_p": float(sp[b] / cnt[b]) if cnt[b] else None,
+             "freq": float(sy[b] / cnt[b]) if cnt[b] else None} for b in range(n_bins)]
+
+
+def calibration(Y, P, eligible_tags=()):
+    """The EVAL-03 block of one probability array: Brier, NLL, classwise ECE with per-tag ECE and support, and the
+    reliability bins pooled over every pair plus per tag for eligible_tags (the θ rule's tags with >= 10 val
+    positives)."""
+    Y, P = _arrays(Y, P, "no messages to score")
+    mean, per_tag = classwise_ece(Y, P)
+    support = Y.sum(axis=0)
+    return {"n_bins": ECE_BINS, "brier": brier(Y, P), "nll": nll(Y, P), "classwise_ece": mean,
+            "per_tag": {t: {"ece": float(per_tag[j]), "support": int(support[j])} for j, t in enumerate(TAGS)},
+            "reliability": {"pooled": reliability(Y, P),
+                            "per_tag": {t: reliability(Y, P, tags=[t]) for t in eligible_tags}}}

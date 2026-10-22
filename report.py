@@ -43,16 +43,38 @@ second table for paired-bootstrap comparisons, and a note for every report whose
 each report's system block, never from a system-specific constant; values are rounded for display only. A --n subset
 report is refused: the table shows full-split numbers only. The README results block is this output, test-enforced.
 
+--confidence RUN_DIR --split val|test [--postfit RECORD] (EVAL-03): a separate confidence/1 report of one verified dump
+(run_report and the committed results/reports/ stay as they are). Two variants, each with pilot.metrics.calibration
+(Brier, NLL, classwise ECE over 15 equal-width bins with per-tag ECE and support, reliability bins pooled and per
+eligible tag) on sigmoid(logit / T) and the θ that goes with it: `headline` (the val-fitted or shipped T) and `raw`
+(T = 1). Where T and θ come from (confidence_binding; every other case is refused before any metric is computed):
+- postfit_candidate: a selection candidate's dump (a training block without postfit_sha256) ships T = 1, so its
+  "after T" numbers need the postfit record: only on val and only with --postfit RECORD (schema postfit/1, read as
+  JSON plus the sha256 of the same bytes, never through the scipy-based pilot.postfit) whose system_kind is the
+  sidecar's and whose candidates hold exactly one entry with the dump's dump_sha256, the same dump_run_id and
+  uids_sha256; headline T and θ are that candidate's temperature and theta.shipped, raw θ its theta.raw
+- final_seed: a dump whose training.postfit_sha256 is set, only with the record of that sha256, at the sidecar's
+  shipped T (which must equal the record's chosen T), with the record's chosen θ (shipped and raw)
+- val_selected: a dump without a training block (baseline, zero-shot), only without --postfit, with θ from the run
+  dir's full val dump by run_report's rule (theta_source, refuse_in_sample_theta; same_source when the reported split
+  is not val); without a full val dump it is refused (θ is chosen on val only)
+A --n subset dump is refused. A val record carries in_sample true and IN_SAMPLE_CAVEAT; the record holds the dump,
+manifest and record hashes, the binding, the rule texts (pilot.metrics.CALIBRATION_RULES), no timestamps or timings and
+no rounded value, so it rebuilds byte for byte (make confidence-reports).
+
 usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.json] [--manifest splits.json]
        python report.py --compare A_RUN[,A_RUN2...] B_RUN[,B_RUN2...] [--split test] [--B 10000] [--seed 0] [--out x.json]
        python report.py --table results/reports [--out table.md]
+       python report.py --confidence results/dumps/RUN_ID --split val [--postfit results/postfit/laya.json]
+                        [--out results/confidence/RUN_ID-val.json]
 """
 import argparse
 import json
 import os
 
 from pilot import dumps, metrics
-from pilot.data import DEFAULT_MANIFEST, TRAINED_ON, manifest_is_committed, repo_relpath, sha256_file, write_atomic
+from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, manifest_is_committed, repo_relpath, sha256_bytes, sha256_file,
+                        write_atomic)
 
 SCHEMA_VERSION = 1
 COMPARE_PROCEDURE = ("EVAL-07: per-seed probabilities averaged per message and tag, then thresholded; test messages "
@@ -63,6 +85,11 @@ COMPARE_THETA_RULE = ("D-12 applied to the seed-averaged val probabilities; Phas
 COMPARE_NOTE = "descriptive intervals only; the decision rule and its thresholds are frozen in protocol.json in Phase 8"
 NO_VAL_REASON = "no val dump in run dir"
 SUBSET_VAL_REASON = "val dump is a --n subset; θ is selected only on a full val dump"
+CONFIDENCE_SCHEMA = "confidence/1"
+POSTFIT_SCHEMA = "postfit/1"
+IN_SAMPLE_CAVEAT = ("in-sample: θ (and, for a fine-tuned model, T and the epoch) were chosen on these val messages, so "
+                    "these numbers are not held-out estimates")
+T_MATCH = 1e-12                                             # a final seed's shipped T vs its record's chosen T
 # Sidecar keys the θ-source val dump and the reported dump must share (03-REVIEW WR-01): θ chosen on one checkpoint's,
 # temperature's or device's / precision's val probabilities is never applied to another's dump. system.baseline_source
 # is excluded on purpose: pilot.data.TRAINED_ON gives a baseline's val and test dumps different training splits.
@@ -185,6 +212,128 @@ def run_report(run_dir, split="test", manifest_path=DEFAULT_MANIFEST):
             "dump_sha256": side["dump_sha256"], "headline": "shipped",
             "theta_source": disclosed, "variants": variants}
 
+
+
+def read_postfit(path):
+    """(record, sha256) of a postfit/1 record: the bytes are read once, hashed and parsed (no reread window). Read as
+    JSON, never through pilot.postfit, which imports scipy (report.py stays numpy only)."""
+    if not os.path.isfile(path):
+        raise SystemExit("%s not found; pass the record postfit.py wrote (e.g. results/postfit/laya.json)" % path)
+    with open(path, "rb") as f:
+        raw = f.read()
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise SystemExit("%s: not a postfit/1 record; pass the record postfit.py wrote" % path)
+    if not isinstance(record, dict) or record.get("schema") != POSTFIT_SCHEMA:
+        raise SystemExit("%s: not a postfit/1 record; pass the record postfit.py wrote" % path)
+    return record, sha256_bytes(raw)
+
+
+def _postfit_block(path, sha, record):
+    return {"path": repo_relpath(path), "sha256": sha, "system_kind": record.get("system_kind")}
+
+
+def confidence_binding(run_dir, split, side, manifest_path, postfit=None):
+    """Where the confidence report of one dump takes T and θ from (kind postfit_candidate, final_seed or
+    val_selected; see the module docstring). SystemExit naming the reason for every other combination, before any
+    metric is computed. Each variant's theta is the full select_theta-shaped dict."""
+    tr = side.get("training")
+    kind = (side.get("system") or {}).get("kind")
+    rid = side["run_id"]
+    if isinstance(tr, dict) and tr.get("postfit_sha256") is not None:
+        if postfit is None:
+            raise SystemExit("%s: a final seed (training.postfit_sha256 %s) is reported only with --postfit, the record "
+                             "it was trained from" % (run_dir, tr["postfit_sha256"]))
+        record, sha = read_postfit(postfit)
+        if sha != tr["postfit_sha256"]:
+            raise SystemExit("%s: --postfit %s has sha256 %s, but the final seed was bound to record %s; pass that "
+                             "record" % (run_dir, postfit, sha, tr["postfit_sha256"]))
+        if record.get("system_kind") != kind:
+            raise SystemExit("%s: --postfit %s is a %s record, the dump is %s" % (run_dir, postfit,
+                                                                                   record.get("system_kind"), kind))
+        chosen = record.get("chosen") or {}
+        T = side["temperature"]["shipped"]
+        if chosen.get("temperature") is None or abs(T - chosen["temperature"]) > T_MATCH:
+            raise SystemExit("%s: the final seed ships T %r, the record's chosen T is %r; a final seed serves its "
+                             "record's T" % (run_dir, T, chosen.get("temperature")))
+        return {"kind": "final_seed", "postfit": _postfit_block(postfit, sha, record),
+                "theta_source": {"postfit_sha256": sha, "chosen": chosen.get("dump_run_id"), "split": "val"},
+                "variants": {"headline": {"temperature": T,
+                                          "temperature_source": "sidecar shipped T (= the postfit record's chosen T)",
+                                          "theta": chosen["theta"]["shipped"]},
+                             "raw": {"temperature": 1.0, "temperature_source": "T = 1 (raw)",
+                                     "theta": chosen["theta"]["raw"]}}}
+    if isinstance(tr, dict):
+        if split != "val":
+            raise SystemExit("%s: a selection candidate is reported on val only (its T and θ were chosen on val); "
+                             "got split %s" % (run_dir, split))
+        if postfit is None:
+            raise SystemExit("%s: a selection candidate ships T = 1; pass --postfit RECORD (the postfit record that "
+                             "lists this dump) so the headline uses its val-fitted T" % run_dir)
+        record, sha = read_postfit(postfit)
+        if record.get("system_kind") != kind:
+            raise SystemExit("%s: --postfit %s is a %s record, the dump is %s" % (run_dir, postfit,
+                                                                                   record.get("system_kind"), kind))
+        cands = [c for c in record.get("candidates") or [] if c.get("dump_sha256") == side["dump_sha256"]]
+        if len(cands) != 1:
+            raise SystemExit("%s: --postfit %s lists %d candidate(s) with dump_sha256 %s, expected exactly 1; pass "
+                             "the record fitted on this dump" % (run_dir, postfit, len(cands), side["dump_sha256"]))
+        c = cands[0]
+        if c.get("dump_run_id") != rid or c.get("uids_sha256") != side["split"]["uids_sha256"]:
+            raise SystemExit("%s: the record candidate (dump_run_id %s, uids_sha256 %s) is not this dump (%s, %s)"
+                             % (run_dir, c.get("dump_run_id"), c.get("uids_sha256"), rid,
+                                side["split"]["uids_sha256"]))
+        return {"kind": "postfit_candidate", "postfit": _postfit_block(postfit, sha, record),
+                "theta_source": {"postfit_sha256": sha, "candidate": rid, "split": "val"},
+                "variants": {"headline": {"temperature": c["temperature"],
+                                          "temperature_source": "postfit record candidate (val-fitted T)",
+                                          "theta": c["theta"]["shipped"]},
+                             "raw": {"temperature": 1.0, "temperature_source": "T = 1 (raw)",
+                                     "theta": c["theta"]["raw"]}}}
+    if postfit is not None:
+        raise SystemExit("%s: the dump has no training block (a baseline or zero-shot model); its θ comes from its "
+                         "own val dump, so --postfit does not apply" % run_dir)
+    src = theta_source(run_dir, manifest_path)
+    if src is None:
+        raise SystemExit("no full val dump in %s to select θ on; θ is chosen on val only" % run_dir)
+    if split != "val":
+        same_source(side, src[2], run_dir)
+    val_logits, Y_val, val_side, disclosed = src
+    T = side["temperature"]["shipped"]
+    return {"kind": "val_selected", "postfit": None, "theta_source": disclosed,
+            "variants": {"headline": {"temperature": T, "temperature_source": "sidecar shipped T",
+                                      "theta": metrics.select_theta(Y_val, metrics.probabilities(
+                                          val_logits, val_side["temperature"]["shipped"]))},
+                         "raw": {"temperature": 1.0, "temperature_source": "T = 1 (raw)",
+                                 "theta": metrics.select_theta(Y_val, metrics.probabilities(val_logits, 1.0))}}}
+
+
+def confidence_report(run_dir, split, manifest_path=DEFAULT_MANIFEST, postfit=None):
+    """The confidence/1 report of one verified full dump (EVAL-03): the binding, and per variant its T, θ and
+    pilot.metrics.calibration on sigmoid(logit / T)."""
+    logits, uids, side, entry = dumps.load_dump(run_dir, split, manifest_path)
+    if side["n_subset"] is not None:
+        raise SystemExit("%s: a --n subset dump is never reported; rescore %s without --n" % (run_dir, split))
+    Y = dumps.read_gold(entry, manifest_path, uids)
+    binding = confidence_binding(run_dir, split, side, manifest_path, postfit)
+    variants = {}
+    for name in ("headline", "raw"):
+        v = binding["variants"][name]
+        P = metrics.probabilities(logits, v["temperature"])
+        variants[name] = dict(v, calibration=metrics.calibration(Y, P, v["theta"]["eligible_tags"]))
+    tr = side.get("training")
+    in_sample = split == "val"
+    return {"schema": CONFIDENCE_SCHEMA, "schema_version": SCHEMA_VERSION, "run_id": side["run_id"],
+            "split": side["split"], "system": side["system"],
+            "training": ({"run_id": tr.get("run_id"), "split": tr.get("split"), "epoch": tr.get("epoch")}
+                         if isinstance(tr, dict) else None),
+            "dump_sha256": side["dump_sha256"], "uids_sha256": dumps.uids_sha256(uids), "n_messages": len(uids),
+            "manifest": {"path": repo_relpath(manifest_path), "sha256": sha256_file(manifest_path),
+                         "is_committed": manifest_is_committed(manifest_path)},
+            "binding": {k: v for k, v in binding.items() if k != "variants"},
+            "in_sample": in_sample, "caveat": IN_SAMPLE_CAVEAT if in_sample else None,
+            "definitions": {"calibration": metrics.CALIBRATION_RULES}, "variants": variants}
 
 def _load_side(run_dirs, split, manifest_path):
     """[(run_dir, split dump, val dump)] of one system's per-seed run dirs, each dump verified by load_dump."""
@@ -385,7 +534,8 @@ def _run_dirs(ap, text):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="recompute metrics from a logit dump, or compare two systems' dumps")
     ap.add_argument("run_dir", nargs="?", default=None)
-    ap.add_argument("--split", default="test", choices=("val", "test"))
+    ap.add_argument("--split", default=None, choices=("val", "test"),
+                    help="the dump's split (default test for RUN_DIR and --compare; required for --confidence)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST,
                     help="splits.json to verify against (default: the committed data/splits.json)")
@@ -395,9 +545,18 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=0, help="bootstrap RNG seed for --compare (default 0)")
     ap.add_argument("--table", nargs="+", metavar="PATH", default=None,
                     help="markdown table of saved reports (a directory expands to its sorted *.json)")
+    ap.add_argument("--confidence", metavar="RUN_DIR", default=None,
+                    help="confidence/1 report (Brier, NLL, classwise ECE, reliability) of RUN_DIR's --split dump")
+    ap.add_argument("--postfit", metavar="RECORD", default=None,
+                    help="with --confidence: the postfit record binding a selection candidate's or final seed's T, θ")
     a = ap.parse_args(argv)
-    if sum(x is not None for x in (a.run_dir, a.compare, a.table)) != 1:
-        ap.error("give exactly one of RUN_DIR, --compare A_DIRS B_DIRS or --table PATH [PATH ...]")
+    if sum(x is not None for x in (a.run_dir, a.compare, a.table, a.confidence)) != 1:
+        ap.error("give exactly one of RUN_DIR, --compare A_DIRS B_DIRS, --table PATH [PATH ...] or "
+                 "--confidence RUN_DIR")
+    if a.postfit is not None and a.confidence is None:
+        ap.error("--postfit applies only to --confidence")
+    if a.confidence is not None and a.split is None:
+        ap.error("--confidence needs an explicit --split val|test")
     if a.table is not None:
         reports = []
         for p in table_inputs(a.table):
@@ -409,10 +568,13 @@ def main(argv=None):
             os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
             write_atomic(a.out, text.encode("utf-8"))
         return text
-    if a.compare is not None:
-        report = compare(_run_dirs(ap, a.compare[0]), _run_dirs(ap, a.compare[1]), a.split, a.manifest, a.B, a.seed)
+    split = "test" if a.split is None else a.split
+    if a.confidence is not None:
+        report = confidence_report(a.confidence, split, a.manifest, a.postfit)
+    elif a.compare is not None:
+        report = compare(_run_dirs(ap, a.compare[0]), _run_dirs(ap, a.compare[1]), split, a.manifest, a.B, a.seed)
     else:
-        report = run_report(a.run_dir, a.split, a.manifest)
+        report = run_report(a.run_dir, split, a.manifest)
     text = json.dumps(report, ensure_ascii=False, indent=2)
     print(text)
     if a.out:

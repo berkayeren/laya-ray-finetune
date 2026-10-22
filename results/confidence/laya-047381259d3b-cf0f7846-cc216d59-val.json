@@ -1,0 +1,3569 @@
+{
+  "schema": "confidence/1",
+  "schema_version": 1,
+  "run_id": "laya-047381259d3b-cf0f7846-cc216d59",
+  "split": {
+    "n_messages": 208,
+    "name": "val",
+    "path": "splits/val.jsonl",
+    "role": "val",
+    "sha256": "95f5cfe5ae5921a5d9a28c285efbcbce5d6bf63c081e7f05bf8d4d2df36ad5bc",
+    "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89"
+  },
+  "system": {
+    "baseline_source": null,
+    "checkpoint": "ray_results/laya-selection_train-neg8-s0-d92447f4/exports/epoch-003",
+    "checkpoint_identity": {
+      "config_sha256": "cf0f784693f2af0fab1b5f2308bb98b2e00299ebcebdcd7c5289105c149ee716",
+      "files_sha256": {
+        "encoder/config.json": "81d6856137aeb1d9cfbc1c1776d5b8196eed2e6ff879e894f517a21a580cc9d3",
+        "tokenizer/tokenizer.json": "dbba919c6e5e492bc22beb80abb64e6fcc7e8744dc696e8388b8c977767afa4b",
+        "tokenizer/tokenizer_config.json#normalized": "56f416183cdd31134a297020bbe9a6f602c129e51ff2d3dce9f99c5279e89928"
+      },
+      "local": true,
+      "model_sha256": "047381259d3bb7ab0e4d01e73adee2e1f6cf1fe1b016584be944f352d64bee81"
+    },
+    "clip_eps": null,
+    "kind": "laya"
+  },
+  "training": {
+    "run_id": "laya-selection_train-neg8-s0-d92447f4",
+    "split": "selection_train",
+    "epoch": 3
+  },
+  "dump_sha256": "2dfc0394afa7bec72c9972facb27f14f3fb5b87953c396e88c1ad612290b589a",
+  "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89",
+  "n_messages": 208,
+  "manifest": {
+    "path": "data/splits.json",
+    "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103",
+    "is_committed": true
+  },
+  "binding": {
+    "kind": "postfit_candidate",
+    "postfit": {
+      "path": "results/postfit/laya.json",
+      "sha256": "e08e8735b19c0973606622be546617ef851f1bf06e2b2d60b1d920d8676b6da2",
+      "system_kind": "laya"
+    },
+    "theta_source": {
+      "postfit_sha256": "e08e8735b19c0973606622be546617ef851f1bf06e2b2d60b1d920d8676b6da2",
+      "candidate": "laya-047381259d3b-cf0f7846-cc216d59",
+      "split": "val"
+    }
+  },
+  "in_sample": true,
+  "caveat": "in-sample: θ (and, for a fine-tuned model, T and the epoch) were chosen on these val messages, so these numbers are not held-out estimates",
+  "definitions": {
+    "calibration": {
+      "brier": "mean over every (message, tag) pair of (p - y)^2; the per-message sum over 48 tags is 48 x this",
+      "nll": "mean binary cross-entropy over every (message, tag) pair, p clipped to [1e-12, 1 - 1e-12]",
+      "classwise_ece": "Kull et al. 2019 Eq. 4: per tag, the sum over the 15 equal-width bins of |sum of y - sum of p| / n; averaged over all 48 tags, zero-support tags included",
+      "bins": "15 equal-width bins [k/15, (k+1)/15), p = 1.0 in the last bin (Guo et al. 2017, M = 15)"
+    }
+  },
+  "variants": {
+    "headline": {
+      "temperature": 4.7698254528950175,
+      "temperature_source": "postfit record candidate (val-fitted T)",
+      "theta": {
+        "global": 0.95,
+        "per_tag": {
+          "transfer_payment_deposit": 0.95,
+          "request_info": 0.5,
+          "wrong_notworking_notshowing": 0.5,
+          "card": 0.5,
+          "make_open_apply_setup_get_activate": 0.46,
+          "account": 0.5,
+          "how_much": 0.5,
+          "affirm": 0.5,
+          "deny": 0.5,
+          "more_higher_after": 0.5,
+          "change": 0.5,
+          "cancel_close_leave_freeze": 0.9,
+          "current": 0.5
+        },
+        "eligible_tags": [
+          "transfer_payment_deposit",
+          "request_info",
+          "wrong_notworking_notshowing",
+          "card",
+          "make_open_apply_setup_get_activate",
+          "account",
+          "how_much",
+          "affirm",
+          "deny",
+          "more_higher_after",
+          "change",
+          "cancel_close_leave_freeze",
+          "current"
+        ],
+        "min_val_positives": 10,
+        "grid": {
+          "start": 0.05,
+          "stop": 0.95,
+          "step": 0.01,
+          "n": 91
+        },
+        "objective": {
+          "global": "val micro-F1",
+          "per_tag": "val per-tag F1"
+        },
+        "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+      },
+      "calibration": {
+        "n_bins": 15,
+        "brier": 0.02040256943195569,
+        "nll": 0.09417181866832924,
+        "classwise_ece": 0.03047170591518224,
+        "per_tag": {
+          "transfer_payment_deposit": {
+            "ece": 0.12157031411680243,
+            "support": 59
+          },
+          "request_info": {
+            "ece": 0.05355802184891078,
+            "support": 42
+          },
+          "wrong_notworking_notshowing": {
+            "ece": 0.05882969890256983,
+            "support": 34
+          },
+          "card": {
+            "ece": 0.027483431298120645,
+            "support": 24
+          },
+          "make_open_apply_setup_get_activate": {
+            "ece": 0.08920663160704007,
+            "support": 24
+          },
+          "account": {
+            "ece": 0.03592861181158092,
+            "support": 26
+          },
+          "how_much": {
+            "ece": 0.005188209715348826,
+            "support": 18
+          },
+          "affirm": {
+            "ece": 0.02648020425924806,
+            "support": 14
+          },
+          "deny": {
+            "ece": 0.027488390537458003,
+            "support": 14
+          },
+          "more_higher_after": {
+            "ece": 0.02542955873918557,
+            "support": 13
+          },
+          "change": {
+            "ece": 0.015424142954109953,
+            "support": 15
+          },
+          "cancel_close_leave_freeze": {
+            "ece": 0.06339348228753021,
+            "support": 10
+          },
+          "fees_interests": {
+            "ece": 0.018172040564966394,
+            "support": 8
+          },
+          "international": {
+            "ece": 0.03491771060004059,
+            "support": 9
+          },
+          "limits": {
+            "ece": 0.017813386848726975,
+            "support": 8
+          },
+          "less_lower_before": {
+            "ece": 0.019701082355045692,
+            "support": 6
+          },
+          "balance": {
+            "ece": 0.022943429258724175,
+            "support": 5
+          },
+          "dont_know": {
+            "ece": 0.03985478888647688,
+            "support": 8
+          },
+          "current": {
+            "ece": 0.029353401869695525,
+            "support": 10
+          },
+          "overdraft": {
+            "ece": 0.02589500099442264,
+            "support": 7
+          },
+          "savings": {
+            "ece": 0.01633535709270765,
+            "support": 6
+          },
+          "loan": {
+            "ece": 0.06552803322476203,
+            "support": 6
+          },
+          "why": {
+            "ece": 0.017876044809913633,
+            "support": 7
+          },
+          "when": {
+            "ece": 0.02596314920576187,
+            "support": 6
+          },
+          "appointment": {
+            "ece": 0.016807002957647588,
+            "support": 6
+          },
+          "handoff": {
+            "ece": 0.016995814758695077,
+            "support": 5
+          },
+          "contactless": {
+            "ece": 0.025659277191743324,
+            "support": 9
+          },
+          "thank": {
+            "ece": 0.02119624944952073,
+            "support": 6
+          },
+          "mortgage": {
+            "ece": 0.0221264316779573,
+            "support": 7
+          },
+          "debit": {
+            "ece": 0.013310201308243213,
+            "support": 6
+          },
+          "how": {
+            "ece": 0.030682014993623014,
+            "support": 7
+          },
+          "refund": {
+            "ece": 0.0757948742450822,
+            "support": 5
+          },
+          "direct_debit": {
+            "ece": 0.022033400098263607,
+            "support": 5
+          },
+          "lost_stolen": {
+            "ece": 0.014747103494021193,
+            "support": 6
+          },
+          "withdrawal": {
+            "ece": 0.021614142296926417,
+            "support": 5
+          },
+          "new": {
+            "ece": 0.022624102741733973,
+            "support": 0
+          },
+          "greet": {
+            "ece": 0.018173229009236815,
+            "support": 5
+          },
+          "arrival": {
+            "ece": 0.027922828991867082,
+            "support": 4
+          },
+          "pin": {
+            "ece": 0.01771355313747569,
+            "support": 4
+          },
+          "credit": {
+            "ece": 0.02013953973396815,
+            "support": 4
+          },
+          "acknowledge": {
+            "ece": 0.0382755124836521,
+            "support": 4
+          },
+          "cheque": {
+            "ece": 0.018342499856627798,
+            "support": 4
+          },
+          "end_call": {
+            "ece": 0.03830392317097226,
+            "support": 3
+          },
+          "standing_order": {
+            "ece": 0.024181413964152815,
+            "support": 3
+          },
+          "business": {
+            "ece": 0.0180905269587805,
+            "support": 3
+          },
+          "existing": {
+            "ece": 0.02219156825149711,
+            "support": 1
+          },
+          "how_long": {
+            "ece": 0.013116294574994584,
+            "support": 1
+          },
+          "repeat": {
+            "ece": 0.018266254792915534,
+            "support": 1
+          }
+        },
+        "reliability": {
+          "pooled": [
+            {
+              "lo": 0.0,
+              "hi": 0.06666666666666667,
+              "count": 9369,
+              "mean_p": 0.018372054766956268,
+              "freq": 0.005336748852598996
+            },
+            {
+              "lo": 0.06666666666666667,
+              "hi": 0.13333333333333333,
+              "count": 6,
+              "mean_p": 0.09463555780977728,
+              "freq": 0.0
+            },
+            {
+              "lo": 0.13333333333333333,
+              "hi": 0.2,
+              "count": 5,
+              "mean_p": 0.1810462438040955,
+              "freq": 0.2
+            },
+            {
+              "lo": 0.2,
+              "hi": 0.26666666666666666,
+              "count": 5,
+              "mean_p": 0.22732255986081382,
+              "freq": 0.2
+            },
+            {
+              "lo": 0.26666666666666666,
+              "hi": 0.3333333333333333,
+              "count": 3,
+              "mean_p": 0.2963198963279891,
+              "freq": 0.0
+            },
+            {
+              "lo": 0.3333333333333333,
+              "hi": 0.4,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.4,
+              "hi": 0.4666666666666667,
+              "count": 4,
+              "mean_p": 0.4468199078097619,
+              "freq": 0.25
+            },
+            {
+              "lo": 0.4666666666666667,
+              "hi": 0.5333333333333333,
+              "count": 2,
+              "mean_p": 0.5048037515607553,
+              "freq": 0.5
+            },
+            {
+              "lo": 0.5333333333333333,
+              "hi": 0.6,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.6,
+              "hi": 0.6666666666666666,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.6666666666666666,
+              "hi": 0.7333333333333333,
+              "count": 3,
+              "mean_p": 0.6983469165840336,
+              "freq": 0.3333333333333333
+            },
+            {
+              "lo": 0.7333333333333333,
+              "hi": 0.8,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.8,
+              "hi": 0.8666666666666667,
+              "count": 3,
+              "mean_p": 0.8369180726658465,
+              "freq": 0.0
+            },
+            {
+              "lo": 0.8666666666666667,
+              "hi": 0.9333333333333333,
+              "count": 9,
+              "mean_p": 0.9063819165984746,
+              "freq": 0.0
+            },
+            {
+              "lo": 0.9333333333333333,
+              "hi": 1.0,
+              "count": 575,
+              "mean_p": 0.9764113195538867,
+              "freq": 0.7443478260869565
+            }
+          ],
+          "per_tag": {
+            "transfer_payment_deposit": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 124,
+                "mean_p": 0.019177940685229038,
+                "freq": 0.008064516129032258
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 1,
+                "mean_p": 0.9274021299225021,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 83,
+                "mean_p": 0.9756766091735422,
+                "freq": 0.6987951807228916
+              }
+            ],
+            "request_info": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 159,
+                "mean_p": 0.01831984171831029,
+                "freq": 0.025157232704402517
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 1,
+                "mean_p": 0.6786788008637886,
+                "freq": 1.0
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 1,
+                "mean_p": 0.9306275655647644,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 47,
+                "mean_p": 0.9744888215549745,
+                "freq": 0.7872340425531915
+              }
+            ],
+            "wrong_notworking_notshowing": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 164,
+                "mean_p": 0.020223244142210568,
+                "freq": 0.012195121951219513
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 44,
+                "mean_p": 0.975453757554818,
+                "freq": 0.7272727272727273
+              }
+            ],
+            "card": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 181,
+                "mean_p": 0.018027173361595823,
+                "freq": 0.0055248618784530384
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 27,
+                "mean_p": 0.9797642715392685,
+                "freq": 0.8518518518518519
+              }
+            ],
+            "make_open_apply_setup_get_activate": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 181,
+                "mean_p": 0.019584430601580563,
+                "freq": 0.055248618784530384
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 1,
+                "mean_p": 0.23435534443810518,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 1,
+                "mean_p": 0.46368330957611154,
+                "freq": 1.0
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 1,
+                "mean_p": 0.5050877730805848,
+                "freq": 1.0
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 2,
+                "mean_p": 0.7081809744441561,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 22,
+                "mean_p": 0.9735370501127588,
+                "freq": 0.5454545454545454
+              }
+            ],
+            "account": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 177,
+                "mean_p": 0.017603198418351944,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 31,
+                "mean_p": 0.979270488282598,
+                "freq": 0.8387096774193549
+              }
+            ],
+            "how_much": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 193,
+                "mean_p": 0.018594332506603133,
+                "freq": 0.02072538860103627
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 15,
+                "mean_p": 0.9778569196377974,
+                "freq": 0.9333333333333333
+              }
+            ],
+            "affirm": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 191,
+                "mean_p": 0.01859923867988528,
+                "freq": 0.015706806282722512
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 1,
+                "mean_p": 0.2879751145346079,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 16,
+                "mean_p": 0.9792157989706812,
+                "freq": 0.6875
+              }
+            ],
+            "deny": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 191,
+                "mean_p": 0.01951918213064694,
+                "freq": 0.015706806282722512
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 1,
+                "mean_p": 0.3202119968555901,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 16,
+                "mean_p": 0.9793255904988818,
+                "freq": 0.6875
+              }
+            ],
+            "more_higher_after": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 193,
+                "mean_p": 0.018778080346637572,
+                "freq": 0.0051813471502590676
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 15,
+                "mean_p": 0.9776785807233032,
+                "freq": 0.8
+              }
+            ],
+            "change": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 193,
+                "mean_p": 0.018236607094351938,
+                "freq": 0.010362694300518135
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 15,
+                "mean_p": 0.979237104349663,
+                "freq": 0.8666666666666667
+              }
+            ],
+            "cancel_close_leave_freeze": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 187,
+                "mean_p": 0.01951335969524877,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 1,
+                "mean_p": 0.2597972023237315,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 1,
+                "mean_p": 0.8466324984005665,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 1,
+                "mean_p": 0.8917461774335498,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 18,
+                "mean_p": 0.9743705652576065,
+                "freq": 0.5555555555555556
+              }
+            ],
+            "current": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 204,
+                "mean_p": 0.01986651715644157,
+                "freq": 0.04411764705882353
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 1,
+                "mean_p": 0.07381246312019307,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 1,
+                "mean_p": 0.14016621355212333,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 2,
+                "mean_p": 0.9721492060692166,
+                "freq": 0.5
+              }
+            ]
+          }
+        }
+      }
+    },
+    "raw": {
+      "temperature": 1.0,
+      "temperature_source": "T = 1 (raw)",
+      "theta": {
+        "global": 0.33,
+        "per_tag": {
+          "transfer_payment_deposit": 0.5,
+          "request_info": 0.5,
+          "wrong_notworking_notshowing": 0.5,
+          "card": 0.5,
+          "make_open_apply_setup_get_activate": 0.33,
+          "account": 0.5,
+          "how_much": 0.5,
+          "affirm": 0.5,
+          "deny": 0.5,
+          "more_higher_after": 0.5,
+          "change": 0.5,
+          "cancel_close_leave_freeze": 0.5,
+          "current": 0.5
+        },
+        "eligible_tags": [
+          "transfer_payment_deposit",
+          "request_info",
+          "wrong_notworking_notshowing",
+          "card",
+          "make_open_apply_setup_get_activate",
+          "account",
+          "how_much",
+          "affirm",
+          "deny",
+          "more_higher_after",
+          "change",
+          "cancel_close_leave_freeze",
+          "current"
+        ],
+        "min_val_positives": 10,
+        "grid": {
+          "start": 0.05,
+          "stop": 0.95,
+          "step": 0.01,
+          "n": 91
+        },
+        "objective": {
+          "global": "val micro-F1",
+          "per_tag": "val per-tag F1"
+        },
+        "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+      },
+      "calibration": {
+        "n_bins": 15,
+        "brier": 0.0214400741688265,
+        "nll": 0.355017266594011,
+        "classwise_ece": 0.021565885889246836,
+        "per_tag": {
+          "transfer_payment_deposit": {
+            "ece": 0.1298076429971434,
+            "support": 59
+          },
+          "request_info": {
+            "ece": 0.07198322838904254,
+            "support": 42
+          },
+          "wrong_notworking_notshowing": {
+            "ece": 0.06730766345614571,
+            "support": 34
+          },
+          "card": {
+            "ece": 0.024038455613009165,
+            "support": 24
+          },
+          "make_open_apply_setup_get_activate": {
+            "ece": 0.11109421209561952,
+            "support": 24
+          },
+          "account": {
+            "ece": 0.024038464130563257,
+            "support": 26
+          },
+          "how_much": {
+            "ece": 0.02403845400070313,
+            "support": 18
+          },
+          "affirm": {
+            "ece": 0.03839829397969638,
+            "support": 14
+          },
+          "deny": {
+            "ece": 0.038332497383997216,
+            "support": 14
+          },
+          "more_higher_after": {
+            "ece": 0.01923076124601866,
+            "support": 13
+          },
+          "change": {
+            "ece": 0.01923076281425767,
+            "support": 15
+          },
+          "cancel_close_leave_freeze": {
+            "ece": 0.048107702775441005,
+            "support": 10
+          },
+          "fees_interests": {
+            "ece": 5.738678662612009e-09,
+            "support": 8
+          },
+          "international": {
+            "ece": 0.019230771021250957,
+            "support": 9
+          },
+          "limits": {
+            "ece": 5.390094099420979e-09,
+            "support": 8
+          },
+          "less_lower_before": {
+            "ece": 3.340918112725983e-08,
+            "support": 6
+          },
+          "balance": {
+            "ece": 0.004807655002964482,
+            "support": 5
+          },
+          "dont_know": {
+            "ece": 0.024038464171442654,
+            "support": 8
+          },
+          "current": {
+            "ece": 0.04807602948150565,
+            "support": 10
+          },
+          "overdraft": {
+            "ece": 0.01923074338867721,
+            "support": 7
+          },
+          "savings": {
+            "ece": 0.01923046454267193,
+            "support": 6
+          },
+          "loan": {
+            "ece": 0.0624925514109728,
+            "support": 6
+          },
+          "why": {
+            "ece": 5.855367425164135e-09,
+            "support": 7
+          },
+          "when": {
+            "ece": 0.009615388992569187,
+            "support": 6
+          },
+          "appointment": {
+            "ece": 0.009615379237980632,
+            "support": 6
+          },
+          "handoff": {
+            "ece": 0.009615379056072673,
+            "support": 5
+          },
+          "contactless": {
+            "ece": 0.00961538925872216,
+            "support": 9
+          },
+          "thank": {
+            "ece": 0.004807696653979442,
+            "support": 6
+          },
+          "mortgage": {
+            "ece": 0.004861219960196004,
+            "support": 7
+          },
+          "debit": {
+            "ece": 0.004807687214496374,
+            "support": 6
+          },
+          "how": {
+            "ece": 0.014428063008052938,
+            "support": 7
+          },
+          "refund": {
+            "ece": 0.06249991723353479,
+            "support": 5
+          },
+          "direct_debit": {
+            "ece": 0.004807697767138778,
+            "support": 5
+          },
+          "lost_stolen": {
+            "ece": 0.00479813477510078,
+            "support": 6
+          },
+          "withdrawal": {
+            "ece": 0.004807689062874308,
+            "support": 5
+          },
+          "new": {
+            "ece": 0.0048076975620848315,
+            "support": 0
+          },
+          "greet": {
+            "ece": 5.666989777548707e-09,
+            "support": 5
+          },
+          "arrival": {
+            "ece": 0.009619845574640015,
+            "support": 4
+          },
+          "pin": {
+            "ece": 4.979306656897566e-09,
+            "support": 4
+          },
+          "credit": {
+            "ece": 0.0009724587856174478,
+            "support": 4
+          },
+          "acknowledge": {
+            "ece": 0.020441779272520465,
+            "support": 4
+          },
+          "cheque": {
+            "ece": 7.973136956218596e-09,
+            "support": 4
+          },
+          "end_call": {
+            "ece": 0.027893783252258126,
+            "support": 3
+          },
+          "standing_order": {
+            "ece": 0.004817330637684896,
+            "support": 3
+          },
+          "business": {
+            "ece": 5.812389522143511e-09,
+            "support": 3
+          },
+          "existing": {
+            "ece": 0.0048073997234399255,
+            "support": 1
+          },
+          "how_long": {
+            "ece": 0.004807687105322838,
+            "support": 1
+          },
+          "repeat": {
+            "ece": 5.8232939242576816e-09,
+            "support": 1
+          }
+        },
+        "reliability": {
+          "pooled": [
+            {
+              "lo": 0.0,
+              "hi": 0.06666666666666667,
+              "count": 9388,
+              "mean_p": 7.673523090779626e-06,
+              "freq": 0.005538985939497231
+            },
+            {
+              "lo": 0.06666666666666667,
+              "hi": 0.13333333333333333,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.13333333333333333,
+              "hi": 0.2,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.2,
+              "hi": 0.26666666666666666,
+              "count": 2,
+              "mean_p": 0.22851549723364106,
+              "freq": 0.0
+            },
+            {
+              "lo": 0.26666666666666666,
+              "hi": 0.3333333333333333,
+              "count": 2,
+              "mean_p": 0.3073112661060256,
+              "freq": 0.5
+            },
+            {
+              "lo": 0.3333333333333333,
+              "hi": 0.4,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.4,
+              "hi": 0.4666666666666667,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.4666666666666667,
+              "hi": 0.5333333333333333,
+              "count": 2,
+              "mean_p": 0.5228975736918866,
+              "freq": 0.5
+            },
+            {
+              "lo": 0.5333333333333333,
+              "hi": 0.6,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.6,
+              "hi": 0.6666666666666666,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.6666666666666666,
+              "hi": 0.7333333333333333,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.7333333333333333,
+              "hi": 0.8,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.8,
+              "hi": 0.8666666666666667,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.8666666666666667,
+              "hi": 0.9333333333333333,
+              "count": 0,
+              "mean_p": null,
+              "freq": null
+            },
+            {
+              "lo": 0.9333333333333333,
+              "hi": 1.0,
+              "count": 590,
+              "mean_p": 0.9998972667920965,
+              "freq": 0.7271186440677966
+            }
+          ],
+          "per_tag": {
+            "transfer_payment_deposit": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 124,
+                "mean_p": 8.447824848258828e-09,
+                "freq": 0.008064516129032258
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 84,
+                "mean_p": 0.9999998903682871,
+                "freq": 0.6904761904761905
+              }
+            ],
+            "request_info": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 159,
+                "mean_p": 6.120996201162537e-09,
+                "freq": 0.025157232704402517
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 49,
+                "mean_p": 0.9994390301665153,
+                "freq": 0.7755102040816326
+              }
+            ],
+            "wrong_notworking_notshowing": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 164,
+                "mean_p": 2.1848570927056773e-08,
+                "freq": 0.012195121951219513
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 44,
+                "mean_p": 0.9999999450464532,
+                "freq": 0.7272727272727273
+              }
+            ],
+            "card": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 181,
+                "mean_p": 5.4339000745315346e-09,
+                "freq": 0.0055248618784530384
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 27,
+                "mean_p": 0.9999999907793267,
+                "freq": 0.8518518518518519
+              }
+            ],
+            "make_open_apply_setup_get_activate": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 182,
+                "mean_p": 1.9330148063816646e-05,
+                "freq": 0.054945054945054944
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 1,
+                "mean_p": 0.3331173077184961,
+                "freq": 1.0
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 1,
+                "mean_p": 0.5242495872384964,
+                "freq": 1.0
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 24,
+                "mean_p": 0.9986867124080612,
+                "freq": 0.5
+              }
+            ],
+            "account": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 177,
+                "mean_p": 5.028019870199475e-09,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 31,
+                "mean_p": 0.9999999886837948,
+                "freq": 0.8387096774193549
+              }
+            ],
+            "how_much": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 193,
+                "mean_p": 6.894414216558814e-09,
+                "freq": 0.02072538860103627
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 15,
+                "mean_p": 0.9999999841845463,
+                "freq": 0.9333333333333333
+              }
+            ],
+            "affirm": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 192,
+                "mean_p": 6.851376217448218e-05,
+                "freq": 0.015625
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 16,
+                "mean_p": 0.9999999868821468,
+                "freq": 0.6875
+              }
+            ],
+            "deny": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 192,
+                "mean_p": 0.0001397936303460283,
+                "freq": 0.015625
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 16,
+                "mean_p": 0.9999999895561161,
+                "freq": 0.6875
+              }
+            ],
+            "more_higher_after": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 193,
+                "mean_p": 7.266247183105893e-09,
+                "freq": 0.0051813471502590676
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 15,
+                "mean_p": 0.9999999827705058,
+                "freq": 0.8
+              }
+            ],
+            "change": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 193,
+                "mean_p": 5.861134546039749e-09,
+                "freq": 0.010362694300518135
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 15,
+                "mean_p": 0.9999999864376375,
+                "freq": 0.8666666666666667
+              }
+            ],
+            "cancel_close_leave_freeze": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 188,
+                "mean_p": 3.582683350302993e-05,
+                "freq": 0.0
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 20,
+                "mean_p": 0.999983336629658,
+                "freq": 0.5
+              }
+            ],
+            "current": [
+              {
+                "lo": 0.0,
+                "hi": 0.06666666666666667,
+                "count": 206,
+                "mean_p": 9.015774828681825e-07,
+                "freq": 0.043689320388349516
+              },
+              {
+                "lo": 0.06666666666666667,
+                "hi": 0.13333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.13333333333333333,
+                "hi": 0.2,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.2,
+                "hi": 0.26666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.26666666666666666,
+                "hi": 0.3333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.3333333333333333,
+                "hi": 0.4,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4,
+                "hi": 0.4666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.4666666666666667,
+                "hi": 0.5333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.5333333333333333,
+                "hi": 0.6,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6,
+                "hi": 0.6666666666666666,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.6666666666666666,
+                "hi": 0.7333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.7333333333333333,
+                "hi": 0.8,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8,
+                "hi": 0.8666666666666667,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.8666666666666667,
+                "hi": 0.9333333333333333,
+                "count": 0,
+                "mean_p": null,
+                "freq": null
+              },
+              {
+                "lo": 0.9333333333333333,
+                "hi": 1.0,
+                "count": 2,
+                "mean_p": 0.9999999285573222,
+                "freq": 0.5
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

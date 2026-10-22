@@ -10,6 +10,7 @@
 #   make baseline-reports  rebuild the reports and print the results table from the committed dumps (no model)
 #   make laya-postfit      rebuild the Phase 5 Laya postfit record from the committed selection dumps (no model)
 #   make berturk-postfit   rebuild the Phase 6 BERTurk postfit record from the committed 30-epoch selection dumps (no model)
+#   make confidence-reports  rebuild the Phase 7 val confidence records from the committed dumps and postfit records (no model)
 PYTHON ?= python
 UV ?= uv
 PY312 ?= python3.12
@@ -21,8 +22,10 @@ BERTURK_SELECTION := berturk-a4dba627ab53-9606916e-29446b61 berturk-7018cd8c39ba
 SCORE_WORKERS ?= 2
 SCORE_CPUS ?= 4
 REPORTS := results/reports
+LAYA_CHOSEN := laya-047381259d3b-cf0f7846-cc216d59
+CONFIDENCE := results/confidence
 
-.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit
+.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports
 
 env:
 	$(PY312) -m venv $(VENV)
@@ -79,6 +82,10 @@ laya-postfit:
 berturk-postfit:
 	mkdir -p results/postfit
 	$(PYTHON) postfit.py $(addprefix results/dumps/,$(BERTURK_SELECTION)) --out results/postfit/berturk.json > /dev/null
+
+confidence-reports:
+	mkdir -p $(CONFIDENCE)
+	$(PYTHON) report.py --confidence results/dumps/$(LAYA_CHOSEN) --split val --postfit results/postfit/laya.json --out $(CONFIDENCE)/$(LAYA_CHOSEN)-val.json > /dev/null
 
 clean-data:
 	rm -rf data/splits data/audit
