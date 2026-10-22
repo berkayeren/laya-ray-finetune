@@ -13,6 +13,9 @@ the code: reported, not gated.
 - each report passes the repository's sidecar text and path check (no message text, no uid list, no local path)
 - exactly four reports are tracked, laya-mps, laya-cpu, berturk-mps and berturk-cpu, each named after its system and
   device, and results/latency/latency.md equals pilot.latency.render_markdown of them byte for byte
+- README.md holds exactly one latency block, in the Phase 7 section, equal to pilot.latency.render_markdown of the
+  reports (`latency.py --render results/latency`), and the Phase 7 prose before the generated blocks says
+  "reported, not gated" too
 """
 import json
 import math
@@ -118,3 +121,26 @@ def test_markdown_matches_render():
     assert md == latency.render_markdown(latency.load_reports(LATENCY)), \
         "results/latency/latency.md != render_markdown of the reports; rerun latency.py --render results/latency --out"
     assert latency.LABEL in md
+
+
+README = os.path.join(REPO_ROOT, "README.md")
+LATENCY_START, LATENCY_END = "<!-- latency:start -->", "<!-- latency:end -->"
+PHASE7_HEADING = "## Confidence, out-of-domain and latency metrics (Phase 7)"
+
+
+def test_readme_latency_block_matches_render():
+    """The README block between the latency markers is pilot.latency.render_markdown of the committed reports; a hand
+    edit or a stale block fails, and the section's prose states the label outside the generated block."""
+    with open(README, encoding="utf-8") as f:
+        text = f.read()
+    assert text.count(LATENCY_START) == 1 and text.count(LATENCY_END) == 1, \
+        "README.md must hold exactly one pair of the latency markers"
+    i, j = text.index(LATENCY_START), text.index(LATENCY_END)
+    assert i < j, "the latency end marker comes before the start marker"
+    assert text[i + len(LATENCY_START):j].strip() == latency.render_markdown(latency.load_reports(LATENCY)).strip(), (
+        "the README latency block differs from pilot.latency.render_markdown of the committed reports; "
+        "regenerate it with `python latency.py --render results/latency`")
+    assert text.count(PHASE7_HEADING) == 1 and text.index(PHASE7_HEADING) < i, \
+        "the latency block is not in the Phase 7 section"
+    prose = text[text.index(PHASE7_HEADING):i].split("<!-- confidence:start -->")[0]
+    assert latency.LABEL in prose, "the Phase 7 prose must say %r next to the generated latency block" % latency.LABEL

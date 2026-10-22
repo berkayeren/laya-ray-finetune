@@ -96,12 +96,12 @@ are hash-registered too, so later phases can trust the flag list.
 | `pilot/weights.py` | pinned, digest-verified weight fetch (`make weights`) |
 | `pilot/laya_adapter.py` | the only module that uses Laya's private API, pinned to laya 0.4.6 and contract-tested |
 | `pilot/dumps.py` | the logit dump format: writer, the one hard-failing reader, gold labels, run ids |
-| `pilot/metrics.py` | torch-free metrics, the val θ rule and the paired bootstrap, the same for every system |
+| `pilot/metrics.py` | torch-free metrics, the val θ rule and the paired bootstrap, the same for every system; Phase 7: Brier, NLL, classwise ECE and reliability bins, the message-confidence rule, coverage and AURC, the false-positive rate and its Wilson interval |
 | `pilot/runs.py` | torch-free run-record schema of `ray_train.py`, the run id, the neg-K item count, the MPS fallback ladder |
 | `pilot/compute.py` | torch-free compute-checkpoint logic: projection, what-if table, disk budget, report and markdown |
 | `ray_train.py` | Ray Train `TorchTrainer` (DDP) fine-tune using Laya's own loss and checkpoint format, uncalibrated (T = 1) checkpoints; cpu, cuda or one MPS worker; resumes by rerunning |
 | `score.py` | the only place a model runs: one system on one val/test split → a logit dump (in-process or Ray Data actors) |
-| `report.py` | dumps → metrics (numpy only, no model); `--compare` paired bootstrap; `--table` results table |
+| `report.py` | dumps → metrics (numpy only, no model); `--compare` paired bootstrap; `--table` results table; `--confidence` the Phase 7 confidence record (calibration, abstention, no-intent and, on `--split hotels_probe`, out-of-domain false positives) with its reliability diagram; `--confidence-table` its markdown |
 | `evaluate.py` | one-step wrapper: `score.py --model laya`, then `report.py`'s report of that dump |
 | `mps_spike.py` | Phase 2 MPS feasibility spike (`results/spike/`) |
 | `compute_checkpoint.py` | Phase 4 compute checkpoint: a measured MPS fine-tune probe and the projected experiment-matrix runtime (`results/compute/`) |
@@ -109,7 +109,9 @@ are hash-registered too, so later phases can trust the flag list.
 | `postfit.py` | Phase 5 and 6 CLI: val dumps → `results/postfit/laya.json` or `berturk.json` (the protocol by system kind), `--prune`, `--print-final-commands`, `--final-manifest`, `--render`, `--reference-check` and `--render-berturk` (BERTurk) |
 | `berturk_train.py` | Phase 6 BERTurk trainer: the HF Trainer, masked BCE, encoder LR `--lr` and head LR `--head-lr` in their own param groups, `--epochs` (default 30), a per-epoch export, `--stop-after-epoch`, `--postfit` and `--reference` for the final seeds; one process, no Ray |
 | `pilot/berturk.py` | torch-free BERTurk bookkeeping: the recipe and run id, labels in `INTENTS` order, the checkpoint identity, the postfit protocol, the BASE-03 reference check, the final commands and manifest, the superseded chain (`SUPERSEDED`, `load_superseded`) and the README Phase 6 block |
-| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`), postfit records (`postfit/`: `laya*.json`, and `berturk.json`, `berturk-reference.json`, `berturk-final.json`), the two discarded BERTurk selection runs kept as disclosed history (`superseded/berturk-tied-head-lr/`, `superseded/berturk-10-epoch-grid/`, never current) |
+| `latency.py` | Phase 7 latency harness: times every final seed of one system per message on one device, in-process at batch 1, fp32, through the load path that scored the dumps; `--render` the markdown; reported, not gated |
+| `pilot/latency.py` | torch-free latency logic: the timing contract and loop, nearest-rank percentiles, the final-manifest reader, the `latency/1` report and its markdown |
+| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`), postfit records (`postfit/`: `laya*.json`, and `berturk.json`, `berturk-reference.json`, `berturk-final.json`), the two discarded BERTurk selection runs kept as disclosed history (`superseded/berturk-tied-head-lr/`, `superseded/berturk-10-epoch-grid/`, never current), the Phase 7 val confidence records and reliability diagrams (`confidence/`) and latency reports (`latency/`) |
 | `tests/` | pytest suite (markers `unit`, `data`, `weights`, `ray`, `mps`) |
 
 ## Run
@@ -158,6 +160,14 @@ python evaluate.py data/splits/test.jsonl --checkpoint ./ckpt --workers 0 --n 20
 # Phase 3 baselines: rescore majority, prior and zero-shot Laya on val + test, rebuild results/reports/
 make baselines              # needs make data and the pinned weights; about 5 minutes on the M4
 make baseline-reports       # rebuild the reports and print the results table from the committed dumps, no model
+
+# Phase 7 confidence and latency (val only; nothing fine-tuned is scored on test or HOTELS before Phase 8)
+make confidence-reports     # the val confidence records and reliability diagrams from the committed dumps, no model
+python report.py --confidence results/dumps/RUN_ID --split val --postfit results/postfit/laya.json \
+    --out results/confidence/RUN_ID-val.json
+python report.py --confidence-table results/confidence
+python latency.py --system laya --device mps --out results/latency/laya-mps.json   # also laya cpu, berturk mps|cpu
+python latency.py --render results/latency --out results/latency/latency.md
 ```
 
 `--checkpoint` (score, evaluate) and `--base` (train) accept `multilingual`, which loads the pinned,
@@ -560,6 +570,242 @@ manifest, plus the superseded history under `results/superseded/` (read and sha2
 | 1 | berturk-final_train-s1-3c44e7ff | 29 | 0.0391 | 6.07 | 0 |
 | 2 | berturk-final_train-s2-44f81396 | 29 | 0.0401 | 5.26 | 0 |
 <!-- berturk-postfit:end -->
+
+## Confidence, out-of-domain and latency metrics (Phase 7)
+
+How the calibration, abstention, false-positive and latency numbers are defined, and what they read on validation
+messages, before any fine-tuned model is scored on test (EVAL-03, EVAL-04, EVAL-05, EVAL-06). Phase 8 freezes these
+definitions in its protocol; nothing here is a test or held-out result.
+
+- **Definitions.** Each is one function in `pilot/metrics.py` (numpy only, the same for every system), and its text is
+  copied into every record:
+  - Brier: the mean of (p - y)^2 over every (message, tag) pair (48 x this is the per-message sum).
+  - NLL: the mean binary cross-entropy over every (message, tag) pair, with p clipped to [1e-12, 1 - 1e-12].
+  - Classwise ECE: per tag, the sum over 15 equal-width bins of |sum of y - sum of p| / n, averaged over all 48 tags,
+    zero-support tags included (Kull et al. 2019).
+  - Message confidence: the joint decision probability, the sum over the 48 tags of log q with q = p for a tag
+    predicted at θ and 1 - p otherwise (the model's own probability that every tag decision is right).
+  - Coverage: keep the (c * n + 99) // 100 most confident messages (an integer ceiling; ties keep split-file order),
+    then report micro precision and exact-match accuracy at 50, 70, 80 and 90% coverage.
+  - AURC: the mean over k = 1..n of 1 - the exact-match rate of the k most confident messages; lower is better.
+  - False positives: a message with no gold tag among the scored columns is counted, and it is a false positive when
+    any scored column is predicted at θ (P >= θ). The no-intent rate scores all 48 columns; the out-of-domain rate
+    scores the 22 banking-only tags of the manifest (`ood_scoring_tags`). Every rate is shown as k/n with its 95%
+    Wilson score interval.
+- **On val, in-sample.** Every number in the block below is on the 208 val messages. For a fine-tuned model, T, θ
+  and the epoch were chosen on those same messages (Phases 5 and 6), so the numbers are optimistic and are not
+  held-out estimates. The rows are the chosen selection candidate of each model, bound to its postfit record, and
+  zero-shot Laya as a reference row (its θ by the baselines' val rule).
+- **Both temperature variants.** Every table shows the headline variant (the val-fitted T) and the raw one (T = 1),
+  so the favourable variant is never shown alone. From T = 1 to the val-fitted T, NLL falls for both fine-tuned
+  models, but their classwise ECE moves in opposite directions: Laya's rises and BERTurk's falls. An NLL-fitted T
+  does not have to lower a binned ECE.
+- **Definition disclosure.** The message-confidence rule was fixed on principle at planning time, because it is the
+  model's own probability of the event that the abstention accuracy scores (exact match). The Phase 7 research had
+  already computed the val AURC under this rule and under a weakest-tag rule (the minimum over tags of q), and had
+  seen that the order of the two fine-tuned models depends on the rule at the val-fitted temperature. The rule was
+  not chosen by that outcome; Phase 8 freezes it knowing both directions.
+- **No-intent sample size.** The val split holds 7 no-intent messages and the test split 15, so every no-intent
+  interval is wide (on val, about half the unit interval), and val cannot separate the two fine-tuned models on this
+  rate.
+- **Out-of-domain (HOTELS).** The out-of-domain false-positive rate on the 22 banking-only tags is implemented
+  (`report.py --confidence RUN_DIR --split hotels_probe`, with θ and T from banking val only) and tested on synthetic
+  HOTELS dumps. Nothing is scored on HOTELS until Phase 8: `score.py` still refuses `hotels_probe`, and a hygiene test
+  keeps any HOTELS dump out of git.
+- **Latency, reported, not gated.** `latency.py` times each of the three final seeds of each model per message, at
+  batch 1, in-process (no Ray), fp32 with autocast off, through the load path that scored the dumps: 10 warm-up
+  messages are excluded, then all 208 val messages are timed between device syncs. Laya's own fp16 autocast default
+  on MPS is not what is timed. Latency is reported, not gated: it is not a decision criterion in this pilot. The two
+  CPU reports record uncommitted changes: a test file was edited while they ran; the timed code (`latency.py`,
+  `pilot/latency.py`, `score.py`) was the committed HEAD. One 177 ms outlier of BERTurk seed 0 on MPS is kept as
+  measured.
+
+```bash
+# the three val confidence records and their reliability diagrams, rebuilt from the committed dumps (no model)
+make confidence-reports
+python report.py --confidence results/dumps/RUN_ID --split val --postfit results/postfit/laya.json \
+    --out results/confidence/RUN_ID-val.json       # also writes RUN_ID-val.svg
+# the generated confidence block below
+python report.py --confidence-table results/confidence
+# latency of the final seeds, one run at a time on a quiet machine (--checkpoint-root DIR: checkpoints elsewhere)
+python latency.py --system laya --device mps --out results/latency/laya-mps.json
+python latency.py --system laya --device cpu --out results/latency/laya-cpu.json
+python latency.py --system berturk --device mps --out results/latency/berturk-mps.json
+python latency.py --system berturk --device cpu --out results/latency/berturk-cpu.json
+# the generated latency block below (and results/latency/latency.md)
+python latency.py --render results/latency --out results/latency/latency.md
+```
+
+The two blocks between the markers are generated by `report.py --confidence-table results/confidence` from the
+committed records under `results/confidence/` and by `latency.py --render results/latency` from the committed
+reports under `results/latency/`; a test fails if either is edited by hand or goes stale.
+
+<!-- confidence:start -->
+### Calibration on val (θ-free)
+
+| system | run_id | variant | T | Brier | NLL | classwise ECE (15 bins) |
+|---|---|---|---|---|---|---|
+| berturk (train run berturk-selection_train-s0-4f36ae05, epoch 29) | berturk-f24d8fe3c899-50e28523-29446b61 | headline | 0.7430 | 0.0154 | 0.0582 | 0.0193 |
+| berturk (train run berturk-selection_train-s0-4f36ae05, epoch 29) | berturk-f24d8fe3c899-50e28523-29446b61 | raw | 1.0000 | 0.0155 | 0.0649 | 0.0294 |
+| laya (train run laya-selection_train-neg8-s0-d92447f4, epoch 3) | laya-047381259d3b-cf0f7846-cc216d59 | headline | 4.7698 | 0.0204 | 0.0942 | 0.0305 |
+| laya (train run laya-selection_train-neg8-s0-d92447f4, epoch 3) | laya-047381259d3b-cf0f7846-cc216d59 | raw | 1.0000 | 0.0214 | 0.3550 | 0.0216 |
+| laya (multilingual) | laya-zeroshot-7b928d82 | headline | 1.0000 | 0.0917 | 0.3414 | 0.1150 |
+| laya (multilingual) | laya-zeroshot-7b928d82 | raw | 1.0000 | 0.0917 | 0.3414 | 0.1150 |
+
+- laya-zeroshot-7b928d82: headline temperature is 1.0, so its raw rows equal its headline rows.
+
+### Reliability diagrams
+
+![reliability diagram berturk-f24d8fe3c899-50e28523-29446b61 (val)](results/confidence/berturk-f24d8fe3c899-50e28523-29446b61-val.svg)
+
+![reliability diagram laya-047381259d3b-cf0f7846-cc216d59 (val)](results/confidence/laya-047381259d3b-cf0f7846-cc216d59-val.svg)
+
+![reliability diagram laya-zeroshot-7b928d82 (val)](results/confidence/laya-zeroshot-7b928d82-val.svg)
+
+### Abstention on val (message confidence)
+
+| system | run_id | variant | θ | precision@50% | precision@70% | precision@80% | precision@90% | accuracy@50% | accuracy@70% | accuracy@80% | accuracy@90% | AURC |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| berturk (train run berturk-selection_train-s0-4f36ae05, epoch 29) | berturk-f24d8fe3c899-50e28523-29446b61 | headline | 0.5 | 0.914 | 0.920 | 0.923 | 0.909 | 0.433 | 0.384 | 0.359 | 0.340 | 0.526 |
+| berturk (train run berturk-selection_train-s0-4f36ae05, epoch 29) | berturk-f24d8fe3c899-50e28523-29446b61 | headline | val-selected, global 0.19 | 0.919 | 0.892 | 0.896 | 0.884 | 0.538 | 0.534 | 0.527 | 0.505 | 0.441 |
+| berturk (train run berturk-selection_train-s0-4f36ae05, epoch 29) | berturk-f24d8fe3c899-50e28523-29446b61 | raw | 0.5 | 0.916 | 0.912 | 0.918 | 0.907 | 0.423 | 0.370 | 0.353 | 0.340 | 0.533 |
+| berturk (train run berturk-selection_train-s0-4f36ae05, epoch 29) | berturk-f24d8fe3c899-50e28523-29446b61 | raw | val-selected, global 0.26 | 0.913 | 0.907 | 0.885 | 0.878 | 0.548 | 0.541 | 0.509 | 0.495 | 0.444 |
+| laya (train run laya-selection_train-neg8-s0-d92447f4, epoch 3) | laya-047381259d3b-cf0f7846-cc216d59 | headline | 0.5 | 0.819 | 0.772 | 0.756 | 0.735 | 0.587 | 0.486 | 0.455 | 0.415 | 0.482 |
+| laya (train run laya-selection_train-neg8-s0-d92447f4, epoch 3) | laya-047381259d3b-cf0f7846-cc216d59 | headline | val-selected, global 0.95 | 0.819 | 0.772 | 0.759 | 0.747 | 0.587 | 0.486 | 0.455 | 0.426 | 0.480 |
+| laya (train run laya-selection_train-neg8-s0-d92447f4, epoch 3) | laya-047381259d3b-cf0f7846-cc216d59 | raw | 0.5 | 0.814 | 0.774 | 0.756 | 0.734 | 0.606 | 0.493 | 0.443 | 0.415 | 0.420 |
+| laya (train run laya-selection_train-neg8-s0-d92447f4, epoch 3) | laya-047381259d3b-cf0f7846-cc216d59 | raw | val-selected, global 0.33 | 0.814 | 0.774 | 0.756 | 0.734 | 0.606 | 0.493 | 0.443 | 0.415 | 0.420 |
+| laya (multilingual) | laya-zeroshot-7b928d82 | headline | 0.5 | 0.205 | 0.206 | 0.189 | 0.171 | 0.058 | 0.041 | 0.036 | 0.032 | 0.924 |
+| laya (multilingual) | laya-zeroshot-7b928d82 | headline | val-selected, global 0.32 | 0.235 | 0.201 | 0.196 | 0.182 | 0.048 | 0.034 | 0.030 | 0.027 | 0.919 |
+| laya (multilingual) | laya-zeroshot-7b928d82 | raw | 0.5 | 0.205 | 0.206 | 0.189 | 0.171 | 0.058 | 0.041 | 0.036 | 0.032 | 0.924 |
+| laya (multilingual) | laya-zeroshot-7b928d82 | raw | val-selected, global 0.32 | 0.235 | 0.201 | 0.196 | 0.182 | 0.048 | 0.034 | 0.030 | 0.027 | 0.919 |
+
+- confidence: message confidence = sum over the 48 tags of log q, q = p if p >= θ (predicted) else 1 - p: the model's probability that every tag decision is right, assuming tag independence
+- coverage: keep the k = ceil(c * n / 100) most confident messages, k computed as (c * n + 99) // 100; ties in confidence keep split-file order (stable sort)
+- aurc: mean over k = 1..n of 1 - exact-match rate of the k most confident messages (Geifman et al. 2019); lower is better
+
+**Definition disclosure:** The message-confidence rule (the joint decision probability) was fixed at planning time on principle, because it is the model's own probability of the event the abstention accuracy scores (exact match), after the Phase 7 research had computed val AURC under it and under a weakest-tag rule (the minimum over tags of q). At the headline (val-fitted) temperature the order of the two fine-tuned models' val AURC differs between the two rules (at T = 1 it does not); the rule was not chosen by that outcome, and Phase 8 freezes it in protocol.json knowing both directions.
+
+### No-intent false positives on val
+
+| system | run_id | variant | θ | k/n | rate | Wilson 95% |
+|---|---|---|---|---|---|---|
+| berturk (train run berturk-selection_train-s0-4f36ae05, epoch 29) | berturk-f24d8fe3c899-50e28523-29446b61 | headline | 0.5 | 1/7 | 0.143 | [0.026, 0.513] |
+| berturk (train run berturk-selection_train-s0-4f36ae05, epoch 29) | berturk-f24d8fe3c899-50e28523-29446b61 | headline | val-selected, global 0.19 | 2/7 | 0.286 | [0.082, 0.641] |
+| berturk (train run berturk-selection_train-s0-4f36ae05, epoch 29) | berturk-f24d8fe3c899-50e28523-29446b61 | raw | 0.5 | 1/7 | 0.143 | [0.026, 0.513] |
+| berturk (train run berturk-selection_train-s0-4f36ae05, epoch 29) | berturk-f24d8fe3c899-50e28523-29446b61 | raw | val-selected, global 0.26 | 2/7 | 0.286 | [0.082, 0.641] |
+| laya (train run laya-selection_train-neg8-s0-d92447f4, epoch 3) | laya-047381259d3b-cf0f7846-cc216d59 | headline | 0.5 | 2/7 | 0.286 | [0.082, 0.641] |
+| laya (train run laya-selection_train-neg8-s0-d92447f4, epoch 3) | laya-047381259d3b-cf0f7846-cc216d59 | headline | val-selected, global 0.95 | 2/7 | 0.286 | [0.082, 0.641] |
+| laya (train run laya-selection_train-neg8-s0-d92447f4, epoch 3) | laya-047381259d3b-cf0f7846-cc216d59 | raw | 0.5 | 2/7 | 0.286 | [0.082, 0.641] |
+| laya (train run laya-selection_train-neg8-s0-d92447f4, epoch 3) | laya-047381259d3b-cf0f7846-cc216d59 | raw | val-selected, global 0.33 | 2/7 | 0.286 | [0.082, 0.641] |
+| laya (multilingual) | laya-zeroshot-7b928d82 | headline | 0.5 | 4/7 | 0.571 | [0.250, 0.842] |
+| laya (multilingual) | laya-zeroshot-7b928d82 | headline | val-selected, global 0.32 | 5/7 | 0.714 | [0.359, 0.918] |
+| laya (multilingual) | laya-zeroshot-7b928d82 | raw | 0.5 | 4/7 | 0.571 | [0.250, 0.842] |
+| laya (multilingual) | laya-zeroshot-7b928d82 | raw | val-selected, global 0.32 | 5/7 | 0.714 | [0.359, 0.918] |
+
+- false_positive: a counted message has no gold tag among the scored columns; it is a false positive when at least one scored column is predicted at θ (P >= θ). No-intent: all 48 columns. Out-of-domain: the 22 banking-only columns (the manifest's ood_scoring_tags)
+- wilson: 95% Wilson score interval, z = 1.959963984540054, no continuity correction
+
+The val no-intent set holds 7 messages (15 on test), so every interval is wide.
+
+### Caveat and definitions
+
+**Caveat:** in-sample: θ (and, for a fine-tuned model, T and the epoch) were chosen on these val messages, so these numbers are not held-out estimates (berturk-f24d8fe3c899-50e28523-29446b61, laya-047381259d3b-cf0f7846-cc216d59, laya-zeroshot-7b928d82).
+
+- bins: 15 equal-width bins [k/15, (k+1)/15), p = 1.0 in the last bin (Guo et al. 2017, M = 15)
+- brier: mean over every (message, tag) pair of (p - y)^2; the per-message sum over 48 tags is 48 x this
+- classwise_ece: Kull et al. 2019 Eq. 4: per tag, the sum over the 15 equal-width bins of |sum of y - sum of p| / n; averaged over all 48 tags, zero-support tags included
+- nll: mean binary cross-entropy over every (message, tag) pair, p clipped to [1e-12, 1 - 1e-12]
+<!-- confidence:end -->
+
+<!-- latency:start -->
+### Latency per message (Phase 7, EVAL-06): reported, not gated
+
+Latency is reported, not gated: it is not a decision criterion (a latency budget is DEC-01, v2).
+
+Rules:
+
+- batch 1, in-process, no Ray; one process per (system, device), every final seed of the final manifest
+- a message is one val row's text, passed unchanged to the checkpoint's tokenizer; its latency is the wall-clock seconds from that text to 48 probabilities on the host
+- the first --warmup messages (default 10) of each seed run first and are excluded; the report records the count
+- the device is synchronised right before t0 and right after the host copy (torch.mps.synchronize on mps, torch.cuda.synchronize on cuda, nothing on cpu), under torch.no_grad
+- fp32 with autocast off, checked after the load and after the timed loop
+- val messages only; only times are kept (no outputs, text or uids)
+- p50 and p95 are nearest-rank with integer ranks s[(q * n + 99) // 100 - 1], never interpolated
+
+#### berturk on cpu
+
+Timed path: BertForSequenceClassification fp32 -> tokenizer of one message (truncated at the record max_len) -> one forward -> logits to host -> sigmoid(logit / T).
+
+- Device cpu, torch.float32, autocast off, torch threads 4, warm-up 10 message(s) excluded, batch 1
+- Versions: numpy 2.5.4, torch 2.14.1, transformers 5.19.0; PYTORCH_ENABLE_MPS_FALLBACK unset
+- Code: ff65d2f1c675, uncommitted changes
+- Messages: 208 val messages of splits/val.jsonl (sha256 95f5cfe5ae59); final manifest results/postfit/berturk-final.json (sha256 0a611f198fcf, committed: True)
+- Preflight: 8.01 GiB available (threshold 7.0), swap grew while idle: False
+- Swap in use: 0 MiB before, 0 MiB after the timed loops
+
+| Seed | Checkpoint | n | p50 ms | p95 ms | mean ms | min ms | max ms |
+|---|---|---|---|---|---|---|---|
+| 0 | ckpt-berturk-final-s0 | 208 | 25.4 | 27.0 | 25.4 | 20.4 | 50.2 |
+| 1 | ckpt-berturk-final-s1 | 208 | 25.9 | 27.5 | 25.9 | 21.1 | 29.1 |
+| 2 | ckpt-berturk-final-s2 | 208 | 25.9 | 27.2 | 25.9 | 20.5 | 29.8 |
+| pooled | 3 seed(s) | 624 | 25.8 | 27.2 | 25.7 | 20.4 | 50.2 |
+
+#### berturk on mps
+
+Timed path: BertForSequenceClassification fp32 -> tokenizer of one message (truncated at the record max_len) -> one forward -> logits to host -> sigmoid(logit / T).
+
+- Device mps, torch.float32, autocast off, torch threads 4, warm-up 10 message(s) excluded, batch 1
+- Versions: numpy 2.5.4, torch 2.14.1, transformers 5.19.0; PYTORCH_ENABLE_MPS_FALLBACK unset
+- Code: a5d790e560b3
+- Messages: 208 val messages of splits/val.jsonl (sha256 95f5cfe5ae59); final manifest results/postfit/berturk-final.json (sha256 0a611f198fcf, committed: True)
+- Preflight: 7.58 GiB available (threshold 7.0), swap grew while idle: False
+- Swap in use: 0 MiB before, 0 MiB after the timed loops
+
+| Seed | Checkpoint | n | p50 ms | p95 ms | mean ms | min ms | max ms |
+|---|---|---|---|---|---|---|---|
+| 0 | ckpt-berturk-final-s0 | 208 | 9.7 | 14.2 | 13.5 | 7.9 | 177.0 |
+| 1 | ckpt-berturk-final-s1 | 208 | 9.4 | 11.7 | 9.6 | 7.9 | 12.6 |
+| 2 | ckpt-berturk-final-s2 | 208 | 9.5 | 11.7 | 9.6 | 8.0 | 12.9 |
+| pooled | 3 seed(s) | 624 | 9.5 | 11.8 | 10.9 | 7.9 | 177.0 |
+
+#### laya on cpu
+
+Timed path: laya.load (digests) -> la.force_fp32 -> la.noul_logits of one message (48 noul questions, one forward) -> sigmoid(margin / T) on the host.
+
+- Device cpu, torch.float32, autocast off, torch threads 4, warm-up 10 message(s) excluded, batch 1
+- Versions: laya 0.4.6, numpy 2.5.4, torch 2.14.1, transformers 5.19.0; PYTORCH_ENABLE_MPS_FALLBACK unset
+- Code: ff65d2f1c675, uncommitted changes
+- Messages: 208 val messages of splits/val.jsonl (sha256 95f5cfe5ae59); final manifest results/postfit/laya-final.json (sha256 3d0b1a91e00e, committed: True)
+- Preflight: 8.46 GiB available (threshold 7.0), swap grew while idle: False
+- Swap in use: 0 MiB before, 0 MiB after the timed loops
+
+| Seed | Checkpoint | n | p50 ms | p95 ms | mean ms | min ms | max ms |
+|---|---|---|---|---|---|---|---|
+| 0 | ckpt-final-s0 | 208 | 682.2 | 829.8 | 693.2 | 568.2 | 1021.2 |
+| 1 | ckpt-final-s1 | 208 | 693.0 | 817.1 | 698.3 | 578.8 | 1033.2 |
+| 2 | ckpt-final-s2 | 208 | 692.2 | 822.1 | 700.9 | 573.2 | 1041.1 |
+| pooled | 3 seed(s) | 624 | 691.0 | 821.8 | 697.5 | 568.2 | 1041.1 |
+
+#### laya on mps
+
+Timed path: laya.load (digests) -> la.force_fp32 -> la.noul_logits of one message (48 noul questions, one forward) -> sigmoid(margin / T) on the host.
+
+- Device mps, torch.float32, autocast off, torch threads 4, warm-up 10 message(s) excluded, batch 1
+- Versions: laya 0.4.6, numpy 2.5.4, torch 2.14.1, transformers 5.19.0; PYTORCH_ENABLE_MPS_FALLBACK unset
+- Code: ff65d2f1c675
+- Messages: 208 val messages of splits/val.jsonl (sha256 95f5cfe5ae59); final manifest results/postfit/laya-final.json (sha256 3d0b1a91e00e, committed: True)
+- Preflight: 7.85 GiB available (threshold 7.0), swap grew while idle: False
+- Swap in use: 0 MiB before, 0 MiB after the timed loops
+
+| Seed | Checkpoint | n | p50 ms | p95 ms | mean ms | min ms | max ms |
+|---|---|---|---|---|---|---|---|
+| 0 | ckpt-final-s0 | 208 | 320.9 | 390.1 | 325.8 | 264.5 | 492.6 |
+| 1 | ckpt-final-s1 | 208 | 330.7 | 406.3 | 339.0 | 277.4 | 518.0 |
+| 2 | ckpt-final-s2 | 208 | 331.5 | 406.9 | 339.6 | 280.7 | 518.0 |
+| pooled | 3 seed(s) | 624 | 329.4 | 404.8 | 334.8 | 264.5 | 518.0 |
+
+Laya's own fp16 autocast default on MPS (laya_default_amp) is not what is timed: every run is fp32 with autocast off, the path that scored the dumps.
+<!-- latency:end -->
 
 ## Results (Phase 3: baselines and zero-shot, full test split)
 

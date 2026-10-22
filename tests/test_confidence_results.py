@@ -28,6 +28,8 @@
   committed manifest and the record it is bound to (needs `make data`, because the gold labels come from the verified
   splits), and a record bound to a postfit candidate reproduces that candidate's nll_fitted (headline) and nll_raw
   (raw) within 1e-8
+- README.md holds exactly one confidence block, in the Phase 7 section, and it equals report.render_confidence of the
+  committed records (`report.py --confidence-table results/confidence`), so a hand edit or a stale block fails (A9)
 """
 import glob
 import json
@@ -355,3 +357,27 @@ def test_render_refuses_a_non_confidence_record(bad):
         report.render_svg(bad)
     with pytest.raises(SystemExit, match="no confidence records"):
         report.render_confidence([])
+
+
+README = os.path.join(REPO_ROOT, "README.md")
+CONFIDENCE_START, CONFIDENCE_END = "<!-- confidence:start -->", "<!-- confidence:end -->"
+PHASE7_HEADING = "## Confidence, out-of-domain and latency metrics (Phase 7)"
+
+
+def test_readme_confidence_block_matches_render():
+    """The README block between the confidence markers is report.render_confidence of the committed records (sorted
+    path order, as `report.py --confidence-table results/confidence` reads them); a hand edit or a stale block fails."""
+    with open(README, encoding="utf-8") as f:
+        text = f.read()
+    assert text.count(CONFIDENCE_START) == 1 and text.count(CONFIDENCE_END) == 1, \
+        "README.md must hold exactly one pair of the confidence markers"
+    i, j = text.index(CONFIDENCE_START), text.index(CONFIDENCE_END)
+    assert i < j, "the confidence end marker comes before the start marker"
+    records = [r for _, r in committed()]
+    assert records, "no tracked confidence record under results/confidence/"
+    assert text[i + len(CONFIDENCE_START):j].strip() == report.render_confidence(records).strip(), (
+        "the README confidence block differs from report.render_confidence of the committed records; "
+        "regenerate it with `python report.py --confidence-table results/confidence`")
+    assert text.count(PHASE7_HEADING) == 1 and text.index(PHASE7_HEADING) < i, \
+        "the confidence block is not in the Phase 7 section"
+    assert report.IN_SAMPLE_CAVEAT in text[i:j] and report.CONFIDENCE_DISCLOSURE in text[i:j]
