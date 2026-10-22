@@ -25,6 +25,10 @@ and numbers only) get the sidecar check too, and only <run_id>-val.json and <run
 A HOTELS dump results/dumps/<run_id>/hotels_probe.{npz,json} is an allowed path for Phase 8 (hotel_<fold>_<index> uids
 only there, bank uids only in val and test dumps), but none may be tracked in Phase 7: score.py scores nothing on HOTELS
 until Phase 8 opens it behind its protocol gate (test_no_hotels_probe_dump_before_phase_8, 07-RESEARCH A7).
+The Phase 7 latency reports (EVAL-06: times, digests and repo-relative paths only) get the sidecar check too,
+and only results/latency/(laya|berturk)-(mps|cpu).json and results/latency/latency.md may be tracked there. Their
+per-seed "state" is the checked {device, dtype, amp_enabled} dict, the one "state" value the message-text key check
+allows (CHECKED_STATE_KEYS); a string or any other "state" is still a finding.
 """
 import io
 import json
@@ -39,6 +43,8 @@ pytestmark = pytest.mark.unit
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MESSAGE_TEXT_KEYS = ("state", "text")
+# the checked fp32 state latency.py records per seed under "state" (EVAL-06): never message text, which is a string
+CHECKED_STATE_KEYS = {"device", "dtype", "amp_enabled"}
 UID_RE = re.compile(r"^bank_[0-9]+_[0-9]+$")       # split uids are bank_<fold>_<index>; never text-like
 HOTEL_UID_RE = re.compile(r"^hotel_[0-9]+_[0-9]+$")  # hotels_probe uids are hotel_<fold>_<index>, only in hotels dumps
 DUMP_KEYS = {"logits", "uids"}
@@ -49,6 +55,8 @@ SUPERSEDED_PATH_RE = re.compile(r"^results/superseded/[^/]+/(README\.md|postfit/
 # Phase 7 commits val confidence records only (no test or HOTELS confidence numbers before Phase 8); Phase 8 widens
 # this pin together with its protocol gate
 CONFIDENCE_PATH_RE = re.compile(r"^results/confidence/[^/]+-val\.(json|svg)$")
+# Phase 7 latency (EVAL-06): one report per (system, device) of the final seeds, and their markdown
+LATENCY_PATH_RE = re.compile(r"^results/latency/((laya|berturk)-(mps|cpu)\.json|latency\.md)$")
 # Coarse backstop only: the longest legitimate manifest value is a 64-char sha256, but message text is often far
 # shorter ("Evet.", "cari hesap"), so length cannot detect it. The key-name check and, when the split files exist
 # locally, the exact-text check below are the real guards.
@@ -142,7 +150,7 @@ def text_problems(obj, home, texts):
     problems = []
     for p, k, v in walk(obj):
         where = p if k is None else "%s.%s" % (p, k)
-        if k in MESSAGE_TEXT_KEYS:
+        if k in MESSAGE_TEXT_KEYS and not (k == "state" and isinstance(v, dict) and set(v) == CHECKED_STATE_KEYS):
             problems.append("message-text key at %s" % where)
         if k is not None and k in texts:
             problems.append("split message text used as a key under %s" % p)
@@ -255,7 +263,7 @@ def test_tracked_dumps_hold_only_uids_and_logits():
 def test_tracked_sidecars_and_reports_hold_no_text_or_paths():
     home, texts = home_dir(), local_split_texts()
     rels = [f for f in tracked("results/dumps/", "results/reports/", "results/compute/", "results/postfit/",
-                               "results/superseded/", "results/confidence/") if f.endswith(".json")]
+                               "results/superseded/", "results/confidence/", "results/latency/") if f.endswith(".json")]
     bad = {rel: p for rel in _existing(rels) for p in [sidecar_problems(os.path.join(REPO_ROOT, rel), home, texts)]
            if p}
     assert bad == {}, "tracked sidecars or reports hold text, local paths or subset runs: %s" % bad
@@ -281,6 +289,23 @@ def test_only_confidence_files_under_results_confidence():
 ])
 def test_confidence_path_pin_flags_planted_paths(rel, ok):
     assert bool(CONFIDENCE_PATH_RE.match(rel)) is ok, rel
+
+
+def test_only_latency_files_under_results_latency():
+    bad = [f for f in tracked("results/latency/") if not LATENCY_PATH_RE.match(f)]
+    assert bad == [], "only results/latency/(laya|berturk)-(mps|cpu).json and latency.md may be tracked: %s" % bad
+
+
+@pytest.mark.parametrize("rel,ok", [
+    ("results/latency/laya-mps.json", True),
+    ("results/latency/berturk-cpu.json", True),
+    ("results/latency/latency.md", True),
+    ("results/latency/laya-cuda.json", False),
+    ("results/latency/notes.txt", False),
+    ("results/latency/sub/laya-mps.json", False),
+])
+def test_latency_path_pin_flags_planted_paths(rel, ok):
+    assert bool(LATENCY_PATH_RE.match(rel)) is ok, rel
 
 
 def test_only_dump_files_under_results_dumps():
@@ -384,6 +409,10 @@ def _planted(**change):
 PLANTED_SIDECARS = {            # name -> (sidecar builder, expected finding fragment or None for clean)
     "clean": (lambda home: _planted(), None),
     "state_key": (lambda home: _planted(state="x"), "message-text key at $.state"),
+    "checked_state": (lambda home: _planted(system__state={"device": "mps", "dtype": "torch.float32",
+                                                           "amp_enabled": False}), None),
+    "state_dict_other_keys": (lambda home: _planted(system__state={"device": "mps", "note": "x"}),
+                              "message-text key at $.system.state"),
     "nested_text_key": (lambda home: _planted(system__meta__text="x"), "message-text key at $.system.meta.text"),
     "home_path": (lambda home: _planted(system__checkpoint=home + "/ckpt"), "local home path at $.system.checkpoint"),
     "n_subset": (lambda home: _planted(n_subset=5), "n_subset is not null"),

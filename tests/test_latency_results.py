@@ -1,0 +1,103 @@
+"""The committed latency reports (plan 07-07, EVAL-06) are the real M4 runs of the final seeds and stay consistent with
+the code: reported, not gated.
+
+- every tracked results/latency/*.json is a latency/1 report labelled "reported, not gated" of one system (laya or
+  berturk) on mps or cpu, bound to the committed final manifest results/postfit/<system>-final.json (its sha256,
+  is_committed true) and timing exactly that manifest's seeds in order (seed, train run id, checkpoint name and
+  identity, dump run id, served T)
+- the protocol is the one latency.py fixes: pilot.latency.WARMUP warm-up messages, pilot.latency.THREADS torch threads,
+  fp32 with autocast off on the report's device for every seed, all 208 messages of the committed val split (its
+  sha256 and uids_sha256 equal to data/splits.json's val entry)
+- every per-seed and pooled summary recomputes from the stored times with pilot.latency.summarize, so no number can be
+  edited by hand
+- each report passes the repository's sidecar text and path check (no message text, no uid list, no local path)
+"""
+import json
+import math
+import os
+import subprocess
+
+import pytest
+
+from pilot import latency
+from pilot.data import DEFAULT_MANIFEST, REPO_ROOT, sha256_file
+from test_repo_hygiene import home_dir, local_split_texts, sidecar_problems
+
+pytestmark = pytest.mark.unit
+
+LATENCY = os.path.join(REPO_ROOT, "results", "latency")
+DEVICES = ("mps", "cpu")
+N_VAL = 208
+SEED_KEYS = ("seed", "train_run_id", "checkpoint_name", "checkpoint_identity", "dump_run_id", "temperature")
+
+
+def committed():
+    """[(repo-relative path, parsed report)] of the tracked results/latency/*.json, in sorted order (git ls-files)."""
+    out = subprocess.run(["git", "ls-files", "-z", "--", "results/latency/"], cwd=REPO_ROOT, check=True,
+                         capture_output=True, text=True, encoding="utf-8")
+    rels = sorted(f for f in out.stdout.split("\0") if f.endswith(".json"))
+    reports = []
+    for rel in rels:
+        with open(os.path.join(REPO_ROOT, rel), encoding="utf-8") as f:
+            reports.append((rel, json.load(f)))
+    return reports
+
+
+@pytest.fixture(scope="module")
+def reports():
+    found = committed()
+    assert found, "no latency report is tracked under results/latency/"
+    return found
+
+
+def test_committed_reports_bind_the_final_manifests(reports):
+    for rel, r in reports:
+        assert r["schema"] == latency.SCHEMA and r["label"] == latency.LABEL, rel
+        assert r["system"] in latency.SYSTEMS and r["device"] in DEVICES, rel
+        fm = r["final_manifest"]
+        path = "results/postfit/%s-final.json" % r["system"]
+        assert fm["path"] == path, rel
+        assert fm["sha256"] == sha256_file(os.path.join(REPO_ROOT, path)), \
+            "%s was timed against another %s than the committed one" % (rel, path)
+        assert fm["is_committed"] is True, rel
+        with open(os.path.join(REPO_ROOT, path), encoding="utf-8") as f:
+            manifest = json.load(f)
+        assert [{k: s[k] for k in SEED_KEYS} for s in r["seeds"]] == \
+            [{k: s[k] for k in SEED_KEYS} for s in manifest["seeds"]], \
+            "%s does not time exactly the final seeds of %s in order" % (rel, path)
+
+
+def test_protocol_settings(reports):
+    with open(DEFAULT_MANIFEST, encoding="utf-8") as f:
+        val = json.load(f)["splits"]["val"]
+    for rel, r in reports:
+        assert r["warmup"] == latency.WARMUP and r["threads"] == latency.THREADS, rel
+        assert r["dtype"] == "torch.float32" and r["amp_enabled"] is False, rel
+        for s in r["seeds"]:
+            assert s["state"] == {"device": r["device"], "dtype": "torch.float32", "amp_enabled": False}, \
+                "%s seed %d" % (rel, s["seed"])
+        sp = r["split"]
+        assert sp["name"] == "val" and sp["n_messages"] == N_VAL, rel
+        assert sp["sha256"] == val["sha256"] and sp["uids_sha256"] == val["uids_sha256"], \
+            "%s was not timed on the committed val split" % rel
+
+
+def test_summaries_recompute_from_times(reports):
+    for rel, r in reports:
+        pooled = []
+        for s in r["seeds"]:
+            times = s["times_s"]
+            where = "%s seed %d on %s" % (r["system"], s["seed"], r["device"])
+            assert len(times) == N_VAL, "%s seed %d" % (rel, s["seed"])
+            assert all(isinstance(t, float) and math.isfinite(t) and t > 0 for t in times), \
+                "%s seed %d" % (rel, s["seed"])
+            assert s["summary"] == latency.summarize(times, where), "%s seed %d" % (rel, s["seed"])
+            pooled += times
+        assert r["pooled"] == latency.summarize(pooled, rel), rel
+        assert r["pooled"]["n"] == N_VAL * len(r["seeds"]), rel
+
+
+def test_reports_hold_no_text_or_paths(reports):
+    home, texts = home_dir(), local_split_texts()
+    bad = {rel: p for rel, _ in reports for p in [sidecar_problems(os.path.join(REPO_ROOT, rel), home, texts)] if p}
+    assert bad == {}, "latency reports hold text, local paths or subset runs: %s" % bad
