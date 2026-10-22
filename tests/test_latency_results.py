@@ -22,6 +22,8 @@ the code: reported, not gated.
   times: p < 1e-7 for both Laya reports, no effect (p > 0.05) for both BERTurk reports (07-REVIEW WR-01)
 - pilot.latency.RULES' one warm-up line, both latency module docstrings and the README Phase 7 prose state the
   seed-order limit, and no doc or code file repeats the old position-independence claim (07-REVIEW WR-01, IN-05)
+- the four reports' recorded rules differ from pilot.latency.RULES at rule 3 (the warm-up line, the text in force when
+  they were timed); render_markdown marks each, and the README prose says so (07-REVIEW WR-02)
 """
 import json
 import math
@@ -131,6 +133,50 @@ def test_markdown_matches_render():
     assert latency.LABEL in md
 
 
+RULES_DRIFT = {"berturk-cpu": [3], "berturk-mps": [3], "laya-cpu": [3], "laya-mps": [3]}
+RULES_FIELD_DISCLOSURE = (
+    "The `rules` field of each of the four reports keeps the rules text in force when it was timed: its warm-up line "
+    "(rule 3) still says that a seed's times do not depend on when the seed runs, a claim this design cannot support "
+    "(see above). The reports are the audit record and stay as timed; the rules in the generated block below are the "
+    "current wording, and the block marks every report whose recorded rules differ from them.")
+
+
+def test_recorded_rules_drift_is_disclosed(reports):
+    """Each committed report keeps the rules text in force when it was timed, so its recorded rule 3 (the warm-up line)
+    differs from pilot.latency.RULES; rules_drift finds exactly that set, render_markdown marks each report, the
+    README says so, and the paraphrase is bound to the recorded text (07-REVIEW WR-02)."""
+    by_name = {os.path.basename(rel)[:-len(".json")]: r for rel, r in reports}
+    drift = {name: latency.rules_drift(r) for name, r in by_name.items()}
+    assert drift == RULES_DRIFT, \
+        "rules_drift of the committed reports is %r, not RULES_DRIFT %r; update RULES_DRIFT and the README Phase 7 " \
+        "prose (07-REVIEW WR-02)" % (drift, RULES_DRIFT)
+    warm = "warm-up (%s)" % latency.WARMUP_POLICY
+    for name, r in by_name.items():
+        assert len(r["rules"]) == len(latency.RULES), \
+            "%s records %d rules, RULES holds %d" % (name, len(r["rules"]), len(latency.RULES))
+        own = [i for i, (a, b) in enumerate(zip(r["rules"], latency.RULES), 1) if a != b]
+        assert own == RULES_DRIFT[name], "%s: rules differ at %r, not %r" % (name, own, RULES_DRIFT[name])
+        assert r["rules"][2].startswith(warm) and latency.RULES[2].startswith(warm), \
+            "%s: recorded rule 3 and RULES[2] must both be the %r line" % (name, warm)
+        assert OLD_CLAIMS[0] in r["rules"][2], \
+            "%s: recorded rule 3 no longer holds %r, which the README paraphrases" % (name, OLD_CLAIMS[0])
+    md = latency.render_markdown(latency.load_reports(LATENCY))
+    assert md.count(latency.RULES_DRIFT_LINE % "3") == len(RULES_DRIFT), \
+        "the render marks %d report(s) as drifting at rule 3, not %d" \
+        % (md.count(latency.RULES_DRIFT_LINE % "3"), len(RULES_DRIFT))
+    assert "3. %s" % warm in md, "the render does not number the rules (no %r)" % ("3. %s" % warm)
+    assert RULES_FIELD_DISCLOSURE in " ".join(phase7_prose().split()), \
+        "the README Phase 7 prose must state %r (07-REVIEW WR-02)" % RULES_FIELD_DISCLOSURE
+    base = by_name["laya-cpu"]
+    same = dict(base, rules=list(latency.RULES))
+    assert latency.rules_drift(same) == [], latency.rules_drift(same)
+    assert "Recorded rules" not in latency.render_markdown([same])
+    short = dict(base, rules=list(latency.RULES)[:-1])
+    assert latency.rules_drift(short) == [len(latency.RULES)], latency.rules_drift(short)
+    bare = {k: v for k, v in base.items() if k != "rules"}
+    assert latency.rules_drift(bare) == list(range(1, len(latency.RULES) + 1)), latency.rules_drift(bare)
+
+
 README = os.path.join(REPO_ROOT, "README.md")
 LATENCY_START, LATENCY_END = "<!-- latency:start -->", "<!-- latency:end -->"
 PHASE7_HEADING = "## Confidence, out-of-domain and latency metrics (Phase 7)"
@@ -197,7 +243,8 @@ def test_readme_discloses_the_seed_order_effect(reports):
 
 
 SEED_ORDER_LIMIT = "a residual seed-order effect is not separated from a seed effect"
-OLD_CLAIMS = ("depends on its position", "independent of its position", "those included")
+OLD_CLAIMS = ("depends on its position", "independent of its position", "those included",
+              "first-occurrence costs are paid")
 
 
 def test_latency_wording_states_the_seed_order_limit():

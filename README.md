@@ -623,8 +623,12 @@ definitions in its protocol; nothing here is a test or held-out result.
   1e-7). This design cannot tell whether it comes from seed 0's weights or from running first. BERTurk shows none
   (100/208 on CPU, 104/208 on MPS). The four reports were regenerated under this policy. The first runs warmed each
   seed on 10 messages only, so the first seed in each process paid one-time costs such as MPS kernel compilation for
-  each new input shape. Laya's own fp16 autocast default on MPS is not what is timed. Latency is reported, not gated:
-  it is not a decision criterion in this pilot. The Laya CPU report (`laya-cpu.json`) records uncommitted changes.
+  each new input shape. The `rules` field of each of the four reports keeps the rules text in force when it was timed:
+  its warm-up line (rule 3) still says that a seed's times do not depend on when the seed runs, a claim this design
+  cannot support (see above). The reports are the audit record and stay as timed; the rules in the generated block
+  below are the current wording, and the block marks every report whose recorded rules differ from them. Laya's own
+  fp16 autocast default on MPS is not what is timed. Latency is reported, not gated: it is not a decision criterion in
+  this pilot. The Laya CPU report (`laya-cpu.json`) records uncommitted changes.
 
 ```bash
 # the three val confidence records and their reliability diagrams, rebuilt from the committed dumps (no model)
@@ -730,19 +734,20 @@ Latency is reported, not gated: it is not a decision criterion (a latency budget
 
 Rules:
 
-- batch 1, in-process, no Ray; one process per (system, device), every final seed of the final manifest
-- a message is one val row's text, passed unchanged to the checkpoint's tokenizer; its latency is the wall-clock seconds from that text to 48 probabilities on the host
-- warm-up (full_pass_per_seed): after each seed's load, one untimed forward of every message the seed then times, in split-file order, then one device sync; only then is every message timed; so every seed follows the same sequence and every input it times has already run once on its model in this process (first-occurrence costs are paid before any timed loop); the seeds run in manifest order, so a residual seed-order effect is not separated from a seed effect; the report records the policy and the count
-- the device is synchronised right before t0 and right after the host copy (torch.mps.synchronize on mps, torch.cuda.synchronize on cuda, nothing on cpu), under torch.no_grad
-- fp32 with autocast off, checked after the load and after the timed loop
-- val messages only; only times are kept (no outputs, text or uids)
-- p50 and p95 are nearest-rank with integer ranks s[(q * n + 99) // 100 - 1], never interpolated
+1. batch 1, in-process, no Ray; one process per (system, device), every final seed of the final manifest
+2. a message is one val row's text, passed unchanged to the checkpoint's tokenizer; its latency is the wall-clock seconds from that text to 48 probabilities on the host
+3. warm-up (full_pass_per_seed): after each seed's load, one untimed forward of every message the seed then times, in split-file order, then one device sync; only then is every message timed; so every seed follows the same sequence and every input it times has already run once on its model in this process; the seeds run in manifest order, so a residual seed-order effect is not separated from a seed effect; the report records the policy and the count
+4. the device is synchronised right before t0 and right after the host copy (torch.mps.synchronize on mps, torch.cuda.synchronize on cuda, nothing on cpu), under torch.no_grad
+5. fp32 with autocast off, checked after the load and after the timed loop
+6. val messages only; only times are kept (no outputs, text or uids)
+7. p50 and p95 are nearest-rank with integer ranks s[(q * n + 99) // 100 - 1], never interpolated
 
 #### berturk on cpu
 
 Timed path: BertForSequenceClassification fp32 -> tokenizer of one message (truncated at the record max_len) -> one forward -> logits to host -> sigmoid(logit / T).
 
 - Device cpu, torch.float32, autocast off, torch threads 4, batch 1; warm-up full_pass_per_seed: one untimed pass over all 208 message(s) per seed before its timed loop
+- Recorded rules: this report's `rules` field differs from the rules above at rule(s) 3; it keeps the text in force when the report was timed, and the rules above are the current wording
 - Versions: numpy 2.5.4, torch 2.14.1, transformers 5.19.0; PYTORCH_ENABLE_MPS_FALLBACK unset
 - Code: 3beea81ca966
 - Messages: 208 val messages of splits/val.jsonl (sha256 95f5cfe5ae59); final manifest results/postfit/berturk-final.json (sha256 0a611f198fcf, committed: True)
@@ -761,6 +766,7 @@ Timed path: BertForSequenceClassification fp32 -> tokenizer of one message (trun
 Timed path: BertForSequenceClassification fp32 -> tokenizer of one message (truncated at the record max_len) -> one forward -> logits to host -> sigmoid(logit / T).
 
 - Device mps, torch.float32, autocast off, torch threads 4, batch 1; warm-up full_pass_per_seed: one untimed pass over all 208 message(s) per seed before its timed loop
+- Recorded rules: this report's `rules` field differs from the rules above at rule(s) 3; it keeps the text in force when the report was timed, and the rules above are the current wording
 - Versions: numpy 2.5.4, torch 2.14.1, transformers 5.19.0; PYTORCH_ENABLE_MPS_FALLBACK unset
 - Code: e8e326f4e1a3
 - Messages: 208 val messages of splits/val.jsonl (sha256 95f5cfe5ae59); final manifest results/postfit/berturk-final.json (sha256 0a611f198fcf, committed: True)
@@ -779,6 +785,7 @@ Timed path: BertForSequenceClassification fp32 -> tokenizer of one message (trun
 Timed path: laya.load (digests) -> la.force_fp32 -> la.noul_logits of one message (48 noul questions, one forward) -> sigmoid(margin / T) on the host.
 
 - Device cpu, torch.float32, autocast off, torch threads 4, batch 1; warm-up full_pass_per_seed: one untimed pass over all 208 message(s) per seed before its timed loop
+- Recorded rules: this report's `rules` field differs from the rules above at rule(s) 3; it keeps the text in force when the report was timed, and the rules above are the current wording
 - Versions: laya 0.4.6, numpy 2.5.4, torch 2.14.1, transformers 5.19.0; PYTORCH_ENABLE_MPS_FALLBACK unset
 - Code: bbf1a8543ed9, uncommitted changes
 - Messages: 208 val messages of splits/val.jsonl (sha256 95f5cfe5ae59); final manifest results/postfit/laya-final.json (sha256 3d0b1a91e00e, committed: True)
@@ -797,6 +804,7 @@ Timed path: laya.load (digests) -> la.force_fp32 -> la.noul_logits of one messag
 Timed path: laya.load (digests) -> la.force_fp32 -> la.noul_logits of one message (48 noul questions, one forward) -> sigmoid(margin / T) on the host.
 
 - Device mps, torch.float32, autocast off, torch threads 4, batch 1; warm-up full_pass_per_seed: one untimed pass over all 208 message(s) per seed before its timed loop
+- Recorded rules: this report's `rules` field differs from the rules above at rule(s) 3; it keeps the text in force when the report was timed, and the rules above are the current wording
 - Versions: laya 0.4.6, numpy 2.5.4, torch 2.14.1, transformers 5.19.0; PYTORCH_ENABLE_MPS_FALLBACK unset
 - Code: bbf1a8543ed9
 - Messages: 208 val messages of splits/val.jsonl (sha256 95f5cfe5ae59); final manifest results/postfit/laya-final.json (sha256 3d0b1a91e00e, committed: True)

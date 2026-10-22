@@ -20,7 +20,9 @@ output, message text, uid list, timestamp or local path enters a report.
 Statistics: nearest-rank percentiles with integer ranks, s[(q * n + 99) // 100 - 1] for an integer percent q (never
 interpolated; never math.ceil(q / 100 * n), whose float product can land one rank off: 07-RESEARCH Pitfall 3). n 208:
 p50 is the 104th and p95 the 198th smallest time. Latency is reported, not gated: LABEL is in every report and in the
-markdown (REP-01 (c)); a latency budget is DEC-01 (v2).
+markdown (REP-01 (c)); a latency budget is DEC-01 (v2). A report keeps the RULES text in force when it was timed;
+render_markdown numbers the current RULES and marks every report whose recorded rules differ from them (rules_drift,
+07-REVIEW WR-02).
 
 usage: from pilot import latency
        times = latency.time_messages(fn, texts, sync)          # inside torch.no_grad(), right after the seed's load
@@ -56,15 +58,17 @@ RULES = [
     "seconds from that text to 48 probabilities on the host",
     "warm-up (%s): after each seed's load, one untimed forward of every message the seed then times, in split-file "
     "order, then one device sync; only then is every message timed; so every seed follows the same sequence and every "
-    "input it times has already run once on its model in this process (first-occurrence costs are paid before any "
-    "timed loop); the seeds run in manifest order, so a residual seed-order effect is not separated from a seed "
-    "effect; the report records the policy and the count" % WARMUP_POLICY,
+    "input it times has already run once on its model in this process; the seeds run in manifest order, so a residual "
+    "seed-order effect is not separated from a seed effect; the report records the policy and the count"
+    % WARMUP_POLICY,
     "the device is synchronised right before t0 and right after the host copy (torch.mps.synchronize on mps, "
     "torch.cuda.synchronize on cuda, nothing on cpu), under torch.no_grad",
     "fp32 with autocast off, checked after the load and after the timed loop",
     "val messages only; only times are kept (no outputs, text or uids)",
     "p50 and p95 are nearest-rank with integer ranks s[(q * n + 99) // 100 - 1], never interpolated",
 ]
+RULES_DRIFT_LINE = ("- Recorded rules: this report's `rules` field differs from the rules above at rule(s) %s; it "
+                    "keeps the text in force when the report was timed, and the rules above are the current wording")
 SUMMARY_KEYS = ("n", "min", "p50", "p95", "mean", "max")
 
 
@@ -199,6 +203,16 @@ def swap_grew(report):
     return before is not None and after is not None and after > before
 
 
+def rules_drift(report):
+    """The ascending 1-based positions at which a report's recorded `rules` differ from RULES (a position on one side
+    only counts; a missing or non-list `rules` is empty); [] when it records RULES exactly. A report keeps the rules
+    text in force when it was timed, so a later wording change shows here and in render_markdown (07-REVIEW WR-02)."""
+    rec = report.get("rules")
+    rec = rec if isinstance(rec, list) else []
+    return [i for i in range(1, max(len(rec), len(RULES)) + 1)
+            if (rec[i - 1] if i <= len(rec) else None) != (RULES[i - 1] if i <= len(RULES) else None)]
+
+
 def _ms(v):
     return "%.1f" % (1000.0 * v)
 
@@ -221,6 +235,9 @@ def _report_lines(r):
                  "message(s) per seed before its timed loop"
                  % (r["device"], r.get("dtype"), "on" if r.get("amp_enabled") else "off", r["threads"],
                     r.get("warmup_policy"), r["warmup"]))
+    drift = rules_drift(r)
+    if drift:
+        lines.append(RULES_DRIFT_LINE % ", ".join(str(i) for i in drift))
     lines.append("- Versions: %s; PYTORCH_ENABLE_MPS_FALLBACK %s"
                  % (", ".join("%s %s" % kv for kv in sorted(v.items())) or "-", r.get("mps_fallback_env") or "unset"))
     lines.append("- Code: %s%s" % (sha[:12] if sha else "no git",
@@ -246,12 +263,14 @@ def _report_lines(r):
 
 
 def render_markdown(reports):
-    """Markdown of latency/1 reports (sorted by system, then device): the label, the rules, then per report the timed
-    path, a busy-machine banner when the preflight was overridden or swap grew (idle or during the timed loops), the
-    provenance and one row per seed plus a pooled row. Milliseconds with one decimal, for display only."""
+    """Markdown of latency/1 reports (sorted by system, then device): the label, the current RULES as a numbered list,
+    then per report the timed path, a busy-machine banner when the preflight was overridden or swap grew (idle or
+    during the timed loops), the provenance (with a Recorded rules line, RULES_DRIFT_LINE, when the report's recorded
+    rules differ from RULES: rules_drift) and one row per seed plus a pooled row. Milliseconds with one decimal, for
+    display only."""
     lines = ["### Latency per message (Phase 7, EVAL-06): %s" % LABEL, "",
              "Latency is %s: it is not a decision criterion (a latency budget is DEC-01, v2)." % LABEL, "",
-             "Rules:", ""] + ["- %s" % rule for rule in RULES]
+             "Rules:", ""] + ["%d. %s" % (i, rule) for i, rule in enumerate(RULES, 1)]
     for r in sorted(reports, key=lambda r: (r["system"], r["device"])):
         lines += _report_lines(r)
     lines += ["", "Laya's own fp16 autocast default on MPS (laya_default_amp) is not what is timed: every run is fp32 "
