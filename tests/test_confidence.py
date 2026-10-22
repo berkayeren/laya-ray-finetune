@@ -24,7 +24,8 @@ candidates written like score.py's (tests/test_postfit.py write_candidate) with 
 over them, final seeds bound by training.postfit_sha256, and prior baselines scored by score.py. Every wrong
 combination is refused before a metric is computed; `import report` stays numpy only. A final seed reports on test and
 hotels_probe only (_write_split_dump): it is refused on val and, under a manifest copy whose test entry holds val or
-final_train content, on that content too, because final_train holds the val folds (07-REVIEW WR-01).
+final_train content, on that content too, because final_train holds the val folds (07-REVIEW WR-01), in every report
+mode: run_report (so evaluate.py, a --n subset val dump included) and --compare refuse it as well (07-09 review CR-01).
 
 The relabelled-manifest tests (07-REVIEW CR-01) copy the snapshot's splits with val replaced by its test or HOTELS
 content (_relabel_copy, all of it or all but one row) and monkeypatch pilot.data.DEFAULT_MANIFEST to the snapshot's
@@ -598,6 +599,63 @@ def test_final_seed_refuses_training_content_under_any_manifest(tmp_path, snap, 
     monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", snap[1])     # after every dump: see the CR-01 tests
     with pytest.raises(SystemExit, match="holds committed %s content" % held):
         report.confidence_report(final, "test", rsnap[1], path)
+
+
+def _drop_val(run_dir):
+    for ext in ("npz", "json"):
+        os.remove(os.path.join(run_dir, "val." + ext))
+    return run_dir
+
+
+@pytest.mark.parametrize("source, held", [("val", "val"), ("selection_train", "final_train")])
+def test_final_seed_run_report_refuses_training_content(tmp_path, snap, fitted, monkeypatch, source, held):
+    """07-09 review CR-01: the final-seed refusal holds in report.py RUN_DIR and in evaluate.py (which prints
+    run_report), not only in --confidence. A final seed's run dir without a val dump (its val record is refused, so
+    Phase 8's run dirs have none) and a test dump of a manifest copy whose test entry holds val or final_train content
+    is refused, never reported at θ 0.5 under the test name; the snapshot's own test still reports, held-out."""
+    import evaluate
+    _, _, record, sha = fitted
+    rsnap = _relabel_copy(snap[0], snap[1], tmp_path / "r", "test", source)
+    final = _drop_val(_write_split_dump(_final_seed(tmp_path / "final", rsnap, record, sha), rsnap[1], "test"))
+    ok = _drop_val(_write_split_dump(_final_seed(tmp_path / "ok", snap, record, sha), snap[1], "test"))
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", snap[1])     # after every dump: see the CR-01 tests
+    want = "holds committed %s content" % held
+    with pytest.raises(SystemExit, match=want):
+        report.run_report(final, "test", rsnap[1])
+    monkeypatch.setattr(evaluate.score, "main", lambda argv: (final, "test"))     # the dump score.py wrote
+    with pytest.raises(SystemExit, match=want):
+        evaluate.main([os.path.join(rsnap[0], "splits", "test.jsonl"), "--manifest", rsnap[1]])
+    rep = report.run_report(ok, "test", snap[1])
+    assert rep["split"]["name"] == "test" and rep["theta_source"] is None
+    assert rep["variants"]["shipped"]["val_selected_reason"] == report.NO_VAL_REASON
+
+
+def test_final_seed_subset_val_dump_is_never_reported(tmp_path, snap, fitted):
+    """07-09 review CR-01, the second path: run_report reports a --n subset val dump on val without a θ source
+    (SUBSET_VAL_REASON), so refuse_in_sample_theta never sees it; a final seed's subset val dump is refused by name."""
+    _, _, record, sha = fitted
+    sub = write_candidate(tmp_path / "sub", snap, 2e-05, record["chosen"]["epoch"], split="final_train",
+                          calibrated=True, shipped=record["chosen"]["temperature"], postfit_sha256=sha, n=5)
+    with pytest.raises(SystemExit, match="trained on final_train, which holds the val folds"):
+        report.run_report(sub, "val", snap[1])
+
+
+def test_compare_refuses_a_final_seed_dump_on_training_content(tmp_path, snap, fitted, monkeypatch):
+    """07-09 review CR-01 in --compare: _load_side refuses the compared dump itself when it is a final seed's on
+    training content, so the rule holds even next to a val dump that is not a final seed's (a planted sidecar: every
+    real final seed is already refused there as an in-sample θ source); run_report refuses the same dir."""
+    _, _, record, sha = fitted
+    rsnap = _relabel_copy(snap[0], snap[1], tmp_path / "r", "test", "val")
+    d = _write_split_dump(write_candidate(tmp_path / "x", rsnap, 2e-05, 1), rsnap[1], "test")
+    logits, uids, side, _ = dumps.load_dump(d, "test", rsnap[1])
+    planted = {k: v for k, v in side.items() if k not in ("dump_sha256", "schema_version")}
+    planted["training"] = dict(side["training"], postfit_sha256=sha)
+    dumps.write_dump(d, "test", logits, uids, planted)
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", snap[1])
+    for call in (lambda: report.compare([d], [d], "test", rsnap[1], B=10),
+                 lambda: report.run_report(d, "test", rsnap[1])):
+        with pytest.raises(SystemExit, match="holds committed val content"):
+            call()
 
 
 def _prior(snap, root, splits=("val", "test"), model="prior"):

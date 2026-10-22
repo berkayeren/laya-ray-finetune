@@ -15,7 +15,10 @@ same way, with no system-specific branch (D-10, D-12):
   the key. A val dump of a model whose training saw val (a training block whose split is not
   pilot.data.TRAINED_ON["val"], selection_train, or that carries a postfit_sha256: a final seed on final_train, which
   holds the val folds) is refused as a θ source here and in --compare (refuse_in_sample_theta, 05-REVIEW WR-02): its
-  θ is the bound postfit record's, never re-selected on its own in-sample val. A θ-source val split holding committed
+  θ is the bound postfit record's, never re-selected on its own in-sample val. A final seed's dump is never reported
+  on content it trained on: on val (a --n subset too) or on a split holding committed val or final_train content
+  under any manifest it is refused, here (so in evaluate.py), in --compare and in the --confidence final_seed binding
+  (refuse_final_seed_training_content, 07-REVIEW WR-01, 07-09 review CR-01). A θ-source val split holding committed
   test or HOTELS content is refused, keyed on the content under any manifest (refuse_held_out_theta over
   pilot.data.holds_committed, 07-REVIEW CR-01), here, in --compare and in the --confidence val_selected and
   postfit_candidate bindings. A subset (--n) val dump next to a reported test dump is refused; without a val dump the
@@ -65,9 +68,9 @@ Where T and θ come from (confidence_binding; every other case is refused before
   uids_sha256; headline T and θ are that candidate's temperature and theta.shipped, raw θ its theta.raw
 - final_seed: a dump whose training.postfit_sha256 is set, on test or hotels_probe only, only with the record of that
   sha256, at the sidecar's shipped T (which must equal the record's chosen T), with the record's chosen θ (shipped and
-  raw). A final seed trained on final_train, which holds the val folds, so its numbers on val, or on any split holding
-  committed val or final_train content under any manifest, are training-set numbers: refused before the record is
-  read (refuse_final_seed_training_content, 07-REVIEW WR-01)
+  raw). A final seed was trained on final_train, which holds the val folds, so its numbers on val, or on any split
+  holding committed val or final_train content under any manifest, are training-set numbers; they are refused before
+  the record is read (refuse_final_seed_training_content, 07-REVIEW WR-01; run_report and --compare refuse them too)
 - val_selected: a dump without a training block (baseline, zero-shot), only without --postfit, with θ from the run
   dir's full val dump by run_report's rule (theta_source, refuse_in_sample_theta; same_source when the reported split
   is not val); without a full val dump it is refused (θ is chosen on val only)
@@ -253,12 +256,20 @@ def refuse_held_out_theta(where, entry, manifest_path):
 FINAL_SEED_TRAINED = ("val", "final_train")
 
 
+def is_final_seed(side):
+    """True for a dump sidecar whose training block carries a postfit_sha256: a final seed, trained on final_train."""
+    tr = side.get("training")
+    return isinstance(tr, dict) and tr.get("postfit_sha256") is not None
+
+
 def refuse_final_seed_training_content(where, split, entry, manifest_path):
     """SystemExit when a final seed would be reported on messages it trained on (07-REVIEW WR-01): split val by name
     (final_train holds the val folds), and any split holding committed val or final_train content (FINAL_SEED_TRAINED)
     under any manifest, keyed on the content by pilot.data.holds_committed, so a manifest copy cannot present
-    training-set numbers as held-out under the test name. Runs before the postfit record is read and before any
-    metric; `entry` is the dump sidecar's split block."""
+    training-set numbers as held-out under the test name. Every report mode applies it to the reported dump of a final
+    seed (is_final_seed): run_report (so evaluate.py), --compare (_load_side) and the --confidence final_seed binding
+    (07-09 review CR-01). Runs before the postfit record is read and before any metric; `entry` is the dump sidecar's
+    split block."""
     if split == "val":
         raise SystemExit("%s: a final seed was trained on final_train, which holds the val folds, so its val numbers "
                          "are training-set numbers (neither held-out nor in-sample); report a final seed on test or "
@@ -298,7 +309,9 @@ def run_report(run_dir, split="test", manifest_path=DEFAULT_MANIFEST):
 
     The val-selected row is null with a reason in two cases: the run dir has no val dump (NO_VAL_REASON), or the
     reported dump is a --n subset val dump (SUBSET_VAL_REASON; it is reported at θ 0.5 only). A θ-source val dump
-    from another source than the reported dump (same_source) is refused.
+    from another source than the reported dump (same_source) is refused, and so is a final seed's dump on val (a
+    subset one too) or on committed val or final_train content (refuse_final_seed_training_content, 07-09 review
+    CR-01), before any metric.
     """
     logits, uids, side, entry = dumps.load_dump(run_dir, split, manifest_path)
     refuse_ood_role(run_dir, split, entry, "report.py RUN_DIR reports")
@@ -307,6 +320,8 @@ def run_report(run_dir, split="test", manifest_path=DEFAULT_MANIFEST):
         src, reason = None, SUBSET_VAL_REASON
     else:
         src, reason = theta_source(run_dir, manifest_path), NO_VAL_REASON   # reads only val: the split never shapes θ
+    if is_final_seed(side):                                 # never on content it trained on (07-09 review CR-01)
+        refuse_final_seed_training_content(run_dir, split, side["split"], manifest_path)
     if src is not None and split != "val":
         same_source(side, src[2], run_dir)
     val_logits, Y_val, val_side, disclosed = src if src is not None else (None, None, None, None)
@@ -361,7 +376,7 @@ def confidence_binding(run_dir, split, side, manifest_path, postfit=None):
     tr = side.get("training")
     kind = (side.get("system") or {}).get("kind")
     rid = side["run_id"]
-    if isinstance(tr, dict) and tr.get("postfit_sha256") is not None:
+    if is_final_seed(side):
         refuse_final_seed_training_content(run_dir, split, side["split"], manifest_path)
         if postfit is None:
             raise SystemExit("%s: a final seed (training.postfit_sha256 %s) is reported only with --postfit, the record "
@@ -490,7 +505,9 @@ def _load_side(run_dirs, split, manifest_path):
         refuse_held_out_theta(d, pair[1][3], manifest_path)
         same_source(pair[0][2], pair[1][2], d)
         refuse_in_sample_theta(pair[1][2], d)
-        rid = pair[0][2]["run_id"]                          # == the run dir name (load_dump checks it)
+        if is_final_seed(pair[0][2]):                       # the compared dump itself (07-09 review CR-01)
+            refuse_final_seed_training_content(d, split, pair[0][2]["split"], manifest_path)
+        rid = pair[0][2]["run_id"]                        # == the run dir name (load_dump checks it)
         if os.path.realpath(d) in seen or rid in seen:
             raise SystemExit("%s (run_id %s) is listed more than once on one side of --compare; each seed counts once"
                              % (d, rid))
