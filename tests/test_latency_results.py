@@ -5,9 +5,10 @@ the code: reported, not gated.
   berturk) on mps or cpu, bound to the committed final manifest results/postfit/<system>-final.json (its sha256,
   is_committed true) and timing exactly that manifest's seeds in order (seed, train run id, checkpoint name and
   identity, dump run id, served T)
-- the protocol is the one latency.py fixes: pilot.latency.WARMUP warm-up messages, pilot.latency.THREADS torch threads,
-  fp32 with autocast off on the report's device for every seed, all 208 messages of the committed val split (its
-  sha256 and uids_sha256 equal to data/splits.json's val entry)
+- the protocol is the one latency.py fixes: the pilot.latency.WARMUP_POLICY warm-up (one untimed pass over all 208
+  val messages per seed before its timed loop, warmup 208), pilot.latency.THREADS torch threads, fp32 with autocast
+  off on the report's device for every seed, all 208 messages of the committed val split (its sha256 and uids_sha256
+  equal to data/splits.json's val entry)
 - every per-seed and pooled summary recomputes from the stored times with pilot.latency.summarize, so no number can be
   edited by hand
 - each report passes the repository's sidecar text and path check (no message text, no uid list, no local path)
@@ -76,7 +77,9 @@ def test_protocol_settings(reports):
     with open(DEFAULT_MANIFEST, encoding="utf-8") as f:
         val = json.load(f)["splits"]["val"]
     for rel, r in reports:
-        assert r["warmup"] == latency.WARMUP and r["threads"] == latency.THREADS, rel
+        assert r.get("warmup_policy") == latency.WARMUP_POLICY, \
+            "%s was timed before the %s warm-up; regenerate it with latency.py" % (rel, latency.WARMUP_POLICY)
+        assert r["warmup"] == N_VAL and r["threads"] == latency.THREADS, rel
         assert r["dtype"] == "torch.float32" and r["amp_enabled"] is False, rel
         for s in r["seeds"]:
             assert s["state"] == {"device": r["device"], "dtype": "torch.float32", "amp_enabled": False}, \
