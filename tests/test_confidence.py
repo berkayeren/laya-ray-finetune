@@ -13,6 +13,12 @@ AURC closed form of a perfect ranking, the inclusive decision rule, finiteness a
 outside (0, 1), the shared path for seed-averaged probabilities, and an AST guard that pilot/metrics.py names no
 system outside its module docstring (D-10).
 
+The EVAL-05 false-positive metrics: pilot.metrics.wilson equals scipy's binomtest(k, n).proportion_ci(method="wilson")
+within 1e-12 for every k of n in {1, 7, 15, 208} (scipy in this test only), with exact 0.0 / 1.0 bounds at k = 0 /
+k = n, None at n = 0 and refused non-integer or out-of-range counts; pilot.metrics.fp_rate counts only messages
+without gold among the scored columns, restricts predictions and a per-tag θ to those columns, uses the inclusive θ
+(np.nextafter below θ is not a prediction) and refuses an empty, unknown or repeated column list.
+
 The --confidence binding (where T and θ come from) is exercised on synthetic dumps of the conftest snapshot: selection
 candidates written like score.py's (tests/test_postfit.py write_candidate) with a postfit/1 record built by postfit.py
 over them, final seeds bound by training.postfit_sha256, and prior baselines scored by score.py. Every wrong
@@ -313,6 +319,100 @@ def test_metrics_module_names_no_system():
     assert len(words) > 100
     named = [w for w in words if "laya" in w.lower() or "berturk" in w.lower()]
     assert named == []
+
+
+# --- EVAL-05: Wilson interval and the false-positive rule ------------------------------------------------------
+
+@pytest.mark.parametrize("n", [1, 7, 15, 208])
+def test_wilson_equals_scipy_on_a_grid(n):
+    stats = pytest.importorskip("scipy.stats")
+    assert metrics.WILSON_Z == float(stats.norm.ppf(0.975))
+    for k in range(n + 1):
+        ci = stats.binomtest(k, n).proportion_ci(confidence_level=0.95, method="wilson")
+        lo, hi = metrics.wilson(k, n)
+        assert type(lo) is float and type(hi) is float     # unrounded float64, never a numpy scalar in JSON
+        assert abs(lo - ci.low) <= TOL and abs(hi - ci.high) <= TOL, (k, n)
+        assert 0.0 <= lo <= k / n <= hi <= 1.0
+    lo, hi = metrics.wilson(2, 7)
+    assert abs(lo - 0.0822) < 5e-5 and abs(hi - 0.6411) < 5e-5   # 2/7 reads as 29 %, its interval spans 8 % to 64 %
+
+
+@pytest.mark.parametrize("n", [1, 2, 7, 15, 208, 1009])
+def test_wilson_extremes_are_exact(n):
+    assert metrics.wilson(0, n)[0] == 0.0 and metrics.wilson(0, n)[1] > 0.0
+    assert metrics.wilson(n, n)[1] == 1.0 and metrics.wilson(n, n)[0] < 1.0
+    assert metrics.wilson(np.int64(0), n)[0] == 0.0            # a numpy count from a .sum() is an integer too
+
+
+def test_wilson_of_zero_trials_is_none_and_bad_counts_refused():
+    assert metrics.wilson(0, 0) is None
+    for k, n in [(-1, 5), (6, 5), (1.5, 5), (2.0, 5), (True, 5), ("1", 5)]:
+        with pytest.raises(SystemExit, match="not an integer in 0..5"):
+            metrics.wilson(k, n)
+
+
+def _fp_arrays(n=6, p=0.1):
+    return np.zeros((n, 48), dtype=bool), np.full((n, 48), p)
+
+
+def test_fp_rate_counts_only_messages_without_gold():
+    Y, P = _fp_arrays()
+    Y[0, 0] = True                                          # gold message predicting another tag: not counted
+    P[0, 5] = 0.9
+    Y[1, 2] = True                                          # gold message predicting nothing: not counted
+    P[2, 7] = P[2, 9] = 0.8                                 # no-gold message predicting two tags: one false positive
+    P[3, 9] = 0.6                                           # no-gold message predicting one tag
+    out = metrics.fp_rate(Y, P, 0.5)                        # messages 2..5 are counted, 2 and 3 are false positives
+    assert (out["k"], out["n"], out["cols"]) == (2, 4, "all")
+    assert out["rate"] == 0.5 and out["wilson95"] == metrics.wilson(2, 4)
+    assert out["per_tag_fp"] == {TAGS[7]: 1, TAGS[9]: 2}     # nonzero counts only, the gold message's tag 5 absent
+    assert list(out["per_tag_fp"]) == [TAGS[7], TAGS[9]]
+    Y[2:, 1] = True                                         # every message has a gold tag: nothing is counted
+    none = metrics.fp_rate(Y, P, 0.5)
+    assert (none["k"], none["n"], none["rate"], none["wilson95"], none["per_tag_fp"]) == (0, 0, None, None, {})
+    clean = metrics.fp_rate(*_fp_arrays(), 0.5)
+    assert (clean["k"], clean["n"], clean["rate"]) == (0, 6, 0.0) and clean["wilson95"][0] == 0.0
+
+
+def test_fp_rate_restricts_predictions_and_theta_to_cols():
+    Y, P = _fp_arrays(n=4)
+    cols = [TAGS[10], TAGS[3]]                              # given out of INTENTS order
+    Y[0, 20] = True                                         # gold outside cols: still counted
+    P[0, 3] = 0.7                                           # ... and its cols prediction is a false positive
+    P[1, 30] = 0.99                                         # a prediction outside cols is not a false positive
+    P[2, 10] = 0.4                                          # predicted only under its own per-tag θ 0.3
+    Y[3, 10] = True                                         # gold inside cols: not counted
+    out = metrics.fp_rate(Y, P, 0.5, cols)
+    assert (out["k"], out["n"], out["cols"]) == (1, 3, cols)
+    assert out["per_tag_fp"] == {TAGS[3]: 1}
+    th = np.full(48, 0.5)
+    th[10], th[30] = 0.3, 0.01                              # a per-tag θ outside cols plays no part
+    out = metrics.fp_rate(Y, P, th, cols)
+    assert (out["k"], out["n"]) == (2, 3) and list(out["per_tag_fp"]) == [TAGS[3], TAGS[10]]
+    full = metrics.fp_rate(Y, P, th)                        # all 48 columns: messages 0 and 3 hold gold, so
+    assert (full["k"], full["n"]) == (2, 2) and full["per_tag_fp"][TAGS[30]] == 2   # tag 30 fires on both counted
+
+
+def test_fp_rate_threshold_is_inclusive():
+    for theta in (0.5, 0.19, 0.95, 0.05):
+        Y, P = _fp_arrays(n=2, p=0.0)
+        P[0, 4] = theta                                     # exactly θ: a prediction
+        P[1, 4] = np.nextafter(theta, 0.0)                  # the next float below θ: not a prediction
+        out = metrics.fp_rate(Y, P, theta)
+        assert (out["k"], out["n"], out["per_tag_fp"]) == (1, 2, {TAGS[4]: 1}), theta
+        out = metrics.fp_rate(Y, P, np.full(48, theta), [TAGS[4]])
+        assert (out["k"], out["n"]) == (1, 2), theta
+
+
+def test_fp_rate_refuses_bad_cols():
+    Y, P = _fp_arrays()
+    for cols in ([], ["no_such_tag"], [TAGS[0], TAGS[0]], [TAGS[1], "x"]):
+        with pytest.raises(SystemExit, match="distinct INTENTS tags"):
+            metrics.fp_rate(Y, P, 0.5, cols)
+    with pytest.raises(SystemExit, match="theta must be"):
+        metrics.fp_rate(Y, P, np.full(47, 0.5))
+    with pytest.raises(SystemExit, match="no messages"):
+        metrics.fp_rate(Y[:0], P[:0], 0.5)
 
 
 # --- report.py --confidence: where T and θ come from -----------------------------------------------------------

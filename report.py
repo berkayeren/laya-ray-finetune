@@ -74,8 +74,8 @@ sorted *.json; any other JSON is refused), rendered in the given order by render
 block (a calibration table with the headline and raw rows of every record, a link to each record's SVG, the
 abstention table (EVAL-04) with the confidence, coverage and AURC rule texts and CONFIDENCE_DISCLOSURE, the
 no-intent false-positive table (EVAL-05: k/n, rate and Wilson 95% interval per row, the rule texts and the sample size
-line), then the in-sample caveat and the definition texts). Values are rounded for display only. The README confidence block is this
-output (plan 07-08).
+line), then the in-sample caveat and the definition texts). Values are rounded for display only. The README
+confidence block is this output (plan 07-08).
 
 usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.json] [--manifest splits.json]
        python report.py --compare A_RUN[,A_RUN2...] B_RUN[,B_RUN2...] [--split test] [--B 10000] [--seed 0] [--out x.json]
@@ -339,9 +339,9 @@ def confidence_binding(run_dir, split, side, manifest_path, postfit=None):
 
 
 def confidence_report(run_dir, split, manifest_path=DEFAULT_MANIFEST, postfit=None):
-    """The confidence/1 report of one verified full dump (EVAL-03, EVAL-04, EVAL-05): the binding, and per variant its T, θ,
-    pilot.metrics.calibration on sigmoid(logit / T), and pilot.metrics.selective and pilot.metrics.fp_rate (no-intent,
-    EVAL-05) at θ 0.5 and at the variant's θ."""
+    """The confidence/1 report of one verified full dump (EVAL-03, EVAL-04, EVAL-05): the binding, and per variant
+    its T, θ, pilot.metrics.calibration on sigmoid(logit / T), and pilot.metrics.selective and pilot.metrics.fp_rate
+    (no-intent) at θ 0.5 and at the variant's θ."""
     logits, uids, side, entry = dumps.load_dump(run_dir, split, manifest_path)
     if side["n_subset"] is not None:
         raise SystemExit("%s: a --n subset dump is never reported; rescore %s without --n" % (run_dir, split))

@@ -19,6 +19,11 @@
   abstention table (one row per record, variant and θ), the three rule texts and report.CONFIDENCE_DISCLOSURE (the
   val AURC order of the two fine-tuned models depends on the confidence rule, T-07-14), and refuses records whose
   abstention definitions differ or are missing
+- EVAL-05: every record and variant carries a no-intent false-positive block at θ 0.5 and at its θ (the manifest's 7 val
+  no-intent messages, rate k / n unrounded, the Wilson interval of those counts) and the false-positive and Wilson rule
+  texts; render_confidence shows the no-intent table with k/n, rate and Wilson 95% interval on every row (T-07-17),
+  the rule texts and the sample-size line, and refuses records whose false-positive definitions or no-intent counts
+  disagree
 - data marker: every committed record equals report.confidence_report recomputed from the committed dump, the
   committed manifest and the record it is bound to (needs `make data`, because the gold labels come from the verified
   splits), and a record bound to a postfit candidate reproduces that candidate's nll_fitted (headline) and nll_raw
@@ -281,6 +286,60 @@ def test_render_has_abstention_table_and_disclosure():
     del other[0]["definitions"]["aurc"]
     with pytest.raises(SystemExit, match="abstention definitions"):
         report.render_confidence(other[:1])
+
+def test_committed_records_carry_no_intent_blocks():
+    """EVAL-05: every record and variant has a no-intent false-positive block at θ 0.5 and at its θ over all 48 tags:
+    the manifest's no-intent count, unrounded rate = k / n and the Wilson interval of those counts."""
+    from pilot import metrics
+    with open(DEFAULT_MANIFEST, encoding="utf-8") as f:
+        splits = json.load(f)["splits"]
+    assert report.TEST_NO_INTENT == splits["test"]["n_no_intent"] == 15
+    for rel, r in committed():
+        n_no_intent = splits[r["split"]["name"]]["n_no_intent"]
+        assert n_no_intent == 7, rel
+        for name in ("headline", "raw"):
+            fp = r["variants"][name]["no_intent_fp"]
+            assert sorted(fp) == ["0.5", "theta"], (rel, name)
+            for key, f in fp.items():
+                assert f["n"] == n_no_intent and f["cols"] == "all" and 0 <= f["k"] <= f["n"], (rel, name, key)
+                assert f["rate"] == f["k"] / f["n"] and f["wilson95"] == metrics.wilson(f["k"], f["n"])
+                assert sum(f["per_tag_fp"].values()) >= f["k"] and all(v > 0 for v in f["per_tag_fp"].values())
+
+
+def test_render_has_no_intent_table_with_counts():
+    """T-07-17: every no-intent row shows k/n, the rate and the Wilson 95% interval; never a rate alone."""
+    from pilot import metrics
+    records = [r for _, r in committed()]
+    text = report.render_confidence(records)
+    head = "### No-intent false positives on val"
+    assert text.count(head) == 1
+    start = text.index(head)
+    section = text[start:text.index("\n### ", start)]
+    assert text.index("### Abstention") < start < text.index("### Caveat and definitions")
+    assert "| system | run_id | variant | θ | k/n | rate | Wilson 95% |" in section
+    for r in records:
+        for name in ("headline", "raw"):
+            v = r["variants"][name]
+            for key, label in (("0.5", "0.5"), ("theta", "val-selected, global %.2f" % v["theta"]["global"])):
+                f = v["no_intent_fp"][key]
+                row = ("| %s | %s | %s | %d/%d | %.3f | [%.3f, %.3f] |"
+                       % (r["run_id"], name, label, f["k"], f["n"], f["rate"], f["wilson95"][0], f["wilson95"][1]))
+                assert section.count(row) == 1, (r["run_id"], name, key)
+    table = [line for line in section.split("\n") if line.startswith("|")]
+    assert len(table) == 2 + 4 * len(records)
+    assert re.search(r"\| 2/7 \| 0\.286 \| \[0\.082, 0\.641\] \|", section)   # the research probe's 2/7
+    assert section.count("The val no-intent set holds 7 messages (15 on test), so every interval is wide.") == 1
+    assert section.count("- false_positive: %s" % metrics.FP_RULE) == 1
+    assert section.count("- wilson: %s" % report.WILSON_TEXT) == 1 and repr(metrics.WILSON_Z) in report.WILSON_TEXT
+    other = json.loads(json.dumps(records))
+    other[0]["definitions"]["wilson"] = "a Wald interval"
+    with pytest.raises(SystemExit, match="false-positive definitions"):
+        report.render_confidence(other)
+    other = json.loads(json.dumps(records))
+    other[0]["variants"]["raw"]["no_intent_fp"]["0.5"]["n"] = 6
+    with pytest.raises(SystemExit, match="no-intent message count"):
+        report.render_confidence(other)
+
 
 def test_confidence_table_cli_prints_render(capsys):
     out = report.main(["--confidence-table", os.path.join(REPO_ROOT, "results", "confidence")])
