@@ -40,8 +40,8 @@ into metrics with numpy alone (D-05). Systems (--model, default laya):
   verified against its digest (pilot.weights.verify_files); the tokenizer and BertForSequenceClassification load from
   the checkpoint dir with local_files_only and fp32, and check_bert refuses parameters off the device or not float32,
   or autocast on, after the load and after every batch. That load is load_bert, which latency.py shares, so the
-  latency harness times the checkpoint exactly as it is scored. The logits are the classifier's raw logits (P = sigmoid(logit
-  / T)); the shipped T is berturk_train.json's temperature (1.0 for an export); seed and training come from that
+  latency harness times the checkpoint exactly as it is scored. The logits are the classifier's raw logits (P =
+  sigmoid(logit / T)); the shipped T is berturk_train.json's temperature (1.0 for an export); seed and training come from that
   record (pilot.berturk.training_block, the keys pilot.postfit reads).
 - prior: p_t = messages carrying tag t / all messages, no-intent rows counted, in the training split the scored
   role's models are trained on (pilot.data.TRAINED_ON: final_train for test, selection_train for val)
