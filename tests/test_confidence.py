@@ -23,6 +23,13 @@ The --confidence binding (where T and θ come from) is exercised on synthetic du
 candidates written like score.py's (tests/test_postfit.py write_candidate) with a postfit/1 record built by postfit.py
 over them, final seeds bound by training.postfit_sha256, and prior baselines scored by score.py. Every wrong
 combination is refused before a metric is computed; `import report` stays numpy only.
+
+The relabelled-manifest tests (07-REVIEW CR-01) copy the snapshot's splits with val replaced by its test or HOTELS
+content (_relabel_copy, all of it or all but one row) and monkeypatch pilot.data.DEFAULT_MANIFEST to the snapshot's
+manifest inside the test body, after every dump is written, so the snapshot plays the committed data for
+pilot.data.holds_committed: every report mode that selects or applies θ (run_report, --confidence val_selected and
+postfit_candidate, --compare) refuses such a θ source, the snapshot's own val still passes with the same θ, and one
+data-marked test repeats the verifier's repro on the real committed splits.
 """
 import json
 import os
@@ -539,12 +546,12 @@ def test_confidence_binding_final_seed_refuses_other_record_or_t(tmp_path, snap,
         report.confidence_report(off, "val", snap[1], path)
 
 
-def _prior(snap, root, splits=("val", "test")):
+def _prior(snap, root, splits=("val", "test"), model="prior"):
     out_dir, manifest = snap[0], snap[1]
     for name in splits:
-        score.main([os.path.join(out_dir, "splits", "%s.jsonl" % name), "--model", "prior", "--manifest", manifest,
+        score.main([os.path.join(out_dir, "splits", "%s.jsonl" % name), "--model", model, "--manifest", manifest,
                     "--out-root", str(root)])
-    return os.path.join(str(root), "prior")
+    return os.path.join(str(root), model)
 
 
 def test_confidence_binding_refuses_postfit_for_baseline(tmp_path, snap, fitted, capsys):
@@ -592,6 +599,113 @@ def test_confidence_refuses_subset_dump(tmp_path, snap, capsys):
     capsys.readouterr()
     with pytest.raises(SystemExit, match="--n subset dump is never reported"):
         report.confidence_report(run_dir, "val", manifest)
+
+
+# --- 07-REVIEW CR-01: θ is selected on banking val content only, under any manifest ------------------------------
+
+def _relabel_copy(src_dir, src_manifest, dest, name, source, cut=0):
+    """A snap-shaped copy of src_dir/splits under dest whose `name` split holds src_dir/splits/<source>.jsonl minus its
+    first `cut` lines, with that entry's sha256, n_messages and uids_sha256 updated in dest/splits.json (the
+    tests/test_consumers.py _relabel recipe). Returns (dest dir, dest manifest, verified dest val entry, val uids)."""
+    import shutil
+    dest = str(dest)
+    shutil.copytree(os.path.join(str(src_dir), "splits"), os.path.join(dest, "splits"))
+    with open(os.path.join(str(src_dir), "splits", "%s.jsonl" % source), "rb") as f:
+        raw = b"".join(f.read().splitlines(keepends=True)[cut:])
+    with open(os.path.join(dest, "splits", "%s.jsonl" % name), "wb") as f:
+        f.write(raw)
+    with open(src_manifest, encoding="utf-8") as f:
+        m = json.load(f)
+    rows = pilot.data.parse_jsonl(raw)
+    m["splits"][name].update(sha256=pilot.data.sha256_bytes(raw), n_messages=len(rows),
+                             uids_sha256=pilot.data.sha256_bytes("\n".join(r["uid"] for r in rows).encode("utf-8")))
+    manifest = os.path.join(dest, "splits.json")
+    with open(manifest, "w", encoding="utf-8") as f:
+        json.dump(m, f, ensure_ascii=False, indent=2)
+    path = os.path.join(dest, "splits", "val.jsonl")
+    with open(path, "rb") as f:
+        val = f.read()
+    entry = pilot.data.verify_split_file(path, manifest_path=manifest, roles=("val",), data=val)
+    return dest, manifest, entry, [r["uid"] for r in pilot.data.parse_jsonl(val)]
+
+
+@pytest.mark.parametrize("held", ["test", "hotels_probe"])
+@pytest.mark.parametrize("cut", [0, 1])
+def test_heldout_theta_source_refused_in_every_report_mode(tmp_path, snap, monkeypatch, capsys, held, cut):
+    """07-REVIEW CR-01: val relabelled to the snapshot's test or HOTELS content (cut 0: the entry's hashes; cut 1: the
+    (uid, message) pairs) is refused as the θ source by run_report, --confidence on val, test and hotels_probe
+    (val_selected) and --compare, keyed on the content whatever the manifest's role says."""
+    from test_ood import write_hotels_run
+    rsnap = _relabel_copy(snap[0], snap[1], tmp_path / "r", "val", held, cut)
+    prior = _prior(rsnap, tmp_path / "d")
+    majority = _prior(rsnap, tmp_path / "d", model="majority")
+    hotels, _ = write_hotels_run(tmp_path / "h", rsnap[:2])
+    capsys.readouterr()
+    # in the body, after every dump is written: with the patch active the snapshot plays the committed data
+    # (pilot.data.committed_content reads DEFAULT_MANIFEST at call time), and a fixture or score.py run would see it too
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", snap[1])
+    want = "holds committed %s content" % held
+    for call in (lambda: report.run_report(prior, "val", rsnap[1]),
+                 lambda: report.run_report(prior, "test", rsnap[1]),
+                 lambda: report.confidence_report(prior, "val", rsnap[1]),
+                 lambda: report.confidence_report(prior, "test", rsnap[1]),
+                 lambda: report.confidence_report(hotels, "hotels_probe", rsnap[1]),
+                 lambda: report.compare([prior], [majority], "test", rsnap[1], B=10)):
+        with pytest.raises(SystemExit, match=want):
+            call()
+
+
+@pytest.mark.parametrize("held", ["test", "hotels_probe"])
+def test_heldout_theta_source_refused_for_a_postfit_candidate(tmp_path, snap, monkeypatch, capsys, held):
+    """07-REVIEW CR-01, the postfit_candidate binding: a candidate's val split is the one its record's T and θ were
+    fitted on, so a val split holding test or HOTELS content is refused there as well."""
+    rsnap = _relabel_copy(snap[0], snap[1], tmp_path / "r", "val", held)
+    run_dirs = [write_candidate(tmp_path / "dumps", rsnap, lr, e) for lr, e in GRID]
+    out = tmp_path / "pf" / "laya.json"
+    postfit_cli.main(run_dirs + ["--manifest", rsnap[1], "--out", str(out)])
+    capsys.readouterr()
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", snap[1])     # after postfit.py: see the test above
+    with pytest.raises(SystemExit, match="holds committed %s content" % held):
+        report.confidence_report(run_dirs[0], "val", rsnap[1], str(out))
+
+
+def test_heldout_theta_check_passes_the_committed_val(tmp_path, snap, monkeypatch, capsys):
+    """No false positive: with the snapshot counted as committed, its own val is a θ source, and run_report,
+    --confidence on test and --compare give the same θ as without the patch."""
+    prior = _prior(snap, tmp_path / "d")
+    majority = _prior(snap, tmp_path / "d", model="majority")
+    capsys.readouterr()
+
+    def thetas():
+        run = report.run_report(prior, "test", snap[1])
+        conf = report.confidence_report(prior, "test", snap[1])
+        return ([run["theta_source"]] + [v["rows"]["val_selected"]["theta"] for v in run["variants"].values()],
+                [conf["binding"]["theta_source"]] + [v["theta"] for v in conf["variants"].values()])
+
+    before = thetas()
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", snap[1])
+    assert pilot.data.holds_committed(snap[2], [], "val")    # the patch is live: the snapshot's val is committed
+    assert thetas() == before
+    c = report.compare([prior], [majority], "test", snap[1], B=10)
+    assert c["a"]["theta"] == before[0][1]
+
+
+@pytest.mark.data
+@pytest.mark.parametrize("held", ["test", "hotels_probe"])
+def test_heldout_theta_source_refused_on_the_committed_data(tmp_path, capsys, held):
+    """The verifier's CR-01 repro on the real committed splits, no monkeypatch: val relabelled to the committed test or
+    HOTELS bytes is refused as the θ source by --confidence and by run_report on test."""
+    data = os.path.join(REPO_ROOT, "data")
+    if not all(os.path.isfile(os.path.join(data, "splits", "%s.jsonl" % s["name"])) for s in pilot.data.SPLITS):
+        pytest.fail("data/splits/*.jsonl missing; run `make data`")
+    rsnap = _relabel_copy(data, pilot.data.DEFAULT_MANIFEST, tmp_path / "r", "val", held)
+    prior = _prior(rsnap, tmp_path / "d")
+    capsys.readouterr()
+    want = "holds committed %s content" % held
+    with pytest.raises(SystemExit, match=want):
+        report.confidence_report(prior, "test", rsnap[1])
+    with pytest.raises(SystemExit, match=want):
+        report.run_report(prior, "test", rsnap[1])
 
 
 def test_confidence_out_writes_the_svg_next_to_the_json(tmp_path, snap, capsys):
