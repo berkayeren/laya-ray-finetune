@@ -19,7 +19,10 @@ the code: reported, not gated.
   "reported, not gated" too
 - the README's seed-order disclosure (k/208 messages on which seed 0 is slower than the mean of seeds 1 and 2, the
   mean and relative excess of seed 0 over that mean, and the exact two-sided sign test) recomputes from the committed
-  times: p < 1e-7 for both Laya reports, no effect (p > 0.05) for both BERTurk reports (07-REVIEW WR-01)
+  times: p < 1e-7 for both Laya reports, no consistent direction (p > 0.05) for both BERTurk reports (07-REVIEW
+  WR-01); every disclosed sentence is asserted whole, so a number passes only on its own device, in its own direction
+  and for its own seed, the seeds are bound to 0, 1, 2, and the reviewer's mutations must fail (07-REVIEW WR-01,
+  WR-03); CLAUDE.md's rounded Laya numbers are bound to the same times (07-REVIEW IN-02)
 - pilot.latency.RULES' one warm-up line, both latency module docstrings and the README Phase 7 prose state the
   seed-order limit, and no doc or code file repeats the old position-independence claim (07-REVIEW WR-01, IN-05)
 - the four reports' recorded rules differ from pilot.latency.RULES at rule 3 (the warm-up line, the text in force when
@@ -215,7 +218,11 @@ def sign_test_p(k, n):
 
 def seed_order(r):
     """(k, n, mean excess ms, relative excess %, sign-test p) of seed 0 against the mean of seeds 1 and 2, message by
-    message over the committed times."""
+    message over the committed times; the report must time seeds 0, 1, 2 in that order."""
+    seeds = [s["seed"] for s in r["seeds"]]
+    assert seeds == [0, 1, 2], \
+        "%s on %s times seeds %r; the README states that the seeds run in manifest order (0, 1, 2)" \
+        % (r.get("system"), r.get("device"), seeds)
     s0, s1, s2 = (s["times_s"] for s in r["seeds"])
     d = [a - (b + c) / 2 for a, b, c in zip(s0, s1, s2)]
     k, untied = sum(x > 0 for x in d), sum(x != 0 for x in d)
@@ -224,27 +231,83 @@ def seed_order(r):
     return k, len(d), excess, relative, sign_test_p(k, untied)
 
 
+LAYA_DISCLOSURE = (
+    "seed 0 is slower than the mean of seeds 1 and 2 on %d/%d messages on CPU (mean %+.2f ms, %+.2f%%) and on %d/%d "
+    "on MPS (mean %+.2f ms, %+.2f%%), both far beyond chance (two-sided sign test, p < 1e-7)")
+BERTURK_DISCLOSURE = (
+    "BERTurk shows no consistent direction: seed 0 is slower on %d/%d messages on CPU and %d/%d on MPS (sign test p "
+    "%.2f and %.2f; mean %+.2f ms, %+.2f%%, and %+.2f ms, %+.2f%%)")
+ORDER_DISCLOSURE = (
+    "The seeds always run in manifest order (%s), so a residual seed-order effect is not separated from a seed effect")
+CLAUDE_MD_ROUNDED = "the committed Laya reports show seed 0 slower (about %.1f%% on CPU, %.1f%% on MPS)"
+
+
+def assert_seed_order_disclosure(prose, by_name):
+    """The README's seed-order disclosure, asserted as whole sentences rebuilt from the committed times, so a number
+    passes only on its own device, in its own direction and for its own seed; `prose` is whitespace-collapsed."""
+    lc, lm, bc, bm = (seed_order(by_name[n]) for n in ("laya-cpu", "laya-mps", "berturk-cpu", "berturk-mps"))
+    for name, v in (("laya-cpu", lc), ("laya-mps", lm)):
+        assert v[4] < 1e-7, "%s: the seed-0 sign test gives p %.3g, not < 1e-7; the README disclosure is stale" \
+            % (name, v[4])
+    for name, v in (("berturk-cpu", bc), ("berturk-mps", bm)):
+        assert v[4] > 0.05, "%s: the seed-0 sign test gives p %.3g, not > 0.05; the README disclosure is stale" \
+            % (name, v[4])
+    orders = {", ".join(str(s["seed"]) for s in r["seeds"]) for r in by_name.values()}
+    assert len(orders) == 1, "the reports time the seeds in different orders: %r" % sorted(orders)
+    wants = [LAYA_DISCLOSURE % (lc[0], lc[1], lc[2], lc[3], lm[0], lm[1], lm[2], lm[3]),
+             BERTURK_DISCLOSURE % (bc[0], bc[1], bm[0], bm[1], bc[4], bm[4], bc[2], bc[3], bm[2], bm[3]),
+             ORDER_DISCLOSURE % orders.pop()]
+    for want in wants:
+        assert want in prose, "the README Phase 7 prose must state %r, recomputed from the committed times" % want
+
+
 def test_readme_discloses_the_seed_order_effect(reports):
-    """Every number of the README's seed-order disclosure recomputes from the committed per-message times: the Laya
-    seed-0 excess (k/n, mean and relative excess, p < 1e-7) and the BERTurk counts (no effect)."""
+    """The README's seed-order disclosure is asserted as whole sentences rebuilt from the committed per-message times
+    (the Laya seed-0 excess with k/n, mean and relative excess and p < 1e-7; BERTurk's lack of a consistent direction
+    with its counts, p, mean and relative excess; the manifest order), so a number cannot pass on another device,
+    direction or seed (07-REVIEW WR-01, WR-03); CLAUDE.md's rounded Laya excess is bound too (07-REVIEW IN-02)."""
     prose = " ".join(phase7_prose().split())
     by_name = {os.path.basename(rel)[:-len(".json")]: r for rel, r in reports}
-    for name in ("laya-cpu", "laya-mps"):
-        k, n, excess, relative, p = seed_order(by_name[name])
-        assert p < 1e-7, "%s: the seed-0 sign test gives p %.3g, not < 1e-7; the README disclosure is stale" % (name, p)
-        for want in ("%d/%d" % (k, n), "%+.2f ms" % excess, "%+.2f%%" % relative, "p < 1e-7"):
-            assert want in prose, \
-                "%s: the README Phase 7 prose must state %r, recomputed from the committed times" % (name, want)
-    for name in ("berturk-cpu", "berturk-mps"):
-        k, n, _, _, p = seed_order(by_name[name])
-        assert p > 0.05, "%s: the seed-0 sign test gives p %.3g; the README says BERTurk shows none" % (name, p)
-        assert "%d/%d" % (k, n) in prose, \
-            "%s: the README Phase 7 prose must state %r, recomputed from the committed times" % (name, "%d/%d" % (k, n))
+    assert_seed_order_disclosure(prose, by_name)
+    with open(os.path.join(REPO_ROOT, "CLAUDE.md"), encoding="utf-8") as f:
+        claude = " ".join(f.read().split())
+    want = CLAUDE_MD_ROUNDED % (seed_order(by_name["laya-cpu"])[3], seed_order(by_name["laya-mps"])[3])
+    assert want in claude, \
+        "CLAUDE.md must state %r: its numbers must be rounded from the committed times (07-REVIEW IN-02)" % want
+
+
+def swap(text, a, b):
+    """text with every a and b exchanged, through a placeholder character."""
+    assert "\0" not in text
+    return text.replace(a, "\0").replace(b, a).replace("\0", b)
+
+
+def test_seed_order_disclosure_rejects_the_review_mutations(reports):
+    """The reviewer's mutations of the README prose (devices swapped, direction inverted, BERTurk counts swapped, seed
+    order changed, a Laya number moved out of its sentence) each fail assert_seed_order_disclosure, so the check
+    cannot quietly become presence-only again (07-REVIEW WR-01, WR-03)."""
+    good = " ".join(phase7_prose().split())
+    by_name = {os.path.basename(rel)[:-len(".json")]: r for rel, r in reports}
+    assert_seed_order_disclosure(good, by_name)
+    bc, bm, lc = (seed_order(by_name[n]) for n in ("berturk-cpu", "berturk-mps", "laya-cpu"))
+    group = "(mean %+.2f ms, %+.2f%%)" % (lc[2], lc[3])
+    assert good.count(group) == 1, "the Laya CPU group %r is not in the README prose once" % group
+    mutations = {
+        "devices swapped": swap(good, "CPU", "MPS"),
+        "direction inverted": good.replace("seed 0 is slower", "seed 0 is faster"),
+        "BERTurk counts swapped": swap(good, "%d/%d" % bc[:2], "%d/%d" % bm[:2]),
+        "seed order changed": good.replace("(0, 1, 2)", "(0, 2, 1)"),
+        "Laya CPU number moved": good.replace(group + " ", "") + " " + group,
+    }
+    for name, mutated in mutations.items():
+        assert mutated != good, "mutation %r no longer matches the README wording; update it" % name
+        with pytest.raises(AssertionError):
+            assert_seed_order_disclosure(mutated, by_name)
 
 
 SEED_ORDER_LIMIT = "a residual seed-order effect is not separated from a seed effect"
 OLD_CLAIMS = ("depends on its position", "independent of its position", "those included",
-              "first-occurrence costs are paid")
+              "first-occurrence costs are paid", "shows none")
 
 
 def test_latency_wording_states_the_seed_order_limit():
