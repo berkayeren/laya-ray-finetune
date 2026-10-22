@@ -71,7 +71,10 @@ Where T and θ come from (confidence_binding; every other case is refused before
   sha256, at the sidecar's shipped T (which must equal the record's chosen T), with the record's chosen θ (shipped and
   raw). A final seed was trained on final_train, which holds the val folds, so its numbers on val, or on any split
   holding committed val or final_train content under any manifest, are training-set numbers; they are refused before
-  the record is read (refuse_final_seed_training_content, 07-REVIEW WR-01; run_report and --compare refuse them too)
+  the record is read (refuse_final_seed_training_content, 07-REVIEW WR-01; run_report and --compare refuse them too).
+  The record's T and θ must have been fitted on banking val content: a record whose split holds committed test, HOTELS
+  or selection_train content (by its hashes, or by its rows read under the manifest it was fitted on) is refused, and
+  so is a record of another manifest whose val is not the committed val (refuse_held_out_record, 07-09 review WR-03)
 - val_selected: a dump without a training block (baseline, zero-shot), only without --postfit, with θ from the run
   dir's full val dump by run_report's rule (theta_source, refuse_in_sample_theta; same_source when the reported split
   is not val); without a full val dump it is refused (θ is chosen on val only)
@@ -398,6 +401,30 @@ def read_postfit(path):
     return record, sha256_bytes(raw)
 
 
+def refuse_held_out_record(where, path, record, manifest_path):
+    """SystemExit unless a final seed's postfit record fitted its T and θ on banking val content (07-09 review WR-03,
+    AR-07-02): the record's split block (path, sha256, uids_sha256) holding committed THETA_HELD_OUT content by its
+    hashes is refused; a record fitted on the committed val bytes passes; any other record's rows are read under the
+    manifest it was fitted on (the record's manifest.sha256 must be this --manifest's) and checked by
+    refuse_held_out_theta. A record of another manifest is refused: it holds hashes only, so its rows cannot be checked
+    (fail closed). pilot.data.DEFAULT_MANIFEST is read at call time."""
+    split = record.get("split") or {}
+    for held in THETA_HELD_OUT:
+        if holds_committed(split, [], held):
+            raise SystemExit("%s: --postfit %s was fitted on a val split that holds committed %s content; a final "
+                             "seed's T and θ come from banking val only (refit the record on the committed val)"
+                             % (where, path, held))
+    with open(data.DEFAULT_MANIFEST, encoding="utf-8") as f:
+        if split.get("sha256") == json.load(f)["splits"]["val"]["sha256"]:
+            return                                          # the committed val bytes
+    if (record.get("manifest") or {}).get("sha256") != sha256_file(manifest_path):
+        raise SystemExit("%s: --postfit %s was fitted on val sha256 %s under manifest sha256 %s, neither the committed "
+                         "val nor this manifest's, so its val rows cannot be content-checked; report the final seed "
+                         "under the manifest the record was fitted on" % (where, path, split.get("sha256"),
+                                                                          (record.get("manifest") or {}).get("sha256")))
+    refuse_held_out_theta(where, split, manifest_path)
+
+
 def _postfit_block(path, sha, record):
     return {"path": repo_relpath(path), "sha256": sha, "system_kind": record.get("system_kind")}
 
@@ -421,6 +448,7 @@ def confidence_binding(run_dir, split, side, manifest_path, postfit=None):
         if record.get("system_kind") != kind:
             raise SystemExit("%s: --postfit %s is a %s record, the dump is %s" % (run_dir, postfit,
                                                                                    record.get("system_kind"), kind))
+        refuse_held_out_record(run_dir, postfit, record, manifest_path)     # T and θ fitted on banking val (WR-03)
         chosen = record.get("chosen") or {}
         T = side["temperature"]["shipped"]
         if chosen.get("temperature") is None or abs(T - chosen["temperature"]) > T_MATCH:

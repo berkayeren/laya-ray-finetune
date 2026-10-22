@@ -26,6 +26,8 @@ combination is refused before a metric is computed; `import report` stays numpy 
 hotels_probe only (_write_split_dump): it is refused on val and, under a manifest copy whose test entry holds val or
 final_train content, on that content too, because final_train holds the val folds (07-REVIEW WR-01), in every report
 mode: run_report (so evaluate.py, a --n subset val dump included) and --compare refuse it as well (07-09 review CR-01).
+A final seed's postfit record fitted on HOTELS content registered as val, or on another manifest whose val is not the
+committed val, is refused (07-09 review WR-03).
 
 The relabelled-manifest tests (07-REVIEW CR-01) copy the snapshot's splits with val replaced by its test, HOTELS or
 selection_train content (_relabel_copy, all of it or all but one row; selection_train: 07-09 review WR-01) and
@@ -602,6 +604,33 @@ def test_final_seed_refuses_training_content_under_any_manifest(tmp_path, snap, 
     monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", snap[1])     # after every dump: see the CR-01 tests
     with pytest.raises(SystemExit, match="holds committed %s content" % held):
         report.confidence_report(final, "test", rsnap[1], path)
+
+
+@pytest.mark.parametrize("cut", [0, 1])
+def test_final_seed_record_fitted_on_held_out_content_is_refused(tmp_path, snap, fitted, monkeypatch, capsys, cut):
+    """07-09 review WR-03 (AR-07-02): the final_seed binding applies its record's T and θ only when the record was
+    fitted on banking val content. A record fitted on HOTELS content registered as val (cut 0: the record's split
+    hashes; cut 1: its rows, read under the manifest the record was fitted on) is refused before any metric, and so
+    is a record of another manifest whose val is not the committed val (its rows cannot be checked); a record fitted
+    on the committed val passes."""
+    rsnap = _relabel_copy(snap[0], snap[1], tmp_path / "r", "val", "hotels_probe", cut)
+    run_dirs = [write_candidate(tmp_path / "dumps", rsnap, lr, e) for lr, e in GRID]
+    out = tmp_path / "pf" / "laya.json"
+    postfit_cli.main(run_dirs + ["--manifest", rsnap[1], "--out", str(out)])
+    record, sha = json.loads(out.read_text(encoding="utf-8")), pilot.data.sha256_file(str(out))
+    final = _write_split_dump(_final_seed(tmp_path / "final", rsnap, record, sha), rsnap[1], "test")
+    other = _write_split_dump(_final_seed(tmp_path / "other", snap, record, sha), snap[1], "test")
+    _, path, frecord, fsha = fitted
+    ok = _write_split_dump(_final_seed(tmp_path / "ok", snap, frecord, fsha), snap[1], "test")
+    capsys.readouterr()
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", snap[1])     # after postfit.py and every dump
+    with pytest.raises(SystemExit, match="holds committed hotels_probe content"):
+        report.confidence_report(final, "test", rsnap[1], str(out))
+    with pytest.raises(SystemExit, match="holds committed hotels_probe content" if cut == 0 else
+                       "neither the committed val nor this manifest's"):
+        report.confidence_report(other, "test", snap[1], str(out))
+    rep = report.confidence_report(ok, "test", snap[1], path)
+    assert rep["binding"]["kind"] == "final_seed" and rep["binding"]["postfit"]["sha256"] == fsha
 
 
 def _drop_val(run_dir):
