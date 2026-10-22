@@ -19,12 +19,12 @@ same way, with no system-specific branch (D-10, D-12):
   on content it trained on: on val (a --n subset too) or on a split holding committed val or final_train content
   under any manifest it is refused, here (so in evaluate.py), in --compare and in the --confidence final_seed binding
   (refuse_final_seed_training_content, 07-REVIEW WR-01, 07-09 review CR-01). A θ-source val split holding committed
-  test or HOTELS content is refused, keyed on the content under any manifest (refuse_held_out_theta over
-  pilot.data.holds_committed, 07-REVIEW CR-01), here, in --compare and in the --confidence val_selected and
-  postfit_candidate bindings. A subset (--n) val dump next to a reported test dump is refused; without a val dump the
-  val-selected row is null with a reason; on the val split itself the val-selected row is labelled in_sample, and a
-  --n subset val dump reported on val gets its θ 0.5 rows with the val-selected row null and SUBSET_VAL_REASON
-  (03-REVIEW WR-04)
+  test, HOTELS or selection_train content is refused, keyed on the content under any manifest (refuse_held_out_theta
+  over pilot.data.holds_committed, 07-REVIEW CR-01, 07-09 review WR-01), here, in --compare and in the --confidence
+  val_selected and postfit_candidate bindings. A subset (--n) val dump next to a reported test dump is refused;
+  without a val dump the val-selected row is null with a reason; on the val split itself the val-selected row is
+  labelled in_sample, and a --n subset val dump reported on val gets its θ 0.5 rows with the val-selected row null and
+  SUBSET_VAL_REASON (03-REVIEW WR-04)
 - the full θ (global, per tag, eligible tags, grid, objective, tie rule) and its val dump's hashes are disclosed
 The report holds no timestamps or timings and no rounded value. A dump whose split is not role val or test (a
 hotels_probe dump, role ood_probe) is refused naming its role, here and in --compare (refuse_ood_role): its gold is
@@ -74,8 +74,9 @@ Where T and θ come from (confidence_binding; every other case is refused before
 - val_selected: a dump without a training block (baseline, zero-shot), only without --postfit, with θ from the run
   dir's full val dump by run_report's rule (theta_source, refuse_in_sample_theta; same_source when the reported split
   is not val); without a full val dump it is refused (θ is chosen on val only)
-In the val_selected and postfit_candidate bindings a val split holding committed test or HOTELS content is refused,
-keyed on the content under any manifest (refuse_held_out_theta over pilot.data.holds_committed, 07-REVIEW CR-01).
+In the val_selected and postfit_candidate bindings a val split holding committed test, HOTELS or selection_train
+content is refused, keyed on the content under any manifest (refuse_held_out_theta over pilot.data.holds_committed,
+07-REVIEW CR-01, 07-09 review WR-01).
 --split hotels_probe (EVAL-05 out of domain, 07-RESEARCH A7): the out-of-domain false-positive rate of a hotels_probe
 dump (role ood_probe, read by pilot.dumps.load_dump) on its valid columns only, pilot.dumps.gold_valid_tags (the
 manifest's ood_scoring_tags; the 22 banking-only tags of pilot.pins.OOD_SCORING_TAGS under the committed manifest).
@@ -221,8 +222,11 @@ def refuse_ood_role(run_dir, split, entry, what):
                          "rate" % (run_dir, split, entry["role"], what))
 
 
-# The committed splits whose content never shapes θ or T, whatever the manifest says (07-REVIEW CR-01)
-THETA_HELD_OUT = ("test", "hotels_probe")
+# The committed splits whose content never shapes θ or T, whatever the manifest says: test and HOTELS (07-REVIEW
+# CR-01), and selection_train, the training messages of the baselines and selection candidates (07-09 review WR-01).
+# They are every committed message outside val (final_train = selection_train + val), so a θ source holding any
+# committed message holds only committed val ones; final_train is not listed, because it holds the val folds.
+THETA_HELD_OUT = ("test", "hotels_probe", "selection_train")
 
 
 def _split_content(entry, manifest_path, roles):
@@ -238,18 +242,18 @@ def _split_content(entry, manifest_path, roles):
 
 
 def refuse_held_out_theta(where, entry, manifest_path):
-    """SystemExit when the θ-source val split holds committed test or HOTELS content (THETA_HELD_OUT), keyed on the
-    content under any manifest by pilot.data.holds_committed (the entry's sha256 or uids_sha256 is the committed
-    entry's, or any (uid, message) pair is in the committed file), never on the manifest's role label (07-REVIEW
-    CR-01; the precedents are score.py's test interlock, 05-REVIEW CR-02, the trainers' pilot.data.refuse_held_out,
-    06-REVIEW CR-01/WR-02, and latency.read_split). `entry` is a manifest entry or a sidecar's split block; both name
-    the registered path. Runs before read_gold and any metric."""
+    """SystemExit when the θ-source val split holds committed test, HOTELS or selection_train content (THETA_HELD_OUT),
+    keyed on the content under any manifest by pilot.data.holds_committed (the entry's sha256 or uids_sha256 is the
+    committed entry's, or any (uid, message) pair is in the committed file), never on the manifest's role label
+    (07-REVIEW CR-01, 07-09 review WR-01; the precedents are score.py's test interlock, 05-REVIEW CR-02, the trainers'
+    pilot.data.refuse_held_out, 06-REVIEW CR-01/WR-02, and latency.read_split). `entry` is a manifest entry or a
+    sidecar's split block; both name the registered path. Runs before read_gold and any metric."""
     verified, rows = _split_content(entry, manifest_path, ("val",))
     for held in THETA_HELD_OUT:
         if holds_committed(verified, rows, held):
             raise SystemExit("%s: the θ-source val split %s holds committed %s content; θ is selected on banking val "
-                             "only, never on test or HOTELS content, whatever the manifest says (drop --manifest, or "
-                             "run `make data`)" % (where, verified["path"], held))
+                             "only, never on test, HOTELS or training (selection_train) content, whatever the manifest "
+                             "says (drop --manifest, or run `make data`)" % (where, verified["path"], held))
 
 
 # Committed content a final seed trained on: final_train holds the val folds, and its pairs cover selection_train's
@@ -289,7 +293,8 @@ def theta_source(run_dir, manifest_path):
     load_dump proves the dump is untampered, belongs to this run (run_id == run dir name) and, for a full dump, covers
     the registered val split in order (uids_sha256). A subset val dump is refused: θ is never chosen on part of val.
     run_report does not call it when the reported dump is itself a subset val dump (SUBSET_VAL_REASON). A val split
-    holding committed test or HOTELS content is refused, keyed on the content (refuse_held_out_theta, 07-REVIEW CR-01).
+    holding committed test, HOTELS or selection_train content is refused, keyed on the content (refuse_held_out_theta,
+    07-REVIEW CR-01, 07-09 review WR-01).
     """
     npz = os.path.join(run_dir, "val.npz")
     if not (os.path.exists(npz) or os.path.exists(os.path.join(run_dir, "val.json"))):

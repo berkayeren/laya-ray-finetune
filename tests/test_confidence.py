@@ -27,12 +27,12 @@ hotels_probe only (_write_split_dump): it is refused on val and, under a manifes
 final_train content, on that content too, because final_train holds the val folds (07-REVIEW WR-01), in every report
 mode: run_report (so evaluate.py, a --n subset val dump included) and --compare refuse it as well (07-09 review CR-01).
 
-The relabelled-manifest tests (07-REVIEW CR-01) copy the snapshot's splits with val replaced by its test or HOTELS
-content (_relabel_copy, all of it or all but one row) and monkeypatch pilot.data.DEFAULT_MANIFEST to the snapshot's
-manifest inside the test body, after every dump is written, so the snapshot plays the committed data for
-pilot.data.holds_committed: every report mode that selects or applies θ (run_report, --confidence val_selected and
-postfit_candidate, --compare) refuses such a θ source, the snapshot's own val still passes with the same θ, and one
-data-marked test repeats the verifier's repro on the real committed splits.
+The relabelled-manifest tests (07-REVIEW CR-01) copy the snapshot's splits with val replaced by its test, HOTELS or
+selection_train content (_relabel_copy, all of it or all but one row; selection_train: 07-09 review WR-01) and
+monkeypatch pilot.data.DEFAULT_MANIFEST to the snapshot's manifest inside the test body, after every dump is written,
+so the snapshot plays the committed data for pilot.data.holds_committed: every report mode that selects or applies
+θ (run_report, --confidence val_selected and postfit_candidate, --compare) refuses such a θ source, the snapshot's own
+val still passes with the same θ, and one data-marked test repeats the verifier's repro on the real committed splits.
 """
 import json
 import os
@@ -741,12 +741,14 @@ def _relabel_copy(src_dir, src_manifest, dest, name, source, cut=0):
     return dest, manifest, entry, [r["uid"] for r in pilot.data.parse_jsonl(val)]
 
 
-@pytest.mark.parametrize("held", ["test", "hotels_probe"])
+@pytest.mark.parametrize("held", ["test", "hotels_probe", "selection_train"])
 @pytest.mark.parametrize("cut", [0, 1])
 def test_heldout_theta_source_refused_in_every_report_mode(tmp_path, snap, monkeypatch, capsys, held, cut):
     """07-REVIEW CR-01: val relabelled to the snapshot's test or HOTELS content (cut 0: the entry's hashes; cut 1: the
     (uid, message) pairs) is refused as the θ source by run_report, --confidence on val, test and hotels_probe
-    (val_selected) and --compare, keyed on the content whatever the manifest's role says."""
+    (val_selected) and --compare, keyed on the content whatever the manifest's role says; so is val relabelled to
+    selection_train content, the training messages of the baselines and the selection candidates (07-09 review
+    WR-01)."""
     from test_ood import write_hotels_run
     rsnap = _relabel_copy(snap[0], snap[1], tmp_path / "r", "val", held, cut)
     prior = _prior(rsnap, tmp_path / "d")
@@ -767,10 +769,11 @@ def test_heldout_theta_source_refused_in_every_report_mode(tmp_path, snap, monke
             call()
 
 
-@pytest.mark.parametrize("held", ["test", "hotels_probe"])
+@pytest.mark.parametrize("held", ["test", "hotels_probe", "selection_train"])
 def test_heldout_theta_source_refused_for_a_postfit_candidate(tmp_path, snap, monkeypatch, capsys, held):
     """07-REVIEW CR-01, the postfit_candidate binding: a candidate's val split is the one its record's T and θ were
-    fitted on, so a val split holding test or HOTELS content is refused there as well."""
+    fitted on, so a val split holding test or HOTELS content is refused there as well, and so is one holding
+    selection_train content, the candidates' own training messages, never in-sample val (07-09 review WR-01)."""
     rsnap = _relabel_copy(snap[0], snap[1], tmp_path / "r", "val", held)
     run_dirs = [write_candidate(tmp_path / "dumps", rsnap, lr, e) for lr, e in GRID]
     out = tmp_path / "pf" / "laya.json"
