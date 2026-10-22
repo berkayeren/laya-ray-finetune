@@ -20,7 +20,9 @@ same way, with no system-specific branch (D-10, D-12):
   itself the val-selected row is labelled in_sample, and a --n subset val dump reported on val gets its θ 0.5 rows
   with the val-selected row null and SUBSET_VAL_REASON (03-REVIEW WR-04)
 - the full θ (global, per tag, eligible tags, grid, objective, tie rule) and its val dump's hashes are disclosed
-The report holds no timestamps or timings and no rounded value.
+The report holds no timestamps or timings and no rounded value. A dump whose split is not role val or test (a
+hotels_probe dump, role ood_probe) is refused naming its role, here and in --compare (refuse_ood_role): its gold is
+valid on the 22 banking-only columns only, so micro-F1 over 48 tags is undefined there (07-RESEARCH A7).
 
 --compare A_DIRS B_DIRS (EVAL-07): a paired, message-level bootstrap between two systems, each side a comma-separated
 list of per-seed run dirs. Every dir needs a full split dump and a full val dump of the same source (SAME_SOURCE_KEYS;
@@ -63,6 +65,15 @@ Where T and θ come from (confidence_binding; every other case is refused before
 - val_selected: a dump without a training block (baseline, zero-shot), only without --postfit, with θ from the run
   dir's full val dump by run_report's rule (theta_source, refuse_in_sample_theta; same_source when the reported split
   is not val); without a full val dump it is refused (θ is chosen on val only)
+--split hotels_probe (EVAL-05 out of domain, 07-RESEARCH A7): the out-of-domain false-positive rate of a hotels_probe
+dump (role ood_probe, read by pilot.dumps.load_dump) on its valid columns only, pilot.dumps.gold_valid_tags (the
+manifest's ood_scoring_tags; the 22 banking-only tags of pilot.pins.OOD_SCORING_TAGS under the committed manifest).
+The binding is the same function, so T and θ come from banking val (the run dir's full val dump by the val rule and
+same_source, or a bound final seed's record; a selection candidate is refused off val) and never from HOTELS. Each
+variant holds only its T, θ and ood_fp (pilot.metrics.fp_rate at θ 0.5 and at its θ: k of the n hotels messages with
+no gold among those columns predicting at least one of them, the rate, its Wilson 95% interval and per-tag counts);
+the record has in_sample false and no calibration, coverage or no-intent block, and --out writes its JSON only (no
+reliability diagram). score.py scores nothing on HOTELS before Phase 8.
 A --n subset dump is refused. A val record carries in_sample true and IN_SAMPLE_CAVEAT; the record holds the dump,
 manifest and record hashes, the binding, the rule texts (pilot.metrics.CALIBRATION_RULES), no timestamps or timings and
 no rounded value, so it rebuilds byte for byte (make confidence-reports). With --out X.json the record's reliability
@@ -74,7 +85,8 @@ sorted *.json; any other JSON is refused), rendered in the given order by render
 block (a calibration table with the headline and raw rows of every record, a link to each record's SVG, the
 abstention table (EVAL-04) with the confidence, coverage and AURC rule texts and CONFIDENCE_DISCLOSURE, the
 no-intent false-positive table (EVAL-05: k/n, rate and Wilson 95% interval per row, the rule texts and the sample size
-line), then the in-sample caveat and the definition texts). Values are rounded for display only. The README
+line), the out-of-domain false-positive table (only when some record holds one; every section skips a record without
+its block), then the in-sample caveat and the definition texts). Values are rounded for display only. The README
 confidence block is this output (plan 07-08).
 
 usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.json] [--manifest splits.json]
@@ -82,6 +94,7 @@ usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.js
        python report.py --table results/reports [--out table.md]
        python report.py --confidence results/dumps/RUN_ID --split val [--postfit results/postfit/laya.json]
                         [--out results/confidence/RUN_ID-val.json]
+       python report.py --confidence results/dumps/RUN_ID --split hotels_probe [--postfit RECORD] [--out X.json]
        python report.py --confidence-table results/confidence [--out confidence.md]
 """
 import argparse
@@ -118,6 +131,9 @@ CONFIDENCE_DISCLOSURE = ("The message-confidence rule (the joint decision probab
 # test n_no_intent, test-pinned) that the no-intent section names next to the val count it reads from the records.
 WILSON_TEXT = "95%% Wilson score interval, z = %r, no continuity correction" % metrics.WILSON_Z
 TEST_NO_INTENT = 15
+# EVAL-05 out of domain: the column rule in every hotels_probe confidence record (07-RESEARCH A7)
+OOD_COLUMNS_TEXT = ("the manifest's ood_scoring_tags (22 banking-only tags); θ and T come from banking val, never from "
+                    "HOTELS")
 T_MATCH = 1e-12                                             # a final seed's shipped T vs its record's chosen T
 # Sidecar keys the θ-source val dump and the reported dump must share (03-REVIEW WR-01): θ chosen on one checkpoint's,
 # temperature's or device's / precision's val probabilities is never applied to another's dump. system.baseline_source
@@ -184,6 +200,16 @@ def refuse_in_sample_theta(val_side, where):
                          % (where, tr.get("split"), tr.get("postfit_sha256")))
 
 
+def refuse_ood_role(run_dir, split, entry, what):
+    """SystemExit for a dump whose split is not role val or test (07-RESEARCH A7): a hotels_probe dump (role ood_probe)
+    has valid gold on the banking-only ood_scoring_tags columns only, all negative, so a 48-tag metric (micro-F1, the
+    θ rows, the bootstrap) is undefined on it; only --confidence reads it, as the out-of-domain false-positive rate."""
+    if entry["role"] not in dumps.EVAL_ROLES:
+        raise SystemExit("%s: split %s has role %s; %s val or test only (micro-F1 needs every tag's gold); use "
+                         "report.py --confidence RUN_DIR --split hotels_probe for the out-of-domain false-positive "
+                         "rate" % (run_dir, split, entry["role"], what))
+
+
 def theta_source(run_dir, manifest_path):
     """(val logits, gold, sidecar, disclosure) of the run dir's full val dump, or None when it has no val dump.
 
@@ -211,6 +237,7 @@ def run_report(run_dir, split="test", manifest_path=DEFAULT_MANIFEST):
     from another source than the reported dump (same_source) is refused.
     """
     logits, uids, side, entry = dumps.load_dump(run_dir, split, manifest_path)
+    refuse_ood_role(run_dir, split, entry, "report.py RUN_DIR reports")
     Y = dumps.read_gold(entry, manifest_path, uids)
     if split == "val" and side["n_subset"] is not None:     # the reported dump is that subset val dump: no θ source
         src, reason = None, SUBSET_VAL_REASON
@@ -341,16 +368,25 @@ def confidence_binding(run_dir, split, side, manifest_path, postfit=None):
 def confidence_report(run_dir, split, manifest_path=DEFAULT_MANIFEST, postfit=None):
     """The confidence/1 report of one verified full dump (EVAL-03, EVAL-04, EVAL-05): the binding, and per variant
     its T, θ, pilot.metrics.calibration on sigmoid(logit / T), and pilot.metrics.selective and pilot.metrics.fp_rate
-    (no-intent) at θ 0.5 and at the variant's θ."""
+    (no-intent) at θ 0.5 and at the variant's θ. A hotels_probe dump (role ood_probe) gets per variant only its T, θ
+    (the same binding: banking val, never HOTELS) and ood_fp, pilot.metrics.fp_rate over pilot.dumps.gold_valid_tags
+    at θ 0.5 and at the variant's θ; no calibration, coverage or no-intent block (its gold is valid on those columns
+    only, and all of it is negative)."""
     logits, uids, side, entry = dumps.load_dump(run_dir, split, manifest_path)
     if side["n_subset"] is not None:
         raise SystemExit("%s: a --n subset dump is never reported; rescore %s without --n" % (run_dir, split))
+    ood = entry["role"] == "ood_probe"
+    cols = dumps.gold_valid_tags(entry, manifest_path) if ood else None     # before any metric: the valid columns
     Y = dumps.read_gold(entry, manifest_path, uids)
     binding = confidence_binding(run_dir, split, side, manifest_path, postfit)
     variants = {}
     for name in ("headline", "raw"):
         v = binding["variants"][name]
         P = metrics.probabilities(logits, v["temperature"])
+        if ood:                                             # θ and T from banking val; only the OOD rate on HOTELS
+            variants[name] = dict(v, ood_fp={"0.5": metrics.fp_rate(Y, P, 0.5, cols),
+                                             "theta": metrics.fp_rate(Y, P, metrics.theta_vector(v["theta"]), cols)})
+            continue
         variants[name] = dict(v, calibration=metrics.calibration(Y, P, v["theta"]["eligible_tags"]),
                               selective={"0.5": metrics.selective(Y, P, 0.5),
                                          "theta": metrics.selective(Y, P, metrics.theta_vector(v["theta"]))},
@@ -358,6 +394,12 @@ def confidence_report(run_dir, split, manifest_path=DEFAULT_MANIFEST, postfit=No
                                             "theta": metrics.fp_rate(Y, P, metrics.theta_vector(v["theta"]))})
     tr = side.get("training")
     in_sample = split == "val"
+    if ood:
+        definitions = {"false_positive": metrics.FP_RULE, "wilson": WILSON_TEXT, "ood_columns": OOD_COLUMNS_TEXT}
+    else:
+        definitions = {"calibration": metrics.CALIBRATION_RULES, "confidence": metrics.CONFIDENCE_RULE,
+                       "coverage": metrics.COVERAGE_RULE, "aurc": metrics.AURC_RULE,
+                       "false_positive": metrics.FP_RULE, "wilson": WILSON_TEXT}
     return {"schema": CONFIDENCE_SCHEMA, "schema_version": SCHEMA_VERSION, "run_id": side["run_id"],
             "split": side["split"], "system": side["system"],
             "training": ({"run_id": tr.get("run_id"), "split": tr.get("split"), "epoch": tr.get("epoch")}
@@ -367,10 +409,7 @@ def confidence_report(run_dir, split, manifest_path=DEFAULT_MANIFEST, postfit=No
                          "is_committed": manifest_is_committed(manifest_path)},
             "binding": {k: v for k, v in binding.items() if k != "variants"},
             "in_sample": in_sample, "caveat": IN_SAMPLE_CAVEAT if in_sample else None,
-            "definitions": {"calibration": metrics.CALIBRATION_RULES, "confidence": metrics.CONFIDENCE_RULE,
-                            "coverage": metrics.COVERAGE_RULE, "aurc": metrics.AURC_RULE,
-                            "false_positive": metrics.FP_RULE, "wilson": WILSON_TEXT},
-            "variants": variants}
+            "definitions": definitions, "variants": variants}
 
 def _load_side(run_dirs, split, manifest_path):
     """[(run_dir, split dump, val dump)] of one system's per-seed run dirs, each dump verified by load_dump."""
@@ -381,6 +420,7 @@ def _load_side(run_dirs, split, manifest_path):
         if not (os.path.exists(os.path.join(d, "val.npz")) or os.path.exists(os.path.join(d, "val.json"))):
             raise SystemExit("compare needs a full val dump in every run dir; %s has none (score.py on val)" % d)
         pair = (dumps.load_dump(d, split, manifest_path), dumps.load_dump(d, "val", manifest_path))
+        refuse_ood_role(d, split, pair[0][3], "report.py --compare compares")
         same_source(pair[0][2], pair[1][2], d)
         refuse_in_sample_theta(pair[1][2], d)
         rid = pair[0][2]["run_id"]                          # == the run dir name (load_dump checks it)
@@ -635,6 +675,9 @@ def render_svg(report):
     Only g, rect, line, circle and text elements, every number %-formatted with fixed decimals, no timestamp, no
     metadata, no script and no external reference, so it rebuilds byte for byte from the JSON."""
     r = _confidence_record(report)
+    if not _has(r, "calibration"):
+        raise SystemExit("%s (%s): an out-of-domain record has no calibration block, so no reliability diagram"
+                         % (r["run_id"], r["split"]["name"]))
     n = r["n_messages"]
     out = ['<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d">'
            % (SVG_WIDTH, SVG_HEIGHT, SVG_WIDTH, SVG_HEIGHT),
@@ -652,6 +695,11 @@ def render_svg(report):
     return "\n".join(out) + "\n"
 
 
+def _has(r, block):
+    """True when every variant of record r holds `block` (an out-of-domain record holds only ood_fp)."""
+    return all(block in r["variants"][name] for name in CONFIDENCE_VARIANTS)
+
+
 def _confidence_label(r):
     tr = r["training"]
     if tr is not None:
@@ -660,6 +708,9 @@ def _confidence_label(r):
 
 
 def _calibration_section(records):
+    records = [r for r in records if _has(r, "calibration")]
+    if not records:
+        return None
     header = ("system", "run_id", "variant", "T", "Brier", "NLL", "classwise ECE (%d bins)" % metrics.ECE_BINS)
     rows, notes = [], []
     for r in records:
@@ -680,6 +731,9 @@ def _calibration_section(records):
 
 
 def _diagram_section(records):
+    records = [r for r in records if _has(r, "calibration")]
+    if not records:
+        return None
     return "\n\n".join(["### Reliability diagrams"] + [
         "![reliability diagram %s (%s)](results/confidence/%s-%s.svg)"
         % (r["run_id"], r["split"]["name"], r["run_id"], r["split"]["name"]) for r in records])
@@ -692,6 +746,9 @@ SELECTIVE_ROWS = (("0.5", "0.5"), ("theta", "val-selected, global %.2f"))
 def _abstention_section(records):
     """EVAL-04: precision and accuracy at every coverage and the AURC per record, variant and θ row, then the rule
     texts (one set, shared by every record) and CONFIDENCE_DISCLOSURE."""
+    records = [r for r in records if _has(r, "selective")]
+    if not records:
+        return None
     rules = {json.dumps([r["definitions"].get(k) for k in ABSTENTION_RULES]) for r in records}
     texts = [records[0]["definitions"].get(k) for k in ABSTENTION_RULES]
     if len(rules) != 1 or None in texts:
@@ -727,6 +784,9 @@ def _no_intent_section(records):
     """EVAL-05: the no-intent false-positive rate per record, variant and θ row, always as k/n with its rate and Wilson
     95% interval (a rate is never shown alone), then the rule texts (one set, shared by every record) and the sample
     size line: the no-intent set is tiny, so every interval is wide."""
+    records = [r for r in records if _has(r, "no_intent_fp")]
+    if not records:
+        return None
     rules = {json.dumps([r["definitions"].get(k) for k in NO_INTENT_RULES]) for r in records}
     texts = [records[0]["definitions"].get(k) for k in NO_INTENT_RULES]
     if len(rules) != 1 or None in texts:
@@ -755,7 +815,46 @@ def _no_intent_section(records):
     return "\n\n".join(parts)
 
 
+OOD_RULES = ("false_positive", "wilson", "ood_columns")
+OOD_ROWS = (("0.5", "0.5"), ("theta", "banking-val, global %.2f"))
+
+
+def _ood_section(records):
+    """EVAL-05 out of domain: the HOTELS false-positive rate on the banking-only columns per record, variant and θ row
+    (θ 0.5 and the banking-val θ), as k/n with its rate and Wilson 95% interval, then the rule texts. Only records that
+    hold ood_fp; none at all (every committed Phase 7 record) leaves the section out."""
+    records = [r for r in records if _has(r, "ood_fp")]
+    if not records:
+        return None
+    rules = {json.dumps([r["definitions"].get(k) for k in OOD_RULES]) for r in records}
+    texts = [records[0]["definitions"].get(k) for k in OOD_RULES]
+    if len(rules) != 1 or None in texts:
+        raise SystemExit("the out-of-domain records disagree on (or lack) the false-positive definitions; rebuild them "
+                         "with report.py --confidence RUN_DIR --split hotels_probe")
+    rows, cols = [], set()
+    for r in records:
+        for name in CONFIDENCE_VARIANTS:
+            v = r["variants"][name]
+            for key, label in OOD_ROWS:
+                f = v["ood_fp"][key]
+                cols.add(json.dumps(f["cols"]))
+                theta = label % v["theta"]["global"] if "%" in label else label
+                ci = "n/a" if f["wilson95"] is None else "[%.3f, %.3f]" % tuple(f["wilson95"])
+                rows.append((_confidence_label(r), r["run_id"], name, theta, "%d/%d" % (f["k"], f["n"]),
+                             _num(f["rate"]), ci))
+    if len(cols) != 1:
+        raise SystemExit("the out-of-domain records disagree on the scored columns; rebuild them with report.py "
+                         "--confidence RUN_DIR --split hotels_probe")
+    n_cols = len(json.loads(next(iter(cols))))
+    header = ("system", "run_id", "variant", "θ", "k/n", "rate", "Wilson 95%")
+    return "\n\n".join(["### Out-of-domain false positives (HOTELS, %d banking-only tags)" % n_cols, _md(header, rows),
+                         "\n".join("- %s: %s" % (k, t) for k, t in zip(OOD_RULES, texts))])
+
+
 def _definitions_section(records):
+    records = [r for r in records if "calibration" in r["definitions"]]
+    if not records:
+        return None
     defs = {json.dumps(r["definitions"]["calibration"], sort_keys=True) for r in records}
     if len(defs) != 1:
         raise SystemExit("the confidence records disagree on the calibration definitions; rebuild them with "
@@ -769,21 +868,24 @@ def _definitions_section(records):
 
 
 # render_confidence's sections in order, each a builder of the record list returning markdown that opens with a
-# level-3 heading (the README carries it inside its own section, plan 07-08); later Phase 7 plans add theirs before
-# the definitions.
+# level-3 heading (the README carries it inside its own section, plan 07-08), or None when no record holds its block
+# (an out-of-domain record holds only ood_fp); later Phase 7 plans add theirs before the definitions.
 CONFIDENCE_SECTIONS = [_calibration_section, _diagram_section, _abstention_section, _no_intent_section,
-                       _definitions_section]
+                       _ood_section, _definitions_section]
 
 
 def render_confidence(reports):
     """Markdown of saved confidence/1 records, in the given order (callers pass them in sorted path order): the
     calibration table (headline then raw per record), a link to each record's reliability diagram, the abstention
-    table with its rule texts and CONFIDENCE_DISCLOSURE, the no-intent false-positive table, the in-sample caveat
-    and the definition texts. Values are rounded for display only; identical input gives identical text."""
+    table with its rule texts and CONFIDENCE_DISCLOSURE, the no-intent false-positive table, the out-of-domain
+    false-positive table (only when some record is a hotels_probe one), the in-sample caveat and the definition texts.
+    Each section skips a record without its block. Values are rounded for display only; identical input gives
+    identical text."""
     records = [_confidence_record(r) for r in reports]
     if not records:
         raise SystemExit("no confidence records to render")
-    return "\n\n".join(build(records) for build in CONFIDENCE_SECTIONS) + "\n"
+    parts = [build(records) for build in CONFIDENCE_SECTIONS]
+    return "\n\n".join(p for p in parts if p is not None) + "\n"
 
 
 def _run_dirs(ap, text):
@@ -796,8 +898,9 @@ def _run_dirs(ap, text):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="recompute metrics from a logit dump, or compare two systems' dumps")
     ap.add_argument("run_dir", nargs="?", default=None)
-    ap.add_argument("--split", default=None, choices=("val", "test"),
-                    help="the dump's split (default test for RUN_DIR and --compare; required for --confidence)")
+    ap.add_argument("--split", default=None, choices=("val", "test", "hotels_probe"),
+                    help="the dump's split (default test for RUN_DIR and --compare; required for --confidence; "
+                         "hotels_probe only with --confidence)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST,
                     help="splits.json to verify against (default: the committed data/splits.json)")
@@ -820,7 +923,7 @@ def main(argv=None):
     if a.postfit is not None and a.confidence is None:
         ap.error("--postfit applies only to --confidence")
     if a.confidence is not None and a.split is None:
-        ap.error("--confidence needs an explicit --split val|test")
+        ap.error("--confidence needs an explicit --split val|test|hotels_probe")
     if a.confidence is not None and a.out is not None and not a.out.endswith(".json"):
         ap.error("--confidence --out must name a .json file (the reliability diagram is written next to it as .svg)")
     if a.table is not None or a.confidence_table is not None:
@@ -847,7 +950,7 @@ def main(argv=None):
         parent = os.path.dirname(os.path.abspath(a.out))
         os.makedirs(parent, exist_ok=True)
         write_atomic(a.out, (text + "\n").encode("utf-8"))
-        if a.confidence is not None:
+        if a.confidence is not None and _has(report, "calibration"):   # an out-of-domain record has no diagram
             write_atomic(a.out[:-len(".json")] + ".svg", render_svg(json.loads(text)).encode("utf-8"))
     return report
 

@@ -18,9 +18,15 @@ array in a committed file would run arbitrary code), a split, questions or tag o
 manifest and code, a run dir renamed away from its run_id, or a full dump whose uids are not the split's.
 read_gold returns the verified split's gold labels in dump-row order; it reads only the `expected` field.
 
+A dump of the out-of-domain probe (hotels_probe, role ood_probe; EVAL-05) is readable too (READ_ROLES), with every
+check above. Its gold is valid on the manifest's ood_scoring_tags only (the banking-only tags, all of them negative on
+every HOTELS message), so gold_valid_tags names those columns and every 48-tag metric refuses the dump
+(report.run_report, report.compare); only report.py --confidence turns it into the out-of-domain false-positive rate.
+score.py does not write one before Phase 8, which opens it for hotels_probe behind its protocol gate.
+
 Numpy and stdlib only: no torch, Ray or laya.
 
-usage: written by score.py (write_dump), read by report.py (load_dump, read_gold)
+usage: written by score.py (write_dump), read by report.py (load_dump, read_gold, gold_valid_tags)
 """
 import hashlib
 import io
@@ -30,8 +36,9 @@ import os
 import numpy as np
 
 from intents import INTENTS
-from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, check_manifest_current, parse_jsonl, questions_sha256,
-                        sha256_bytes, verify_split_file, write_atomic)
+from pilot import pins
+from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, check_manifest_current, manifest_is_committed, parse_jsonl,
+                        questions_sha256, sha256_bytes, verify_split_file, write_atomic)
 
 SCHEMA_VERSION = 1
 DUMP_KEYS = ("logits", "uids")
@@ -40,6 +47,10 @@ DUMP_ROOT = os.path.join(REPO_ROOT, "results", "dumps")
 LOGIT_NOTE = "margin z_true - z_false per tag; P(tag) = sigmoid(logit / T)"
 TAGS = list(INTENTS)
 EVAL_ROLES = ("val", "test")
+# the roles load_dump and read_gold read: a hotels_probe dump (role ood_probe) is readable, but only its
+# ood_scoring_tags columns are valid gold (gold_valid_tags); score.py does not write one before Phase 8
+READ_ROLES = EVAL_ROLES + ("ood_probe",)
+OOD_GOLD = "ood_scoring_tags"                               # the manifest entry's gold_valid_tags value on hotels_probe
 
 
 def intents_order_sha256():
@@ -190,8 +201,8 @@ def load_dump(run_dir, split_name, manifest_path=DEFAULT_MANIFEST):
     entry = m["splits"].get(split_name)
     if entry is None:
         refuse("split %r is not registered in %s" % (split_name, manifest_path))
-    if entry["role"] not in EVAL_ROLES:
-        refuse("split %s has role %s; dumps cover role val or test only" % (split_name, entry["role"]))
+    if entry["role"] not in READ_ROLES:
+        refuse("split %s has role %s; dumps cover role val, test or ood_probe only" % (split_name, entry["role"]))
     for key in ("sha256", "role", "path"):
         if split.get(key) != entry[key]:
             refuse("sidecar split %s %r != manifest %r" % (key, split.get(key), entry[key]))
@@ -219,7 +230,7 @@ def read_gold(entry, manifest_path, uids):
         raise SystemExit("%s not found; run `make data` to write the registered splits" % path)
     with open(path, "rb") as f:
         raw = f.read()
-    verify_split_file(path, manifest_path=manifest_path, roles=EVAL_ROLES, data=raw)
+    verify_split_file(path, manifest_path=manifest_path, roles=READ_ROLES, data=raw)
     by_uid = {r["uid"]: r["expected"] for r in parse_jsonl(raw)}
     missing = [u for u in uids if u not in by_uid]
     if missing:
@@ -227,3 +238,30 @@ def read_gold(entry, manifest_path, uids):
                          % (len(missing), entry["path"], missing[0]))
     return np.array([[bool(by_uid[u].get(t, False)) for t in TAGS] for u in uids], dtype=bool).reshape(len(uids),
                                                                                                        len(TAGS))
+
+
+def gold_valid_tags(entry, manifest_path=DEFAULT_MANIFEST):
+    """The tags whose gold is valid on the split of manifest `entry`, in INTENTS order: all 48 for a banking split (no
+    gold_valid_tags key), the manifest's ood_scoring_tags for hotels_probe (gold_valid_tags "ood_scoring_tags": the
+    banking-only tags, the only columns an out-of-domain false positive is counted on). SystemExit on any other
+    gold_valid_tags value, and on an ood_scoring_tags list that is empty, repeats a tag, names a tag not in INTENTS or,
+    under the committed manifest, is not exactly pilot.pins.OOD_SCORING_TAGS (the 22 banking-only tags)."""
+    want = entry.get("gold_valid_tags")
+    if want is None:
+        return list(TAGS)
+    if want != OOD_GOLD:
+        raise SystemExit("%s: gold_valid_tags %r is unknown; expected %r (hotels_probe) or no key (a banking split)"
+                         % (manifest_path, want, OOD_GOLD))
+    if not os.path.isfile(manifest_path):
+        raise SystemExit("manifest %s not found; run `make data`" % manifest_path)
+    with open(manifest_path, encoding="utf-8") as f:
+        tags = json.load(f).get(OOD_GOLD)
+    if (not isinstance(tags, list) or not tags or len(set(map(str, tags))) != len(tags)
+            or any(t not in TAGS for t in tags)):
+        raise SystemExit("%s: ood_scoring_tags %r must be a non-empty list of distinct INTENTS tags; regenerate the "
+                         "manifest with `make data`" % (manifest_path, tags))
+    if manifest_is_committed(manifest_path) and sorted(tags) != sorted(pins.OOD_SCORING_TAGS):
+        raise SystemExit("%s: ood_scoring_tags %s != pilot.pins.OOD_SCORING_TAGS %s; the committed manifest's "
+                         "banking-only tags drifted from the pins" % (manifest_path, sorted(tags),
+                                                                        sorted(pins.OOD_SCORING_TAGS)))
+    return [t for t in TAGS if t in set(tags)]
