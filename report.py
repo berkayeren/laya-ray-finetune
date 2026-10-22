@@ -63,8 +63,11 @@ Where T and θ come from (confidence_binding; every other case is refused before
   JSON plus the sha256 of the same bytes, never through the scipy-based pilot.postfit) whose system_kind is the
   sidecar's and whose candidates hold exactly one entry with the dump's dump_sha256, the same dump_run_id and
   uids_sha256; headline T and θ are that candidate's temperature and theta.shipped, raw θ its theta.raw
-- final_seed: a dump whose training.postfit_sha256 is set, only with the record of that sha256, at the sidecar's
-  shipped T (which must equal the record's chosen T), with the record's chosen θ (shipped and raw)
+- final_seed: a dump whose training.postfit_sha256 is set, on test or hotels_probe only, only with the record of that
+  sha256, at the sidecar's shipped T (which must equal the record's chosen T), with the record's chosen θ (shipped and
+  raw). A final seed trained on final_train, which holds the val folds, so its numbers on val, or on any split holding
+  committed val or final_train content under any manifest, are training-set numbers: refused before the record is
+  read (refuse_final_seed_training_content, 07-REVIEW WR-01)
 - val_selected: a dump without a training block (baseline, zero-shot), only without --postfit, with θ from the run
   dir's full val dump by run_report's rule (theta_source, refuse_in_sample_theta; same_source when the reported split
   is not val); without a full val dump it is refused (θ is chosen on val only)
@@ -246,6 +249,29 @@ def refuse_held_out_theta(where, entry, manifest_path):
                              "run `make data`)" % (where, verified["path"], held))
 
 
+# Committed content a final seed trained on: final_train holds the val folds, and its pairs cover selection_train's
+FINAL_SEED_TRAINED = ("val", "final_train")
+
+
+def refuse_final_seed_training_content(where, split, entry, manifest_path):
+    """SystemExit when a final seed would be reported on messages it trained on (07-REVIEW WR-01): split val by name
+    (final_train holds the val folds), and any split holding committed val or final_train content (FINAL_SEED_TRAINED)
+    under any manifest, keyed on the content by pilot.data.holds_committed, so a manifest copy cannot present
+    training-set numbers as held-out under the test name. Runs before the postfit record is read and before any
+    metric; `entry` is the dump sidecar's split block."""
+    if split == "val":
+        raise SystemExit("%s: a final seed was trained on final_train, which holds the val folds, so its val numbers "
+                         "are training-set numbers (neither held-out nor in-sample); report a final seed on test or "
+                         "hotels_probe (Phase 8) with its postfit record" % where)
+    verified, rows = _split_content(entry, manifest_path, dumps.READ_ROLES)
+    for held in FINAL_SEED_TRAINED:
+        if holds_committed(verified, rows, held):
+            raise SystemExit("%s: split %s holds committed %s content, on which a final seed was trained (final_train "
+                             "holds the val folds); its numbers there are training-set numbers; report a final seed "
+                             "on the committed test or hotels_probe split (drop --manifest, or run `make data`)"
+                             % (where, split, held))
+
+
 def theta_source(run_dir, manifest_path):
     """(val logits, gold, sidecar, disclosure) of the run dir's full val dump, or None when it has no val dump.
 
@@ -336,6 +362,7 @@ def confidence_binding(run_dir, split, side, manifest_path, postfit=None):
     kind = (side.get("system") or {}).get("kind")
     rid = side["run_id"]
     if isinstance(tr, dict) and tr.get("postfit_sha256") is not None:
+        refuse_final_seed_training_content(run_dir, split, side["split"], manifest_path)
         if postfit is None:
             raise SystemExit("%s: a final seed (training.postfit_sha256 %s) is reported only with --postfit, the record "
                              "it was trained from" % (run_dir, tr["postfit_sha256"]))

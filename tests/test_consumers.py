@@ -222,8 +222,9 @@ def test_trainers_refuse_held_out_content_under_any_manifest(tmp_repo, script, n
 ])
 def test_report_refuses_heldout_theta_source_under_any_manifest(tmp_repo, held, cut):
     """07-REVIEW CR-01: a manifest copy that registers committed test or HOTELS content as val makes score.py score
-    prior on it, but report.py never selects θ on it: the θ source is keyed on the content (pilot.data.holds_committed),
-    never on the manifest's role. --confidence, RUN_DIR and --compare all refuse before any output is written."""
+    prior on it, but report.py never selects θ on it: the θ source is keyed on the content
+    (pilot.data.holds_committed), never on the manifest's role. --confidence, RUN_DIR and --compare all refuse before
+    any output is written."""
     lines = (tmp_repo / "data" / "splits" / (held + ".jsonl")).read_bytes().splitlines(keepends=True)
     _relabel(tmp_repo, "val", b"".join(lines[cut:]))
     for split in ("val", "test"):
