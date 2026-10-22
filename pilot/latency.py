@@ -10,11 +10,12 @@ Timing contract (07-RESEARCH Pattern 5, Pitfall 7): batch 1, in-process; a messa
 string, passed unchanged to the checkpoint's own tokenizer; its latency is the wall-clock seconds (time.perf_counter)
 from that string to 48 probabilities on the host, through the path that scored the dumps (fp32, autocast off, checked
 after the load and after the loop). Warm-up (WARMUP_POLICY, G-07-6): after each seed's load, one untimed pass over
-every message the seed then times, in split-file order, then one device sync; only then is every message timed, those
-included, so no seed's row depends on its position in the run. The device is synchronised right before t0 and right
-after the host copy of every timed message (torch.mps.synchronize on mps, torch.cuda.synchronize on cuda, nothing on
-cpu). Only val messages are timed and only times are kept: no model output,
-message text, uid list, timestamp or local path enters a report.
+every message the seed then times, in split-file order, then one device sync; only then is every message timed; so
+every seed follows the same sequence and every input it times has already run once on its model in this process; the
+seeds run in manifest order, so a residual seed-order effect is not separated from a seed effect (07-REVIEW WR-01).
+The device is synchronised right before t0 and right after the host copy of every timed message (torch.mps.synchronize
+on mps, torch.cuda.synchronize on cuda, nothing on cpu). Only val messages are timed and only times are kept: no model
+output, message text, uid list, timestamp or local path enters a report.
 
 Statistics: nearest-rank percentiles with integer ranks, s[(q * n + 99) // 100 - 1] for an integer percent q (never
 interpolated; never math.ceil(q / 100 * n), whose float product can land one rank off: 07-RESEARCH Pitfall 3). n 208:
@@ -54,9 +55,10 @@ RULES = [
     "a message is one val row's text, passed unchanged to the checkpoint's tokenizer; its latency is the wall-clock "
     "seconds from that text to 48 probabilities on the host",
     "warm-up (%s): after each seed's load, one untimed forward of every message the seed then times, in split-file "
-    "order, then one device sync; only then is every message timed, those included; so every input a seed times has "
-    "already run once on that seed's model in this process, and no seed's row depends on its position in the run; "
-    "the report records the policy and the count" % WARMUP_POLICY,
+    "order, then one device sync; only then is every message timed; so every seed follows the same sequence and every "
+    "input it times has already run once on its model in this process (first-occurrence costs are paid before any "
+    "timed loop); the seeds run in manifest order, so a residual seed-order effect is not separated from a seed "
+    "effect; the report records the policy and the count" % WARMUP_POLICY,
     "the device is synchronised right before t0 and right after the host copy (torch.mps.synchronize on mps, "
     "torch.cuda.synchronize on cuda, nothing on cpu), under torch.no_grad",
     "fp32 with autocast off, checked after the load and after the timed loop",

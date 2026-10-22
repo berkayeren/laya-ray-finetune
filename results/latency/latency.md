@@ -6,7 +6,7 @@ Rules:
 
 - batch 1, in-process, no Ray; one process per (system, device), every final seed of the final manifest
 - a message is one val row's text, passed unchanged to the checkpoint's tokenizer; its latency is the wall-clock seconds from that text to 48 probabilities on the host
-- warm-up (full_pass_per_seed): after each seed's load, one untimed forward of every message the seed then times, in split-file order, then one device sync; only then is every message timed, those included; so every input a seed times has already run once on that seed's model in this process, and no seed's row depends on its position in the run; the report records the policy and the count
+- warm-up (full_pass_per_seed): after each seed's load, one untimed forward of every message the seed then times, in split-file order, then one device sync; only then is every message timed; so every seed follows the same sequence and every input it times has already run once on its model in this process (first-occurrence costs are paid before any timed loop); the seeds run in manifest order, so a residual seed-order effect is not separated from a seed effect; the report records the policy and the count
 - the device is synchronised right before t0 and right after the host copy (torch.mps.synchronize on mps, torch.cuda.synchronize on cuda, nothing on cpu), under torch.no_grad
 - fp32 with autocast off, checked after the load and after the timed loop
 - val messages only; only times are kept (no outputs, text or uids)

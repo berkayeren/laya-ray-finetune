@@ -11,11 +11,12 @@ scored the dumps (07-RESEARCH Pattern 5):
   berturk uses: every digest verified right before the fp32 load, check_bert), then per message the tokenizer of the
   one text (truncated at the record's max_len), one forward, the logits copied to the host and probabilities at T.
 Warm-up (pilot.latency.WARMUP_POLICY, full_pass_per_seed; G-07-6): after each seed's load, every val message runs once
-untimed, in split-file order, then the device is synced once; then every message, those included, is timed with
-time.perf_counter between a device sync right before t0 and one right after the host copy (torch.mps.synchronize on
-mps, torch.cuda.synchronize on cuda, nothing on cpu), under torch.no_grad. So every input a seed times has already run
-once on that seed's model in this process, whatever the seed's position in the run. fp32 with autocast off is checked
-after the load and after the loop. --threads sets the torch threads (default 4). Never score.py's batch-of-16
+untimed, in split-file order, then the device is synced once; then every message is timed with time.perf_counter
+between a device sync right before t0 and one right after the host copy (torch.mps.synchronize on mps,
+torch.cuda.synchronize on cuda, nothing on cpu), under torch.no_grad; so every seed follows the same sequence and every
+input it times has already run once on its model in this process; the seeds run in manifest order, so a residual
+seed-order effect is not separated from a seed effect (07-REVIEW WR-01). fp32 with autocast off is checked after the
+load and after the loop. --threads sets the torch threads (default 4). Never score.py's batch-of-16
 inference seconds: those carry no sync and no warm-up.
 
 Refusals, each a SystemExit before torch is imported or any model loads: a split not registered with role val
