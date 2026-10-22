@@ -3,7 +3,8 @@
 Each test runs the real script as a subprocess inside a hermetic copy of the repo whose data/splits.json is
 built from the synthetic snapshot, so the copied pilot package's DEFAULT_MANIFEST points at it. evaluate.py is a
 thin wrapper over score.py + report.py, so its refusals come from score.py; test_evaluate_is_a_thin_wrapper keeps it
-free of metric and model-loading code (the assumption-delta invariant of plan 03-01).
+free of metric and model-loading code (the assumption-delta invariant of plan 03-01). report.py refuses a θ-source val
+split that holds committed test or HOTELS content under a relabelled manifest, keyed on the content (07-REVIEW CR-01).
 """
 import ast
 import os
@@ -210,6 +211,32 @@ def test_trainers_refuse_held_out_content_under_any_manifest(tmp_repo, script, n
     assert r.returncode != 0 and "holds committed %s content" % held in r.stderr, r.stderr
     assert "Traceback" not in r.stderr, r.stderr
     assert not (tmp_repo / "runs").exists() and not (tmp_repo / "ckpt").exists()
+
+
+@pytest.mark.timeout(900)
+@pytest.mark.parametrize("held, cut", [
+    ("test", 0),                             # the whole committed test bytes: the entry's hashes
+    ("test", 1),                             # all but one row: the (uid, message) pairs
+    ("hotels_probe", 0),
+    ("hotels_probe", 1),
+])
+def test_report_refuses_heldout_theta_source_under_any_manifest(tmp_repo, held, cut):
+    """07-REVIEW CR-01: a manifest copy that registers committed test or HOTELS content as val makes score.py score
+    prior on it, but report.py never selects θ on it: the θ source is keyed on the content (pilot.data.holds_committed),
+    never on the manifest's role. --confidence and RUN_DIR refuse before any output is written."""
+    lines = (tmp_repo / "data" / "splits" / (held + ".jsonl")).read_bytes().splitlines(keepends=True)
+    _relabel(tmp_repo, "val", b"".join(lines[cut:]))
+    for split in ("val", "test"):
+        r = _run(tmp_repo, "score.py", "copy/splits/%s.jsonl" % split, "--model", "prior",
+                 "--manifest", "copy/splits.json", "--out-root", "dumps")
+        assert r.returncode == 0, (split, r.stdout, r.stderr)
+    for args in (["--confidence", "dumps/prior", "--split", "test", "--out", "conf/prior-test.json"],
+                 ["dumps/prior", "--split", "test", "--out", "conf/prior.json"]):
+        r = _run(tmp_repo, "report.py", *(args + ["--manifest", "copy/splits.json"]))
+        assert r.returncode != 0, (args, r.stdout, r.stderr)
+        assert "holds committed %s content" % held in r.stderr, (args, r.stderr)
+        assert "Traceback" not in r.stderr, (args, r.stderr)
+        assert not (tmp_repo / "conf").exists(), args
 
 
 @pytest.mark.parametrize("n", ["0", "-5"])
