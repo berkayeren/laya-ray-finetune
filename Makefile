@@ -23,6 +23,7 @@ SCORE_WORKERS ?= 2
 SCORE_CPUS ?= 4
 REPORTS := results/reports
 LAYA_CHOSEN := laya-047381259d3b-cf0f7846-cc216d59
+BERTURK_CHOSEN := berturk-f24d8fe3c899-50e28523-29446b61
 CONFIDENCE := results/confidence
 
 .PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports
@@ -86,6 +87,8 @@ berturk-postfit:
 confidence-reports:
 	mkdir -p $(CONFIDENCE)
 	$(PYTHON) report.py --confidence results/dumps/$(LAYA_CHOSEN) --split val --postfit results/postfit/laya.json --out $(CONFIDENCE)/$(LAYA_CHOSEN)-val.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/$(BERTURK_CHOSEN) --split val --postfit results/postfit/berturk.json --out $(CONFIDENCE)/$(BERTURK_CHOSEN)-val.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/$(LAYA_ZS) --split val --out $(CONFIDENCE)/$(LAYA_ZS)-val.json > /dev/null
 
 clean-data:
 	rm -rf data/splits data/audit
