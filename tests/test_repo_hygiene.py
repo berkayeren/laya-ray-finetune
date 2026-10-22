@@ -20,7 +20,8 @@ test skips binary files, so the .npz check is the guard there. The two legacy re
 no-intent rows) sit under results/legacy/ next to a README that labels them as not comparable (D-08). The superseded
 BERTurk selections (BASE-03 fixes of the 06-10 and 06-16 gates, pilot.berturk.SUPERSEDED) sit under
 results/superseded/, each next to a README that labels it superseded and not comparable, and get the same dump and
-sidecar checks.
+sidecar checks. The Phase 7 confidence records under results/confidence/ (EVAL-03: ids, digests, repo-relative paths
+and numbers only) get the sidecar check too, and only <run_id>-val.json and <run_id>-val.svg may be tracked there.
 """
 import io
 import json
@@ -41,6 +42,9 @@ DUMP_COLUMNS = 48                                   # one logit per INTENTS tag
 DUMP_PATH_RE = re.compile(r"^results/dumps/[^/]+/(val|test)\.(npz|json)$")
 # a superseded dir (pilot.berturk.SUPERSEDED) holds its README, its records and its val dumps only (RP-2)
 SUPERSEDED_PATH_RE = re.compile(r"^results/superseded/[^/]+/(README\.md|postfit/[^/]+\.json|dumps/[^/]+/val\.(npz|json))$")
+# Phase 7 commits val confidence records only (no test or HOTELS confidence numbers before Phase 8); Phase 8 widens
+# this pin together with its protocol gate
+CONFIDENCE_PATH_RE = re.compile(r"^results/confidence/[^/]+-val\.(json|svg)$")
 # Coarse backstop only: the longest legitimate manifest value is a 64-char sha256, but message text is often far
 # shorter ("Evet.", "cari hesap"), so length cannot detect it. The key-name check and, when the split files exist
 # locally, the exact-text check below are the real guards.
@@ -245,7 +249,7 @@ def test_tracked_dumps_hold_only_uids_and_logits():
 def test_tracked_sidecars_and_reports_hold_no_text_or_paths():
     home, texts = home_dir(), local_split_texts()
     rels = [f for f in tracked("results/dumps/", "results/reports/", "results/compute/", "results/postfit/",
-                               "results/superseded/") if f.endswith(".json")]
+                               "results/superseded/", "results/confidence/") if f.endswith(".json")]
     bad = {rel: p for rel in _existing(rels) for p in [sidecar_problems(os.path.join(REPO_ROOT, rel), home, texts)]
            if p}
     assert bad == {}, "tracked sidecars or reports hold text, local paths or subset runs: %s" % bad
@@ -254,6 +258,23 @@ def test_tracked_sidecars_and_reports_hold_no_text_or_paths():
 def test_only_json_under_results_postfit():
     bad = [f for f in tracked("results/postfit/") if not f.endswith(".json")]
     assert bad == [], "only postfit records (.json) may be tracked under results/postfit/: %s" % bad
+
+
+def test_only_confidence_files_under_results_confidence():
+    bad = [f for f in tracked("results/confidence/") if not CONFIDENCE_PATH_RE.match(f)]
+    assert bad == [], "only results/confidence/<run_id>-val.(json|svg) may be tracked: %s" % bad
+
+
+@pytest.mark.parametrize("rel,ok", [
+    ("results/confidence/laya-x-val.json", True),
+    ("results/confidence/laya-x-val.svg", True),
+    ("results/confidence/laya-x-test.json", False),
+    ("results/confidence/laya-x-hotels_probe.json", False),
+    ("results/confidence/notes.md", False),
+    ("results/confidence/x/laya-x-val.json", False),
+])
+def test_confidence_path_pin_flags_planted_paths(rel, ok):
+    assert bool(CONFIDENCE_PATH_RE.match(rel)) is ok, rel
 
 
 def test_only_dump_files_under_results_dumps():

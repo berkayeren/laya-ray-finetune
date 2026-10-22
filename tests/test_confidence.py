@@ -5,13 +5,30 @@ brier_score_loss and NLL to sklearn's log_loss on the flattened (message, tag) p
 to torchmetrics' binary_calibration_error(n_bins=15, norm="l1") (probabilities drawn strictly inside (0, 1), because
 torchmetrics puts an exact 1.0 into an extra bin). The bin edges, the NLL clipping, the zero-support tags in the
 48-tag mean, the reliability counts and the empty-input refusals are pinned on hand-built arrays.
+
+The --confidence binding (where T and θ come from) is exercised on synthetic dumps of the conftest snapshot: selection
+candidates written like score.py's (tests/test_postfit.py write_candidate) with a postfit/1 record built by postfit.py
+over them, final seeds bound by training.postfit_sha256, and prior baselines scored by score.py. Every wrong
+combination is refused before a metric is computed; `import report` stays numpy only.
 """
+import json
+import os
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 from sklearn.metrics import brier_score_loss, log_loss
 
+import pilot.data
+import postfit as postfit_cli
+import report
+import score
+from conftest import prepared
 from intents import INTENTS
-from pilot import metrics
+from pilot import dumps, metrics
+from pilot.data import REPO_ROOT
+from test_postfit import GRID, write_candidate
 
 pytestmark = pytest.mark.unit
 
@@ -116,3 +133,199 @@ def test_calibration_refuses_empty_or_misshaped_input(fn):
         fn(np.zeros((3, 47), dtype=bool), np.zeros((3, 47)))
     with pytest.raises(SystemExit, match="must both be"):
         fn(np.zeros((3, 48), dtype=bool), np.zeros((3, 47)))
+
+
+# --- report.py --confidence: where T and θ come from -----------------------------------------------------------
+
+@pytest.fixture
+def snap(tmp_path, synthetic_raw):
+    """(out_dir, manifest_path, val entry, val uids) of the synthetic snapshot prepared under tmp_path."""
+    out_dir, manifest = prepared(tmp_path, synthetic_raw)
+    path = os.path.join(out_dir, "splits", "val.jsonl")
+    with open(path, "rb") as f:
+        raw = f.read()
+    entry = pilot.data.verify_split_file(path, manifest_path=manifest, roles=("val",), data=raw)
+    return out_dir, manifest, entry, [r["uid"] for r in pilot.data.parse_jsonl(raw)]
+
+
+@pytest.fixture
+def fitted(tmp_path, snap, capsys):
+    """(candidate run dirs, record path, record dict, record sha256): a postfit/1 record over a synthetic grid."""
+    run_dirs = [write_candidate(tmp_path / "dumps", snap, lr, e) for lr, e in GRID]
+    out = tmp_path / "postfit" / "laya.json"
+    postfit_cli.main(run_dirs + ["--manifest", snap[1], "--out", str(out)])
+    capsys.readouterr()
+    return run_dirs, str(out), json.loads(out.read_text(encoding="utf-8")), pilot.data.sha256_file(str(out))
+
+
+def _write_json(path, obj):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _cand(record, run_dir):
+    rid = os.path.basename(run_dir)
+    return [c for c in record["candidates"] if c["dump_run_id"] == rid][0]
+
+
+def test_confidence_binding_selection_candidate_uses_record_t_and_theta(snap, fitted):
+    run_dirs, path, record, sha = fitted
+    for d in run_dirs:
+        rep = report.confidence_report(d, "val", snap[1], path)
+        c = _cand(record, d)
+        head, raw = rep["variants"]["headline"], rep["variants"]["raw"]
+        assert rep["binding"]["kind"] == "postfit_candidate" and rep["schema"] == report.CONFIDENCE_SCHEMA
+        assert rep["binding"]["postfit"]["sha256"] == sha and rep["binding"]["postfit"]["system_kind"] == "laya"
+        assert head["temperature"] == c["temperature"] and head["theta"] == c["theta"]["shipped"]
+        assert raw["temperature"] == 1.0 and raw["theta"] == c["theta"]["raw"]
+        assert rep["in_sample"] is True and rep["caveat"] == report.IN_SAMPLE_CAVEAT
+        assert abs(head["calibration"]["nll"] - c["nll_fitted"]) <= 1e-8
+        assert abs(raw["calibration"]["nll"] - c["nll_raw"]) <= 1e-8
+        assert rep["definitions"] == {"calibration": metrics.CALIBRATION_RULES}
+        assert sorted(head["calibration"]["reliability"]["per_tag"]) == sorted(c["theta"]["shipped"]["eligible_tags"])
+
+
+def test_confidence_binding_refuses_without_postfit(snap, fitted):
+    with pytest.raises(SystemExit, match="ships T = 1; pass --postfit"):
+        report.confidence_report(fitted[0][0], "val", snap[1])
+
+
+def test_confidence_binding_refuses_other_kind_record(tmp_path, snap, fitted):
+    other = dict(fitted[2], system_kind="berturk")
+    path = _write_json(tmp_path / "other" / "berturk.json", other)
+    with pytest.raises(SystemExit, match="is a berturk record, the dump is laya"):
+        report.confidence_report(fitted[0][0], "val", snap[1], path)
+
+
+def test_confidence_binding_refuses_dump_not_in_record(tmp_path, snap, fitted):
+    stray = write_candidate(tmp_path / "stray", snap, 2e-05, 3, rng_seed=999)   # same identity, other logits
+    with pytest.raises(SystemExit, match="lists 0 candidate"):
+        report.confidence_report(stray, "val", snap[1], fitted[1])
+
+
+def test_confidence_binding_refuses_non_postfit_schema(tmp_path, snap, fitted):
+    wrong = _write_json(tmp_path / "x" / "conf.json", {"schema": "confidence/1"})
+    for path in (wrong, _write_json(tmp_path / "x" / "list.json", [1, 2])):
+        with pytest.raises(SystemExit, match="not a postfit/1 record"):
+            report.confidence_report(fitted[0][0], "val", snap[1], path)
+    broken = tmp_path / "x" / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    with pytest.raises(SystemExit, match="not a postfit/1 record"):
+        report.confidence_report(fitted[0][0], "val", snap[1], str(broken))
+    with pytest.raises(SystemExit, match="not found"):
+        report.confidence_report(fitted[0][0], "val", snap[1], str(tmp_path / "missing.json"))
+
+
+def test_confidence_binding_refuses_candidate_off_val(snap, fitted):
+    d = fitted[0][0]
+    _, _, side, _ = dumps.load_dump(d, "val", snap[1])
+    with pytest.raises(SystemExit, match="reported on val only"):
+        report.confidence_binding(d, "test", side, snap[1], fitted[1])
+
+
+def test_confidence_binding_final_seed_by_postfit_sha256(tmp_path, snap, fitted):
+    _, path, record, sha = fitted
+    T = record["chosen"]["temperature"]
+    final = write_candidate(tmp_path / "final", snap, 2e-05, record["chosen"]["epoch"], split="final_train",
+                            calibrated=True, shipped=T, postfit_sha256=sha)
+    rep = report.confidence_report(final, "val", snap[1], path)
+    assert rep["binding"]["kind"] == "final_seed"
+    assert rep["binding"]["theta_source"]["postfit_sha256"] == sha
+    assert rep["variants"]["headline"]["temperature"] == T
+    assert rep["variants"]["headline"]["theta"] == record["chosen"]["theta"]["shipped"]
+    assert rep["variants"]["raw"]["temperature"] == 1.0
+    assert rep["variants"]["raw"]["theta"] == record["chosen"]["theta"]["raw"]
+    with pytest.raises(SystemExit, match="final seed .* is reported only with --postfit"):
+        report.confidence_report(final, "val", snap[1])
+
+
+def test_confidence_binding_final_seed_refuses_other_record_or_t(tmp_path, snap, fitted):
+    _, path, record, sha = fitted
+    T = record["chosen"]["temperature"]
+    final = write_candidate(tmp_path / "final", snap, 2e-05, 3, split="final_train", calibrated=True, shipped=T,
+                            postfit_sha256=sha)
+    copy = tmp_path / "copy.json"
+    copy.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")   # same content, other bytes
+    copy = str(copy)
+    assert pilot.data.sha256_file(copy) != sha
+    with pytest.raises(SystemExit, match="final seed was bound to record"):
+        report.confidence_report(final, "val", snap[1], copy)
+    off = write_candidate(tmp_path / "off", snap, 2e-05, 3, split="final_train", calibrated=True, shipped=T + 0.5,
+                          postfit_sha256=sha)
+    with pytest.raises(SystemExit, match="record's chosen T"):
+        report.confidence_report(off, "val", snap[1], path)
+
+
+def _prior(snap, root, splits=("val", "test")):
+    out_dir, manifest = snap[0], snap[1]
+    for name in splits:
+        score.main([os.path.join(out_dir, "splits", "%s.jsonl" % name), "--model", "prior", "--manifest", manifest,
+                    "--out-root", str(root)])
+    return os.path.join(str(root), "prior")
+
+
+def test_confidence_binding_refuses_postfit_for_baseline(tmp_path, snap, fitted, capsys):
+    d = _prior(snap, tmp_path / "base")
+    capsys.readouterr()
+    with pytest.raises(SystemExit, match="no training block"):
+        report.confidence_report(d, "val", snap[1], fitted[1])
+
+
+def test_confidence_binding_baseline_selects_theta_on_val(tmp_path, snap, capsys):
+    d = _prior(snap, tmp_path / "base")
+    capsys.readouterr()
+    rep = report.confidence_report(d, "val", snap[1])
+    run = report.run_report(d, "val", snap[1])
+    assert rep["binding"]["kind"] == "val_selected" and rep["binding"]["postfit"] is None
+    assert rep["binding"]["theta_source"] == run["theta_source"]
+    assert rep["variants"]["headline"]["theta"] == run["variants"]["shipped"]["rows"]["val_selected"]["theta"]
+    assert rep["variants"]["raw"]["theta"] == run["variants"]["raw"]["rows"]["val_selected"]["theta"]
+    assert rep["in_sample"] is True and rep["training"] is None
+    test = report.confidence_report(d, "test", snap[1])                     # θ from val, applied to test
+    assert test["in_sample"] is False and test["caveat"] is None
+    assert test["variants"]["headline"]["theta"] == rep["variants"]["headline"]["theta"]
+
+
+def test_confidence_refuses_theta_source_off_val(tmp_path, snap, capsys):
+    only_test = _prior(snap, tmp_path / "t", splits=("test",))
+    capsys.readouterr()
+    with pytest.raises(SystemExit, match="no full val dump in .*θ is chosen on val only"):
+        report.confidence_report(only_test, "test", snap[1])
+    d = _prior(snap, tmp_path / "s")
+    capsys.readouterr()
+    _, uids, side, _ = dumps.load_dump(d, "val", snap[1])
+    logits = dumps.load_dump(d, "val", snap[1])[0]
+    planted = {k: v for k, v in side.items() if k not in ("dump_sha256", "schema_version")}
+    planted["temperature"] = dict(side["temperature"], shipped=2.0)       # another source's val dump
+    dumps.write_dump(d, "val", logits, uids, planted)
+    with pytest.raises(SystemExit, match="differ in temperature.shipped"):
+        report.confidence_report(d, "test", snap[1])
+
+
+def test_confidence_refuses_subset_dump(tmp_path, snap, capsys):
+    out_dir, manifest = snap[0], snap[1]
+    run_dir, _ = score.main([os.path.join(out_dir, "splits", "val.jsonl"), "--model", "prior", "--manifest", manifest,
+                             "--out-root", str(tmp_path / "sub"), "--n", "5"])
+    capsys.readouterr()
+    with pytest.raises(SystemExit, match="--n subset dump is never reported"):
+        report.confidence_report(run_dir, "val", manifest)
+
+
+def test_confidence_argument_errors(tmp_path, capsys):
+    with pytest.raises(SystemExit) as e:
+        report.main(["--postfit", "x.json", "results/dumps/prior"])
+    assert e.value.code == 2 and "--postfit applies only to --confidence" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as e:
+        report.main(["--confidence", "results/dumps/prior"])
+    assert e.value.code == 2 and "--confidence needs an explicit --split" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as e:
+        report.main(["--confidence", "results/dumps/prior", "results/dumps/prior", "--split", "val"])
+    assert e.value.code == 2 and "exactly one of" in capsys.readouterr().err
+
+
+def test_report_stays_numpy_only():
+    banned = ("torch", "scipy", "laya", "ray", "transformers", "sklearn")
+    code = "import sys, report; print(sorted(m for m in %r if m in sys.modules))" % (banned,)
+    out = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "[]", out.stdout + out.stderr
