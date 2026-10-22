@@ -283,9 +283,11 @@ def swap(text, a, b):
 
 
 def test_seed_order_disclosure_rejects_the_review_mutations(reports):
-    """The reviewer's mutations of the README prose (devices swapped, direction inverted, BERTurk counts swapped, seed
-    order changed, a Laya number moved out of its sentence) each fail assert_seed_order_disclosure, so the check
-    cannot quietly become presence-only again (07-REVIEW WR-01, WR-03)."""
+    """The reviewers' mutations of the README prose (devices swapped, direction inverted, BERTurk counts swapped, seed
+    order changed, a Laya number moved out of its sentence, the Laya numbers attributed to BERTurk, the disclosure
+    turned into a denial, the confound disclaimer replaced by a causal claim) each fail assert_seed_order_disclosure;
+    every surviving mutation is reported, so the check cannot quietly become presence-only again (07-REVIEW WR-01,
+    WR-03; 07-13 review WR-01)."""
     good = " ".join(phase7_prose().split())
     by_name = {os.path.basename(rel)[:-len(".json")]: r for rel, r in reports}
     assert_seed_order_disclosure(good, by_name)
@@ -298,11 +300,24 @@ def test_seed_order_disclosure_rejects_the_review_mutations(reports):
         "BERTurk counts swapped": swap(good, "%d/%d" % bc[:2], "%d/%d" % bm[:2]),
         "seed order changed": good.replace("(0, 1, 2)", "(0, 2, 1)"),
         "Laya CPU number moved": good.replace(group + " ", "") + " " + group,
+        "system swapped": good.replace("The committed Laya reports", "The committed BERTurk reports"),
+        "disclosure denied": good.replace("The committed Laya reports show such a difference:",
+                                          "Neither model shows such a difference; were it otherwise,"),
+        "confound claimed": good.replace(
+            "This design cannot tell whether it comes from seed 0's weights or from running first.",
+            "This difference comes from seed 0's weights, not from running first."),
     }
+    survivors = []
     for name, mutated in mutations.items():
         assert mutated != good, "mutation %r no longer matches the README wording; update it" % name
-        with pytest.raises(AssertionError):
+        try:
             assert_seed_order_disclosure(mutated, by_name)
+        except AssertionError:
+            continue
+        survivors.append(name)
+    assert survivors == [], \
+        "these mutations of the README prose still pass assert_seed_order_disclosure, so the check does not bind " \
+        "what they change: %r (07-13 review WR-01)" % survivors
 
 
 SEED_ORDER_LIMIT = "a residual seed-order effect is not separated from a seed effect"
