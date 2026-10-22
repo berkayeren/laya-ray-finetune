@@ -11,6 +11,8 @@ the code: reported, not gated.
 - every per-seed and pooled summary recomputes from the stored times with pilot.latency.summarize, so no number can be
   edited by hand
 - each report passes the repository's sidecar text and path check (no message text, no uid list, no local path)
+- exactly four reports are tracked, laya-mps, laya-cpu, berturk-mps and berturk-cpu, each named after its system and
+  device, and results/latency/latency.md equals pilot.latency.render_markdown of them byte for byte
 """
 import json
 import math
@@ -101,3 +103,18 @@ def test_reports_hold_no_text_or_paths(reports):
     home, texts = home_dir(), local_split_texts()
     bad = {rel: p for rel, _ in reports for p in [sidecar_problems(os.path.join(REPO_ROOT, rel), home, texts)] if p}
     assert bad == {}, "latency reports hold text, local paths or subset runs: %s" % bad
+
+
+def test_exactly_four_reports(reports):
+    names = [os.path.basename(rel) for rel, _ in reports]
+    assert names == ["berturk-cpu.json", "berturk-mps.json", "laya-cpu.json", "laya-mps.json"], names
+    for rel, r in reports:
+        assert os.path.basename(rel) == "%s-%s.json" % (r["system"], r["device"]), rel
+
+
+def test_markdown_matches_render():
+    with open(os.path.join(LATENCY, latency.MD_NAME), encoding="utf-8") as f:
+        md = f.read()
+    assert md == latency.render_markdown(latency.load_reports(LATENCY)), \
+        "results/latency/latency.md != render_markdown of the reports; rerun latency.py --render results/latency --out"
+    assert latency.LABEL in md
