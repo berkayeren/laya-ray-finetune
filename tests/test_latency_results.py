@@ -17,6 +17,9 @@ the code: reported, not gated.
 - README.md holds exactly one latency block, in the Phase 7 section, equal to pilot.latency.render_markdown of the
   reports (`latency.py --render results/latency`), and the Phase 7 prose before the generated blocks says
   "reported, not gated" too
+- the README's seed-order disclosure (k/208 messages on which seed 0 is slower than the mean of seeds 1 and 2, the
+  mean and relative excess of seed 0 over that mean, and the exact two-sided sign test) recomputes from the committed
+  times: p < 1e-7 for both Laya reports, no effect (p > 0.05) for both BERTurk reports (07-REVIEW WR-01)
 """
 import json
 import math
@@ -145,5 +148,47 @@ def test_readme_latency_block_matches_render():
         "regenerate it with `python latency.py --render results/latency`")
     assert text.count(PHASE7_HEADING) == 1 and text.index(PHASE7_HEADING) < i, \
         "the latency block is not in the Phase 7 section"
-    prose = text[text.index(PHASE7_HEADING):i].split("<!-- confidence:start -->")[0]
-    assert latency.LABEL in prose, "the Phase 7 prose must say %r next to the generated latency block" % latency.LABEL
+    assert latency.LABEL in phase7_prose(), \
+        "the Phase 7 prose must say %r next to the generated latency block" % latency.LABEL
+
+
+def phase7_prose():
+    """The README's Phase 7 prose: from PHASE7_HEADING to the latency start marker, cut at the confidence block."""
+    with open(README, encoding="utf-8") as f:
+        text = f.read()
+    return text[text.index(PHASE7_HEADING):text.index(LATENCY_START)].split("<!-- confidence:start -->")[0]
+
+
+def sign_test_p(k, n):
+    """Exact two-sided sign-test p of k successes in n untied pairs under p = 1/2 (math.comb, no scipy)."""
+    tail = sum(math.comb(n, i) for i in range(min(k, n - k) + 1))
+    return min(1.0, 2.0 * tail / 2 ** n)
+
+
+def seed_order(r):
+    """(k, n, mean excess ms, relative excess %, sign-test p) of seed 0 against the mean of seeds 1 and 2, message by
+    message over the committed times."""
+    s0, s1, s2 = (s["times_s"] for s in r["seeds"])
+    d = [a - (b + c) / 2 for a, b, c in zip(s0, s1, s2)]
+    k, untied = sum(x > 0 for x in d), sum(x != 0 for x in d)
+    excess = 1000 * sum(d) / len(d)
+    relative = 100 * (sum(s0) / sum((b + c) / 2 for b, c in zip(s1, s2)) - 1)
+    return k, len(d), excess, relative, sign_test_p(k, untied)
+
+
+def test_readme_discloses_the_seed_order_effect(reports):
+    """Every number of the README's seed-order disclosure recomputes from the committed per-message times: the Laya
+    seed-0 excess (k/n, mean and relative excess, p < 1e-7) and the BERTurk counts (no effect)."""
+    prose = " ".join(phase7_prose().split())
+    by_name = {os.path.basename(rel)[:-len(".json")]: r for rel, r in reports}
+    for name in ("laya-cpu", "laya-mps"):
+        k, n, excess, relative, p = seed_order(by_name[name])
+        assert p < 1e-7, "%s: the seed-0 sign test gives p %.3g, not < 1e-7; the README disclosure is stale" % (name, p)
+        for want in ("%d/%d" % (k, n), "%+.2f ms" % excess, "%+.2f%%" % relative, "p < 1e-7"):
+            assert want in prose, \
+                "%s: the README Phase 7 prose must state %r, recomputed from the committed times" % (name, want)
+    for name in ("berturk-cpu", "berturk-mps"):
+        k, n, _, _, p = seed_order(by_name[name])
+        assert p > 0.05, "%s: the seed-0 sign test gives p %.3g; the README says BERTurk shows none" % (name, p)
+        assert "%d/%d" % (k, n) in prose, \
+            "%s: the README Phase 7 prose must state %r, recomputed from the committed times" % (name, "%d/%d" % (k, n))
