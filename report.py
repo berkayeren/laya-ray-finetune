@@ -15,10 +15,13 @@ same way, with no system-specific branch (D-10, D-12):
   the key. A val dump of a model whose training saw val (a training block whose split is not
   pilot.data.TRAINED_ON["val"], selection_train, or that carries a postfit_sha256: a final seed on final_train, which
   holds the val folds) is refused as a θ source here and in --compare (refuse_in_sample_theta, 05-REVIEW WR-02): its
-  θ is the bound postfit record's, never re-selected on its own in-sample val. A subset (--n) val dump next to a
-  reported test dump is refused; without a val dump the val-selected row is null with a reason; on the val split
-  itself the val-selected row is labelled in_sample, and a --n subset val dump reported on val gets its θ 0.5 rows
-  with the val-selected row null and SUBSET_VAL_REASON (03-REVIEW WR-04)
+  θ is the bound postfit record's, never re-selected on its own in-sample val. A θ-source val split holding committed
+  test or HOTELS content is refused, keyed on the content under any manifest (refuse_held_out_theta over
+  pilot.data.holds_committed, 07-REVIEW CR-01), here, in --compare and in the --confidence val_selected and
+  postfit_candidate bindings. A subset (--n) val dump next to a reported test dump is refused; without a val dump the
+  val-selected row is null with a reason; on the val split itself the val-selected row is labelled in_sample, and a
+  --n subset val dump reported on val gets its θ 0.5 rows with the val-selected row null and SUBSET_VAL_REASON
+  (03-REVIEW WR-04)
 - the full θ (global, per tag, eligible tags, grid, objective, tie rule) and its val dump's hashes are disclosed
 The report holds no timestamps or timings and no rounded value. A dump whose split is not role val or test (a
 hotels_probe dump, role ood_probe) is refused naming its role, here and in --compare (refuse_ood_role): its gold is
@@ -65,6 +68,8 @@ Where T and θ come from (confidence_binding; every other case is refused before
 - val_selected: a dump without a training block (baseline, zero-shot), only without --postfit, with θ from the run
   dir's full val dump by run_report's rule (theta_source, refuse_in_sample_theta; same_source when the reported split
   is not val); without a full val dump it is refused (θ is chosen on val only)
+In the val_selected and postfit_candidate bindings a val split holding committed test or HOTELS content is refused,
+keyed on the content under any manifest (refuse_held_out_theta over pilot.data.holds_committed, 07-REVIEW CR-01).
 --split hotels_probe (EVAL-05 out of domain, 07-RESEARCH A7): the out-of-domain false-positive rate of a hotels_probe
 dump (role ood_probe, read by pilot.dumps.load_dump) on its valid columns only, pilot.dumps.gold_valid_tags (the
 manifest's ood_scoring_tags; the 22 banking-only tags of pilot.pins.OOD_SCORING_TAGS under the committed manifest).
@@ -357,6 +362,7 @@ def confidence_binding(run_dir, split, side, manifest_path, postfit=None):
         if split != "val":
             raise SystemExit("%s: a selection candidate is reported on val only (its T and θ were chosen on val); "
                              "got split %s" % (run_dir, split))
+        refuse_held_out_theta(run_dir, side["split"], manifest_path)    # the val split its record's T and θ fit on
         if postfit is None:
             raise SystemExit("%s: a selection candidate ships T = 1; pass --postfit RECORD (the postfit record that "
                              "lists this dump) so the headline uses its val-fitted T" % run_dir)
@@ -454,6 +460,7 @@ def _load_side(run_dirs, split, manifest_path):
             raise SystemExit("compare needs a full val dump in every run dir; %s has none (score.py on val)" % d)
         pair = (dumps.load_dump(d, split, manifest_path), dumps.load_dump(d, "val", manifest_path))
         refuse_ood_role(d, split, pair[0][3], "report.py --compare compares")
+        refuse_held_out_theta(d, pair[1][3], manifest_path)
         same_source(pair[0][2], pair[1][2], d)
         refuse_in_sample_theta(pair[1][2], d)
         rid = pair[0][2]["run_id"]                          # == the run dir name (load_dump checks it)
