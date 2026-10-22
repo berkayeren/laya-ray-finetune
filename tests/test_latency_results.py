@@ -20,9 +20,10 @@ the code: reported, not gated.
 - the README's seed-order disclosure (k/208 messages on which seed 0 is slower than the mean of seeds 1 and 2, the
   mean and relative excess of seed 0 over that mean, and the exact two-sided sign test) recomputes from the committed
   times: p < 1e-7 for both Laya reports, no consistent direction (p > 0.05) for both BERTurk reports (07-REVIEW
-  WR-01); every disclosed sentence is asserted whole, so a number passes only on its own device, in its own direction
-  and for its own seed, the seeds are bound to 0, 1, 2, and the reviewer's mutations must fail (07-REVIEW WR-01,
-  WR-03); CLAUDE.md's rounded Laya numbers are bound to the same times (07-REVIEW IN-02)
+  WR-01); every disclosed sentence is asserted whole, so a number passes only for its own system, on its own device,
+  in its own direction and for its own seed, the Laya sentence is asserted from its subject through its confound
+  disclaimer, the seeds are bound to 0, 1, 2, and every review mutation must fail (07-REVIEW WR-01, WR-03; 07-13
+  review WR-01); CLAUDE.md's rounded Laya numbers are bound to the same times (07-REVIEW IN-02)
 - pilot.latency.RULES' one warm-up line, both latency module docstrings and the README Phase 7 prose state the
   seed-order limit, and no doc or code file repeats the old position-independence claim (07-REVIEW WR-01, IN-05)
 - the four reports' recorded rules differ from pilot.latency.RULES at rule 3 (the warm-up line, the text in force when
@@ -232,8 +233,10 @@ def seed_order(r):
 
 
 LAYA_DISCLOSURE = (
-    "seed 0 is slower than the mean of seeds 1 and 2 on %d/%d messages on CPU (mean %+.2f ms, %+.2f%%) and on %d/%d "
-    "on MPS (mean %+.2f ms, %+.2f%%), both far beyond chance (two-sided sign test, p < 1e-7)")
+    "The committed Laya reports show such a difference: seed 0 is slower than the mean of seeds 1 and 2 on %d/%d "
+    "messages on CPU (mean %+.2f ms, %+.2f%%) and on %d/%d on MPS (mean %+.2f ms, %+.2f%%), both far beyond chance "
+    "(two-sided sign test, p < 1e-7). This design cannot tell whether it comes from seed 0's weights or from running "
+    "first.")
 BERTURK_DISCLOSURE = (
     "BERTurk shows no consistent direction: seed 0 is slower on %d/%d messages on CPU and %d/%d on MPS (sign test p "
     "%.2f and %.2f; mean %+.2f ms, %+.2f%%, and %+.2f ms, %+.2f%%)")
@@ -244,7 +247,8 @@ CLAUDE_MD_ROUNDED = "the committed Laya reports show seed 0 slower (about %.1f%%
 
 def assert_seed_order_disclosure(prose, by_name):
     """The README's seed-order disclosure, asserted as whole sentences rebuilt from the committed times, so a number
-    passes only on its own device, in its own direction and for its own seed; `prose` is whitespace-collapsed."""
+    passes only for its own system, on its own device, in its own direction and for its own seed; the Laya sentence is
+    asserted from its subject through its confound disclaimer (07-13 review WR-01); `prose` is whitespace-collapsed."""
     lc, lm, bc, bm = (seed_order(by_name[n]) for n in ("laya-cpu", "laya-mps", "berturk-cpu", "berturk-mps"))
     for name, v in (("laya-cpu", lc), ("laya-mps", lm)):
         assert v[4] < 1e-7, "%s: the seed-0 sign test gives p %.3g, not < 1e-7; the README disclosure is stale" \
@@ -263,9 +267,10 @@ def assert_seed_order_disclosure(prose, by_name):
 
 def test_readme_discloses_the_seed_order_effect(reports):
     """The README's seed-order disclosure is asserted as whole sentences rebuilt from the committed per-message times
-    (the Laya seed-0 excess with k/n, mean and relative excess and p < 1e-7; BERTurk's lack of a consistent direction
-    with its counts, p, mean and relative excess; the manifest order), so a number cannot pass on another device,
-    direction or seed (07-REVIEW WR-01, WR-03); CLAUDE.md's rounded Laya excess is bound too (07-REVIEW IN-02)."""
+    (the Laya seed-0 excess with k/n, mean and relative excess and p < 1e-7, from the subject naming Laya through the
+    confound disclaimer (07-13 review WR-01); BERTurk's lack of a consistent direction with its counts, p, mean and
+    relative excess; the manifest order), so a number cannot pass for another system, device, direction or seed
+    (07-REVIEW WR-01, WR-03); CLAUDE.md's rounded Laya excess is bound too (07-REVIEW IN-02)."""
     prose = " ".join(phase7_prose().split())
     by_name = {os.path.basename(rel)[:-len(".json")]: r for rel, r in reports}
     assert_seed_order_disclosure(prose, by_name)
