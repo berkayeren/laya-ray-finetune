@@ -69,6 +69,9 @@ RULES = [
 ]
 RULES_DRIFT_LINE = ("- Recorded rules: this report's `rules` field differs from the rules above at rule(s) %s; it "
                     "keeps the text in force when the report was timed, and the rules above are the current wording")
+RULES_EXTRA_LINE = ("- Recorded rules: this report's `rules` field holds %d rule(s) past the last of the %d rules "
+                    "above; it keeps the text in force when the report was timed, and the rules above are the current "
+                    "wording")
 SUMMARY_KEYS = ("n", "min", "p50", "p95", "mean", "max")
 
 
@@ -203,14 +206,19 @@ def swap_grew(report):
     return before is not None and after is not None and after > before
 
 
+# The side that has no rule at a position in rules_drift: never equal to a recorded value, a JSON null included.
+_ABSENT = object()
+
+
 def rules_drift(report):
     """The ascending 1-based positions at which a report's recorded `rules` differ from RULES (a position on one side
-    only counts; a missing or non-list `rules` is empty); [] when it records RULES exactly. A report keeps the rules
-    text in force when it was timed, so a later wording change shows here and in render_markdown (07-REVIEW WR-02)."""
+    only counts, against a private sentinel, so a recorded null past the end of RULES counts too (07-13 review IN-01);
+    a missing or non-list `rules` is empty); [] when it records RULES exactly. A report keeps the rules text in force
+    when it was timed, so a later wording change shows here and in render_markdown (07-REVIEW WR-02)."""
     rec = report.get("rules")
     rec = rec if isinstance(rec, list) else []
     return [i for i in range(1, max(len(rec), len(RULES)) + 1)
-            if (rec[i - 1] if i <= len(rec) else None) != (RULES[i - 1] if i <= len(RULES) else None)]
+            if (rec[i - 1] if i <= len(rec) else _ABSENT) != (RULES[i - 1] if i <= len(RULES) else _ABSENT)]
 
 
 def _ms(v):
@@ -236,8 +244,12 @@ def _report_lines(r):
                  % (r["device"], r.get("dtype"), "on" if r.get("amp_enabled") else "off", r["threads"],
                     r.get("warmup_policy"), r["warmup"]))
     drift = rules_drift(r)
-    if drift:
-        lines.append(RULES_DRIFT_LINE % ", ".join(str(i) for i in drift))
+    shown = [i for i in drift if i <= len(RULES)]
+    extra = len(drift) - len(shown)
+    if shown:
+        lines.append(RULES_DRIFT_LINE % ", ".join(str(i) for i in shown))
+    if extra:
+        lines.append(RULES_EXTRA_LINE % (extra, len(RULES)))
     lines.append("- Versions: %s; PYTORCH_ENABLE_MPS_FALLBACK %s"
                  % (", ".join("%s %s" % kv for kv in sorted(v.items())) or "-", r.get("mps_fallback_env") or "unset"))
     lines.append("- Code: %s%s" % (sha[:12] if sha else "no git",
@@ -266,8 +278,9 @@ def render_markdown(reports):
     """Markdown of latency/1 reports (sorted by system, then device): the label, the current RULES as a numbered list,
     then per report the timed path, a busy-machine banner when the preflight was overridden or swap grew (idle or
     during the timed loops), the provenance (with a Recorded rules line, RULES_DRIFT_LINE, when the report's recorded
-    rules differ from RULES: rules_drift) and one row per seed plus a pooled row. Milliseconds with one decimal, for
-    display only."""
+    rules differ from RULES at a shown rule: rules_drift; recorded rules past the last of RULES are counted, not
+    numbered, by RULES_EXTRA_LINE) and one row per seed plus a pooled row. Milliseconds with one decimal, for display
+    only."""
     lines = ["### Latency per message (Phase 7, EVAL-06): %s" % LABEL, "",
              "Latency is %s: it is not a decision criterion (a latency budget is DEC-01, v2)." % LABEL, "",
              "Rules:", ""] + ["%d. %s" % (i, rule) for i, rule in enumerate(RULES, 1)]

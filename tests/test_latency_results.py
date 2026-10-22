@@ -25,7 +25,8 @@ the code: reported, not gated.
   disclaimer, the seeds are bound to 0, 1, 2, and every review mutation must fail (07-REVIEW WR-01, WR-03; 07-13
   review WR-01); CLAUDE.md's rounded Laya numbers are bound to the same times (07-REVIEW IN-02)
 - pilot.latency.RULES' one warm-up line, both latency module docstrings and the README Phase 7 prose state the
-  seed-order limit, and no doc or code file repeats the old position-independence claim (07-REVIEW WR-01, IN-05)
+  seed-order limit, and no doc or code file repeats a withdrawn latency phrase (OLD_CLAIMS, each mapped to the finding
+  that withdrew it; 07-REVIEW WR-01, IN-05; 07-13 review IN-02)
 - the four reports' recorded rules differ from pilot.latency.RULES at rule 3 (the warm-up line, the text in force when
   they were timed); render_markdown marks each, and the README prose says so (07-REVIEW WR-02)
 """
@@ -162,8 +163,8 @@ def test_recorded_rules_drift_is_disclosed(reports):
         assert own == RULES_DRIFT[name], "%s: rules differ at %r, not %r" % (name, own, RULES_DRIFT[name])
         assert r["rules"][2].startswith(warm) and latency.RULES[2].startswith(warm), \
             "%s: recorded rule 3 and RULES[2] must both be the %r line" % (name, warm)
-        assert OLD_CLAIMS[0] in r["rules"][2], \
-            "%s: recorded rule 3 no longer holds %r, which the README paraphrases" % (name, OLD_CLAIMS[0])
+        assert POSITION_CLAIM in r["rules"][2], \
+            "%s: recorded rule 3 no longer holds %r, which the README paraphrases" % (name, POSITION_CLAIM)
     md = latency.render_markdown(latency.load_reports(LATENCY))
     assert md.count(latency.RULES_DRIFT_LINE % "3") == len(RULES_DRIFT), \
         "the render marks %d report(s) as drifting at rule 3, not %d" \
@@ -181,7 +182,31 @@ def test_recorded_rules_drift_is_disclosed(reports):
     assert latency.rules_drift(bare) == list(range(1, len(latency.RULES) + 1)), latency.rules_drift(bare)
 
 
-README = os.path.join(REPO_ROOT, "README.md")
+def test_rules_drift_counts_recorded_rules_past_rules(reports):
+    """A recorded value past the end of RULES (a JSON null included) counts, and the render counts such rules instead of
+    naming rule numbers it does not show (07-13 review IN-01)."""
+    by_name = {os.path.basename(rel)[:-len(".json")]: r for rel, r in reports}
+    base, n = by_name["laya-cpu"], len(latency.RULES)
+    null = dict(base, rules=list(latency.RULES) + [None])
+    assert latency.rules_drift(null) == [n + 1], \
+        "a recorded null past RULES gives rules_drift %r, not %r" % (latency.rules_drift(null), [n + 1])
+    one = dict(base, rules=list(latency.RULES) + ["x"])
+    assert latency.rules_drift(one) == [n + 1], \
+        "one extra recorded rule gives rules_drift %r, not %r" % (latency.rules_drift(one), [n + 1])
+    md = latency.render_markdown([one])
+    assert latency.RULES_EXTRA_LINE % (1, n) in md, "the render does not count the extra rule: %r" % md
+    assert latency.RULES_DRIFT_LINE % (n + 1) not in md, "the render names rule %d, which it does not show" % (n + 1)
+    rules = list(latency.RULES)
+    rules[2] = rules[2] + " (changed)"
+    both = dict(base, rules=rules + ["x", "y"])
+    assert latency.rules_drift(both) == [3, n + 1, n + 2], "rule 3 changed plus two extra rules gives rules_drift " \
+        "%r, not %r" % (latency.rules_drift(both), [3, n + 1, n + 2])
+    md = latency.render_markdown([both])
+    assert latency.RULES_DRIFT_LINE % "3" in md, "the render does not mark rule 3: %r" % md
+    assert latency.RULES_EXTRA_LINE % (2, n) in md, "the render does not count the two extra rules: %r" % md
+
+
+README =os.path.join(REPO_ROOT, "README.md")
 LATENCY_START, LATENCY_END = "<!-- latency:start -->", "<!-- latency:end -->"
 PHASE7_HEADING = "## Confidence, out-of-domain and latency metrics (Phase 7)"
 
@@ -326,15 +351,24 @@ def test_seed_order_disclosure_rejects_the_review_mutations(reports):
 
 
 SEED_ORDER_LIMIT = "a residual seed-order effect is not separated from a seed effect"
-OLD_CLAIMS = ("depends on its position", "independent of its position", "those included",
-              "first-occurrence costs are paid", "shows none")
+POSITION_CLAIM = "depends on its position"
+# Each withdrawn latency phrase maps to the finding that withdrew it.
+OLD_CLAIMS = {
+    POSITION_CLAIM: "07-REVIEW-10-11 WR-01",
+    "independent of its position": "07-REVIEW-10-11 WR-01",
+    "those included": "07-REVIEW-10-11 IN-05",
+    "first-occurrence costs are paid": "07-REVIEW-12 IN-01",
+    "BERTurk shows none": "07-REVIEW-12 WR-03",
+}
 
 
 def test_latency_wording_states_the_seed_order_limit():
     """RULES has exactly one warm-up line, and it states only what full_pass_per_seed guarantees (the same sequence per
     seed, every timed input run once before) and the seed-order limit; both module docstrings and the README Phase 7
     prose say the same, and no doc or code file repeats the old position-independence claim (07-REVIEW WR-01, IN-05,
-    G-07-UAT2-1). The committed reports keep the rules text in force when they were timed, so they are not checked."""
+    G-07-UAT2-1); each banned phrase is specific to the latency wording and is reported with the finding that withdrew
+    it (07-13 review IN-02). The committed reports keep the rules text in force when they were timed, so they are not
+    checked."""
     warm = [rule for rule in latency.RULES if rule.startswith("warm-up")]
     assert len(warm) == 1, "pilot.latency.RULES must hold exactly one warm-up line, not %d" % len(warm)
     for want in (latency.WARMUP_POLICY, "every seed follows the same sequence",
@@ -353,5 +387,5 @@ def test_latency_wording_states_the_seed_order_limit():
             continue
         with open(path, encoding="utf-8") as f:
             text = " ".join(f.read().split())
-        for claim in OLD_CLAIMS:
-            assert claim not in text, "%s still says %r (07-REVIEW WR-01, IN-05)" % (rel, claim)
+        for claim, finding in OLD_CLAIMS.items():
+            assert claim not in text, "%s still says %r (%s)" % (rel, claim, finding)
