@@ -746,3 +746,78 @@ def test_render_holds_no_local_path_or_message_text(built):
     texts = {t for t in texts if any(ch.isalpha() for ch in t)}
     assert [t for t in texts if len(t) >= 12 and t in md] == []
     assert sorted(t for t in texts if t in pieces) == []
+
+
+# ---- 08-10: the freeze rehearsal (the committed inputs, a temp protocol pinned in-process) ----
+
+@pytest.mark.data
+def test_freeze_rehearsal(tmp_path, monkeypatch, capsys):
+    """The freeze end to end without touching the repo: the protocol built from the committed inputs is written to
+    tmp_path and pinned by monkeypatch; then require_frozen, score.py's gate (trigger, admission, the final-seed
+    allow-list), fewshot.py --support-sets and the render all accept it exactly as they will accept the frozen one,
+    and refuse the rest. No model loads (load_agent and load_bert raise) and nothing is written outside tmp_path."""
+    import argparse
+
+    import fewshot as runner
+    import score
+
+    def no_load(*a, **k):
+        raise AssertionError("the rehearsal never loads a model")
+    monkeypatch.setattr(score, "load_agent", no_load)
+    monkeypatch.setattr(score, "load_bert", no_load)
+    code = {"git_head": "rehearsal", "dirty": False}
+    p = pr.build_protocol(code=code)
+    assert pr.protocol_bytes(p) == pr.protocol_bytes(pr.build_protocol(code=dict(code)))
+    path = str(tmp_path / "protocol.json")
+    sha = pr.write_protocol(p, path)
+    monkeypatch.setattr(pr, "PROTOCOL_PATH", path)
+    monkeypatch.setattr(pr, "PROTOCOL_SHA256", sha)
+
+    # (1) the pinned reader
+    assert pr.require_frozen() == (p, sha)
+
+    # (2) score.py's gate on the committed gated splits, for each of the six final seeds
+    entries, manifest = committed_entries(), pilot.data.DEFAULT_MANIFEST
+    laya_ckpt = tmp_path / "laya-ckpt"
+    laya_ckpt.mkdir()
+    (laya_ckpt / "rl_agent_config.json").write_text(json.dumps({"fine_tuned": True}), encoding="utf-8")
+    finals = {"laya": final_ids(LAYA_FINAL), "berturk": final_ids(BERTURK_FINAL)}
+    assert [len(finals[k]) for k in ("laya", "berturk")] == [3, 3]
+
+    def ns(**change):
+        return argparse.Namespace(**dict({"n": None, "force": False, "out_root": None, "workers": 0}, **change))
+    for split in ("test", "hotels_probe"):
+        entry = entries[split]
+        for kind, ckpt in (("laya", str(laya_ckpt)), ("berturk", str(tmp_path / "berturk-ckpt"))):
+            trigger = score.gate_trigger(kind, ckpt, entry, manifest)
+            assert trigger, (split, kind)
+            proto, pin, gated = score.protocol_gate(ns(), kind, ckpt, entry, manifest, "mps", trigger)
+            assert (proto, pin, gated) == (p, sha, split)
+            head = score._gate_head(kind, ckpt, entry, trigger)
+            for rid in finals[kind]:
+                score.require_final_seed(proto, kind, rid, head)
+                assert pr.final_seed_allowed(proto, kind, rid)
+            for chosen in (LAYA_CHOSEN, BERTURK_CHOSEN):
+                assert not pr.final_seed_allowed(proto, kind, chosen)
+                with pytest.raises(SystemExit) as e:
+                    score.require_final_seed(proto, kind, chosen, head)
+                assert str(e.value.code).startswith(score.GATE), e.value.code
+            for a, device in ((ns(force=True), "mps"), (ns(n=5), "mps"), (ns(out_root="elsewhere"), "mps"),
+                              (ns(workers=2), "mps"), (ns(), "cpu")):
+                with pytest.raises(SystemExit) as e:
+                    score.protocol_gate(a, kind, ckpt, entry, manifest, device, trigger)
+                assert str(e.value.code).startswith(score.GATE), (vars(a), device, e.value.code)
+    assert not os.path.exists(tmp_path / "berturk-ckpt")
+
+    # (3) the few-shot runner re-checks the three frozen draws against the committed selection_train
+    out = runner.main(["--support-sets"])
+    capsys.readouterr()
+    assert out["protocol_sha256"] == sha
+    assert [d["digest"] for d in out["draws"]] == [d["digest"] for d in p["fewshot"]["draws"]]
+    assert len(out["draws"]) == 3
+
+    # (4) the README block shows the margin in points, both prior fractions and each draw digest's 12 hex
+    md = pr.render_markdown(p, sha)
+    for want in ["-2.00 points", "10/41", "520/2163", sha] + [d["digest"][:12] for d in p["fewshot"]["draws"]]:
+        assert want in md, want
+    assert sorted(os.listdir(tmp_path)) == ["laya-ckpt", "protocol.json"]
