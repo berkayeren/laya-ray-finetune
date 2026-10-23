@@ -654,7 +654,7 @@ def test_final_seed_run_report_refuses_training_content(tmp_path, snap, fitted, 
     want = "holds committed %s content" % held
     with pytest.raises(SystemExit, match=want):
         report.run_report(final, "test", rsnap[1])
-    monkeypatch.setattr(evaluate.score, "main", lambda argv: (final, "test"))     # the dump score.py wrote
+    monkeypatch.setattr(evaluate.score, "main", lambda argv, roles=None: (final, "test"))   # the dump score.py wrote
     with pytest.raises(SystemExit, match=want):
         evaluate.main([os.path.join(rsnap[0], "splits", "test.jsonl"), "--manifest", rsnap[1]])
     rep = report.run_report(ok, "test", snap[1])
