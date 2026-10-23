@@ -144,6 +144,7 @@ def test_exports_hold_the_checkpoint_files(two_runs, inputs):
             r = rec["record"]
             assert r["device"] == r["param_device"] == "cpu" and r["dtype"] == "torch.float32" and r["amp"] is False
             assert r["bit_reproducible"] is True
+            assert r["fewshot"] is None and "fewshot" not in rec["canonical"]   # no Phase 9 run: no proof, no key
             assert type(r["n_truncated"]) is int and 0 <= r["n_truncated"] <= r["n_messages"]
             assert type(r["n_messages"]) is int and r["n_messages"] > 0 and r["max_len"] == MAX_LEN
             assert [row["epoch"] for row in r["epochs"]] == list(range(1, k + 1))
@@ -805,3 +806,275 @@ def test_pinned_base_head_is_the_fresh_classifier(keep_threads):
     groups = berturk.optimizer_groups(names, decay, info["missing_keys"], ENC_LR, HEAD_LR, berturk.WEIGHT_DECAY)
     assert groups[2]["params"] == ["classifier.weight"] and groups[3]["params"] == ["classifier.bias"]
     assert sum(len(g["params"]) for g in groups[:2]) == len(names) - 2
+
+
+# ---- Phase 9 few-shot modes: every refusal before a load, a fetch or a run dir (09-03, D-01) ----
+
+@pytest.fixture
+def fewshot_env(tmp_path, synthetic_raw, monkeypatch, no_load):
+    """tests/test_fewshot_berturk.py's synthetic frozen protocol installed in this process (tag card, k 1 and 2, draw
+    0, the tiny recipes, a postfit record whose chosen canonical is the tiny unmasked command's), with every model load
+    (no_load) and the pinned fetch failing the test if reached. Returns a namespace: ns (synthetic_protocol's),
+    base(*extra, data=None) and cont(base_dir, *extra) argv builders, base_canon (the masked base command's canonical
+    config) and plant(canonical=..., record=True, name=...) -> a tiny BERTurk checkpoint dir (the base's files, a
+    config.json scoring INTENTS in order and a berturk_train.json naming the base run), as a continued run's --base."""
+    import shutil
+    import types
+    import berturk_train
+    import pilot.weights
+    from conftest import prepared
+    from fewshot_synthetic import postfit_systems, synthetic_protocol
+    from test_fewshot_berturk import COMMON, rules
+
+    def no_fetch(*a, **kw):
+        raise AssertionError("the pinned fetch reached; a few-shot refusal must come first")
+    monkeypatch.setattr(pilot.weights, "fetch", no_fetch)
+    tiny = tiny_base(tmp_path / "tiny")
+    seen, run_id = [], berturk.run_id
+
+    def canon_of(argv):                                     # the canonical config main gives argv (--print-run-id)
+        def capture(canon):
+            seen.append(canon)
+            return run_id(canon)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(berturk, "run_id", capture)
+            berturk_train.main([str(x) for x in argv] + ["--print-run-id"])
+        return seen[-1]
+    pre_dir, pre_manifest = prepared(tmp_path, synthetic_raw, name="pre")
+    chosen = canon_of(["--data", os.path.join(pre_dir, "splits", "selection_train.jsonl"), "--manifest", pre_manifest,
+                       "--base", tiny, "--storage", tmp_path / "unused", "--epochs", "2"] + COMMON)
+    ns = synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, rules=rules(),
+                            systems=postfit_systems(tmp_path, {"berturk": chosen}))
+
+    def split(name):
+        return os.path.join(ns.out_dir, "splits", name + ".jsonl")
+
+    def base(*extra, data=None):
+        return [str(x) for x in ["--data", data or split("selection_train"), "--manifest", ns.manifest, "--base", tiny,
+                                 "--out", tmp_path / "o", "--storage", tmp_path / "runs", "--epochs", "2",
+                                 "--stop-after-epoch", "1", "--fewshot-base"] + COMMON + list(extra)]
+
+    def cont(base_dir, *extra):
+        return [str(x) for x in ["--data", split("selection_train"), "--manifest", ns.manifest, "--base", base_dir,
+                                 "--out", tmp_path / "o", "--storage", tmp_path / "runs", "--epochs", "1",
+                                 "--fewshot-draw", "0", "--fewshot-k", "2"] + COMMON + list(extra)]
+
+    base_canon = canon_of(base())
+
+    def plant(canonical=None, record=True, name="planted"):
+        d = str(tmp_path / name)
+        shutil.copytree(tiny, d)
+        cfg = _json(os.path.join(d, "config.json"))
+        cfg.update(id2label={str(i): t for i, t in berturk.id2label().items()}, label2id=berturk.label2id(),
+                   problem_type=berturk.PROBLEM_TYPE)
+        write_json(os.path.join(d, "config.json"), cfg)
+        canon = base_canon if canonical is None else canonical
+        if record:
+            write_json(os.path.join(d, berturk.RECORD), {"schema": berturk.RECORD_SCHEMA, "run_id": run_id(canon),
+                                                        "canonical": canon, "epoch": 1, "temperature": 1.0})
+        return d
+    return types.SimpleNamespace(ns=ns, base=base, cont=cont, plant=plant, base_canon=base_canon, chosen=chosen,
+                                 tmp=tmp_path, storage=tmp_path / "runs", out=tmp_path / "o")
+
+
+def fewshot_refused(env, argv, match):
+    """main(argv) raises SystemExit matching `match`; no run dir, no --out and no load (no_load) followed."""
+    import berturk_train
+    with pytest.raises(SystemExit, match=match):
+        berturk_train.main(argv)
+    assert not env.storage.exists() and not env.out.exists()
+
+
+def test_fewshot_base_and_continued_commands_print_their_run_ids_without_a_load(fewshot_env, capsys):
+    """The positive path the refusals below depart from: the frozen base command (with and without the frozen
+    --mask-tags spelled out) and a continued command from a masked base of this protocol print a run id; no model,
+    tokenizer or fetch is reached and nothing is created."""
+    import berturk_train
+    berturk_train.main(fewshot_env.base("--print-run-id"))
+    rid = capsys.readouterr().out.strip()
+    assert re.fullmatch(r"berturk-selection_train-s0-[0-9a-f]{8}", rid), rid
+    berturk_train.main(fewshot_env.base("--mask-tags", "card", "--print-run-id"))
+    assert capsys.readouterr().out.strip() == rid
+    assert fewshot_env.base_canon["fewshot"] == {"protocol_sha256": fewshot_env.ns.pin, "stage": "base"}
+    assert fewshot_env.base_canon["mask_tags"] == ["card"]
+    berturk_train.main(fewshot_env.cont(fewshot_env.plant(), "--print-run-id"))
+    cont = capsys.readouterr().out.strip()
+    assert re.fullmatch(r"berturk-selection_train-s0-[0-9a-f]{8}", cont) and cont != rid
+    assert not fewshot_env.storage.exists() and not fewshot_env.out.exists()
+
+
+@pytest.mark.parametrize("case", ["missing", "unpinned", "changed"])
+def test_fewshot_protocol_is_required_before_the_split_is_read(fewshot_env, monkeypatch, case):
+    """D-01: require_frozen() runs first: a missing, unpinned or changed protocol is refused before verify_split_file
+    reads --data (monkeypatched to fail the test if reached), for the base and the continued command."""
+    import berturk_train
+    from pilot import protocol as pr
+
+    def no_split(*a, **kw):
+        raise AssertionError("verify_split_file reached before the protocol check")
+    monkeypatch.setattr(berturk_train, "verify_split_file", no_split)
+    base = fewshot_env.plant()
+    if case == "missing":
+        monkeypatch.setattr(pr, "PROTOCOL_PATH", str(fewshot_env.tmp / "absent.json"))
+        match = "absent.json not found; the decision protocol must be frozen"
+    elif case == "unpinned":
+        monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)
+        match = "the decision protocol is not frozen"
+    else:
+        with open(fewshot_env.ns.protocol_path, "ab") as f:
+            f.write(b" ")
+        match = "the protocol may not change after the freeze"
+    for argv in (fewshot_env.base(), fewshot_env.cont(base)):
+        fewshot_refused(fewshot_env, argv, match)
+
+
+def test_fewshot_decision_record_is_required(fewshot_env):
+    """D-08: the projection's decision record names the mode; without it no few-shot command trains."""
+    os.remove(fewshot_env.ns.decision_path)
+    fewshot_refused(fewshot_env, fewshot_env.base("--print-run-id"), "run `python fewshot.py --projection")
+
+
+def test_fewshot_protocol_mask_label_and_dtype_must_be_the_trainers(fewshot_env, tmp_path, synthetic_raw, monkeypatch):
+    """D-01: the frozen rules.base_runs.berturk name the mask label and dtype berturk_train.py trains with; a protocol
+    naming another is refused before the split is read."""
+    from fewshot_synthetic import postfit_systems, synthetic_protocol
+    from test_fewshot_berturk import rules
+    for key, value in (("mask_label", -1.0), ("dtype", "float16")):
+        r = rules()
+        r["base_runs"]["berturk"][key] = value
+        sub = tmp_path / key                                 # a protocol is frozen once per path
+        sub.mkdir()
+        synthetic_protocol(sub, synthetic_raw, monkeypatch, rules=r,
+                           systems=postfit_systems(sub, {"berturk": fewshot_env.chosen}))
+        fewshot_refused(fewshot_env, fewshot_env.base("--print-run-id"), "cannot run this protocol unchanged")
+
+
+def test_mask_tags_other_than_the_protocols_are_refused_with_fewshot_base(fewshot_env):
+    """D-03: --mask-tags duplicates a frozen value, so any other list (another tag, an extra tag, a repeated tag) is
+    refused naming the frozen tags."""
+    for tags in ("loan", "card,loan", "card,card"):
+        fewshot_refused(fewshot_env, fewshot_env.base("--mask-tags", tags, "--print-run-id"),
+                        "--mask-tags %s is not the frozen protocol's held-out tags card; pass them" % tags)
+
+
+FLAG_ERRORS = [  # (argv edit, the argument error it gives)
+    ("draw_without_k", lambda e: set_flag(e.cont(e.plant()), "--fewshot-k"), "--fewshot-draw and --fewshot-k go"),
+    ("k_without_draw", lambda e: set_flag(e.cont(e.plant()), "--fewshot-draw"), "--fewshot-draw and --fewshot-k go"),
+    ("base_and_draw", lambda e: e.cont(e.plant(), "--fewshot-base"), "pass one of them"),
+    ("stop_with_draw", lambda e: e.cont(e.plant(), "--stop-after-epoch", "1", "--epochs", "2"),
+     "--fewshot-draw takes no --stop-after-epoch"),
+    ("mask_with_draw", lambda e: e.cont(e.plant(), "--mask-tags", "card"), "--mask-tags masks a Phase 9 base only"),
+    ("base_with_postfit", lambda e: e.base("--postfit", "p.json", "--reference", "r.json"),
+     "--fewshot-base takes no --postfit or --reference"),
+    ("base_with_reference", lambda e: e.base("--reference", "r.json"), "--fewshot-base takes no --postfit"),
+    ("draw_with_postfit", lambda e: e.cont(e.plant(), "--postfit", "p.json"), "--fewshot-draw takes no --postfit"),
+    ("base_with_max_messages", lambda e: e.base("--max-messages", "5"), "--fewshot-base takes no --max-messages"),
+    ("draw_with_max_messages", lambda e: e.cont(e.plant(), "--max-messages", "5"),
+     "--fewshot-draw takes no --max-messages"),
+]
+
+
+@pytest.mark.parametrize("name,edit,match", FLAG_ERRORS, ids=[f[0] for f in FLAG_ERRORS])
+def test_fewshot_flag_combinations_are_argument_errors(fewshot_env, capsys, name, edit, match):
+    """D-01: a few-shot mode is one frozen-protocol command; every other flag combination exits 2 naming the fix."""
+    code, err = exit_code(edit(fewshot_env), capsys)
+    assert code == 2 and match in err, err
+    assert not fewshot_env.storage.exists() and not fewshot_env.out.exists()
+
+
+def test_fewshot_base_on_another_split_is_refused(fewshot_env):
+    """D-02: the few-shot source is the frozen selection_train; final_train (a train split) is refused by
+    check_source."""
+    final = os.path.join(fewshot_env.ns.out_dir, "splits", "final_train.jsonl")
+    fewshot_refused(fewshot_env, fewshot_env.base("--print-run-id", data=final),
+                    "the source entry has sha256 .* the frozen few-shot source")
+
+
+def test_fewshot_base_with_another_recipe_is_refused(fewshot_env):
+    """D-03: the base recipe is rules.base_runs.berturk: --epochs 10 is refused naming epochs, a seed outside the base
+    seeds and another batch likewise."""
+    fewshot_refused(fewshot_env, fewshot_env.base("--epochs", "10", "--print-run-id"),
+                    "epochs is 10 here but 2 in the frozen rules.base_runs.berturk")
+    fewshot_refused(fewshot_env, fewshot_env.base("--seed", "5", "--print-run-id"),
+                    "seed 5 is not one of the base seeds \\[0\\]")
+    fewshot_refused(fewshot_env, fewshot_env.base("--batch", "8", "--print-run-id"),
+                    "batch is 8 here but 4 in the frozen rules.base_runs.berturk")
+
+
+def test_fewshot_masked_base_refuses_a_row_missing_an_old_tag(fewshot_env, monkeypatch):
+    """FEW-01 edge: label_vector never reads a missing label as a negative, so a masked base whose row lacks an
+    old-tag label is refused naming the uid and the tag (a missing held-out label is masked anyway)."""
+    import berturk_train
+    seen = {}
+
+    def parse_dropping_a_tag(raw):                          # a doctored file would fail its sha256 first
+        rows = pilot.data.parse_jsonl(raw)
+        del rows[0]["expected"]["loan"]
+        seen["uid"] = rows[0]["uid"]
+        return rows
+    monkeypatch.setattr(berturk_train, "parse_jsonl", parse_dropping_a_tag)
+    fewshot_refused(fewshot_env, fewshot_env.base("--print-run-id"), "does not label tag loan")
+    assert seen["uid"]
+
+
+def test_fewshot_continued_refuses_a_selected_uid_missing_from_the_rows(fewshot_env, monkeypatch):
+    """FEW-02 edge: a continued run builds its rows from the frozen lists only (pilot.fewshot.berturk_rows), so a
+    support uid missing from the rows is refused before any load, never trained on a shortened set (check_source,
+    which would refuse first, is bypassed here to reach that refusal)."""
+    import berturk_train
+    from pilot import fewshot as fs
+    support = sorted(fs.selection(fewshot_env.ns.block, 0, 2)["support"])
+
+    def parse_dropping_a_support_row(raw):
+        return [r for r in pilot.data.parse_jsonl(raw) if r["uid"] != support[0]]
+    monkeypatch.setattr(berturk_train, "parse_jsonl", parse_dropping_a_support_row)
+    monkeypatch.setattr(berturk_train.fewshot, "check_source", lambda block, entry, rows: None)
+    fewshot_refused(fewshot_env, fewshot_env.cont(fewshot_env.plant(), "--print-run-id"),
+                    "selected uids are not in the rows")
+
+
+def test_fewshot_continued_from_the_pinned_base_is_refused(fewshot_env):
+    """D-06: a continued run starts from a masked base checkpoint, never the pinned weights (refused before the split
+    is read and before the fetch, which fails the test if reached)."""
+    fewshot_refused(fewshot_env, fewshot_env.cont("berturk"), "pass a berturk_train.py --fewshot-base checkpoint as "
+                                                              "--base, not berturk")
+
+
+def test_fewshot_continued_from_a_checkpoint_without_a_base_binding_is_refused(fewshot_env):
+    """T-09-11: the base names itself by its own record bytes: a dir without berturk_train.json (the tiny base
+    itself), a record whose run id is not its canonical config's, a run that is not a masked base of this protocol,
+    and a config.json that does not score INTENTS in order are each refused before any load."""
+    fewshot_refused(fewshot_env, fewshot_env.cont(fewshot_env.plant(record=False, name="bare"), "--print-run-id"),
+                    "lacks berturk_train.json")
+    unbound = {k: v for k, v in fewshot_env.base_canon.items() if k not in ("fewshot", "mask_tags")}
+    fewshot_refused(fewshot_env, fewshot_env.cont(fewshot_env.plant(unbound, name="unbound"), "--print-run-id"),
+                    "carries fewshot binding <absent>, not a masked base of this protocol")
+    d = fewshot_env.plant(name="edited")
+    rec = _json(os.path.join(d, berturk.RECORD))
+    rec["run_id"] = "berturk-selection_train-s0-00000000"
+    write_json(os.path.join(d, berturk.RECORD), rec)
+    fewshot_refused(fewshot_env, fewshot_env.cont(d, "--print-run-id"),
+                    "names run berturk-selection_train-s0-00000000, but its canonical config")
+    d = fewshot_env.plant(name="unlabelled")
+    cfg = _json(os.path.join(d, "config.json"))
+    del cfg["id2label"]
+    write_json(os.path.join(d, "config.json"), cfg)
+    fewshot_refused(fewshot_env, fewshot_env.cont(d, "--print-run-id"), "does not score the 48 INTENTS tags")
+
+
+def test_fewshot_continued_seed_must_be_the_draw_seed(fewshot_env):
+    """D-07: the training seed of a continued run is the draw seed."""
+    fewshot_refused(fewshot_env, fewshot_env.cont(fewshot_env.plant(), "--seed", "1", "--print-run-id"),
+                    "seed is 1 here but draw 0's seed is 0; the training seed is the draw seed")
+
+
+def test_fewshot_continued_k_draw_and_epochs_outside_the_frozen_values_are_refused(fewshot_env):
+    """FEW-02: k is one of the frozen k_values (1, 2 here), the draw one of the frozen draws and the epochs the
+    frozen continued_training's."""
+    base = fewshot_env.plant()
+    fewshot_refused(fewshot_env, fewshot_env.cont(base, "--fewshot-k", "3", "--print-run-id"),
+                    "few-shot k 3 is not one of the frozen k values \\[1, 2\\]")
+    fewshot_refused(fewshot_env, fewshot_env.cont(base, "--fewshot-draw", "1", "--print-run-id"),
+                    "few-shot draw 1 is not one of the frozen draws 0..0")
+    fewshot_refused(fewshot_env, fewshot_env.cont(base, "--epochs", "2", "--print-run-id"),
+                    "epochs is 2 here but 1 in the frozen continued_training")

@@ -318,6 +318,76 @@ def test_identity_seeds_never_share_a_run_dir():
     assert [i.split("-")[2] for i in ids] == ["s0", "s1", "s2"]
 
 
+def test_identity_fewshot_key_is_dropped_when_none():
+    """Phase 9 (09-03, T-09-12): fewshot is an IDENTITY key left out when None, and the three few-shot flags are
+    NOT_IDENTITY (represented by fewshot and mask_tags); a bound base and a continued binding each get their own id."""
+    assert "fewshot" in berturk.IDENTITY and "fewshot" in berturk.DROPPED_WHEN_NONE
+    assert {"fewshot_base", "fewshot_draw", "fewshot_k"} <= set(berturk.NOT_IDENTITY)
+    plain = berturk.canonical(_values())
+    assert "fewshot" not in plain
+    base = berturk.canonical(_values(mask_tags=["card"], fewshot={"protocol_sha256": "p" * 64, "stage": "base"}))
+    cont = berturk.canonical(_values(fewshot={"protocol_sha256": "p" * 64, "stage": "continued", "draw": 0, "k": 10,
+                                              "digest": "d" * 64, "base_run_id": berturk.run_id(base)}))
+    assert len({berturk.run_id(c) for c in (plain, base, cont)}) == 3
+
+
+def test_identity_committed_final_seed_run_ids_are_unchanged():
+    """T-09-12: the three committed BERTurk final seeds' train run ids recompute from the committed postfit record and
+    data/splits.json with every DROPPED_WHEN_NONE key (fewshot included) given as None; the selection run's id is
+    test_epochs_is_the_only_change_from_the_head_lr_run's (berturk-selection_train-s0-4f36ae05)."""
+    with open(os.path.join(REPO_ROOT, "results", "postfit", "berturk-final.json"), encoding="utf-8") as f:
+        final = json.load(f)
+    with open(os.path.join(REPO_ROOT, "results", "postfit", "berturk.json"), encoding="utf-8") as f:
+        chosen = json.load(f)["chosen"]["canonical"]
+    with open(os.path.join(REPO_ROOT, "data", "splits.json"), encoding="utf-8") as f:
+        entry = json.load(f)["splits"]["final_train"]
+    pf_sha = sha256_file(os.path.join(REPO_ROOT, final["postfit"]["path"]))
+    assert pf_sha == final["postfit"]["sha256"]
+    assert berturk.run_id(berturk.canonical(dict({k: None for k in berturk.DROPPED_WHEN_NONE}, **chosen))) \
+        == final["chosen"]["train_run_id"] == "berturk-selection_train-s0-4f36ae05"
+    for s in final["seeds"]:
+        values = dict({k: None for k in berturk.DROPPED_WHEN_NONE}, **chosen)
+        values.update(split="final_train", data_sha256=entry["sha256"], data_role=entry["role"], seed=s["seed"],
+                      stop_after_epoch=final["chosen"]["stop_after_epoch"], postfit_sha256=pf_sha)
+        assert berturk.run_id(berturk.canonical(values)) == s["train_run_id"]
+    assert [s["train_run_id"] for s in final["seeds"]] == ["berturk-final_train-s0-8a167355",
+                                                           "berturk-final_train-s1-3c44e7ff",
+                                                           "berturk-final_train-s2-44f81396"]
+
+
+OG_NAMES = ["bert.embeddings.word_embeddings.weight", "bert.embeddings.LayerNorm.weight",
+            "bert.encoder.layer.0.attention.self.query.weight", "bert.encoder.layer.0.attention.self.query.bias",
+            "classifier.weight", "classifier.bias"]
+OG_DECAY = [n for n in OG_NAMES if n.endswith(".weight") and "LayerNorm" not in n]
+
+
+def test_optimizer_groups_continued_mode_trains_the_loaded_head():
+    """FEW-02, D-06 (T-09-10): continued=True takes the classifier.* names as the head of a masked base, loaded, so
+    nothing may be newly initialised; the same four groups, the head at the head LR."""
+    groups = berturk.optimizer_groups(OG_NAMES, OG_DECAY, [], 2e-05, 1e-4, 0.01, continued=True)
+    assert [(g["group"], g["decay"], g["lr"], g["weight_decay"]) for g in groups] == [
+        ("encoder", True, 2e-05, 0.01), ("encoder", False, 2e-05, 0.0), ("head", True, 1e-4, 0.01),
+        ("head", False, 1e-4, 0.0)]
+    assert groups[2]["params"] == ["classifier.weight"] and groups[3]["params"] == ["classifier.bias"]
+    assert sorted(n for g in groups for n in g["params"]) == sorted(OG_NAMES)
+    for new in (["classifier.weight", "classifier.bias"], ["classifier.bias"], ["bert.embeddings.LayerNorm.weight"]):
+        with pytest.raises(SystemExit, match="loaded, never newly initialised"):
+            berturk.optimizer_groups(OG_NAMES, OG_DECAY, new, 2e-05, 1e-4, 0.01, continued=True)
+    with pytest.raises(SystemExit, match="head none"):
+        berturk.optimizer_groups(OG_NAMES[:4], OG_DECAY, [], 2e-05, 1e-4, 0.01, continued=True)
+
+
+def test_optimizer_groups_default_mode_still_needs_a_fresh_head():
+    """continued=False (every non-few-shot run) keeps the BASE-03 rule: the head is exactly the newly initialised
+    names, so a loaded head (nothing newly initialised) is refused."""
+    fresh = ["classifier.bias", "classifier.weight"]
+    assert berturk.optimizer_groups(OG_NAMES, OG_DECAY, fresh, 2e-05, 1e-4, 0.01) \
+        == berturk.optimizer_groups(OG_NAMES, OG_DECAY, [], 2e-05, 1e-4, 0.01, continued=True)
+    for new in ([], ["classifier.weight"]):
+        with pytest.raises(SystemExit, match="the classifier head must be exactly the newly initialised parameters"):
+            berturk.optimizer_groups(OG_NAMES, OG_DECAY, new, 2e-05, 1e-4, 0.01)
+
+
 def _checkpoint(d):
     os.makedirs(d, exist_ok=True)
     for name in berturk.CHECKPOINT_FILES:
