@@ -350,8 +350,8 @@ def test_parse_fraction():
     assert v.parse_fraction("0/1") == Fraction(0)
 
 
-@pytest.mark.parametrize("text", ["0.2439", "10/0", "-1/2", " 1/2", "1/2 ", "1 / 2", "01/2", "1/02", "", "1/2/3",
-                                  0.5, None, Fraction(1, 2)])
+@pytest.mark.parametrize("text", ["0.2439", "1/2\n", "10/0", "-1/2", " 1/2", "1/2 ", "1 / 2", "01/2", "1/02", "",
+                                  "1/2/3", 0.5, None, Fraction(1, 2)])
 def test_parse_fraction_refuses_anything_but_a_over_b(text):
     with pytest.raises(SystemExit, match="fraction"):
         v.parse_fraction(text)
@@ -460,7 +460,7 @@ def test_default_collapse_states_the_runs_and_components():
     assert c["components"]["test_floor"]["addition"].startswith("Claude-recommended addition to the REP-01 default")
     assert "Open Question 1" in c["components"]["test_floor"]["addition"]
     assert c["not_applied"] == "the val floor is not applied to final seeds: final_train holds the val folds"
-    assert "prior_val_fraction" not in c and "prior_test_fraction" not in c          # 08-05 adds the data-derived values
+    assert "prior_val_fraction" not in c and "prior_test_fraction" not in c        # 08-05 adds the data-derived values
 
 
 def test_criterion_b_holds_no_threshold_literal():
