@@ -913,11 +913,12 @@ def verdict_from(protocol, sha, manifest_path=DEFAULT_MANIFEST, root=None, dump_
             test_counts=_global_counts(Y, Ps, record["chosen"]["theta"]["shipped"]["global"]),
             loss_by_epoch=entries[f["seed"]].get("loss_by_epoch")))
     seeded = {}
+    A, B = pilot.verdict.KINDS                              # every delta is A - B (D-10: no system name in report.py)
     for variant, key in (("headline", "shipped"), ("raw", "raw")):
         Pv = {k: metrics.seed_average(P[k][variant]) for k in pilot.verdict.KINDS}
         th = {k: metrics.theta_vector(recs[k][0]["chosen"]["theta"][key]) for k in pilot.verdict.KINDS}
-        d = pilot.verdict.system_deltas(Y, Pv["laya"], th["laya"], Pv["berturk"], th["berturk"], protocol["bootstrap"])
-        seeded[variant] = dict(d, a="laya", b="berturk",
+        d = pilot.verdict.system_deltas(Y, Pv[A], th[A], Pv[B], th[B], protocol["bootstrap"])
+        seeded[variant] = dict(d, a=A, b=B,
                                temperature={k: (recs[k][0]["chosen"]["temperature"] if variant == "headline" else 1.0)
                                             for k in pilot.verdict.KINDS},
                                theta={k: "theta.%s" % key for k in pilot.verdict.KINDS})
