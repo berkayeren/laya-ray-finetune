@@ -11,7 +11,7 @@
   seed, the postfit record sha256 and the chosen T (1e-12) of the protocol, from the seed's checkpoint (base name);
   the zero-shot HOTELS reference is tracked, ungated (no protocol_sha256), on its val dump's scorer (cpu, 2 workers)
 - git order (REP-01): protocol.json has exactly one commit, and it is a strict ancestor of the commit that added each
-  gated dump file
+  gated dump file (skipped in a shallow clone, which has no history to walk: 08-REVIEW WR-05)
 
 The published verdict (plan 08-12, REP-02, REP-03, ROADMAP Phase 8 criteria 4 and 5):
 - `make final-reports` (no model) is the exact command list: LAYA_FINAL and BERTURK_FINAL are the protocol's final
@@ -160,13 +160,22 @@ def test_final_seeds_scored_exactly_once():
     assert side["system"]["checkpoint_identity"] == val["system"]["checkpoint_identity"]
 
 
+def require_full_history():
+    """Skip in a shallow clone (08-REVIEW WR-05): its grafted HEAD commit reports every file as added there, and
+    merge-base has no history to walk, so the git-order checks need the full history."""
+    if git("rev-parse", "--is-shallow-repository").strip() == "true":
+        pytest.skip("needs the full git history (git fetch --unshallow)")
+
+
 def test_protocol_json_has_one_commit():
+    require_full_history()
     out = git("log", "--format=%H", "--", "protocol.json")
     commits = out.split()
     assert len(commits) == 1, commits
 
 
 def test_gated_dumps_descend_from_the_freeze():
+    require_full_history()
     proto, _ = protocol.require_frozen()
     out = git("log", "--format=%H", "--", "protocol.json")
     freeze = out.split()
