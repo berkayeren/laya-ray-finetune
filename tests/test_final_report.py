@@ -177,3 +177,66 @@ def test_every_val_selected_row_names_a_val_theta_source(tmp_path, snap, fitted,
     seen = [s for r in reps for s in _theta_sources(r, snap[1], (base, major))]
     assert len(seen) == 11
     assert all(split == "val" for _, split in seen), seen
+
+
+# --- render_confidence's svg_dir (08-12 renders the test/HOTELS block from results/final/confidence) ----------------
+
+CONFIDENCE_DIR = os.path.join(pilot.data.REPO_ROOT, "results", "confidence")
+
+
+def _committed_confidence():
+    paths = report.table_inputs([CONFIDENCE_DIR])
+    assert paths, "no committed confidence record under results/confidence/"
+    out = []
+    for p in paths:
+        with open(p, encoding="utf-8") as f:
+            out.append(json.load(f))
+    return paths, out
+
+
+def test_render_confidence_svg_dir_default_is_the_phase7_block():
+    """The default svg_dir is results/confidence, so the committed Phase 7 README block renders as before."""
+    _, records = _committed_confidence()
+    assert report.CONFIDENCE_SVG_DIR == "results/confidence"
+    assert report.render_confidence(records) == report.render_confidence(records, svg_dir="results/confidence")
+
+
+def test_render_confidence_svg_dir_changes_only_the_links():
+    """Another svg_dir moves every diagram link there and changes nothing else."""
+    _, records = _committed_confidence()
+    base = report.render_confidence(records).split("\n")
+    moved = report.render_confidence(records, svg_dir="results/final/confidence").split("\n")
+    assert len(base) == len(moved)
+    links = ["![reliability diagram %s (%s)](results/final/confidence/%s-%s.svg)"
+             % (r["run_id"], r["split"]["name"], r["run_id"], r["split"]["name"]) for r in records]
+    changed = [(a, b) for a, b in zip(base, moved) if a != b]
+    assert [b for _, b in changed] == links
+    assert [a for a, _ in changed] == [x.replace("results/final/confidence/", "results/confidence/") for x in links]
+
+
+def test_confidence_table_svg_dir_keeps_the_committed_block(capsys):
+    """`report.py --confidence-table results/confidence` derives svg_dir from the inputs' directory: the committed
+    records give exactly render_confidence's default text (the README Phase 7 block)."""
+    paths, records = _committed_confidence()
+    assert report.confidence_svg_dir(paths) == report.CONFIDENCE_SVG_DIR
+    text = report.main(["--confidence-table", CONFIDENCE_DIR])
+    assert capsys.readouterr().out == text == report.render_confidence(records)
+
+
+def test_confidence_svg_dir_follows_one_common_directory_under_root(tmp_path):
+    """One common directory under root gives its forward-slash relative path; two directories, root itself or a
+    record outside root give CONFIDENCE_SVG_DIR (never an absolute or outside-repo link)."""
+    root = tmp_path / "repo"
+    for rel in ("a/b/x-test.json", "a/b/y-test.json", "a/c/z-test.json", "top-test.json"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("{}", encoding="utf-8")
+    outside = tmp_path / "elsewhere" / "w-test.json"
+    outside.parent.mkdir()
+    outside.write_text("{}", encoding="utf-8")
+    one = [str(root / "a" / "b" / "x-test.json"), str(root / "a" / "b" / "y-test.json")]
+    assert report.confidence_svg_dir(one, root=str(root)) == "a/b"
+    assert report.confidence_svg_dir(one + [str(root / "a" / "c" / "z-test.json")], root=str(root)) \
+        == report.CONFIDENCE_SVG_DIR
+    assert report.confidence_svg_dir([str(root / "top-test.json")], root=str(root)) == report.CONFIDENCE_SVG_DIR
+    assert report.confidence_svg_dir([str(outside)], root=str(root)) == report.CONFIDENCE_SVG_DIR
+    assert report.confidence_svg_dir([], root=str(root)) == report.CONFIDENCE_SVG_DIR
