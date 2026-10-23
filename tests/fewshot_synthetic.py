@@ -26,6 +26,15 @@ training.ray_train {run_id, canonical, record} and final.json; plant_berturk(pat
 tests/tiny_berturk.tiny_base files plus berturk_train.json. plant_fewshot_set(ns, root) plants one consistent set per
 kind under root: the masked base of each allowed base seed and one continued run per frozen (draw, k), each with a
 valid masking proof, and returns {name: dir} (names laya-base-s0, laya-d0-k1, berturk-d0-k2, ...).
+
+Planted results inputs (09-06; no checkpoint, no model): plant_runs(ns, path) writes a complete runs manifest
+(fewshot-runs/1) for the synthetic protocol `ns` straight from its slots, with made-up run ids, a valid masking proof
+and a distinct wall clock per entry, and returns its path (pilot.fewshot.read_runs accepts it). plant_fewshot_dumps(ns,
+runs, runs_sha256, dump_root, seed) writes, for every entry of that manifest, its dumps through pilot.dumps.write_dump
+on the synthetic snapshot: a base's ungated val dump (no protocol_sha256, no fewshot_runs_sha256) and every entry's
+gated test dump (protocol_sha256 the pin, fewshot_runs_sha256 the manifest's), each sidecar carrying the entry's system
+kind, identity, dump run id, seed and training run id. The logits are seeded float32 normals unless `logits(entry,
+split, Y, rng)` returns them. `extra` of synthetic_protocol sets top-level protocol keys (e.g. the bootstrap block).
 """
 import copy
 import json
@@ -249,7 +258,8 @@ def write_decision(path, record):
 
 
 def synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, tags=("card",), k_values=(1, 2), draw_seeds=(0,),
-                       neg_per_pos=1, replay=2, rules=None, systems=None, scoring=None, mode="primary", splits=None):
+                       neg_per_pos=1, replay=2, rules=None, systems=None, scoring=None, mode="primary", splits=None,
+                       extra=None):
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", manifest)   # first: splits_block reads the committed one
     entry, rows = _rows(manifest)
@@ -271,6 +281,8 @@ def synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, tags=("card",), k_v
         protocol["systems"] = systems
     if scoring is not None:
         protocol["scoring"] = scoring
+    for key, value in (extra or {}).items():
+        protocol[key] = copy.deepcopy(value)
     protocol["splits"] = pr.splits_block(manifest) if splits is None else splits
     path = str(tmp_path / "protocol.json")
     pin = pr.write_protocol(protocol, path)
@@ -281,3 +293,85 @@ def synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, tags=("card",), k_v
     return types.SimpleNamespace(manifest=manifest, out_dir=out_dir, protocol_path=path, pin=pin,
                                  decision_path=decision_path, block=json.loads(json.dumps(block)), rows=rows,
                                  protocol=json.loads(json.dumps(protocol)))
+
+
+def plant_runs(ns, path):
+    """A complete runs manifest (pilot.fewshot RUNS_SCHEMA) of the synthetic protocol `ns` under its recorded mode,
+    built from pilot.fewshot.slots without any checkpoint, written to `path` (key-sorted JSON); returns `path`."""
+    from pilot.data import repo_relpath, sha256_bytes
+    mode = fs.read_mode(ns.pin)
+    tags = sorted(ns.block["tags"])
+    entries, wall = [], 100.0
+    for kind, stage, seed, draw, k in fs.slots(ns.block, mode):
+        name = "%s-base-s%d" % (kind, seed) if stage == "base" else "%s-d%d-k%d" % (kind, draw, k)
+        e = {"kind": kind, "stage": stage, "seed": seed, "draw": draw, "k": k, "digest": None, "base_seed": None,
+             "base_run_id": None, "train_run_id": "%s-train-%s" % (kind, name.split("-", 1)[1]),
+             "dump_run_id": "%s-dump-%s" % (kind, name.split("-", 1)[1]), "checkpoint_name": "ckpt-" + name,
+             "rung": "none" if kind == "laya" else None, "fallback": False if kind == "laya" else None,
+             "weaker": False if kind == "laya" else None, "wall_clock_s": wall, "loss_by_epoch": [1.0, 0.5]}
+        wall += 1.5
+        if stage == "base":
+            key = "held_out_items" if kind == "laya" else "unmasked_held_out_labels"
+            e["proof"] = {key: {t: 0 for t in tags}}
+        else:
+            base_seed = fs.base_seed_of(ns.block, draw, mode)
+            sel = fs.selection(ns.block, draw, k)
+            n_sup, n_rep = len(sel["support"]), len(sel["replay"])
+            e.update(digest=ns.block["draws"][draw]["digest"], base_seed=base_seed,
+                     base_run_id="%s-train-base-s%d" % (kind, base_seed))
+            key = "new_tag_items" if kind == "laya" else "new_tag_labels"
+            e["proof"] = {key: {t: n_sup for t in tags}, "support_rows": n_sup, "replay_rows": n_rep}
+            if kind == "berturk":
+                e["proof"]["replay_unmasked_held_out_labels"] = 0
+        entries.append(e)
+    entries.sort(key=fs.entry_key)
+    with open(fs.DECISION_PATH, "rb") as f:
+        decision = {"path": repo_relpath(fs.DECISION_PATH), "sha256": sha256_bytes(f.read())}
+    record = {"schema": fs.RUNS_SCHEMA, "protocol_sha256": ns.pin, "mode": mode, "decision": decision, "tags": tags,
+              "wall_rule": fs.WALL_RULE, "entries": entries}
+    fs.check_runs(record, ns.protocol, ns.pin, mode)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write((json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    return path
+
+
+def split_gold(manifest, split):
+    """(manifest entry, uids in file order, bool [n, 48] gold) of a verified split of the synthetic snapshot."""
+    from pilot import dumps
+    with open(manifest, encoding="utf-8") as f:
+        entry = json.load(f)["splits"][split]
+    with open(os.path.join(os.path.dirname(manifest), entry["path"]), "rb") as f:
+        uids = [r["uid"] for r in pilot.data.parse_jsonl(f.read())]
+    return entry, uids, dumps.read_gold(entry, manifest, uids)
+
+
+def plant_fewshot_dumps(ns, runs, runs_sha256, dump_root, seed=0, logits=None):
+    """Every dump the few-shot record reads, for the entries of `runs` (see the module docstring); returns {(dump run
+    id, split): dump dir}."""
+    import zlib
+
+    import numpy as np
+
+    import score
+    from pilot import dumps
+    out = {}
+    for e in runs["entries"]:
+        for split in (("val", "test") if e["stage"] == "base" else ("test",)):
+            entry, uids, Y = split_gold(ns.manifest, split)
+            side = score.sidecar_base(entry, split, ns.manifest, None)
+            side.update(run_id=e["dump_run_id"],
+                        system={"kind": e["kind"], "checkpoint": "<outside-repo>/" + e["checkpoint_name"],
+                                "checkpoint_identity": {"local": True, "model_sha256": "%064x" % zlib.crc32(
+                                    e["dump_run_id"].encode("utf-8"))}},
+                        temperature={"shipped": 1.0, "source": "planted"},
+                        scorer={"device": "cpu", "dtype": "float32", "amp_enabled": False}, seed=e["seed"],
+                        training={"run_id": e["train_run_id"], "split": "selection_train", "calibrated": False})
+            if split == "test":
+                side.update(protocol_sha256=ns.pin, fewshot_runs_sha256=runs_sha256)
+            rng = np.random.default_rng([seed, zlib.crc32(("%s/%s" % (e["dump_run_id"], split)).encode("utf-8"))])
+            L = logits(e, split, Y, rng) if logits is not None else rng.normal(0.0, 3.0, size=Y.shape)
+            run_dir = os.path.join(dump_root, e["dump_run_id"])
+            dumps.write_dump(run_dir, split, np.asarray(L, dtype=np.float32), uids, side)
+            out[(e["dump_run_id"], split)] = run_dir
+    return out
