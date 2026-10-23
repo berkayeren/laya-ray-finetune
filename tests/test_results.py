@@ -136,3 +136,28 @@ def test_reports_reproduce_from_dumps():
             got = report.run_report(os.path.join(DUMPS, committed["run_id"]), committed["split"]["name"],
                                     DEFAULT_MANIFEST)
         assert json.loads(json.dumps(got, ensure_ascii=False)) == committed, "%s does not reproduce" % rel
+
+
+def test_final_dir_rule_flags_planted_cases():
+    pin, rid = "a" * 64, "laya-final-dir"
+    gated = ("test.npz", "test.json", "hotels_probe.npz", "hotels_probe.json")
+
+    def side(**kw):
+        return dict({"run_id": rid, "n_subset": None, "protocol_sha256": pin}, **kw)
+    both = {"test": side(), "hotels_probe": side()}
+    assert final_dir_problems(rid, gated, both, pin) == []
+    assert final_dir_problems(rid, (), {}, None) == []                  # before the scoring run: nothing tracked
+    assert final_dir_problems(rid, gated[:2], {"test": side()}, pin) == []
+    flagged = {
+        "val dump": (gated + ("val.npz", "val.json"), both, pin, "val"),
+        "other file": (gated + ("notes.txt",), both, pin, "notes.txt"),
+        "missing pin key": (gated, {"test": side(protocol_sha256=None), "hotels_probe": side()}, pin,
+                            "protocol_sha256"),
+        "other pin": (gated, {"test": side(), "hotels_probe": side(protocol_sha256="b" * 64)}, pin, "b" * 64),
+        "pin unset": (gated, both, None, "PROTOCOL_SHA256"),
+        "subset": (gated, {"test": side(n_subset=20), "hotels_probe": side()}, pin, "subset"),
+        "npz without sidecar": (("test.npz",), {}, pin, "sidecar"),
+    }
+    for name, (names, sides, p, word) in flagged.items():
+        got = final_dir_problems(rid, names, sides, p)
+        assert got and any(word in g for g in got), (name, got)
