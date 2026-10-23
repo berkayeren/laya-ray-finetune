@@ -71,6 +71,11 @@ that run; a canonical few-shot binding of this pin); then DIR/<run id>, the run'
 else. A missing or symlinked DIR/<run id>, or one that holds CKPT itself, is refused. The runs manifest is not needed:
 storage is freed after each training run, before the allow-list is written.
 
+--report --out PATH (09-06, D-10, D-12): require_frozen() first; pilot.fewshot.read_runs must find and accept
+results/fewshot/runs.json; pilot.fewshot_report.build_record computes the few-shot results record (schema
+fewshot-results/1) from the dumps the manifest lists only (numpy, no model), writes it to PATH atomically (a rebuild
+overwrites it: make fewshot-reports) and prints its primary block.
+
 usage:
     python fewshot.py --support-sets                     # refused until protocol.json is frozen (plan 08-10)
     python fewshot.py --support-sets --manifest OTHER_DIR/splits.json
@@ -81,6 +86,7 @@ usage:
     python fewshot.py --runs-manifest ckpt-fewshot-* ckpt-berturk-fewshot-* --out results/fewshot/runs.json   # once
     python fewshot.py --prune ckpt-fewshot-d0-k10          # after its verified gated test dump exists
     python fewshot.py --drop-storage ckpt-fewshot-d0-k10 --storage ray_results   # that run's Ray storage only
+    python fewshot.py --report --out results/fewshot/fewshot.json   # the results record (make fewshot-reports)
 """
 import argparse
 import json
@@ -89,7 +95,7 @@ import os
 import shutil
 
 import pilot.data
-from pilot import berturk, compute, dumps, fewshot, protocol, runs, spike
+from pilot import berturk, compute, dumps, fewshot, fewshot_report, protocol, runs, spike
 from pilot.data import REPO_ROOT, parse_jsonl, repo_relpath, sha256_bytes, verify_split_file, write_atomic
 
 SOURCE_SPLIT = fewshot.SOURCE_SPLIT
@@ -612,8 +618,20 @@ def drop_storage_mode(ckpt, storage):
     return run
 
 
+# ---- 09-06: the results record (D-10, D-12) ----
+
+def report_mode(out):
+    """--report: require_frozen first, then pilot.fewshot_report.build_record of the committed runs manifest and the
+    dumps it lists, written to `out` atomically (a rebuild); prints the primary block."""
+    proto, _, pin = frozen_protocol()                           # first: nothing is read without the frozen protocol
+    record = fewshot_report.build_record(proto, pin)
+    fewshot_report.write_record(record, out)
+    print(json.dumps(record["primary"], ensure_ascii=False, indent=2, sort_keys=True))
+    return record
+
+
 # which mode each optional flag belongs to (each mode refuses the others' flags, the postfit.py convention)
-FLAG_MODES = {"out": ("projection", "runs_manifest"), "ladder_failure": ("projection",),
+FLAG_MODES = {"out": ("projection", "runs_manifest", "report"), "ladder_failure": ("projection",),
               "storage": ("drop_storage",), "manifest": ("support_sets", "counts", "projection", "prune")}
 
 
@@ -634,8 +652,11 @@ def main(argv=None):
                       help="delete listed few-shot checkpoints once their verified dumps exist")
     mode.add_argument("--drop-storage", metavar="CKPT",
                       help="delete the Ray storage dir (--storage/<run id>) of a finished ray_train.py few-shot run")
+    mode.add_argument("--report", action="store_true",
+                      help="build the few-shot results record from the listed dumps and write it to --out")
     ap.add_argument("--out", default=None, help="--projection: the decision record (results/fewshot/projection.json); "
-                                                "--runs-manifest: the allow-list (results/fewshot/runs.json)")
+                                                "--runs-manifest: the allow-list (results/fewshot/runs.json); "
+                                                "--report: the results record (results/fewshot/fewshot.json)")
     ap.add_argument("--ladder-failure", default=None, metavar="TEXT",
                     help="--projection: turn the recorded primary decision at --out into the fallback, naming the "
                          "primary base run that still failed after the LAYA-03 ladder")
@@ -644,20 +665,24 @@ def main(argv=None):
     a = ap.parse_args(argv)
     manifest = a.manifest or pilot.data.DEFAULT_MANIFEST
     chosen = next((m for m in ("support_sets", "counts", "projection", "inspect", "runs_manifest", "prune",
-                               "drop_storage") if getattr(a, m)), None)
+                               "drop_storage", "report") if getattr(a, m)), None)
     if a.ladder_failure is not None and chosen != "projection":
         ap.error("--out and --ladder-failure belong to --projection (--out also to --runs-manifest)")
     if a.out is not None and chosen not in FLAG_MODES["out"]:
-        ap.error("--out and --ladder-failure belong to --projection (--out also to --runs-manifest)")
+        ap.error("--out and --ladder-failure belong to --projection (--out also to --runs-manifest and --report)")
     if a.storage is not None and chosen != "drop_storage":
         ap.error("--storage belongs to --drop-storage")
     if a.manifest is not None and chosen not in FLAG_MODES["manifest"]:
         ap.error("--manifest belongs to --support-sets, --counts, --projection and --prune; --inspect, "
-                 "--runs-manifest and --drop-storage read the checkpoints' own records")
+                 "--runs-manifest and --drop-storage read the checkpoints' own records, --report the committed splits")
     if a.drop_storage:
         if not a.storage:
             ap.error("--drop-storage needs --storage DIR (the Ray storage the run trained under)")
         return drop_storage_mode(a.drop_storage, a.storage)
+    if a.report:
+        if not a.out:
+            ap.error("--report needs --out PATH (results/fewshot/fewshot.json)")
+        return report_mode(a.out)
     if a.prune:
         return prune_mode(a.prune, manifest)
     if a.inspect:
@@ -673,8 +698,8 @@ def main(argv=None):
     if a.counts:
         return counts_mode(manifest)
     if not a.support_sets:
-        ap.error("pass a mode: --support-sets, --counts, --projection, --inspect, --runs-manifest, --prune or "
-                 "--drop-storage")
+        ap.error("pass a mode: --support-sets, --counts, --projection, --inspect, --runs-manifest, --prune, "
+                 "--drop-storage or --report")
     return support_sets(manifest)
 
 
