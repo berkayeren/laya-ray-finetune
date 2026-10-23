@@ -689,6 +689,13 @@ def test_render_shows_the_remaining_values_of_a_hand_written_dict():
     assert "| 0 | 0 | 0 | 2 | 3 | 2 | loan 2, card 3 | 9876543210ab |" in md
 
 
+def test_render_keeps_an_html_like_text_literal_in_a_code_span():
+    p = tiny()
+    p["scoring"]["once"] = "scored once into results/dumps/<dump_run_id>/<split>"
+    md = pr.render_markdown(p, "5" * 64)
+    assert "- once: `scored once into results/dumps/<dump_run_id>/<split>`" in md
+
+
 @pytest.mark.data
 def test_render_shows_the_remaining_sections(built):
     md = pr.render_markdown(built, "5" * 64)
@@ -729,11 +736,13 @@ def test_render_holds_no_local_path_or_message_text(built):
     assert pilot.data.REPO_ROOT not in md
     texts = local_split_texts()
     assert texts, "make data first: the message-text check needs the committed splits"
-    # a message text never appears inside the block; a few messages are a bare number or word ("40"), so those
-    # short ones are checked as whole lines, bullet values and table cells instead of as substrings
+    # a message text never appears inside the block; a few messages are short, so those are checked as whole
+    # lines, bullet values and table cells instead of as substrings; a message without a letter ("1", "40") cannot be
+    # told from a count of the block and carries no text, so it is left out
     pieces = set()
     for line in md.split("\n"):
         pieces |= {line.strip(), line.lstrip("- ").strip()} | {c.strip() for c in line.split("|")}
         pieces |= {x.strip() for x in line.split(": ")}
+    texts = {t for t in texts if any(ch.isalpha() for ch in t)}
     assert [t for t in texts if len(t) >= 12 and t in md] == []
     assert sorted(t for t in texts if t in pieces) == []

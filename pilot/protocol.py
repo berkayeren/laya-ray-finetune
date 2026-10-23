@@ -47,6 +47,7 @@ import argparse
 import copy
 import json
 import os
+import re
 import subprocess
 
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, sha256_bytes, sha256_file,
@@ -545,6 +546,8 @@ def build_protocol(manifest_path=DEFAULT_MANIFEST, root=REPO_ROOT, code=None):
 
 # ---- the README protocol block ----
 
+HTML_TAG = re.compile(r"<[A-Za-z/!?]")                     # text markdown would read as raw HTML
+
 def _num(x):
     """A frozen number as stored (its JSON form: -0.02, 0.0, 2e-05, 80)."""
     return json.dumps(x)
@@ -553,7 +556,7 @@ def _num(x):
 def _value(x, points=False):
     """Display form of a frozen value: a float fraction with its points when `points` (e.g. "-0.02 (-2.00 points)"),
     other numbers and null/booleans in JSON form, lists joined by ", ", dicts as "key: value" joined by "; ", strings
-    verbatim."""
+    verbatim (inside a code span when they hold an HTML-like tag such as <split>, which markdown would swallow)."""
     if x is None or isinstance(x, bool):
         return json.dumps(x)
     if isinstance(x, float) and points:
@@ -564,7 +567,7 @@ def _value(x, points=False):
         return ", ".join(_value(v, points) for v in x)
     if isinstance(x, dict):
         return "; ".join("%s: %s" % (k, _value(v, points)) for k, v in x.items())
-    return str(x)
+    return "`%s`" % x if HTML_TAG.search(x) and "`" not in x else str(x)
 
 
 def _table(header, rows):
@@ -628,11 +631,144 @@ def _verdict_lines(v):
     return out
 
 
+def _bullets(d, depth=0):
+    """Nested bullets of a dict: "- key: value" for a scalar or a list of short items, a nested list for a dict or a
+    list of sentences (every string verbatim)."""
+    pad, out = "  " * depth, []
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out.append("%s- %s:" % (pad, k))
+            out += _bullets(v, depth + 1)
+        elif isinstance(v, list) and any(isinstance(x, (dict, list)) or (isinstance(x, str) and " " in x) for x in v):
+            out.append("%s- %s:" % (pad, k))
+            out += ["%s  - %s" % (pad, _value(x)) for x in v]
+        else:
+            out.append("%s- %s: %s" % (pad, k, _value(v)))
+    return out
+
+
+def _short(sha):
+    """The first 12 hex characters of a sha256, for display (the full value is in protocol.json)."""
+    return sha[:12]
+
+
+def _averaging_lines(p):
+    b = p["bootstrap"]
+    out = ["#### Seed averaging, θ and bootstrap", "", "Variant:", ""] + _bullets(p["variant"])
+    out += ["", "Seed averaging:", ""] + _bullets(p["seed_averaging"])
+    out += ["", "Bootstrap: B = %s, seed %s, level %s, coverage %s%%, unit %s, method %s."
+            % (_num(b["B"]), _num(b["seed"]), _num(b["level"]), _num(b["coverage"]), b["unit"], b["method"]), ""]
+    out += _bullets({k: v for k, v in b.items() if k not in ("B", "seed", "level", "coverage", "unit", "method")})
+    out += ["", "Scoring (each final seed, once per gated split):", ""] + _bullets(p["scoring"])
+    return out
+
+
+def _systems_lines(p):
+    rows, seeds = [], []
+    for kind, s in p["systems"].items():
+        c = s["chosen"]
+        th = c["theta"]
+        rows.append((kind, c["dump_run_id"], "%s of %s" % (_num(c["epoch"]), _num(c["epochs_schedule"])),
+                     "%.4f" % c["temperature"],
+                     "%.2f / %.2f (%d / %d)" % (th["shipped"]["global"], th["raw"]["global"], th["shipped"]["n_per_tag"],
+                                                th["raw"]["n_per_tag"]),
+                     "%s / %s" % (_num(c["encoder_lr"]), _num(c["head_lr"])),
+                     "%s %s" % (s["postfit"]["path"], _short(s["postfit"]["sha256"])),
+                     "%s %s" % (s["final_manifest"]["path"], _short(s["final_manifest"]["sha256"]))))
+        for f in s["final_seeds"]:
+            seeds.append((kind, _num(f["seed"]), f["train_run_id"], f["checkpoint_name"], f["dump_run_id"]))
+    out = ["#### Systems, splits and inputs", ""]
+    out += _table(("system", "chosen selection dump", "epoch", "T", "θ shipped / raw (tags with their own θ)",
+                   "encoder / head LR", "postfit record", "final manifest"), rows)
+    out += ["", "Final seeds (the only fine-tuned checkpoints scored on the gated splits):", ""]
+    out += _table(("system", "seed", "train run id", "checkpoint", "dump run id"), seeds)
+    rows, extra = [], []
+    for name, e in p["splits"].items():
+        rows.append((name, e["path"], e["role"], _num(e["n_messages"]), _num(e["n_no_intent"]), _short(e["sha256"]),
+                     _short(e["uids_sha256"])))
+        for k, v in e.items():
+            if k not in ("path", "role", "n_messages", "n_no_intent", "sha256", "uids_sha256"):
+                extra.append("- %s %s: %s" % (name, k, _value(v)))
+    out += [""] + _table(("split", "path", "role", "messages", "no-intent", "sha256", "uids sha256"), rows)
+    out += [""] + extra if extra else []
+    out += ["", "- References: %s" % p["references"]["rule"]] + _bullets(p["references"]["rows"], 1)
+    out += ["", "Inputs (sha256 of every committed file the verdict reads):", ""]
+    out += _table(("input", "sha256"), [(rel, _short(sha)) for rel, sha in p["inputs"].items()])
+    return out
+
+
+def _fewshot_lines(f):
+    out = ["#### Few-shot protocol (Phase 9 executes it unchanged)", ""]
+    out += _table(("setting", "value"), [(k, _value(v)) for k, v in f.items()
+                                         if not isinstance(v, dict) and k != "draws"])
+    src, el = f["source"], f["eligibility"]
+    out += ["", "- Source: %s, sha256 %s, uids sha256 %s." % (src["split"], _short(src["sha256"]),
+                                                             _short(src["uids_sha256"])),
+            "- Eligibility rule:"] + _bullets(el["rule"], 1)
+    out += ["- Eligibility note: %s" % el["note"], ""]
+    cols = list(el["counts"])
+    out += _table(["held-out tag"] + ["%s positives" % c for c in cols],
+                  [[t] + [_value(el["counts"][c].get(t)) for c in cols] for t in f["tags"]])
+    out += ["", "- Sampler:"] + _bullets(f["sampler"], 1) + [""]
+    rows = []
+    for d in f["draws"]:
+        for k, uids in d["support"].items():
+            rows.append((_num(d["draw"]), _num(d["seed"]), _num(d["base_seed"]), k, "%d" % len(uids),
+                         "%d" % len(d["replay"]), ", ".join("%s %d" % (t, n) for t, n in d["positives"][k].items()),
+                         _short(d["digest"])))
+    out += _table(("draw", "seed", "base seed", "k", "support messages", "replay messages", "new-tag positives",
+                   "digest"), rows)
+    out += ["", "Rules:", ""] + _bullets(f["rules"])
+    return out
+
+
+def _known_lines(k):
+    out = ["#### Known at freeze (val, in-sample, one seed per model)", "",
+           "In-sample val deltas Laya - BERTurk of the two chosen selection candidates (split %s, n = %s, in_sample "
+           "%s): Laya %s, BERTurk %s." % (k["split"], _num(k["n"]), _value(k["in_sample"]), k["laya"], k["berturk"])]
+    for name, v in k.items():
+        if not (isinstance(v, dict) and "metrics" in v):
+            continue
+        out += ["", "**%s** (T: %s; θ: %s; n = %s, B = %s, seed %s, level %s, coverage %s%%, method %s)"
+                % (name, "; ".join("%s %.4f" % kv for kv in v["temperature"].items()),
+                   "; ".join("%s %s" % kv for kv in v["theta"].items()), _num(v["n"]), _num(v["B"]), _num(v["seed"]),
+                   _num(v["level"]), _num(v["coverage"]), v["method"]), ""]
+        out += _table(("metric", "Laya", "BERTurk", "delta (Laya - BERTurk)", "%g%% CI" % (v["level"] * 100),
+                       "width", "undefined replicates"),
+                      [(m, "%.4f" % x["a"], "%.4f" % x["b"], "%+.4f" % x["delta"],
+                        "[%+.4f, %+.4f]" % tuple(x["ci"]), "%.4f" % x["width"], _num(x["n_undefined"]))
+                       for m, x in v["metrics"].items()])
+    out += ["", "Note: %s" % k["note"]]
+    return out
+
+
+def _power_lines(pc):
+    return (["#### Power at the test size (research estimates)", "", "%s." % pc["label"], ""]
+            + _bullets({k: v for k, v in pc.items() if k != "label"}))
+
+
+def _assumption_lines(p):
+    a = p["assumptions"]
+    taken = {x["taken"] for x in a}
+    out = ["#### Assumptions and delegation", ""]
+    if len(taken) == 1:
+        out += ["- %s: %s" % (x["id"], x["decision"]) for x in a]
+        out += ["", "All %d were %s." % (len(a), a[0]["taken"])] if a else []
+    else:
+        out += ["- %s: %s (%s)" % (x["id"], x["decision"], x["taken"]) for x in a]
+    out += ["", "Delegation:", ""] + _bullets(p["delegation"])
+    return out
+
+
 def render_markdown(protocol, sha256):
     """The README protocol block (markdown, level-3 and level-4 headings; 08-10 writes the section heading): the
     protocol's sha256 and frozen-before sentence, the criteria with their thresholds in points, the collapse rule
-    with the label prior's floors, the verdict rules. Every value is read from `protocol`, never from a code constant;
-    rule texts are verbatim; rounding is display only. Deterministic: the same dict and sha256 give the same text."""
+    with the label prior's floors, the verdict rules, the seed averaging, θ and bootstrap, the systems, splits and
+    inputs, the few-shot protocol with its draw digests, the in-sample deltas known at freeze, the power research
+    estimates, the definitions, the assumptions and the delegation. Every value is read from `protocol`, never from a
+    code constant; rule, definition and quote texts are verbatim; rounding is display only (2 decimals for points, 4
+    for metrics; hashes shown by their first 12 hex characters). Deterministic: the same dict and sha256 give the same
+    text. No uid list and no message text is shown (support and replay sets are counted)."""
     p = protocol
     fz, code = p["frozen"], p["code"]
     out = ["### Frozen decision protocol (protocol.json)", "", p["title"], "",
@@ -642,7 +778,9 @@ def render_markdown(protocol, sha256):
            "- Units: %s." % p["units"],
            "- Built at git HEAD `%s` (dirty: %s)." % (code["git_head"], _value(code["dirty"]))]
     for block in (_criteria_lines(p["criteria"], p["units"]), _collapse_lines(p["collapse"]),
-                  _verdict_lines(p["verdict"])):
+                  _verdict_lines(p["verdict"]), _averaging_lines(p), _systems_lines(p), _fewshot_lines(p["fewshot"]),
+                  _known_lines(p["known_at_freeze"]), _power_lines(p["power_context"]),
+                  ["#### Definitions", ""] + _bullets(p["definitions"]), _assumption_lines(p)):
         out += [""] + block
     return "\n".join(out) + "\n"
 
