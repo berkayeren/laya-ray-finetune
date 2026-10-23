@@ -109,8 +109,10 @@ block (a calibration table with the headline and raw rows of every record, a lin
 abstention table (EVAL-04) with the confidence, coverage and AURC rule texts and CONFIDENCE_DISCLOSURE, the
 no-intent false-positive table (EVAL-05: k/n, rate and Wilson 95% interval per row, the rule texts and the sample size
 line), the out-of-domain false-positive table (only when some record holds one; every section skips a record without
-its block), then the in-sample caveat and the definition texts). Values are rounded for display only. The README
-confidence block is this output (plan 07-08).
+its block), then the in-sample caveat and the definition texts). Values are rounded for display only. The SVG links
+follow the inputs' one common directory under the repo (confidence_svg_dir; records in several directories or outside
+the repo link to CONFIDENCE_SVG_DIR, results/confidence), so results/final/confidence renders with its own links. The
+README confidence block is this output (plan 07-08).
 
 usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.json] [--manifest splits.json]
        python report.py results/dumps/FINAL_SEED_RUN_ID --split test --postfit results/postfit/laya.json [--out X.json]
@@ -126,8 +128,9 @@ import json
 import os
 
 from pilot import data, dumps, metrics                     # data.DEFAULT_MANIFEST: the committed one, at call time
-from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, committed_content, holds_committed, manifest_is_committed,
-                        parse_jsonl, repo_relpath, sha256_bytes, sha256_file, verify_split_file, write_atomic)
+from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, TRAINED_ON, committed_content, holds_committed,
+                        manifest_is_committed, parse_jsonl, repo_relpath, sha256_bytes, sha256_file, verify_split_file,
+                        write_atomic)
 
 SCHEMA_VERSION = 1
 COMPARE_PROCEDURE = ("EVAL-07: per-seed probabilities averaged per message and tag, then thresholded; test messages "
@@ -918,13 +921,16 @@ def _calibration_section(records):
     return "\n\n".join(parts)
 
 
-def _diagram_section(records):
+def _diagram_section(records, svg_dir=None):
+    """A link per record with a calibration block to its reliability diagram, <svg_dir>/<run_id>-<split>.svg
+    (default CONFIDENCE_SVG_DIR, the Phase 7 records' directory)."""
     records = [r for r in records if _has(r, "calibration")]
     if not records:
         return None
     return "\n\n".join(["### Reliability diagrams"] + [
-        "![reliability diagram %s (%s)](results/confidence/%s-%s.svg)"
-        % (r["run_id"], r["split"]["name"], r["run_id"], r["split"]["name"]) for r in records])
+        "![reliability diagram %s (%s)](%s/%s-%s.svg)"
+        % (r["run_id"], r["split"]["name"], svg_dir or CONFIDENCE_SVG_DIR, r["run_id"], r["split"]["name"])
+        for r in records])
 
 
 ABSTENTION_RULES = ("confidence", "coverage", "aurc")
@@ -1062,9 +1068,30 @@ CONFIDENCE_SECTIONS = [_calibration_section, _diagram_section, _abstention_secti
                        _ood_section, _definitions_section]
 
 
-def render_confidence(reports):
+CONFIDENCE_SVG_DIR = "results/confidence"                 # the Phase 7 records' directory: the README's SVG links
+
+
+def confidence_svg_dir(paths, root=REPO_ROOT):
+    """The directory --confidence-table links the reliability diagrams to: the forward-slash path, relative to root,
+    of the one directory every input record sits in, when that directory is under root (not root itself); else
+    CONFIDENCE_SVG_DIR. Never an absolute or outside-repo path. 08-12 renders the test/HOTELS block from
+    results/final/confidence with it."""
+    dirs = {os.path.dirname(os.path.realpath(p)) for p in paths}
+    if len(dirs) != 1:
+        return CONFIDENCE_SVG_DIR
+    try:
+        rel = os.path.relpath(next(iter(dirs)), os.path.realpath(root))
+    except ValueError:                                      # another drive (Windows): not under root
+        return CONFIDENCE_SVG_DIR
+    if rel == os.curdir or rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+        return CONFIDENCE_SVG_DIR
+    return rel.replace(os.sep, "/")
+
+
+def render_confidence(reports, svg_dir=CONFIDENCE_SVG_DIR):
     """Markdown of saved confidence/1 records, in the given order (callers pass them in sorted path order): the
-    calibration table (headline then raw per record), a link to each record's reliability diagram, the abstention
+    calibration table (headline then raw per record), a link to each record's reliability diagram (under svg_dir,
+    default CONFIDENCE_SVG_DIR), the abstention
     table with its rule texts and CONFIDENCE_DISCLOSURE, the no-intent false-positive table, the out-of-domain
     false-positive table (only when some record is a hotels_probe one), the in-sample caveat and the definition texts.
     Each section skips a record without its block. Values are rounded for display only; identical input gives
@@ -1072,7 +1099,8 @@ def render_confidence(reports):
     records = [_confidence_record(r) for r in reports]
     if not records:
         raise SystemExit("no confidence records to render")
-    parts = [build(records) for build in CONFIDENCE_SECTIONS]
+    parts = [build(records, svg_dir) if build is _diagram_section else build(records)     # only it links files
+             for build in CONFIDENCE_SECTIONS]
     return "\n\n".join(p for p in parts if p is not None) + "\n"
 
 
@@ -1116,11 +1144,12 @@ def main(argv=None):
     if a.confidence is not None and a.out is not None and not a.out.endswith(".json"):
         ap.error("--confidence --out must name a .json file (the reliability diagram is written next to it as .svg)")
     if a.table is not None or a.confidence_table is not None:
-        reports = []
-        for p in table_inputs(a.table if a.table is not None else a.confidence_table):
+        reports, paths = [], table_inputs(a.table if a.table is not None else a.confidence_table)
+        for p in paths:
             with open(p, encoding="utf-8") as f:
                 reports.append(json.load(f))
-        text = render_table(reports) if a.table is not None else render_confidence(reports)
+        text = (render_table(reports) if a.table is not None
+                else render_confidence(reports, svg_dir=confidence_svg_dir(paths)))
         print(text, end="")
         if a.out:
             os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
