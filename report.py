@@ -830,6 +830,26 @@ def _latency_rows(inputs, root):
     return rows
 
 
+def frozen_code(protocol):
+    """SystemExit unless the frozen protocol's definitions block, and its bootstrap block but for the parameters
+    (pilot.verdict.BOOT_KEYS: B, seed, level, coverage, read from the protocol), equal the live code's
+    (pilot.protocol.definitions_block, bootstrap_block): the verdict is computed by the code the protocol froze only
+    (08-REVIEW WR-04). Names the differing keys."""
+    boot = pilot.verdict.BOOT_KEYS
+    for key, live in (("definitions", pilot.protocol.definitions_block()),
+                      ("bootstrap", pilot.protocol.bootstrap_block())):
+        have = protocol.get(key) if isinstance(protocol, dict) else None
+        if not isinstance(have, dict):
+            raise SystemExit("the frozen protocol has no %s block; the verdict is computed by the frozen code only"
+                             % key)
+        skip = boot if key == "bootstrap" else ()
+        diff = sorted(k for k in set(have) | set(live)
+                      if k not in skip and (k not in have or k not in live or have[k] != live[k]))
+        if diff:
+            raise SystemExit("the code's %s (%s) differ from the frozen protocol's; the verdict is computed by the "
+                             "frozen code only (restore the code the protocol froze)" % (key, ", ".join(diff)))
+
+
 def verdict_from(protocol, sha, manifest_path=DEFAULT_MANIFEST, root=None, dump_root=None):
     """The verdict/1 record (REP-02, REP-03) of a frozen protocol (the dict and its sha256), computed mechanically by
     pilot.verdict.build_verdict from protocol-bound inputs only (08-RESEARCH A3, A5, A6, A16, A18):
@@ -847,7 +867,13 @@ def verdict_from(protocol, sha, manifest_path=DEFAULT_MANIFEST, root=None, dump_
     - the label prior's val and test fractions and θ are recomputed (pilot.protocol.prior_floors) and refused unless
       equal to the frozen ones; the selection runs' objective counts and loss come from each record's chosen candidate;
     - the latency rows come from the protocol's latency reports and the reference rows from its reference reports.
+    - the protocol's definitions block and the code texts of its bootstrap block (every key but the parameters
+      pilot.verdict.BOOT_KEYS, which the code reads from the protocol) equal the live code's
+      (pilot.protocol.definitions_block, bootstrap_block), so a metric or bootstrap text changed after the freeze is
+      refused rather than computing a verdict that names the frozen sha256 (08-REVIEW WR-04; verdict/1 holds no code
+      state, so a drift in the code under unchanged texts is caught by the data-marked byte rebuild only).
     numpy only; SystemExit naming the first failure."""
+    frozen_code(protocol)
     root = REPO_ROOT if root is None else root
     inputs = _protocol_inputs(protocol, root)
     if "data/splits.json" in inputs and sha256_file(manifest_path) != inputs["data/splits.json"]:

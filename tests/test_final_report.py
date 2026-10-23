@@ -591,6 +591,24 @@ def test_verdict_refuses_a_prior_fraction_off_the_frozen_one(synthetic_final, ke
         _verdict(synthetic_final, protocol=protocol)
 
 
+@pytest.mark.parametrize("where, key", [("definitions", "brier"), ("definitions", "bootstrap_method"),
+                                        ("bootstrap", "procedure"), ("bootstrap", "extra")])
+def test_verdict_refuses_code_texts_off_the_frozen_ones(synthetic_final, monkeypatch, where, key):
+    """08-REVIEW WR-04: the verdict is computed by the frozen code only. A metric or bootstrap text of the live code
+    that differs from the protocol's (here: the live block changed after the freeze) is refused naming the key, before
+    any input is read; the bootstrap parameters (B, seed, level, coverage) are the protocol's to set."""
+    fn = "definitions_block" if where == "definitions" else "bootstrap_block"
+    live = getattr(pilot_protocol, fn)
+    monkeypatch.setattr(pilot_protocol, fn, lambda: dict(live(), **{key: "changed after the freeze"}))
+    with pytest.raises(SystemExit) as e:
+        _verdict(synthetic_final)
+    text = str(e.value.code)
+    assert "\n" not in text and where in text and key in text and "frozen code" in text, text
+    monkeypatch.setattr(pilot_protocol, fn, live)
+    assert synthetic_final.protocol["bootstrap"]["B"] != pilot_protocol.bootstrap_block()["B"]   # parameters differ
+    report.frozen_code(synthetic_final.protocol)                                                # and still pass
+
+
 def test_verdict_refuses_a_system_with_fewer_final_seeds_than_listed(synthetic_final):
     protocol = copy_module.deepcopy(synthetic_final.protocol)
     protocol["systems"]["laya"]["final_seeds"].pop()
