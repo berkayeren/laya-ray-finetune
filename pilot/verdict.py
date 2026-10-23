@@ -40,6 +40,7 @@ usage: from pilot import verdict
                verdict.collapse_loss(loss_by_epoch), verdict.collapse_test_floor(value, floor)]
        b = verdict.criterion_b(rows, {"laya": [0, 1, 2], "berturk": [0, 1, 2]}, criteria["b"])
        c = verdict.criterion_c(latency_rows, criteria["c"])
+       deltas = verdict.system_deltas(Y, P_laya, th_laya, P_berturk, th_berturk, protocol["bootstrap"])
 """
 import math
 import numbers
@@ -47,6 +48,8 @@ import re
 from fractions import Fraction
 
 import numpy as np
+
+from pilot import metrics
 
 PASS, FAIL, INCONCLUSIVE, PENDING = "PASS", "FAIL", "INCONCLUSIVE", "PENDING"
 MET, NOT_MET = "MET", "NOT MET"
@@ -427,3 +430,25 @@ def criterion_c(rows, rule):
     if not isinstance(rule, dict) or rule.get("status") != REPORTED or not rule.get("label"):
         raise SystemExit("(c) rule must be reported with a label (status %r), got %r" % (REPORTED, rule))
     return {"status": REPORTED, "label": rule["label"], "rows": rows, "rule": rule.get("rule")}
+
+
+BOOT_KEYS = ("B", "seed", "level", "coverage")
+
+
+def system_deltas(Y, PA, thA, PB, thB, boot):
+    """The paired Laya - BERTurk deltas of one bootstrap draw (EVAL-07): paired_bootstrap's four metrics (micro-F1,
+    macro-F1, exact match, top-1) then paired_bootstrap_extra's brier, classwise_ece and precision_at_<coverage>,
+    both drawn with boot's (B, seed, level) on the same n, so every metric shares one index draw. Each metric is
+    {a, b, delta, ci, width, n_undefined}. `boot` is the protocol's bootstrap block (B, seed, level, coverage); a
+    missing key is refused. The verdict and protocol.json's known_at_freeze use this one function."""
+    if not isinstance(boot, dict) or any(k not in boot for k in BOOT_KEYS):
+        raise SystemExit("the bootstrap block %r lacks %s; it needs %s" % (
+            boot, ", ".join(k for k in BOOT_KEYS if not isinstance(boot, dict) or k not in boot), ", ".join(BOOT_KEYS)))
+    base = metrics.paired_bootstrap(Y, PA, thA, PB, thB, B=boot["B"], seed=boot["seed"], level=boot["level"])
+    extra = metrics.paired_bootstrap_extra(Y, PA, thA, PB, thB, B=boot["B"], seed=boot["seed"], level=boot["level"],
+                                           coverage=boot["coverage"])
+    if (base["n"], base["B"]) != (extra["n"], extra["B"]):
+        raise SystemExit("the two bootstraps drew on different (n, B): %s vs %s" % ((base["n"], base["B"]),
+                                                                                   (extra["n"], extra["B"])))
+    return {"n": base["n"], "B": base["B"], "seed": base["seed"], "level": base["level"], "method": base["method"],
+            "coverage": extra["coverage"], "metrics": dict(base["metrics"], **extra["metrics"])}

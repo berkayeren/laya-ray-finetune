@@ -21,6 +21,14 @@ system uses its postfit record's theta.shipped at the record T), A14 (final seed
 scored on cpu with Ray workers 2 x 4 CPUs like its committed val dump), A17 (protocol.json at the repo root, the pin
 here) and A18 (every gating number uses the headline variant; raw is reported).
 
+The decision blocks are copies of code, never retyped: criteria is pilot.verdict.DEFAULT_CRITERIA, verdict its
+VERDICT_RULES and statuses, definitions the pilot.metrics and pilot.fewshot rule texts, fewshot the sampler's own
+pilot.fewshot.protocol_block(); collapse adds to DEFAULT_COLLAPSE the label prior's floors computed from its committed
+dumps (prior_floors: 10/41 on val and 520/2163 on test at its global val θ 0.12); known_at_freeze holds the in-sample
+val deltas of the two chosen selection candidates, computed by pilot.verdict.system_deltas, the function the verdict
+uses, so what was known at freeze time is disclosed; power_context, assumptions (A1-A19, Open Questions 1-3) and
+delegation are this module's literals.
+
 Stdlib only at import time: build_protocol and main import the numpy-using modules (pilot.metrics, pilot.dumps,
 pilot.verdict) inside the function, so score.py's gate never pays for them.
 
@@ -29,6 +37,7 @@ usage:
     python -m pilot.protocol --check                         # require_frozen(): print the pinned sha256
 """
 import argparse
+import copy
 import json
 import os
 import subprocess
@@ -120,6 +129,84 @@ BOOTSTRAP_PROCEDURE = ("EVAL-07: a paired message-level bootstrap of Laya - BERT
                        "shared by both systems and by every metric; each replicate's delta is computed at each "
                        "system's fixed θ; the interval is the percentile interval of the replicate deltas; replicates "
                        "where a delta is undefined are counted and left out")
+KNOWN_NOTE = ("in-sample val: T, θ and the epoch were chosen on these 208 messages, by one selection seed per model, "
+              "while the test system is a 3-seed average; the thresholds are the REP-01 defaults, written before any "
+              "result, and are not tuned to these numbers; both (d) paths (Brier, precision at 80% coverage) favour "
+              "BERTurk on val and (a) sits near the margin; recorded so that what was known at freeze time is "
+              "disclosed")
+POWER_CONTEXT = {
+    "label": ("research estimate, normal approximation (A19): 08-RESEARCH CI-width research, from the in-sample val "
+              "deltas (B = 10,000, seed 0) scaled to the test size; the 3-seed average makes the SE somewhat smaller"),
+    "n": 413,
+    "micro_f1_delta_se": 0.0098,
+    "p_a_lower_at_least_margin": {"0": 0.53, "-0.005": 0.34, "-0.01": 0.17, "-0.0155": 0.07},
+    "p_a_lower_note": ("P(the (a) micro-F1 delta CI lower bound >= -0.02) at a true micro-F1 delta of each key; "
+                       "-0.0155 is the in-sample val estimate"),
+    "margin_80_power": -0.0274,
+    "margin_80_power_note": "the non-inferiority margin with 80% power at a true delta of 0",
+    "alternative_go_success": {"0.03": 0.5, "0.04": 0.85, "0.05": 0.98},
+    "alternative_go_note": "P(the alternative GO is MET) at a true micro-F1 delta of each key",
+    "macro_f1_ci_half_width": 0.035,
+    "precision_at_80_ci_half_width": 0.03,
+    "precision_at_80_note": "extrapolated by the square-root-of-n rule (A19)",
+    "margin": ("the -0.02 margin is locked (REP-01) and kept; (a) is three-way, so a non-resolvable result reads "
+               "INCONCLUSIVE, which counts as NO-GO plus collect bank data"),
+}
+TAKEN = "taken as 08-RESEARCH recommended under the standing delegation"
+ASSUMPTIONS = [{"id": i, "decision": d, "taken": TAKEN} for i, d in (
+    ("A1", "(d)'s calibration path is Brier at the headline T; classwise ECE is reported only, its percentile "
+           "bootstrap being biased"),
+    ("A2", "(a) is three-way: PASS when the micro-F1 delta CI lower bound >= -0.02 and the macro-F1 delta point >= "
+           "-0.03; FAIL when the micro-F1 CI upper bound < -0.02 or the macro-F1 point < -0.03; INCONCLUSIVE otherwise"),
+    ("A3", "the overall verdict follows the verdict rules in order; INCONCLUSIVE counts as NO-GO; with (d) PENDING the "
+           "verdict is PROVISIONAL only when the few-shot MET and NOT MET outcomes differ"),
+    ("A4", "the alternative GO is a micro-F1 delta > +0.03 with a CI lower bound > 0, and still needs (b) PASS"),
+    ("A5", "a seed-averaged final system uses its postfit record's theta.shipped at the record T"),
+    ("A6", "the collapse rule applies to each selection run (val floor 10/41 and loss) and to each final seed (loss "
+           "and a test floor against the prior's 520/2163, a marked addition)"),
+    ("A7", "the held-out few-shot tags are the FEATURES TS-14 list; eligibility checks the list, never selects it"),
+    ("A8", "one masked base run per model and seed on selection_train at the chosen recipe; seeds 0-2 pair with "
+           "draws 0-2"),
+    ("A9", "k is nested (5 within 10), 4k negatives per tag, full-label support rows, the union over tags, and 200 "
+           "replay messages outside the k = 10 support set"),
+    ("A10", "the Laya few-shot item rule: every positive, every new-tag label and 8 old-tag negatives per message"),
+    ("A11", "10 epochs of continued training at the base LRs with each trainer's schedule (epoch parity, not step "
+            "parity)"),
+    ("A12", "new-tag AP has sklearn semantics, macro over the 6 tags, at T = 1, as the mean over draws; (d) reads "
+            "k = 10"),
+    ("A13", "the compute fallback (1 base run per model, seed 0) triggers on a projection over 10 h or a base-run "
+            "failure after the ladder"),
+    ("A14", "final seeds are scored on MPS, fp32, --workers 0: the device the postfit T was fitted on"),
+    ("A15", "zero-shot Laya on HOTELS is an ungated reference row (cpu, Ray workers 2 x 4 CPUs); majority and prior "
+            "are not scored on HOTELS"),
+    ("A16", "the table's standard deviation over seeds is the sample std (ddof 1)"),
+    ("A17", "protocol.json sits at the repo root; its sha256 pin is in pilot/protocol.py"),
+    ("A18", "every gating number uses the headline variant (record T, theta.shipped); raw (T = 1, theta.raw) is "
+            "reported only"),
+    ("A19", "power numbers are normal-approximation estimates; the precision at 80% coverage widths are extrapolated "
+            "by the square-root-of-n rule"),
+    ("OQ1", "the test-floor collapse component is frozen, marked as a Claude-recommended addition to the REP-01 "
+            "default"),
+    ("OQ2", "zero-shot Laya is scored once on HOTELS as an ungated reference OOD row; majority and prior are not"),
+    ("OQ3", "Phase 8 ships fewshot.py --support-sets behind require_frozen; Phase 9 extends the same entry point"),
+)]
+DELEGATION = {
+    "standing": {"given": "06-15 (2026-10-21)",
+                 "quote": "do the programatical control. i will not do manual control until all phases done.",
+                 "meaning": ("every blocking-human gate is resolved by programmatic checks; the recommended option is "
+                             "taken and the delegation recorded")},
+    "restated": {"given": "2026-10-23",
+                 "quote": "i already told you that i will not made a manual control untill all phases are done"},
+    "single_lr": {"given": "2026-10-15",
+                  "reply": ("assume it okey for now. defer for further learning rate grid search. we know that at "
+                            "least one hyperparameter works."),
+                  "choice": "Single LR now (Recommended)",
+                  "decision": "one encoder LR 2e-05 for both models, fixed, not tuned (head LR 1e-4)"},
+    "bank_name": "the bank-name check is deferred to the end-of-milestone review",
+}
+REQUIRED_KEYS = ("schema", "title", "units", "frozen", "inputs", "splits", "systems", "references", "scoring",
+                 "variant", "seed_averaging", "bootstrap", "criteria", "collapse", "verdict", "definitions", "fewshot",
+                 "known_at_freeze", "power_context", "assumptions", "delegation", "code")
 
 
 # ---- bytes, writer and the pinned reader ----
@@ -167,6 +254,10 @@ def require_frozen(path=None, pin=None):
     if protocol.get("schema") != SCHEMA:
         raise SystemExit("%s: schema %r, expected %s; restore it with `git checkout -- protocol.json`"
                          % (path, protocol.get("schema"), SCHEMA))
+    missing = [k for k in REQUIRED_KEYS if k not in protocol]
+    if missing:
+        raise SystemExit("%s lacks the protocol/1 key(s) %s; restore it with `git checkout -- protocol.json`"
+                         % (path, ", ".join(missing)))
     return protocol, have
 
 
@@ -306,11 +397,113 @@ def git_code(root=REPO_ROOT):
         raise SystemExit("git is needed to record the code state of the protocol (%s)" % e)
 
 
+def bootstrap_block():
+    """The frozen EVAL-07 bootstrap: B 10000, seed 0, level 0.95, coverage 80 ((d)'s abstention path), messages."""
+    from pilot import metrics
+    return {"B": 10000, "seed": 0, "level": 0.95, "coverage": 80, "unit": "message", "method": metrics.BOOT_METHOD,
+            "procedure": BOOTSTRAP_PROCEDURE, "extra": metrics.BOOT_EXTRA_RULE}
+
+
+def verdict_block():
+    """The verdict rules, the INCONCLUSIVE meaning, the provisional text and every status, copied from pilot.verdict."""
+    from pilot import verdict as v
+    return {"rules": list(v.VERDICT_RULES), "inconclusive_means": v.INCONCLUSIVE_MEANS,
+            "provisional": v.PROVISIONAL_TEXT, "units": v.UNITS,
+            "statuses": {"a": list(v.A_STATUSES), "b": list(v.B_STATUSES), "c": [v.REPORTED],
+                         "d": list(v.D_STATUSES), "alternative_go": list(v.ALT_STATUSES),
+                         "overall": [v.GO, v.NO_GO, v.INCONCLUSIVE]}}
+
+
+def definitions_block():
+    """The metric and rule texts the verdict applies, copied verbatim from the code that applies them."""
+    from pilot import fewshot, metrics
+    cal = metrics.CALIBRATION_RULES
+    return {"brier": cal["brier"], "nll": cal["nll"], "classwise_ece": cal["classwise_ece"], "bins": cal["bins"],
+            "confidence": metrics.CONFIDENCE_RULE, "coverage": metrics.COVERAGE_RULE, "aurc": metrics.AURC_RULE,
+            "theta_tie": metrics.TIE_RULE, "bootstrap_method": metrics.BOOT_METHOD,
+            "bootstrap_extra": metrics.BOOT_EXTRA_RULE, "false_positive": metrics.FP_RULE,
+            "average_precision": metrics.AP_RULE, "fewshot_sampler": fewshot.SAMPLER_RULE,
+            "fewshot_digest": fewshot.DIGEST_RULE}
+
+
+def _micro_counts(Y, P, theta):
+    from pilot import metrics
+    tags = metrics.metrics(Y, P, theta)["per_tag"].values()
+    return {k: int(sum(t[k] for t in tags)) for k in ("tp", "fp", "fn")}
+
+
+def prior_floors(manifest_path=DEFAULT_MANIFEST, root=REPO_ROOT):
+    """The label prior's collapse floors (A6) from its committed dumps: its global val θ (select_theta on val at
+    T 1), and its micro-F1 at that θ on val and on test as exact fractions 2TP / (2TP + FP + FN) ("a/b") with the
+    float values for display. Every key starts with prior_. The verdict recomputes them with this function."""
+    from pilot import dumps, metrics, verdict
+    run = os.path.join(root, "results", "dumps", "prior")
+    data = {}
+    for split in ("val", "test"):
+        logits, uids, side, entry = dumps.load_dump(run, split, manifest_path)
+        if side["temperature"]["shipped"] != 1.0 or side["system"]["kind"] != "prior":
+            raise SystemExit("results/dumps/prior/%s is not the label prior at T = 1; restore it with git" % split)
+        data[split] = (dumps.read_gold(entry, manifest_path, uids), metrics.probabilities(logits, 1.0))
+    theta = metrics.select_theta(*data["val"])["global"]
+    out = {"prior_theta_global": theta, "prior_counts": {}}
+    for split in ("val", "test"):
+        c = _micro_counts(data[split][0], data[split][1], theta)
+        f = verdict.micro_fraction(c["tp"], c["fp"], c["fn"])
+        out["prior_%s_fraction" % split] = "%d/%d" % (f.numerator, f.denominator)
+        out["prior_%s_micro_f1" % split] = float(f)
+        out["prior_counts"][split] = c
+    out["prior_source"] = ("results/dumps/prior/{val,test}: the label prior at T = 1; θ = its global val θ "
+                           "(pilot.metrics.select_theta); micro-F1 = 2TP / (2TP + FP + FN) over all 48 tags")
+    return out
+
+
+def collapse_block(manifest_path=DEFAULT_MANIFEST, root=REPO_ROOT):
+    """DEFAULT_COLLAPSE (the rule texts) plus the prior's val and test floors (prior_floors)."""
+    from pilot import verdict
+    return dict(copy.deepcopy(verdict.DEFAULT_COLLAPSE), **prior_floors(manifest_path, root))
+
+
+def known_at_freeze_block(manifest_path, root, systems, boot):
+    """The in-sample val deltas Laya - BERTurk of the two chosen selection candidates, computed by
+    pilot.verdict.system_deltas (the verdict's own function): headline at each record's T and theta.shipped, raw at
+    T 1 and theta.raw. Each val dump must be the one its record chose (dump_sha256)."""
+    from pilot import dumps, metrics, verdict
+    got = {}
+    for kind in KINDS:
+        record, sha = _read_json(root, systems[kind]["postfit"]["path"])
+        if sha != systems[kind]["postfit"]["sha256"]:
+            raise SystemExit("%s changed while the protocol was built; rebuild it" % systems[kind]["postfit"]["path"])
+        c = record["chosen"]
+        logits, uids, side, entry = dumps.load_dump(os.path.join(root, "results", "dumps", c["dump_run_id"]), "val",
+                                                    manifest_path)
+        if side.get("dump_sha256") != c["dump_sha256"]:
+            raise SystemExit("results/dumps/%s/val is not the dump %s chose (dump_sha256 %s != %s); restore it with "
+                             "git" % (c["dump_run_id"], systems[kind]["postfit"]["path"], side.get("dump_sha256"),
+                                      c["dump_sha256"]))
+        got[kind] = (logits, uids, entry, c)
+    if got["laya"][1] != got["berturk"][1]:
+        raise SystemExit("the chosen candidates' val dumps hold different uids; both must score the full val split")
+    Y = dumps.read_gold(got["laya"][2], manifest_path, got["laya"][1])
+    out = {"split": "val", "in_sample": True, "n": int(Y.shape[0]),
+           "laya": got["laya"][3]["dump_run_id"], "berturk": got["berturk"][3]["dump_run_id"]}
+    for variant, theta_key in (("headline", "shipped"), ("raw", "raw")):
+        T = {k: (got[k][3]["temperature"] if variant == "headline" else 1.0) for k in KINDS}
+        P = {k: metrics.probabilities(got[k][0], T[k]) for k in KINDS}
+        th = {k: metrics.theta_vector(got[k][3]["theta"][theta_key]) for k in KINDS}
+        d = verdict.system_deltas(Y, P["laya"], th["laya"], P["berturk"], th["berturk"], boot)
+        out[variant] = dict(d, temperature=T, theta={k: "theta.%s" % theta_key for k in KINDS})
+    out["note"] = KNOWN_NOTE
+    return out
+
+
 def build_protocol(manifest_path=DEFAULT_MANIFEST, root=REPO_ROOT, code=None):
-    """The complete protocol/1 dict from the committed inputs; deterministic for a given `code` (else git_code)."""
+    """The complete protocol/1 dict (REQUIRED_KEYS, in order) from the committed inputs and the code constants of
+    pilot.verdict, pilot.metrics and pilot.fewshot; deterministic for a given `code` (else git_code(root))."""
+    from pilot import fewshot, verdict
     splits = splits_block(manifest_path)
     systems = systems_block(root)
-    return {
+    boot = bootstrap_block()
+    p = {
         "schema": SCHEMA,
         "title": TITLE,
         "units": UNITS,
@@ -318,19 +511,25 @@ def build_protocol(manifest_path=DEFAULT_MANIFEST, root=REPO_ROOT, code=None):
         "inputs": inputs_block(root, systems),
         "splits": splits,
         "systems": systems,
-        "references": {"rule": REFERENCES_RULE, "rows": json.loads(json.dumps(REFERENCES))},
-        "scoring": json.loads(json.dumps(SCORING)),
+        "references": {"rule": REFERENCES_RULE, "rows": copy.deepcopy(REFERENCES)},
+        "scoring": copy.deepcopy(SCORING),
         "variant": dict(VARIANT),
         "seed_averaging": dict(SEED_AVERAGING),
-        "bootstrap": bootstrap_block(),
+        "bootstrap": boot,
+        "criteria": copy.deepcopy(verdict.DEFAULT_CRITERIA),
+        "collapse": collapse_block(manifest_path, root),
+        "verdict": verdict_block(),
+        "definitions": definitions_block(),
+        "fewshot": fewshot.protocol_block(manifest_path),
+        "known_at_freeze": known_at_freeze_block(manifest_path, root, systems, boot),
+        "power_context": copy.deepcopy(POWER_CONTEXT),
+        "assumptions": copy.deepcopy(ASSUMPTIONS),
+        "delegation": copy.deepcopy(DELEGATION),
         "code": dict(code) if code is not None else git_code(root),
     }
-
-
-def bootstrap_block():
-    from pilot import metrics
-    return {"B": 10000, "seed": 0, "level": 0.95, "coverage": 80, "unit": "message", "method": metrics.BOOT_METHOD,
-            "procedure": BOOTSTRAP_PROCEDURE, "extra": metrics.BOOT_EXTRA_RULE}
+    if tuple(p) != REQUIRED_KEYS:
+        raise SystemExit("build_protocol wrote keys %s, REQUIRED_KEYS is %s" % (list(p), list(REQUIRED_KEYS)))
+    return json.loads(json.dumps(p))                        # plain JSON values only (no numpy scalar survives)
 
 
 # ---- CLI ----
