@@ -265,3 +265,104 @@ def test_gate_trigger_texts(snap):
         "holds committed test content"
     assert score.gate_trigger("berturk", "x", v_entry, m, v_cases + h_cases[:1]) == \
         "holds committed hotels_probe content"
+
+
+# ---- BERTurk through the same gate ----
+
+from test_score_berturk import built, ckpt  # noqa: E402,F401  (pytest fixtures: the tiny BERTurk export)
+
+
+@pytest.fixture
+def bsnap(built, ckpt, tmp_path, monkeypatch):
+    """The BERTurk bench: the module's synthetic splits as the committed stand-in, a private export copy, its dump run
+    id and a temp protocol binding it under systems.berturk."""
+    import torch
+    from pilot import berturk
+    threads = torch.get_num_threads()
+    s = Snap()
+    s.splits, s.manifest, _ = built
+    s.out_dir = os.path.dirname(s.splits)
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", s.manifest)
+    s.root = str(tmp_path / "dumps")
+    monkeypatch.setattr(dumps, "DUMP_ROOT", s.root)
+    s.ckpt, s.tmp = ckpt, tmp_path
+    s.rid = berturk.dump_run_id(berturk.identity(ckpt))
+    s.path, s.sha = _bind(monkeypatch, s, {"berturk": [s.rid]}, "cpu", 0)
+    yield s
+    torch.set_num_threads(threads)
+
+
+def bert_argv(s, name, *extra):
+    return [split(s, name), "--model", "berturk", "--checkpoint", s.ckpt, "--workers", "0", "--device", "cpu",
+            "--manifest", s.manifest] + list(extra)
+
+
+def test_gate_admits_a_bound_berturk_final_seed_once(bsnap):
+    for name in ("test", "hotels_probe"):
+        run_dir, got = score.main(bert_argv(bsnap, name))
+        assert (run_dir, got) == (os.path.join(bsnap.root, bsnap.rid), name)
+        side = sidecar(run_dir, name)
+        assert side["protocol_sha256"] == bsnap.sha and side["system"]["kind"] == "berturk"
+        logits, _, _, entry = dumps.load_dump(run_dir, name, bsnap.manifest)
+        assert logits.shape == (entry["n_messages"], 48)
+    before = files(bsnap.root)
+    refused(bert_argv(bsnap, "test"), "fine-tuned berturk checkpoint", "already exists")
+    refused(bert_argv(bsnap, "hotels_probe", "--force"), "--force")
+    assert files(bsnap.root) == before
+
+
+def test_gate_refuses_a_berturk_export_outside_the_final_seeds(bsnap, monkeypatch):
+    other = "berturk-000000000000-00000000-00000000"
+    _bind(monkeypatch, bsnap, {"berturk": [other], "laya": [bsnap.rid]}, "cpu", 0)
+
+    def boom(*a, **k):
+        raise AssertionError("the BERTurk checkpoint was parsed or loaded before the gate refused")
+    monkeypatch.setattr(score, "check_berturk", boom)
+    monkeypatch.setattr(score, "load_bert", boom)
+    for name in ("test", "hotels_probe"):
+        text = refused(bert_argv(bsnap, name), bsnap.rid, other)
+        assert "never scored on test or HOTELS" in text
+    assert files(bsnap.root) == []
+
+
+def test_gate_refuses_berturk_without_the_frozen_protocol_before_hashing(bsnap, monkeypatch):
+    from pilot import berturk
+    monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)
+
+    def boom(*a, **k):
+        raise AssertionError("the BERTurk checkpoint was hashed before the gate refused")
+    monkeypatch.setattr(berturk, "identity", boom)
+    monkeypatch.setattr(berturk, "require_files", boom)
+    for name in ("test", "hotels_probe"):
+        refused(bert_argv(bsnap, name), "is a split with role", "PROTOCOL_SHA256 is unset")
+    assert files(bsnap.root) == []
+
+
+def test_berturk_val_is_ungated(bsnap, monkeypatch):
+    monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)
+    run_dir, _ = score.main(bert_argv(bsnap, "val", "--out-root", str(bsnap.tmp / "val-dumps")))
+    assert "protocol_sha256" not in sidecar(run_dir, "val")
+
+
+# ---- HOTELS: closed to the baselines and to evaluate.py ----
+
+@pytest.mark.parametrize("model", ["majority", "prior"])
+def test_baselines_are_refused_on_hotels_naming_the_role(snap, model):
+    with pytest.raises(SystemExit, match="role ood_probe") as e:
+        score.main([split(snap, "hotels_probe"), "--model", model, "--manifest", snap.manifest,
+                    "--out-root", str(snap.tmp / "b")])
+    assert "TRAINED_ON" in str(e.value.code) and "only --model laya or berturk" in str(e.value.code)
+    assert not (snap.tmp / "b").exists()
+
+
+def test_evaluate_still_refuses_hotels_before_any_load(snap, monkeypatch):
+    import evaluate
+
+    def boom(*a, **k):
+        raise AssertionError("evaluate.py reached a checkpoint resolve on hotels_probe")
+    monkeypatch.setattr(score, "resolve_checkpoint", boom)
+    no_identity(monkeypatch)
+    with pytest.raises(SystemExit, match="role ood_probe; expected one of test, val"):
+        evaluate.main([split(snap, "hotels_probe"), "--checkpoint", snap.ckpt, "--workers", "0",
+                       "--manifest", snap.manifest, "--out-root", str(snap.tmp / "e")])
+    assert not (snap.tmp / "e").exists()
