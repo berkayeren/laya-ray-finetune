@@ -468,3 +468,59 @@ def test_criterion_b_holds_no_threshold_literal():
     nums = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
             and isinstance(n.value, (int, float)) and not isinstance(n.value, bool)}
     assert nums <= {0, 1}, nums
+
+
+# ---- system_deltas: the seven paired deltas of one draw (08-05) ----
+
+DELTA_METRICS = ["micro_f1", "macro_f1", "exact_match", "top1_hit", "brier", "classwise_ece", "precision_at_80"]
+BOOT = {"B": 300, "seed": 0, "level": 0.95, "coverage": 80}
+
+
+def _systems(n=60, seed=0):
+    """Gold Y and two systems' probabilities on the same n messages (A informative, B noisier)."""
+    rng = np.random.default_rng(seed)
+    Y = rng.random((n, 48)) < 0.08
+    Y[np.arange(n), rng.integers(0, 48, size=n)] = True
+    PA = np.clip(0.55 * Y + 0.45 * rng.random((n, 48)), 0.001, 0.999)
+    PB = np.clip(0.35 * Y + 0.65 * rng.random((n, 48)), 0.001, 0.999)
+    return Y, PA, PB
+
+
+def test_system_deltas_self_comparison_has_zero_width_cis():
+    Y, P, _ = _systems()
+    th = np.full(48, 0.5)
+    out = v.system_deltas(Y, P, th, P, th, BOOT)
+    assert list(out["metrics"]) == DELTA_METRICS
+    assert (out["n"], out["B"], out["seed"], out["level"], out["coverage"]) == (60, 300, 0, 0.95, 80)
+    for name, m in out["metrics"].items():
+        assert m["delta"] == 0.0 and m["ci"] == [0.0, 0.0] and m["width"] == 0.0, name
+        assert set(m) == {"a", "b", "delta", "ci", "width", "n_undefined"}
+
+
+def test_system_deltas_merges_paired_bootstrap_and_extra_on_one_draw():
+    import pilot.metrics as pm
+    Y, PA, PB = _systems(seed=1)
+    thA, thB = 0.4, np.linspace(0.3, 0.6, 48)
+    out = v.system_deltas(Y, PA, thA, PB, thB, BOOT)
+    base = pm.paired_bootstrap(Y, PA, thA, PB, thB, B=300, seed=0, level=0.95)
+    extra = pm.paired_bootstrap_extra(Y, PA, thA, PB, thB, B=300, seed=0, level=0.95, coverage=80)
+    assert list(out["metrics"]) == DELTA_METRICS
+    for name in DELTA_METRICS[:4]:
+        assert out["metrics"][name] == base["metrics"][name]
+    for name in DELTA_METRICS[4:]:
+        assert out["metrics"][name] == extra["metrics"][name]
+    assert out["method"] == pm.BOOT_METHOD
+    assert any(out["metrics"][k]["width"] > 0 for k in DELTA_METRICS)
+
+
+def test_system_deltas_coverage_names_the_precision_metric():
+    Y, PA, PB = _systems(seed=2)
+    out = v.system_deltas(Y, PA, 0.5, PB, 0.5, dict(BOOT, coverage=70))
+    assert list(out["metrics"])[-1] == "precision_at_70" and out["coverage"] == 70
+
+
+@pytest.mark.parametrize("missing", ["B", "seed", "level", "coverage"])
+def test_system_deltas_refuses_an_incomplete_bootstrap_block(missing):
+    Y, PA, PB = _systems()
+    with pytest.raises(SystemExit, match=missing):
+        v.system_deltas(Y, PA, 0.5, PB, 0.5, {k: x for k, x in BOOT.items() if k != missing})

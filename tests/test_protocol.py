@@ -32,9 +32,17 @@ LAYA_CHOSEN = "laya-047381259d3b-cf0f7846-cc216d59"
 BERTURK_CHOSEN = "berturk-f24d8fe3c899-50e28523-29446b61"
 
 
+# every top-level key of protocol/1, in build order (written here, independently of pilot.protocol.REQUIRED_KEYS)
+KEYS = ("schema", "title", "units", "frozen", "inputs", "splits", "systems", "references", "scoring", "variant",
+        "seed_averaging", "bootstrap", "criteria", "collapse", "verdict", "definitions", "fewshot", "known_at_freeze",
+        "power_context", "assumptions", "delegation", "code")
+
+
 def small():
-    """A hand-written protocol dict: enough for the byte identity and the reader's refusals."""
-    return {"schema": pr.SCHEMA, "title": "a hand-written protocol", "units": "fractions; ünits"}
+    """A hand-written protocol dict with every top-level key: enough for the byte identity and the reader."""
+    p = {k: {} for k in KEYS}
+    p.update({"schema": pr.SCHEMA, "title": "a hand-written protocol", "units": "fractions; ünits"})
+    return p
 
 
 def frozen(tmp_path, p=None):
@@ -276,3 +284,146 @@ def test_cli_build_writes_the_protocol_and_refuses_an_existing_out(tmp_path, cap
         assert pilot.data.sha256_bytes(f.read()) == sha and len(sha) == 64
     with pytest.raises(SystemExit, match="exists"):
         pr.main(["--build", "--out", out])
+
+
+# ---- Task 2: the decision blocks ----
+
+def test_required_keys_are_every_top_level_key_in_build_order():
+    assert pr.REQUIRED_KEYS == KEYS
+
+
+@pytest.mark.parametrize("key", ["criteria", "collapse", "verdict", "fewshot", "known_at_freeze", "code"])
+def test_require_frozen_refuses_a_protocol_missing_a_required_key(tmp_path, key):
+    p = {k: x for k, x in small().items() if k != key}
+    path, sha = frozen(tmp_path, p)
+    with pytest.raises(SystemExit, match=key):
+        pr.require_frozen(path, sha)
+
+
+def test_bootstrap_coverage_is_criterion_d_abstention_coverage():
+    from pilot import verdict
+    path = [x for x in verdict.DEFAULT_CRITERIA["d"]["paths"] if x["path"] == "abstention"][0]
+    assert pr.bootstrap_block()["coverage"] == path["coverage"] == 80
+
+
+def test_power_context_is_a_labelled_research_estimate():
+    pc = pr.POWER_CONTEXT
+    assert "research estimate, normal approximation (A19)" in pc["label"]
+    assert pc["n"] == 413 and pc["micro_f1_delta_se"] == 0.0098
+    assert pc["p_a_lower_at_least_margin"] == {"0": 0.53, "-0.005": 0.34, "-0.01": 0.17, "-0.0155": 0.07}
+    assert pc["margin_80_power"] == -0.0274
+    assert pc["alternative_go_success"] == {"0.03": 0.5, "0.04": 0.85, "0.05": 0.98}
+    assert pc["macro_f1_ci_half_width"] == 0.035 and pc["precision_at_80_ci_half_width"] == 0.03
+    assert "the -0.02 margin is locked (REP-01) and kept" in pc["margin"]
+
+
+def test_assumptions_cover_a1_to_a19_and_the_three_open_questions():
+    ids = [a["id"] for a in pr.ASSUMPTIONS]
+    assert ids == ["A%d" % i for i in range(1, 20)] + ["OQ1", "OQ2", "OQ3"]
+    for a in pr.ASSUMPTIONS:
+        assert set(a) == {"id", "decision", "taken"} and "\n" not in a["decision"] and a["decision"]
+        assert a["taken"] == "taken as 08-RESEARCH recommended under the standing delegation"
+    by = {a["id"]: a["decision"] for a in pr.ASSUMPTIONS}
+    assert "Brier" in by["A1"] and "520/2163" in by["A6"] and "ddof 1" in by["A16"]
+
+
+def test_delegation_quotes_are_verbatim():
+    d = json.dumps(pr.DELEGATION, ensure_ascii=False)
+    for quote in ("do the programatical control. i will not do manual control until all phases done.",
+                  "i already told you that i will not made a manual control untill all phases are done",
+                  "assume it okey for now. defer for further learning rate grid search. we know that at least one "
+                  "hyperparameter works.",
+                  "Single LR now (Recommended)",
+                  "the bank-name check is deferred to the end-of-milestone review"):
+        assert quote in d, quote
+
+
+@pytest.fixture(scope="module")
+def built():
+    return pr.build_protocol(code=CODE)
+
+
+@pytest.mark.data
+def test_build_has_every_required_key_in_order(built):
+    assert tuple(built) == KEYS
+
+
+@pytest.mark.data
+def test_criteria_match_verdict_defaults(built):
+    from pilot import verdict
+    assert built["criteria"] == verdict.DEFAULT_CRITERIA
+    assert built["criteria"] is not verdict.DEFAULT_CRITERIA
+    vb = built["verdict"]
+    assert vb["rules"] == list(verdict.VERDICT_RULES)
+    assert vb["inconclusive_means"] == verdict.INCONCLUSIVE_MEANS and vb["provisional"] == verdict.PROVISIONAL_TEXT
+    assert vb["statuses"]["a"] == list(verdict.A_STATUSES) and vb["statuses"]["d"] == list(verdict.D_STATUSES)
+    assert vb["statuses"]["overall"] == [verdict.GO, verdict.NO_GO, verdict.INCONCLUSIVE]
+
+
+def _definitions():
+    from pilot import fewshot, metrics
+    return {"brier": metrics.CALIBRATION_RULES["brier"], "nll": metrics.CALIBRATION_RULES["nll"],
+            "classwise_ece": metrics.CALIBRATION_RULES["classwise_ece"], "bins": metrics.CALIBRATION_RULES["bins"],
+            "confidence": metrics.CONFIDENCE_RULE, "coverage": metrics.COVERAGE_RULE, "aurc": metrics.AURC_RULE,
+            "theta_tie": metrics.TIE_RULE, "bootstrap_method": metrics.BOOT_METHOD,
+            "bootstrap_extra": metrics.BOOT_EXTRA_RULE, "false_positive": metrics.FP_RULE,
+            "average_precision": metrics.AP_RULE, "fewshot_sampler": fewshot.SAMPLER_RULE,
+            "fewshot_digest": fewshot.DIGEST_RULE}
+
+
+@pytest.mark.data
+@pytest.mark.parametrize("key", sorted(_definitions()))
+def test_definitions_match_code_constants(built, key):
+    assert set(built["definitions"]) == set(_definitions())
+    assert built["definitions"][key] == _definitions()[key]
+
+
+@pytest.mark.data
+def test_collapse_holds_the_rule_and_the_prior_fractions(built):
+    from pilot import verdict
+    c = built["collapse"]
+    assert {k: x for k, x in c.items() if not k.startswith("prior_")} == verdict.DEFAULT_COLLAPSE
+    assert c["prior_theta_global"] == 0.12
+    assert (c["prior_val_fraction"], c["prior_test_fraction"]) == ("10/41", "520/2163")
+    assert c["prior_val_micro_f1"] == 10 / 41 and c["prior_test_micro_f1"] == 520 / 2163
+    assert c["prior_counts"]["val"] == {"tp": 135, "fp": 489, "fn": 348}
+    assert verdict.parse_fraction(c["prior_val_fraction"]) == verdict.micro_fraction(135, 489, 348)
+
+
+@pytest.mark.data
+def test_known_at_freeze_holds_the_in_sample_val_deltas(built):
+    k = built["known_at_freeze"]
+    assert (k["split"], k["in_sample"], k["n"]) == ("val", True, 208)
+    assert (k["laya"], k["berturk"]) == (LAYA_CHOSEN, BERTURK_CHOSEN)
+    for variant in ("headline", "raw"):
+        m = k[variant]["metrics"]
+        assert list(m) == ["micro_f1", "macro_f1", "exact_match", "top1_hit", "brier", "classwise_ece",
+                           "precision_at_80"]
+        assert k[variant]["B"] == 10000 and k[variant]["seed"] == 0 and k[variant]["n"] == 208
+        for name, x in m.items():
+            assert x["ci"][0] <= x["ci"][1], (variant, name)
+    h = k["headline"]["metrics"]
+    assert abs(h["micro_f1"]["delta"] + 0.0155) < 5e-4
+    assert abs(h["macro_f1"]["delta"] - 0.1100) < 5e-4 and abs(h["brier"]["delta"] - 0.0050) < 5e-4
+    assert abs(h["precision_at_80"]["delta"] + 0.1362) < 5e-4
+    assert abs(k["raw"]["metrics"]["micro_f1"]["delta"] + 0.0269) < 5e-4
+    assert "in-sample" in k["note"] and "not tuned" in k["note"]
+    assert k["headline"]["temperature"] == {"laya": built["systems"]["laya"]["chosen"]["temperature"],
+                                            "berturk": built["systems"]["berturk"]["chosen"]["temperature"]}
+
+
+@pytest.mark.data
+def test_fewshot_is_the_sampler_output_and_its_draws_check(built):
+    from pilot import fewshot
+    assert built["fewshot"] == fewshot.protocol_block()
+    path = os.path.join(pilot.data.REPO_ROOT, built["splits"]["selection_train"]["path"])
+    with open(path, "rb") as f:
+        rows = pilot.data.parse_jsonl(f.read())
+    fewshot.check_draws(built["fewshot"], rows)
+
+
+@pytest.mark.data
+def test_power_assumptions_and_delegation_are_the_constants(built):
+    assert built["power_context"] == pr.POWER_CONTEXT
+    assert built["assumptions"] == pr.ASSUMPTIONS
+    assert built["delegation"] == pr.DELEGATION
