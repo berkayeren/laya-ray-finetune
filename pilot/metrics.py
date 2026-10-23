@@ -89,6 +89,14 @@ False positives (EVAL-05): one definition (fp_rate, FP_RULE) serves the no-inten
   no-intent set holds 7 messages and the test set 15, so the interval is always wide: 2/7 reads as 29 % with an
   interval of about 8 % to 64 %
 
+Average precision (Phase 9 primary metric, frozen in Phase 8): one definition (average_precision, AP_RULE), the
+threshold-free score of one held-out tag; new_tag_ap gives it per tag and its unweighted mean (macro) over the tags:
+- AP = the sum over the distinct score thresholds, in decreasing order, of (R_n - R_(n-1)) * P_n, P_n and R_n the
+  precision and recall of the messages scoring at or above the n-th threshold; tied scores form one threshold; not
+  interpolated. This is sklearn's average_precision_score, its test oracle (sklearn stays out of this module)
+- a tag column with no positive is refused (sklearn would return 0.0 with a warning); a non-finite score is refused
+- T-invariant: a temperature is a monotone map of the logits, so the ranking and AP do not change
+
 usage: from pilot import metrics; metrics.metrics(Y, metrics.probabilities(logits, T), 0.5)
        sel = metrics.select_theta(Y_val, P_val); metrics.metrics(Y, P, metrics.theta_vector(sel))
        metrics.paired_bootstrap(Y, metrics.seed_average([PA0, PA1]), thA, PB, thB, B=10000, seed=0)
@@ -96,6 +104,7 @@ usage: from pilot import metrics; metrics.metrics(Y, metrics.probabilities(logit
        metrics.calibration(Y, metrics.probabilities(logits, T), sel["eligible_tags"])
        metrics.selective(Y, metrics.probabilities(logits, T), metrics.theta_vector(sel))
        metrics.fp_rate(Y, metrics.probabilities(logits, T), metrics.theta_vector(sel))   # no-intent, all 48 tags
+       metrics.new_tag_ap(Y, metrics.probabilities(logits, 1.0), ["savings", "loan"])   # per-tag AP and macro
 """
 import math
 
@@ -137,6 +146,10 @@ WILSON_Z = 1.959963984540054                                # the 0.975 standard
 FP_RULE = ("a counted message has no gold tag among the scored columns; it is a false positive when at least one "
            "scored column is predicted at θ (P >= θ). No-intent: all 48 columns. Out-of-domain: the 22 banking-only "
            "columns (the manifest's ood_scoring_tags)")
+AP_RULE = ("average precision of one tag: AP = sum over the distinct score thresholds, in decreasing order, of "
+           "(R_n - R_(n-1)) * P_n, with P_n and R_n the precision and recall of the messages scoring at or above the "
+           "n-th threshold; tied scores form one threshold; not interpolated (sklearn average_precision_score); a tag "
+           "with no positive is refused; T-invariant (a monotone transform of the logits keeps the ranking)")
 
 
 def probabilities(logits, temperature):
@@ -554,3 +567,41 @@ def fp_rate(Y, P, theta, cols=None):
     return {"k": k, "n": n, "rate": k / n if n else None, "wilson95": wilson(k, n),
             "per_tag_fp": {TAGS[j]: int(c) for j, c in zip(idx, per_tag) if c},
             "cols": cols if cols is not None else "all"}
+
+
+def average_precision(y, s):
+    """AP_RULE of one tag: y bool [n] gold, s float [n] scores (probabilities or logits: AP depends on the ranking
+    only). Every tied score group is one threshold; float64, vectorised, no loop over messages."""
+    y, s = np.asarray(y), np.asarray(s, dtype=np.float64)
+    if y.ndim != 1 or s.ndim != 1 or y.shape != s.shape or y.size == 0:
+        raise SystemExit("average precision needs one non-empty gold column and one score column of the same "
+                         "length, got %s and %s" % (y.shape, s.shape))
+    if not np.isfinite(s).all():
+        raise SystemExit("average precision: the scores hold a non-finite value; refusing")
+    y = y.astype(bool)
+    n_pos = int(y.sum())
+    if n_pos == 0:
+        raise SystemExit("average precision: the tag has no positive among %d messages; AP is undefined" % y.size)
+    order = np.argsort(-s, kind="stable")
+    ss = s[order]
+    last = np.r_[np.flatnonzero(np.diff(ss)), ss.size - 1]  # the last message of every distinct-score group
+    tp = np.cumsum(y[order])[last].astype(np.float64)
+    precision, recall = tp / (last + 1), tp / n_pos
+    return float(np.sum(np.diff(np.r_[0.0, recall]) * precision))
+
+
+def new_tag_ap(Y, P, tags):
+    """{"tags", "per_tag": {tag: AP}, "macro": their unweighted mean} of the given distinct INTENTS tags, in the given
+    order (AP_RULE); a tag column with no positive is refused."""
+    Y, P = _arrays(Y, P, "no messages to score")
+    tags = list(tags)
+    unknown = [t for t in tags if t not in TAGS]
+    if not tags or unknown or len(set(tags)) != len(tags):
+        raise SystemExit("tags must be a non-empty list of distinct INTENTS tags, got %r" % (tags,))
+    per_tag = {}
+    for t in tags:
+        j = TAGS.index(t)
+        if not Y[:, j].any():
+            raise SystemExit("tag %s has no positive among %d messages; its AP is undefined" % (t, Y.shape[0]))
+        per_tag[t] = average_precision(Y[:, j], P[:, j])
+    return {"tags": tags, "per_tag": per_tag, "macro": float(sum(per_tag.values()) / len(per_tag))}
