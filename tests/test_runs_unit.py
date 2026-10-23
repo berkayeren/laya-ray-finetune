@@ -279,3 +279,34 @@ def test_identity_and_not_identity_stay_disjoint():
     assert not set(runs.IDENTITY) & set(runs.NOT_IDENTITY)
     assert {"stop_after_epoch", "postfit_sha256"} <= set(runs.IDENTITY) & set(runs.DROPPED_WHEN_NONE)
     assert "postfit" in runs.NOT_IDENTITY and set(runs.DROPPED_WHEN_NONE) <= set(runs.IDENTITY)
+
+
+def test_committed_run_id_d92447f4_is_unchanged_by_the_fewshot_keys():
+    """Pitfall 5, T-09-08: mask_tags and fewshot are IDENTITY keys dropped when None, so the committed chosen Laya
+    selection run (results/postfit/laya.json, every Phase 5-8 record and dump names it) recomputes to the same id."""
+    with open(os.path.join(REPO_ROOT, "results", "postfit", "laya.json"), encoding="utf-8") as f:
+        chosen = json.load(f)["chosen"]
+    vals = {k: chosen["canonical"].get(k) for k in runs.IDENTITY}
+    assert vals["mask_tags"] is None and vals["fewshot"] is None
+    assert runs.canonical(vals) == chosen["canonical"]
+    assert runs.run_id(runs.canonical(vals)) == chosen["train_run_id"] == "laya-selection_train-neg8-s0-d92447f4"
+
+
+def test_canonical_keeps_mask_tags_and_fewshot_only_when_set():
+    """D-03: a Phase 9 masked base and a continued run name their mask and protocol binding in the run id; every other
+    run leaves both keys out (they must still be given, as None)."""
+    assert {"mask_tags", "fewshot"} <= set(runs.IDENTITY) & set(runs.DROPPED_WHEN_NONE)
+    assert {"fewshot_base", "fewshot_draw", "fewshot_k"} <= set(runs.NOT_IDENTITY)
+    plain = _identity(stop_after_epoch=None, postfit_sha256=None, base_files_sha256=None, mask_tags=None, fewshot=None)
+    canon = runs.canonical(plain)
+    assert not {"mask_tags", "fewshot"} & set(canon)
+    rid = runs.run_id(canon)
+    base = runs.canonical(dict(plain, mask_tags=["card"], fewshot={"protocol_sha256": "p" * 64, "stage": "base"}))
+    assert base["mask_tags"] == ["card"] and base["fewshot"]["stage"] == "base"
+    assert runs.run_id(base) != rid
+    assert runs.run_id(runs.canonical(dict(plain, mask_tags=["card"]))) not in (rid, runs.run_id(base))
+    cont = runs.canonical(dict(plain, fewshot={"protocol_sha256": "p" * 64, "stage": "continued", "draw": 0, "k": 10,
+                                               "digest": "d" * 64, "base_run_id": "laya-x"}))
+    assert runs.run_id(cont) not in (rid, runs.run_id(base))
+    with pytest.raises(ValueError, match="missing mask_tags, fewshot"):
+        runs.canonical({k: v for k, v in plain.items() if k not in ("mask_tags", "fewshot")})

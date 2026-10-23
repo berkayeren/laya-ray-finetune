@@ -132,6 +132,28 @@ def test_training_round_trip_on_tiny_model(tmp_path):
     assert la.read_jsonl(str(path)) == rows
 
 
+def test_items_per_question_counts_items_by_their_intents_instruction(tmp_path):
+    """FEW-01 (D-04): items_per_question maps each laya item to its tag by the exact INTENTS instruction of its
+    question, over all 48 tags: unmasked rows give one item per labelled question, a deleted (masked) key gives none,
+    and an item whose instruction is not one of the 48 is refused."""
+    from intents import INTENTS
+    _model, tok, _cfg = la.load_checkpoint(tiny_checkpoint(tmp_path / "base"))
+    rows = _rows()
+    tags = TAGS[:3]
+    per_q = la.items_per_question(la.items_from_rows(tok, rows, 64, 32)[0])
+    assert list(per_q) == list(INTENTS) and per_q[tags[0]] == per_q[tags[1]] == per_q[tags[2]] == 2
+    assert sum(per_q.values()) == 6
+    masked = [dict(r, expected={t: v for t, v in r["expected"].items() if t != tags[1]}) for r in rows]
+    items = la.items_from_rows(tok, masked, 64, 32)[0]
+    per_q = la.items_per_question(items)
+    assert per_q[tags[1]] == 0 and per_q[tags[0]] == per_q[tags[2]] == 2 and sum(per_q.values()) == len(items) == 4
+    bad = dict(items[0], q=dict(items[0]["q"], ins=items[0]["q"]["ins"] + " "))
+    with pytest.raises(SystemExit, match="training item 1 asks .* not one of the 48 intents.py instructions"):
+        la.items_per_question([items[0], bad])
+    with pytest.raises(SystemExit, match="training item 0 asks None"):
+        la.items_per_question([{"k": 2}])
+
+
 def test_noul_logits_match_predict_batch(tiny_agent):
     texts = ["Kartım kayboldu 0", "Evet.", "x"]
     m = la.noul_logits(tiny_agent, texts, QUESTIONS)

@@ -1,6 +1,7 @@
 """ray_train.py helpers that run inside Ray workers, tested without starting Ray or loading a model."""
 import hashlib
 import json
+import os
 import re
 
 import pytest
@@ -688,3 +689,245 @@ def test_check_final_binds_neg_seed_and_the_committed_final_data():
     with pytest.raises(SystemExit, match="not the committed final_train sha256 %s" % committed):
         postfit.check_final(on_committed, final)
     postfit.check_final(on_committed, dict(final, data_sha256=committed))
+
+
+# ---- Phase 9 few-shot modes (FEW-01, FEW-02, D-01; 09-02): every refusal before ray.init ----
+
+@pytest.mark.parametrize("flags, msg", [
+    (["--fewshot-draw", "0"], "--fewshot-draw and --fewshot-k go together"),
+    (["--fewshot-k", "2"], "--fewshot-draw and --fewshot-k go together"),
+    (["--fewshot-base", "--fewshot-draw", "0", "--fewshot-k", "2"], "--fewshot-base trains a masked base"),
+    (["--fewshot-base", "--postfit", "results/postfit/laya.json"], "--fewshot-base takes no --postfit"),
+    (["--fewshot-draw", "0", "--fewshot-k", "2", "--postfit", "x.json"], "--fewshot-draw takes no --postfit"),
+    (["--fewshot-base", "--max-messages", "5"], "--fewshot-base takes no --max-messages"),
+    (["--fewshot-draw", "0", "--fewshot-k", "2", "--epochs", "4", "--stop-after-epoch", "1"],
+     "--fewshot-draw takes no --stop-after-epoch or --mask-tags"),
+    (["--fewshot-draw", "0", "--fewshot-k", "2", "--mask-tags", "card"],
+     "--fewshot-draw takes no --stop-after-epoch or --mask-tags"),
+    (["--mask-tags", "card"], "--mask-tags masks a Phase 9 base only"),
+])
+def test_fewshot_flag_combinations_are_argument_errors(flags, msg, capsys):
+    """D-01: a few-shot command is one frozen-protocol mode; any other combination is an argparse error (exit 2),
+    before the protocol, the split, the fetch or ray.init."""
+    with pytest.raises(SystemExit) as e:
+        ray_train.main(["--data", "d.jsonl", "--out", "o"] + flags)
+    err = capsys.readouterr().err
+    assert e.value.code == 2 and msg in err, err
+
+
+@pytest.fixture
+def fewshot_env(tmp_path, synthetic_raw, monkeypatch):
+    """tests/test_fewshot_ray.py's synthetic frozen protocol installed in this process (tag card, k 1 and 2, draw 0,
+    the tiny recipes, a postfit record whose chosen canonical is the tiny command's), with ray.init and the pinned
+    fetch failing the test if reached. Returns a namespace: ns (synthetic_protocol's), base(*extra, data=None) and
+    cont(base_dir, *extra) argv builders, and plant(canonical=..., ray_train=True) -> a tiny checkpoint whose config
+    names a base run (training.ray_train run_id and canonical), as a continued run's --base."""
+    import types
+    from conftest import prepared
+    from fewshot_synthetic import postfit_systems, synthetic_protocol
+    from pilot import fewshot as fs
+    from pilot import runs
+    from pilot.weights import identity
+    from test_fewshot_ray import COMMON, chosen_canonical, rules
+    from tiny_laya import tiny_checkpoint
+
+    def no_ray(*a, **kw):
+        raise AssertionError("ray.init reached; a few-shot refusal must come first")
+
+    def no_fetch(*a, **kw):
+        raise AssertionError("the pinned fetch reached; a few-shot refusal must come first")
+    monkeypatch.setattr(ray_train.ray, "init", no_ray)
+    monkeypatch.setattr(ray_train, "fetch", no_fetch)
+    tiny = tiny_checkpoint(tmp_path / "tiny")
+    pre_dir, pre_manifest = prepared(tmp_path, synthetic_raw, name="pre")
+    chosen = chosen_canonical(["--data", os.path.join(pre_dir, "splits", "selection_train.jsonl"),
+                               "--manifest", pre_manifest, "--base", tiny, "--out", "o", "--epochs", "2"] + COMMON)
+    ns = synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, rules=rules(),
+                            systems=postfit_systems(tmp_path, {"laya": chosen}))
+
+    def split(name):
+        return os.path.join(ns.out_dir, "splits", name + ".jsonl")
+
+    def base(*extra, data=None):
+        return ["--data", data or split("selection_train"), "--manifest", ns.manifest, "--base", tiny,
+                "--out", str(tmp_path / "o"), "--storage", str(tmp_path / "ray"), "--epochs", "2",
+                "--stop-after-epoch", "1", "--fewshot-base"] + COMMON + list(extra)
+
+    def cont(base_dir, *extra):
+        return ["--data", split("selection_train"), "--manifest", ns.manifest, "--base", str(base_dir),
+                "--out", str(tmp_path / "o"), "--storage", str(tmp_path / "ray"), "--epochs", "1",
+                "--fewshot-draw", "0", "--fewshot-k", "2"] + COMMON + list(extra)
+
+    a = ray_train.parser().parse_args(base())
+    entry = pilot_data().verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))
+    base_canon = runs.canonical(ray_train.identity_values(a, ray_train.resolve(a), entry, tiny, identity(tiny),
+                                                          mask_tags=["card"], fewshot=fs.binding(ns.pin, "base")))
+
+    def plant(canonical=None, ray_train_block=True, name="planted"):
+        d = tiny_checkpoint(tmp_path / name)
+        path = os.path.join(d, "rl_agent_config.json")
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        canon = base_canon if canonical is None else canonical
+        if ray_train_block:
+            cfg["training"] = {"ray_train": {"run_id": runs.run_id(canon), "canonical": canon}}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        return d
+    return types.SimpleNamespace(ns=ns, base=base, cont=cont, plant=plant, base_canon=base_canon, tmp=tmp_path)
+
+
+def pilot_data():
+    import pilot.data
+    return pilot.data
+
+
+def test_fewshot_base_and_continued_commands_print_their_run_ids_without_ray(fewshot_env, capsys):
+    """The positive path the refusals below depart from: the frozen base command and a continued command from a base
+    of this protocol print a run id (ray.init and the fetch are never reached)."""
+    ray_train.main(fewshot_env.base("--print-run-id"))
+    rid = capsys.readouterr().out.strip()
+    assert re.fullmatch(r"laya-selection_train-neg2-s0-[0-9a-f]{8}", rid), rid
+    ray_train.main(fewshot_env.base("--mask-tags", "card", "--print-run-id"))      # the frozen tags, spelled out
+    assert capsys.readouterr().out.strip() == rid
+    ray_train.main(fewshot_env.cont(fewshot_env.plant(), "--print-run-id"))
+    cont = capsys.readouterr().out.strip()
+    assert re.fullmatch(r"laya-selection_train-neg2-s0-[0-9a-f]{8}", cont) and cont != rid
+    assert not (fewshot_env.tmp / "ray").exists() and not (fewshot_env.tmp / "o").exists()
+
+
+@pytest.mark.parametrize("case", ["missing", "unpinned", "changed"])
+def test_fewshot_protocol_is_required_before_the_split_is_read(fewshot_env, monkeypatch, case):
+    """D-01: require_frozen() runs first: a missing, unpinned or changed protocol is refused before verify_split_file
+    reads --data (monkeypatched to fail the test if reached)."""
+    from pilot import protocol as pr
+
+    def no_split(*a, **kw):
+        raise AssertionError("verify_split_file reached before the protocol check")
+    monkeypatch.setattr(ray_train, "verify_split_file", no_split)
+    if case == "missing":
+        monkeypatch.setattr(pr, "PROTOCOL_PATH", str(fewshot_env.tmp / "absent.json"))
+        match = "absent.json not found; the decision protocol must be frozen"
+    elif case == "unpinned":
+        monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)
+        match = "the decision protocol is not frozen"
+    else:
+        with open(fewshot_env.ns.protocol_path, "ab") as f:
+            f.write(b" ")
+        match = "the protocol may not change after the freeze"
+    for argv in (fewshot_env.base(), fewshot_env.cont(fewshot_env.plant())):
+        with pytest.raises(SystemExit, match=match):
+            ray_train.main(argv)
+
+
+def test_fewshot_decision_record_is_required(fewshot_env):
+    """D-08: the projection's decision record names the mode; without it no few-shot command trains."""
+    os.remove(fewshot_env.ns.decision_path)
+    with pytest.raises(SystemExit, match="run `python fewshot.py --projection"):
+        ray_train.main(fewshot_env.base("--print-run-id"))
+
+
+def test_mask_tags_other_than_the_protocols_are_refused(fewshot_env):
+    """D-03: --mask-tags duplicates a frozen value, so any other list (another tag, an extra tag, a repeated tag) is
+    refused naming the frozen tags."""
+    for tags in ("loan", "card,loan", "card,card"):
+        with pytest.raises(SystemExit, match="--mask-tags %s is not the frozen protocol's held-out tags card; pass "
+                                             "them" % tags):
+            ray_train.main(fewshot_env.base("--mask-tags", tags, "--print-run-id"))
+
+
+def test_fewshot_base_on_another_split_is_refused(fewshot_env):
+    """D-02: the few-shot source is the frozen selection_train; final_train (a train split) is refused by
+    check_source before the base is read."""
+    final = os.path.join(fewshot_env.ns.out_dir, "splits", "final_train.jsonl")
+    with pytest.raises(SystemExit, match="the source entry has sha256 .* the frozen few-shot source"):
+        ray_train.main(fewshot_env.base("--print-run-id", data=final))
+
+
+def test_fewshot_base_with_another_epochs_is_refused(fewshot_env):
+    """D-03: the base recipe is rules.base_runs.laya: another --epochs is refused naming the key."""
+    with pytest.raises(SystemExit, match="epochs is 3 here but 2 in the frozen rules.base_runs.laya"):
+        ray_train.main(fewshot_env.base("--epochs", "3", "--print-run-id"))
+    with pytest.raises(SystemExit, match="seed 5 is not one of the base seeds \\[0\\]"):
+        ray_train.main(fewshot_env.base("--seed", "5", "--print-run-id"))
+
+
+def test_fewshot_continued_from_multilingual_is_refused(fewshot_env):
+    """D-06: a continued run starts from a masked base checkpoint, never the pinned weights (refused before the
+    fetch, which fails the test if reached)."""
+    argv = fewshot_env.cont("multilingual")
+    with pytest.raises(SystemExit, match="pass a ray_train.py --fewshot-base checkpoint as --base"):
+        ray_train.main(argv)
+
+
+def test_fewshot_continued_from_a_checkpoint_without_a_base_binding_is_refused(fewshot_env):
+    """T-09-06: the base names itself by its own config bytes: a checkpoint without a ray_train.py run (the tiny base
+    itself), one whose run id is not its canonical config's, and a run that is not a masked base of this protocol are
+    each refused."""
+    with pytest.raises(SystemExit, match="holds no ray_train.py run id and canonical config; a continued run starts "
+                                         "from a --fewshot-base checkpoint"):
+        ray_train.main(fewshot_env.cont(fewshot_env.plant(ray_train_block=False, name="bare")))
+    unbound = {k: v for k, v in fewshot_env.base_canon.items() if k not in ("fewshot", "mask_tags")}
+    with pytest.raises(SystemExit, match="carries fewshot binding <absent>, not a masked base of this protocol"):
+        ray_train.main(fewshot_env.cont(fewshot_env.plant(unbound, name="unbound"), "--print-run-id"))
+    d = fewshot_env.plant(name="edited")
+    path = os.path.join(d, "rl_agent_config.json")
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    cfg["training"]["ray_train"]["run_id"] = "laya-selection_train-neg2-s0-00000000"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
+    with pytest.raises(SystemExit, match="names run laya-selection_train-neg2-s0-00000000, but its canonical config"):
+        ray_train.main(fewshot_env.cont(d, "--print-run-id"))
+
+
+def test_fewshot_continued_seed_must_be_the_draw_seed(fewshot_env):
+    """D-07: the training seed of a continued run is the draw seed."""
+    with pytest.raises(SystemExit, match="seed is 1 here but draw 0's seed is 0; the training seed is the draw seed"):
+        ray_train.main(fewshot_env.cont(fewshot_env.plant(), "--seed", "1", "--print-run-id"))
+
+
+def test_fewshot_continued_k_outside_the_frozen_values_is_refused(fewshot_env):
+    """FEW-02: k is one of the frozen k_values (1, 2 here) and the draw one of the frozen draws."""
+    base = fewshot_env.plant()
+    with pytest.raises(SystemExit, match="few-shot k 3 is not one of the frozen k values \\[1, 2\\]"):
+        ray_train.main(fewshot_env.cont(base, "--fewshot-k", "3", "--print-run-id"))
+    with pytest.raises(SystemExit, match="few-shot draw 1 is not one of the frozen draws 0..0"):
+        ray_train.main(fewshot_env.cont(base, "--fewshot-draw", "1", "--print-run-id"))
+    with pytest.raises(SystemExit, match="epochs is 2 here but 1 in the frozen continued_training"):
+        ray_train.main(fewshot_env.cont(base, "--epochs", "2", "--print-run-id"))
+
+
+def _proof_cfg(stage):
+    from pilot import fewshot as fs
+    if stage == "base":
+        return {"fewshot": fs.binding("p" * 64, "base"), "mask_tags": ["card"]}
+    return {"fewshot": fs.binding("p" * 64, "continued", 0, 2, "d" * 64, "laya-base"), "mask_tags": None,
+            "fewshot_rows": {"support": ["bank_1_0", "bank_2_0"], "replay": ["bank_3_0"], "tags": ["card"]},
+            "fewshot_base": {"run_id": "laya-base", "canonical": {"seed": 0}}}
+
+
+def test_fewshot_proof_refuses_a_held_out_item_in_a_masked_base():
+    """FEW-01, T-09-05: the worker's masking proof refuses a masked base with any item of a held-out question and
+    records zero otherwise; it carries counts and tags, never a uid."""
+    per_q = {"card": 0, "loan": 5}
+    proof = ray_train.fewshot_proof(_proof_cfg("base"), per_q, 5, 5)
+    assert proof == {"protocol_sha256": "p" * 64, "stage": "base", "tags": ["card"], "held_out_items": {"card": 0},
+                     "items_per_question": per_q}
+    with pytest.raises(SystemExit, match="the masked base built items of held-out question\\(s\\) \\(card 1\\); "
+                                         "refusing to train"):
+        ray_train.fewshot_proof(_proof_cfg("base"), dict(per_q, card=1), 6, 6)
+    assert ray_train.fewshot_proof({"fewshot": None}, per_q, 5, 5) is None
+
+
+def test_fewshot_proof_of_a_continued_run_needs_one_new_tag_item_per_support_row():
+    """FEW-02: exactly one held-out item per support row (a replay row contributes none) and the frozen item count;
+    the proof names the base by run id and canonical config and holds no uid."""
+    per_q = {"card": 2, "loan": 3}
+    proof = ray_train.fewshot_proof(_proof_cfg("continued"), per_q, 5, 5)
+    assert proof["new_tag_items"] == {"card": 2} and proof["support_rows"] == 2 and proof["replay_rows"] == 1
+    assert proof["base"] == {"run_id": "laya-base", "canonical": {"seed": 0}} and "bank_" not in json.dumps(proof)
+    with pytest.raises(SystemExit, match="held-out question\\(s\\) \\(card 3\\) for 2 support rows"):
+        ray_train.fewshot_proof(_proof_cfg("continued"), dict(per_q, card=3), 6, 6)
+    with pytest.raises(SystemExit, match="built 6 items, the frozen Laya item rule gives 5"):
+        ray_train.fewshot_proof(_proof_cfg("continued"), per_q, 6, 5)
