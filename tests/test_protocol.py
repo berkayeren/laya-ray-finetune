@@ -627,3 +627,113 @@ def test_cli_render_of_a_built_protocol(tmp_path, capsys):
     md = capsys.readouterr().out
     assert md == pr.render_markdown(json.loads(raw.decode("utf-8")), pilot.data.sha256_bytes(raw))
     assert "counts as NO-GO; collect bank data" in md
+
+
+# ---- 08-06 Task 2: the remaining sections ----
+
+SECTIONS = ("#### Criteria", "#### Collapse rule (b)", "#### Verdict", "#### Seed averaging, θ and bootstrap",
+            "#### Systems, splits and inputs", "#### Few-shot protocol (Phase 9 executes it unchanged)",
+            "#### Known at freeze (val, in-sample, one seed per model)", "#### Power at the test size (research estimates)",
+            "#### Definitions", "#### Assumptions and delegation")
+
+
+def _strings(x):
+    """Every string value under x (dict values and list items, never dict keys)."""
+    if isinstance(x, str):
+        return [x]
+    if isinstance(x, dict):
+        return [s for v in x.values() for s in _strings(v)]
+    if isinstance(x, list):
+        return [s for v in x for s in _strings(v)]
+    return []
+
+
+def frozen_texts(p):
+    """Every rule, definition, note and quote text of a protocol dict that the README block must show verbatim."""
+    texts = list(p["definitions"].values()) + list(p["verdict"]["rules"])
+    texts += [p["verdict"]["inconclusive_means"], p["verdict"]["provisional"], p["verdict"]["units"]]
+    for c in p["criteria"].values():
+        texts += [c["rule"]] + list((c.get("reported_only") or {}).values())
+    texts += [p["collapse"]["rule"], p["collapse"]["not_applied"], p["collapse"]["prior_source"]]
+    texts += _strings(p["collapse"]["components"])
+    texts += _strings(p["variant"]) + _strings(p["seed_averaging"]) + _strings(p["scoring"])
+    texts += [p["references"]["rule"], p["bootstrap"]["procedure"], p["bootstrap"]["extra"]]
+    texts += _strings(p["fewshot"]["rules"]) + _strings(p["fewshot"]["sampler"]) + [p["fewshot"]["eligibility"]["note"]]
+    texts += [p["known_at_freeze"]["note"]] + _strings(p["power_context"])
+    texts += [a["decision"] for a in p["assumptions"]] + [a["taken"] for a in p["assumptions"]]
+    texts += _strings(p["delegation"]) + _strings(p["frozen"])
+    return texts
+
+
+def test_render_shows_every_section_in_order_on_a_hand_written_dict():
+    md = pr.render_markdown(tiny(), "5" * 64)
+    at = [md.index(s) for s in SECTIONS]
+    assert at == sorted(at)
+
+
+def test_render_shows_every_frozen_text_of_a_hand_written_dict():
+    md = pr.render_markdown(tiny(), "5" * 64)
+    for text in frozen_texts(tiny()):
+        assert text in md, text
+
+
+def test_render_shows_the_remaining_values_of_a_hand_written_dict():
+    md = pr.render_markdown(tiny(), "5" * 64)
+    for text in ("B = 7", "seed 3", "level 0.9", "coverage 50%", "loan", "card", "9876543210ab", "A1", "OQ1",
+                 "tiny research estimate", "in-sample", "-0.2500", "[-0.5000, +0.1250]", "laya-chosen",
+                 "berturk-chosen", "laya-final-s0", "berturk-final-s0", "1.5000", "0.55", "0.45",
+                 "data/splits/test.jsonl", "ood_scoring_tags: card, loan", "do the tiny control."):
+        assert text in md, text
+    assert "9876543210abc" not in md                    # digests show their first 12 hex characters only
+    assert "u1" not in md and "u5" not in md            # support and replay uids are counted, never listed
+    assert "| 0 | 0 | 0 | 2 | 3 | 2 | loan 2, card 3 | 9876543210ab |" in md
+
+
+@pytest.mark.data
+def test_render_shows_the_remaining_sections(built):
+    md = pr.render_markdown(built, "5" * 64)
+    for s in SECTIONS:
+        assert s in md, s
+    assert "B = 10000" in md and "research estimate" in md and "in-sample" in md
+    for tag in built["fewshot"]["tags"]:
+        assert tag in md, tag
+    for d in built["fewshot"]["draws"]:
+        assert d["digest"][:12] in md and d["digest"] not in md
+    for a in built["assumptions"]:
+        assert "- %s: " % a["id"] in md, a["id"]
+    delta = built["known_at_freeze"]["headline"]["metrics"]["micro_f1"]["delta"]
+    assert "%+.4f" % delta in md and "%+.4f" % delta == "-0.0155"
+    for kind in pr.KINDS:
+        for s in built["systems"][kind]["final_seeds"]:
+            assert s["dump_run_id"] in md
+    assert "%.4f" % built["systems"]["laya"]["chosen"]["temperature"] in md
+
+
+@pytest.mark.data
+def test_render_shows_every_frozen_text(built):
+    md = pr.render_markdown(built, "5" * 64)
+    for text in list(built["definitions"].values()) + list(built["verdict"]["rules"]):
+        assert text in md, text
+    for c in built["criteria"].values():
+        assert c["rule"] in md, c["rule"]
+    for text in frozen_texts(built):
+        assert text in md, text
+
+
+@pytest.mark.data
+def test_render_holds_no_local_path_or_message_text(built):
+    from test_repo_hygiene import home_dir, local_split_texts
+    md = pr.render_markdown(built, "5" * 64)
+    home = home_dir()
+    assert home is None or home not in md
+    assert pilot.data.REPO_ROOT not in md
+    texts = local_split_texts()
+    assert texts, "make data first: the message-text check needs the committed splits"
+    # a message text never appears inside the block; a few messages are a bare number or word ("40"), so those
+    # short ones are checked as whole lines, bullet values and table cells instead of as substrings
+    pieces = set()
+    for line in md.split("\n"):
+        pieces |= {line.strip(), line.lstrip("- ").strip()} | {c.strip() for c in line.split("|")}
+        pieces |= {x.strip() for x in line.split(": ")}
+    assert [t for t in texts if len(t) >= 12 and t in md] == []
+    assert sorted(t for t in texts if t in pieces) == []
