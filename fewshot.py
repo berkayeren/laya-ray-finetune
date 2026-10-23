@@ -214,6 +214,10 @@ def projection_mode(manifest_path, out, ladder_failure=None):
                              "only turns a primary record into the fallback" % out)
         with open(out, encoding="utf-8") as f:
             record = json.load(f)
+        if not isinstance(record.get("projection"), dict) or not isinstance(record["projection"].get("total_s"),
+                                                                            (int, float)):
+            raise SystemExit("%s holds no projection with a total_s; a ladder failure rewrites the record `python "
+                             "fewshot.py --projection` wrote (`git checkout -- %s`)" % (out, repo_relpath(out)))
         record.update(compute.fewshot_decision(record["projection"], block, ladder_failure))
     else:
         if os.path.lexists(out):
