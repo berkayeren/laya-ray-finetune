@@ -11,6 +11,7 @@
 #   make laya-postfit      rebuild the Phase 5 Laya postfit record from the committed selection dumps (no model)
 #   make berturk-postfit   rebuild the Phase 6 BERTurk postfit record from the committed 30-epoch selection dumps (no model)
 #   make confidence-reports  rebuild the Phase 7 val confidence records from the committed dumps and postfit records (no model)
+#   make final-scoring  score the six final seeds once on test and HOTELS behind the protocol gate (model, about 35 min on the M4; never rerun: the gate refuses an existing dump)
 PYTHON ?= python
 UV ?= uv
 PY312 ?= python3.12
@@ -25,8 +26,9 @@ REPORTS := results/reports
 LAYA_CHOSEN := laya-047381259d3b-cf0f7846-cc216d59
 BERTURK_CHOSEN := berturk-f24d8fe3c899-50e28523-29446b61
 CONFIDENCE := results/confidence
+FINAL_ROOT ?= .
 
-.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports
+.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring
 
 env:
 	$(PY312) -m venv $(VENV)
@@ -89,6 +91,21 @@ confidence-reports:
 	$(PYTHON) report.py --confidence results/dumps/$(LAYA_CHOSEN) --split val --postfit results/postfit/laya.json --out $(CONFIDENCE)/$(LAYA_CHOSEN)-val.json > /dev/null
 	$(PYTHON) report.py --confidence results/dumps/$(BERTURK_CHOSEN) --split val --postfit results/postfit/berturk.json --out $(CONFIDENCE)/$(BERTURK_CHOSEN)-val.json > /dev/null
 	$(PYTHON) report.py --confidence results/dumps/$(LAYA_ZS) --split val --out $(CONFIDENCE)/$(LAYA_ZS)-val.json > /dev/null
+
+final-scoring:
+	$(PYTHON) score.py data/splits/test.jsonl --model laya --checkpoint $(FINAL_ROOT)/ckpt-final-s0 --device mps --workers 0
+	$(PYTHON) score.py data/splits/hotels_probe.jsonl --model laya --checkpoint $(FINAL_ROOT)/ckpt-final-s0 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model laya --checkpoint $(FINAL_ROOT)/ckpt-final-s1 --device mps --workers 0
+	$(PYTHON) score.py data/splits/hotels_probe.jsonl --model laya --checkpoint $(FINAL_ROOT)/ckpt-final-s1 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model laya --checkpoint $(FINAL_ROOT)/ckpt-final-s2 --device mps --workers 0
+	$(PYTHON) score.py data/splits/hotels_probe.jsonl --model laya --checkpoint $(FINAL_ROOT)/ckpt-final-s2 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model berturk --checkpoint $(FINAL_ROOT)/ckpt-berturk-final-s0 --device mps --workers 0
+	$(PYTHON) score.py data/splits/hotels_probe.jsonl --model berturk --checkpoint $(FINAL_ROOT)/ckpt-berturk-final-s0 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model berturk --checkpoint $(FINAL_ROOT)/ckpt-berturk-final-s1 --device mps --workers 0
+	$(PYTHON) score.py data/splits/hotels_probe.jsonl --model berturk --checkpoint $(FINAL_ROOT)/ckpt-berturk-final-s1 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model berturk --checkpoint $(FINAL_ROOT)/ckpt-berturk-final-s2 --device mps --workers 0
+	$(PYTHON) score.py data/splits/hotels_probe.jsonl --model berturk --checkpoint $(FINAL_ROOT)/ckpt-berturk-final-s2 --device mps --workers 0
+	$(PYTHON) score.py data/splits/hotels_probe.jsonl --model laya --workers $(SCORE_WORKERS) --cpus-per-worker $(SCORE_CPUS)
 
 clean-data:
 	rm -rf data/splits data/audit
