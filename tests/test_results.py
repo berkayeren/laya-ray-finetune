@@ -30,6 +30,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -38,8 +39,9 @@ import pilot.data
 import report
 import score
 from conftest import prepared
-from pilot import dumps, protocol
-from pilot.data import DEFAULT_MANIFEST
+from fewshot_synthetic import plant_fewshot_dumps, plant_rules, plant_runs, synthetic_protocol
+from pilot import dumps, fewshot, protocol
+from pilot.data import DEFAULT_MANIFEST, sha256_file
 from pilot.weights import identity
 
 pytestmark = pytest.mark.unit
@@ -274,9 +276,10 @@ def test_final_dir_rule_flags_planted_cases():
         assert got and any(word in g for g in got), (name, got)
 
 
-def _plant(snap, root, rid, split, kind, pin=None):
+def _plant(snap, root, rid, split, kind, pin=None, training=None):
     """A synthetic full dump of `split` in root/rid (score.sidecar_base of the synthetic manifest), of a pinned Laya
-    (kind "zeroshot"), a local Laya or BERTurk checkpoint, or a baseline; pin stamps protocol_sha256."""
+    (kind "zeroshot"), a local Laya or BERTurk checkpoint, or a baseline; pin stamps protocol_sha256, `training` sets
+    the sidecar's training block."""
     out_dir, manifest = snap
     with open(manifest, encoding="utf-8") as f:
         entry = json.load(f)["splits"][split]
@@ -287,19 +290,112 @@ def _plant(snap, root, rid, split, kind, pin=None):
     side = dict(score.sidecar_base(entry, split, manifest, None), run_id=rid, system=system)
     if pin is not None:
         side["protocol_sha256"] = pin
+    if training is not None:
+        side["training"] = training
     logits = np.random.default_rng(len(rid)).normal(size=(len(uids), 48)).astype(np.float32)
     dumps.write_dump(os.path.join(str(root), rid), split, logits, uids, side)
 
 
-def test_dir_rule_on_a_planted_post_scoring_tree(tmp_path, synthetic_raw, capsys):
-    snap = prepared(tmp_path, synthetic_raw)
+def _planted_runs(tmp_path, synthetic_raw, monkeypatch):
+    """The synthetic frozen protocol (one draw, k 1 and 2, base seed 0) and its planted runs manifest: (ns, path,
+    {dump_run_id: entry}, runs sha256)."""
+    ns = synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, rules=plant_rules((0,)))
+    path = plant_runs(ns, str(tmp_path / "fewshot" / "runs.json"))
+    runs, sha = fewshot.read_runs(ns.protocol, ns.pin, path)
+    return ns, path, {e["dump_run_id"]: e for e in runs["entries"]}, sha
+
+
+def test_fewshot_dirs_follow_the_tracked_runs_manifest():
+    # state-agnostic: {} until 09-11 commits results/fewshot/runs.json, then every listed dump run id
+    dirs, sha = fewshot_runs()
+    if not tracked(FEWSHOT_RUNS):
+        assert (dirs, sha) == ({}, None), "results/fewshot/runs.json is untracked, yet few-shot dirs were read"
+    else:
+        assert dirs and sha == sha256_file(os.path.join(REPO_ROOT, FEWSHOT_RUNS))
+        assert all(e["dump_run_id"] == rid for rid, e in dirs.items())
+    assert fewshot_dirs() == dirs
+
+
+def test_fewshot_dirs_read_a_tracked_planted_manifest(tmp_path, synthetic_raw, monkeypatch, capsys):
+    ns, path, want, sha = _planted_runs(tmp_path, synthetic_raw, monkeypatch)
     capsys.readouterr()
-    pin, root = "c" * 64, tmp_path / "dumps"
+    monkeypatch.setattr(sys.modules[__name__], "tracked", lambda *spec: [])
+    assert fewshot_runs(path) == ({}, None)                     # untracked: never read, whatever is on disk
+    monkeypatch.setattr(sys.modules[__name__], "tracked", lambda *spec: list(spec))
+    assert fewshot_runs(path) == (want, sha) and sha == sha256_file(path)
+    assert len(want) == 6 and {e["stage"] for e in want.values()} == {"base", "continued"}
+    with open(path, encoding="utf-8") as f:
+        runs = json.load(f)
+    runs["entries"] = runs["entries"][1:]
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(runs, f)
+    with pytest.raises(SystemExit, match="incomplete"):           # a tracked manifest check_runs refuses fails
+        fewshot_runs(path)
+
+
+def test_fewshot_dir_rule_flags_planted_cases():
+    pin, runs_sha = "a" * 64, "b" * 64
+    base = {"kind": "laya", "stage": "base", "seed": 0, "train_run_id": "laya-train-base-s0"}
+    cont = {"kind": "berturk", "stage": "continued", "seed": 0, "train_run_id": "berturk-train-d0-k1"}
+    pairs = {s: (s + ".npz", s + ".json") for s in ("val", "test", "hotels_probe")}
+
+    def side(entry, split, **kw):
+        out = {"run_id": "rid", "n_subset": None, "system": {"kind": entry["kind"]}, "seed": entry["seed"],
+               "training": {"run_id": entry["train_run_id"], "split": "selection_train"}}
+        if split != "val":
+            out.update(protocol_sha256=pin, fewshot_runs_sha256=runs_sha)
+        out.update(kw)
+        return out
+
+    def check(entry, splits, sides=None):
+        names = [n for s in splits for n in pairs[s]]
+        sides = dict({s: side(entry, s) for s in splits}, **(sides or {}))
+        return fewshot_dir_problems("rid", names, sides, entry, pin, runs_sha)
+
+    assert check(base, ("val", "test")) == []                   # a scored masked base: ungated val, gated test
+    assert check(base, ("val",)) == []                          # before the test scoring run
+    assert check(cont, ("test",)) == []                         # a scored continued run: its gated test dump
+    assert check(cont, ()) == [] and check(base, ()) == []
+    flagged = {
+        "continued val dump": (cont, ("val", "test"), {}, "val"),
+        "ungated base test": (base, ("val", "test"), {"test": side(base, "val")}, "protocol_sha256"),
+        "gated base val": (base, ("val", "test"), {"val": side(base, "val", protocol_sha256=pin)}, "ungated"),
+        "base val with runs sha": (base, ("val",), {"val": side(base, "val", fewshot_runs_sha256=runs_sha)},
+                                   "ungated"),
+        "other protocol": (cont, ("test",), {"test": side(cont, "test", protocol_sha256="c" * 64)}, "c" * 64),
+        "other runs manifest": (cont, ("test",), {"test": side(cont, "test", fewshot_runs_sha256="d" * 64)},
+                                "d" * 64),
+        "no runs sha": (cont, ("test",), {"test": side(cont, "test", fewshot_runs_sha256=None)},
+                        "fewshot_runs_sha256"),
+        "HOTELS dump": (base, ("val", "test", "hotels_probe"), {}, "HOTELS"),
+        "continued HOTELS dump": (cont, ("test", "hotels_probe"), {}, "HOTELS"),
+        "subset": (cont, ("test",), {"test": side(cont, "test", n_subset=20)}, "subset"),
+        "other kind": (base, ("val",), {"val": side(base, "val", system={"kind": "berturk"})}, "kind"),
+        "other train run": (cont, ("test",), {"test": side(cont, "test", training={"run_id": "x"})}, "train run"),
+        "other seed": (base, ("val",), {"val": side(base, "val", seed=1)}, "seed"),
+    }
+    for name, (entry, splits, sides, word) in flagged.items():
+        got = check(entry, splits, sides)
+        assert len(got) == 1 and word in got[0], (name, got)
+    for entry, split in ((base, "val"), (base, "test"), (cont, "test")):
+        for n in pairs[split]:                                  # an npz without its sidecar, or the reverse
+            got = fewshot_dir_problems("rid", [n], {split: side(entry, split)} if n.endswith(".json") else {}, entry,
+                                       pin, runs_sha)
+            assert len(got) == 1 and "sidecar" in got[0], (n, got)
+    got = fewshot_dir_problems("rid", pairs["test"], {"test": side(cont, "test")}, cont, None, runs_sha)
+    assert got and any("PROTOCOL_SHA256" in g for g in got), got
+
+
+def test_dir_rule_on_a_planted_post_scoring_tree(tmp_path, synthetic_raw, monkeypatch, capsys):
+    ns, _, fdirs, runs_sha = _planted_runs(tmp_path, synthetic_raw, monkeypatch)
+    snap = (ns.out_dir, ns.manifest)
+    capsys.readouterr()
+    pin, root = ns.pin, tmp_path / "dumps"
     final = {"laya-final-s0": ("laya", 0), "berturk-final-s0": ("berturk", 0)}
 
     def problems(rid, p=pin):
         names = sorted(os.listdir(os.path.join(str(root), rid)))
-        return dir_problems(str(root), rid, names, snap[1], p, final)
+        return dir_problems(str(root), rid, names, snap[1], p, final, fdirs, runs_sha)
 
     for rid, kind in (("laya-final-s0", "laya"), ("berturk-final-s0", "berturk")):
         for split in ("test", "hotels_probe"):
@@ -311,6 +407,10 @@ def test_dir_rule_on_a_planted_post_scoring_tree(tmp_path, synthetic_raw, capsys
     assert any("val" in x for x in problems("laya-final-s0"))       # a final seed's val is in-sample: never a dump
     _plant(snap, root, "laya-sel", "val", "laya")
     assert problems("laya-sel") == []                               # a selection candidate: val only
+    _plant(snap, root, "laya-sel", "val", "laya", pin)
+    got = problems("laya-sel")                                      # a gated selection val dump
+    assert len(got) == 1 and "protocol_sha256" in got[0], got
+    _plant(snap, root, "laya-sel", "val", "laya")
     _plant(snap, root, "laya-sel", "hotels_probe", "laya")
     assert any("hotels_probe" in x for x in problems("laya-sel"))   # never HOTELS outside the final seeds
     _plant(snap, root, "berturk-sel", "val", "berturk")
@@ -326,3 +426,24 @@ def test_dir_rule_on_a_planted_post_scoring_tree(tmp_path, synthetic_raw, capsys
     assert problems("prior") == []
     _plant(snap, root, "prior", "hotels_probe", "prior")
     assert any("hotels_probe" in x for x in problems("prior"))      # the baselines never reach HOTELS
+
+    # Phase 9 (D-09, D-10): every listed few-shot dir after 09-11's scoring: bases val + gated test, continued test
+    plant_fewshot_dumps(ns, {"entries": list(fdirs.values())}, runs_sha, str(root))
+    for rid, e in sorted(fdirs.items()):
+        want = ["test.json", "test.npz"] + (["val.json", "val.npz"] if e["stage"] == "base" else [])
+        assert sorted(os.listdir(os.path.join(str(root), rid))) == sorted(want), rid
+        assert problems(rid) == [], (rid, problems(rid))
+    assert problems("laya-sel", pin) == []                          # unchanged by the listed dirs
+    canon = {"fewshot": {"protocol_sha256": pin, "stage": "base"}, "split": "selection_train", "seed": 0}
+    _plant(snap, root, "laya-fewshot-unlisted", "val", "laya",
+           training={"run_id": "laya-train-x", "split": "selection_train", "canonical": canon})
+    got = problems("laya-fewshot-unlisted")                         # a few-shot dump the runs manifest does not list
+    assert len(got) == 1 and "not listed" in got[0], got
+    cont = sorted(rid for rid, e in fdirs.items() if e["stage"] == "continued")[0]
+    os.remove(os.path.join(str(root), cont, "test.json"))
+    got = problems(cont)                                            # an interrupted run: the npz without its sidecar
+    assert len(got) == 1 and "sidecar" in got[0], got
+    base = sorted(rid for rid, e in fdirs.items() if e["stage"] == "base")[0]
+    _plant(snap, root, base, "hotels_probe", fdirs[base]["kind"])
+    got = problems(base)                                            # a few-shot checkpoint never reaches HOTELS
+    assert len(got) == 1 and "HOTELS" in got[0], got
