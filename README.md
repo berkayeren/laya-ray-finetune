@@ -1221,6 +1221,38 @@ Delegation:
 - bank_name: the bank-name check is deferred to the end-of-milestone review
 <!-- protocol:end -->
 
+The results table below is generated from `results/final/verdict.json` by `python report.py --final-table results/final/verdict.json` (a test fails if it differs).
+
+<!-- final-results:start -->
+### Results on test (Phase 8)
+
+Split test: n = 413 (15 no-intent), sha256 `3abfb1836033`, uids sha256 `f0fc53ccb638`; protocol sha256 `0d337d2019f9`.
+Every value is at the val-selected θ and headline T: a reference row at its own val θ, a fine-tuned row as the mean ± sample std (ddof 1) over its final seeds with the per-seed values in seed order, the seed-averaged row the system the GO block compares (each seed at its record T, averaged, then the record's theta.shipped).
+
+| system | run | micro-F1 | macro-F1 | exact match | top-1 |
+|---|---|---|---|---|---|
+| majority (train: final_train) | majority | 0.138 | 0.008 | 0.005 | 0.231 |
+| prior (train: final_train) | prior | 0.184 | 0.048 | 0.000 | 0.231 |
+| laya (multilingual) | laya-zeroshot-7b928d82 | 0.205 | 0.216 | 0.007 | 0.214 |
+| laya fine-tuned (final seeds 0, 1, 2) | mean ± std (seed 0 / 1 / 2) | 0.793 ± 0.020 (0.779 / 0.784 / 0.815) | 0.790 ± 0.013 (0.784 / 0.781 / 0.805) | 0.390 ± 0.040 (0.370 / 0.363 / 0.436) | 0.890 ± 0.003 (0.887 / 0.892 / 0.892) |
+| laya fine-tuned, seed-averaged (EVAL-07 system) | seeds 0, 1, 2 averaged | 0.826 | 0.815 | 0.460 | 0.922 |
+| berturk fine-tuned (final seeds 0, 1, 2) | mean ± std (seed 0 / 1 / 2) | 0.832 ± 0.009 (0.829 / 0.826 / 0.843) | 0.759 ± 0.003 (0.758 / 0.757 / 0.762) | 0.532 ± 0.018 (0.523 / 0.521 / 0.552) | 0.927 ± 0.003 (0.927 / 0.925 / 0.930) |
+| berturk fine-tuned, seed-averaged (EVAL-07 system) | seeds 0, 1, 2 averaged | 0.844 | 0.777 | 0.562 | 0.940 |
+
+Settings (T and θ are each postfit record's, chosen on val, never re-selected on test):
+
+| system | T | θ shipped global (per-tag) | θ raw global (per-tag) | epoch / schedule | encoder / head LR | seeds | train run ids | selection run (chosen dump) |
+|---|---|---|---|---|---|---|---|---|
+| majority (train: final_train) | 1.0000 | 0.50 (13) | n/a | n/a | n/a | n/a | n/a | n/a |
+| prior (train: final_train) | 1.0000 | 0.12 (13) | n/a | n/a | n/a | n/a | n/a | n/a |
+| laya (multilingual) | 1.0000 | 0.32 (13) | n/a | n/a | n/a | n/a | n/a | n/a |
+| laya fine-tuned | 4.7698 | 0.95 (13) | 0.33 (13) | 3 / 4 | 2e-05 / 0.0001 | 0, 1, 2 | laya-final_train-neg8-s0-95cf6955, laya-final_train-neg8-s1-07a1ee59, laya-final_train-neg8-s2-bbb5230e | laya-selection_train-neg8-s0-d92447f4 (laya-047381259d3b-cf0f7846-cc216d59) |
+| berturk fine-tuned | 0.7430 | 0.19 (13) | 0.26 (13) | 29 / 30 | 2e-05 / 0.0001 | 0, 1, 2 | berturk-final_train-s0-8a167355, berturk-final_train-s1-3c44e7ff, berturk-final_train-s2-44f81396 | berturk-selection_train-s0-4f36ae05 (berturk-f24d8fe3c899-50e28523-29446b61) |
+
+- laya: postfit record results/postfit/laya.json `e08e8735b19c`, final manifest results/postfit/laya-final.json `3d0b1a91e00e`, config sha256 without the seed `4fe1e17f7701`.
+- berturk: postfit record results/postfit/berturk.json `83b34dfb524e`, final manifest results/postfit/berturk-final.json `0a611f198fcf`, config sha256 without the seed `16cb358001af`.
+<!-- final-results:end -->
+
 The GO block below is computed mechanically from the frozen thresholds and the committed final-seed test dumps; regenerate it with `python report.py --go-block results/final/verdict.json` (a test fails if it differs).
 
 <!-- go-block:start -->
@@ -1248,6 +1280,181 @@ Statuses: (a) INCONCLUSIVE; (b) PASS; (c) REPORTED (not gated); (d) PENDING; alt
 
 Descriptive, not gating: classwise_ece delta +1.66 points, CI [+1.31, +1.68]; exact_match delta -10.17 points, CI [-15.74, -4.60]; top1_hit delta -1.76 points, CI [-4.74, +1.23]; raw (T: laya 1.0000; berturk 1.0000; θ: laya theta.raw; berturk theta.raw) micro_f1 delta -8.57 points, CI [-10.68, -6.45].
 <!-- go-block:end -->
+
+The test and HOTELS confidence block below is generated from the records under `results/final/confidence/` by `python report.py --confidence-table results/final/confidence` (a test fails if it differs); every T and θ comes from val or the postfit record, never from test or HOTELS.
+
+<!-- final-confidence:start -->
+### Calibration on test (θ-free)
+
+| system | run_id | variant | T | Brier | NLL | classwise ECE (15 bins) |
+|---|---|---|---|---|---|---|
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | headline | 0.7430 | 0.0128 | 0.0488 | 0.0160 |
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | raw | 1.0000 | 0.0130 | 0.0550 | 0.0243 |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | headline | 0.7430 | 0.0131 | 0.0499 | 0.0159 |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | raw | 1.0000 | 0.0133 | 0.0562 | 0.0237 |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | headline | 0.7430 | 0.0132 | 0.0499 | 0.0159 |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | raw | 1.0000 | 0.0135 | 0.0567 | 0.0248 |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | headline | 4.7698 | 0.0188 | 0.0877 | 0.0284 |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | raw | 1.0000 | 0.0198 | 0.3250 | 0.0199 |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | headline | 4.7698 | 0.0235 | 0.1064 | 0.0339 |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | raw | 1.0000 | 0.0249 | 0.4138 | 0.0250 |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | headline | 4.7698 | 0.0223 | 0.1041 | 0.0344 |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | raw | 1.0000 | 0.0233 | 0.3976 | 0.0234 |
+| laya (multilingual) | laya-zeroshot-7b928d82 | headline | 1.0000 | 0.0924 | 0.3563 | 0.1141 |
+| laya (multilingual) | laya-zeroshot-7b928d82 | raw | 1.0000 | 0.0924 | 0.3563 | 0.1141 |
+| prior (train: final_train) | prior | headline | 1.0000 | 0.0422 | 0.1704 | 0.0066 |
+| prior (train: final_train) | prior | raw | 1.0000 | 0.0422 | 0.1704 | 0.0066 |
+
+- laya-zeroshot-7b928d82: headline temperature is 1.0, so its raw rows equal its headline rows.
+- prior: headline temperature is 1.0, so its raw rows equal its headline rows.
+
+### Reliability diagrams
+
+![reliability diagram berturk-06685feeb69f-faf017a7-29446b61 (test)](results/final/confidence/berturk-06685feeb69f-faf017a7-29446b61-test.svg)
+
+![reliability diagram berturk-1f0bb00cd6f7-a14835e4-29446b61 (test)](results/final/confidence/berturk-1f0bb00cd6f7-a14835e4-29446b61-test.svg)
+
+![reliability diagram berturk-c500b06ccf34-f37197ee-29446b61 (test)](results/final/confidence/berturk-c500b06ccf34-f37197ee-29446b61-test.svg)
+
+![reliability diagram laya-6f66dfd4c331-23b93830-cc216d59 (test)](results/final/confidence/laya-6f66dfd4c331-23b93830-cc216d59-test.svg)
+
+![reliability diagram laya-a6a866dd69fc-88cfaa80-cc216d59 (test)](results/final/confidence/laya-a6a866dd69fc-88cfaa80-cc216d59-test.svg)
+
+![reliability diagram laya-f43484c8aab4-b43eaa54-cc216d59 (test)](results/final/confidence/laya-f43484c8aab4-b43eaa54-cc216d59-test.svg)
+
+![reliability diagram laya-zeroshot-7b928d82 (test)](results/final/confidence/laya-zeroshot-7b928d82-test.svg)
+
+![reliability diagram prior (test)](results/final/confidence/prior-test.svg)
+
+### Abstention on test (message confidence)
+
+| system | run_id | variant | θ | precision@50% | precision@70% | precision@80% | precision@90% | accuracy@50% | accuracy@70% | accuracy@80% | accuracy@90% | AURC |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | headline | 0.5 | 0.955 | 0.957 | 0.952 | 0.936 | 0.681 | 0.603 | 0.559 | 0.508 | 0.305 |
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | headline | val-selected, global 0.19 | 0.956 | 0.922 | 0.902 | 0.873 | 0.754 | 0.672 | 0.637 | 0.597 | 0.254 |
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | raw | 0.5 | 0.953 | 0.959 | 0.956 | 0.941 | 0.657 | 0.600 | 0.556 | 0.508 | 0.317 |
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | raw | val-selected, global 0.26 | 0.943 | 0.916 | 0.905 | 0.875 | 0.734 | 0.669 | 0.640 | 0.594 | 0.259 |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | headline | 0.5 | 0.955 | 0.954 | 0.936 | 0.920 | 0.686 | 0.614 | 0.571 | 0.524 | 0.307 |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | headline | val-selected, global 0.19 | 0.951 | 0.916 | 0.887 | 0.859 | 0.725 | 0.672 | 0.619 | 0.575 | 0.273 |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | raw | 0.5 | 0.946 | 0.948 | 0.931 | 0.922 | 0.657 | 0.603 | 0.568 | 0.524 | 0.319 |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | raw | val-selected, global 0.26 | 0.944 | 0.907 | 0.886 | 0.858 | 0.725 | 0.669 | 0.622 | 0.575 | 0.278 |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | headline | 0.5 | 0.942 | 0.944 | 0.941 | 0.933 | 0.671 | 0.593 | 0.544 | 0.511 | 0.326 |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | headline | val-selected, global 0.19 | 0.945 | 0.922 | 0.893 | 0.861 | 0.734 | 0.683 | 0.622 | 0.575 | 0.278 |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | raw | 0.5 | 0.944 | 0.945 | 0.940 | 0.930 | 0.657 | 0.586 | 0.541 | 0.508 | 0.330 |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | raw | val-selected, global 0.26 | 0.932 | 0.919 | 0.890 | 0.862 | 0.734 | 0.676 | 0.619 | 0.573 | 0.278 |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | headline | 0.5 | 0.835 | 0.795 | 0.772 | 0.749 | 0.575 | 0.524 | 0.483 | 0.444 | 0.424 |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | headline | val-selected, global 0.95 | 0.827 | 0.798 | 0.772 | 0.753 | 0.570 | 0.528 | 0.483 | 0.452 | 0.420 |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | raw | 0.5 | 0.847 | 0.805 | 0.776 | 0.747 | 0.599 | 0.528 | 0.483 | 0.441 | 0.386 |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | raw | val-selected, global 0.33 | 0.847 | 0.805 | 0.776 | 0.747 | 0.599 | 0.528 | 0.483 | 0.441 | 0.386 |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | headline | 0.5 | 0.760 | 0.724 | 0.706 | 0.691 | 0.498 | 0.434 | 0.402 | 0.379 | 0.505 |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | headline | val-selected, global 0.95 | 0.760 | 0.724 | 0.706 | 0.694 | 0.498 | 0.434 | 0.408 | 0.392 | 0.504 |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | raw | 0.5 | 0.761 | 0.715 | 0.701 | 0.690 | 0.498 | 0.421 | 0.399 | 0.379 | 0.476 |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | raw | val-selected, global 0.33 | 0.761 | 0.715 | 0.701 | 0.690 | 0.498 | 0.421 | 0.399 | 0.379 | 0.476 |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | headline | 0.5 | 0.742 | 0.729 | 0.719 | 0.707 | 0.473 | 0.445 | 0.429 | 0.395 | 0.491 |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | headline | val-selected, global 0.95 | 0.742 | 0.730 | 0.721 | 0.709 | 0.473 | 0.448 | 0.432 | 0.395 | 0.490 |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | raw | 0.5 | 0.768 | 0.738 | 0.719 | 0.707 | 0.517 | 0.462 | 0.429 | 0.395 | 0.471 |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | raw | val-selected, global 0.33 | 0.768 | 0.738 | 0.719 | 0.707 | 0.517 | 0.462 | 0.429 | 0.395 | 0.471 |
+| laya (multilingual) | laya-zeroshot-7b928d82 | headline | 0.5 | 0.192 | 0.176 | 0.167 | 0.157 | 0.014 | 0.010 | 0.009 | 0.008 | 0.976 |
+| laya (multilingual) | laya-zeroshot-7b928d82 | headline | val-selected, global 0.32 | 0.185 | 0.166 | 0.155 | 0.149 | 0.014 | 0.010 | 0.009 | 0.008 | 0.980 |
+| laya (multilingual) | laya-zeroshot-7b928d82 | raw | 0.5 | 0.192 | 0.176 | 0.167 | 0.157 | 0.014 | 0.010 | 0.009 | 0.008 | 0.976 |
+| laya (multilingual) | laya-zeroshot-7b928d82 | raw | val-selected, global 0.32 | 0.185 | 0.166 | 0.155 | 0.149 | 0.014 | 0.010 | 0.009 | 0.008 | 0.980 |
+| prior (train: final_train) | prior | headline | 0.5 | 0.000 | 0.000 | 0.000 | 0.000 | 0.019 | 0.034 | 0.036 | 0.032 | 0.979 |
+| prior (train: final_train) | prior | headline | val-selected, global 0.12 | 0.110 | 0.107 | 0.106 | 0.107 | 0.000 | 0.000 | 0.000 | 0.000 | 1.000 |
+| prior (train: final_train) | prior | raw | 0.5 | 0.000 | 0.000 | 0.000 | 0.000 | 0.019 | 0.034 | 0.036 | 0.032 | 0.979 |
+| prior (train: final_train) | prior | raw | val-selected, global 0.12 | 0.110 | 0.107 | 0.106 | 0.107 | 0.000 | 0.000 | 0.000 | 0.000 | 1.000 |
+
+- confidence: message confidence = sum over the 48 tags of log q, q = p if p >= θ (predicted) else 1 - p: the model's probability that every tag decision is right, assuming tag independence
+- coverage: keep the k = ceil(c * n / 100) most confident messages, k computed as (c * n + 99) // 100; ties in confidence keep split-file order (stable sort)
+- aurc: mean over k = 1..n of 1 - exact-match rate of the k most confident messages (Geifman et al. 2019); lower is better
+
+**Definition disclosure:** The message-confidence rule (the joint decision probability) was fixed at planning time on principle, because it is the model's own probability of the event the abstention accuracy scores (exact match), after the Phase 7 research had computed val AURC under it and under a weakest-tag rule (the minimum over tags of q). At the headline (val-fitted) temperature the order of the two fine-tuned models' val AURC differs between the two rules (at T = 1 it does not); the rule was not chosen by that outcome, and Phase 8 freezes it in protocol.json knowing both directions.
+
+### No-intent false positives on test
+
+| system | run_id | variant | θ | k/n | rate | Wilson 95% |
+|---|---|---|---|---|---|---|
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | headline | 0.5 | 0/15 | 0.000 | [0.000, 0.204] |
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | headline | val-selected, global 0.19 | 0/15 | 0.000 | [0.000, 0.204] |
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | raw | 0.5 | 0/15 | 0.000 | [0.000, 0.204] |
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | raw | val-selected, global 0.26 | 0/15 | 0.000 | [0.000, 0.204] |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | headline | 0.5 | 1/15 | 0.067 | [0.012, 0.298] |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | headline | val-selected, global 0.19 | 1/15 | 0.067 | [0.012, 0.298] |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | raw | 0.5 | 1/15 | 0.067 | [0.012, 0.298] |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | raw | val-selected, global 0.26 | 1/15 | 0.067 | [0.012, 0.298] |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | headline | 0.5 | 0/15 | 0.000 | [0.000, 0.204] |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | headline | val-selected, global 0.19 | 1/15 | 0.067 | [0.012, 0.298] |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | raw | 0.5 | 0/15 | 0.000 | [0.000, 0.204] |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | raw | val-selected, global 0.26 | 1/15 | 0.067 | [0.012, 0.298] |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | headline | 0.5 | 7/15 | 0.467 | [0.248, 0.699] |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | headline | val-selected, global 0.95 | 7/15 | 0.467 | [0.248, 0.699] |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | raw | 0.5 | 7/15 | 0.467 | [0.248, 0.699] |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | raw | val-selected, global 0.33 | 7/15 | 0.467 | [0.248, 0.699] |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | headline | 0.5 | 7/15 | 0.467 | [0.248, 0.699] |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | headline | val-selected, global 0.95 | 7/15 | 0.467 | [0.248, 0.699] |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | raw | 0.5 | 7/15 | 0.467 | [0.248, 0.699] |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | raw | val-selected, global 0.33 | 7/15 | 0.467 | [0.248, 0.699] |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | headline | 0.5 | 5/15 | 0.333 | [0.152, 0.583] |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | headline | val-selected, global 0.95 | 5/15 | 0.333 | [0.152, 0.583] |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | raw | 0.5 | 5/15 | 0.333 | [0.152, 0.583] |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | raw | val-selected, global 0.33 | 5/15 | 0.333 | [0.152, 0.583] |
+| laya (multilingual) | laya-zeroshot-7b928d82 | headline | 0.5 | 13/15 | 0.867 | [0.621, 0.963] |
+| laya (multilingual) | laya-zeroshot-7b928d82 | headline | val-selected, global 0.32 | 14/15 | 0.933 | [0.702, 0.988] |
+| laya (multilingual) | laya-zeroshot-7b928d82 | raw | 0.5 | 13/15 | 0.867 | [0.621, 0.963] |
+| laya (multilingual) | laya-zeroshot-7b928d82 | raw | val-selected, global 0.32 | 14/15 | 0.933 | [0.702, 0.988] |
+| prior (train: final_train) | prior | headline | 0.5 | 0/15 | 0.000 | [0.000, 0.204] |
+| prior (train: final_train) | prior | headline | val-selected, global 0.12 | 15/15 | 1.000 | [0.796, 1.000] |
+| prior (train: final_train) | prior | raw | 0.5 | 0/15 | 0.000 | [0.000, 0.204] |
+| prior (train: final_train) | prior | raw | val-selected, global 0.12 | 15/15 | 1.000 | [0.796, 1.000] |
+
+- false_positive: a counted message has no gold tag among the scored columns; it is a false positive when at least one scored column is predicted at θ (P >= θ). No-intent: all 48 columns. Out-of-domain: the 22 banking-only columns (the manifest's ood_scoring_tags)
+- wilson: 95% Wilson score interval, z = 1.959963984540054, no continuity correction
+
+The test no-intent set holds 15 messages, so every interval is wide.
+
+### Out-of-domain false positives (HOTELS, 22 banking-only tags)
+
+| system | run_id | variant | θ | k/n | rate | Wilson 95% |
+|---|---|---|---|---|---|---|
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | headline | 0.5 | 28/1009 | 0.028 | [0.019, 0.040] |
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | headline | banking-val, global 0.19 | 102/1009 | 0.101 | [0.084, 0.121] |
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | raw | 0.5 | 28/1009 | 0.028 | [0.019, 0.040] |
+| berturk (train run berturk-final_train-s2-44f81396, epoch 29) | berturk-06685feeb69f-faf017a7-29446b61 | raw | banking-val, global 0.26 | 99/1009 | 0.098 | [0.081, 0.118] |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | headline | 0.5 | 43/1009 | 0.043 | [0.032, 0.057] |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | headline | banking-val, global 0.19 | 151/1009 | 0.150 | [0.129, 0.173] |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | raw | 0.5 | 43/1009 | 0.043 | [0.032, 0.057] |
+| berturk (train run berturk-final_train-s1-3c44e7ff, epoch 29) | berturk-1f0bb00cd6f7-a14835e4-29446b61 | raw | banking-val, global 0.26 | 146/1009 | 0.145 | [0.124, 0.168] |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | headline | 0.5 | 27/1009 | 0.027 | [0.018, 0.039] |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | headline | banking-val, global 0.19 | 114/1009 | 0.113 | [0.095, 0.134] |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | raw | 0.5 | 27/1009 | 0.027 | [0.018, 0.039] |
+| berturk (train run berturk-final_train-s0-8a167355, epoch 29) | berturk-c500b06ccf34-f37197ee-29446b61 | raw | banking-val, global 0.26 | 109/1009 | 0.108 | [0.090, 0.129] |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | headline | 0.5 | 271/1009 | 0.269 | [0.242, 0.297] |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | headline | banking-val, global 0.95 | 243/1009 | 0.241 | [0.215, 0.268] |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | raw | 0.5 | 271/1009 | 0.269 | [0.242, 0.297] |
+| laya (train run laya-final_train-neg8-s2-bbb5230e, epoch 3) | laya-6f66dfd4c331-23b93830-cc216d59 | raw | banking-val, global 0.33 | 273/1009 | 0.271 | [0.244, 0.299] |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | headline | 0.5 | 340/1009 | 0.337 | [0.308, 0.367] |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | headline | banking-val, global 0.95 | 319/1009 | 0.316 | [0.288, 0.345] |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | raw | 0.5 | 340/1009 | 0.337 | [0.308, 0.367] |
+| laya (train run laya-final_train-neg8-s0-95cf6955, epoch 3) | laya-a6a866dd69fc-88cfaa80-cc216d59 | raw | banking-val, global 0.33 | 340/1009 | 0.337 | [0.308, 0.367] |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | headline | 0.5 | 174/1009 | 0.172 | [0.150, 0.197] |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | headline | banking-val, global 0.95 | 160/1009 | 0.159 | [0.137, 0.182] |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | raw | 0.5 | 174/1009 | 0.172 | [0.150, 0.197] |
+| laya (train run laya-final_train-neg8-s1-07a1ee59, epoch 3) | laya-f43484c8aab4-b43eaa54-cc216d59 | raw | banking-val, global 0.33 | 174/1009 | 0.172 | [0.150, 0.197] |
+| laya (multilingual) | laya-zeroshot-7b928d82 | headline | 0.5 | 731/1009 | 0.724 | [0.696, 0.751] |
+| laya (multilingual) | laya-zeroshot-7b928d82 | headline | banking-val, global 0.32 | 827/1009 | 0.820 | [0.795, 0.842] |
+| laya (multilingual) | laya-zeroshot-7b928d82 | raw | 0.5 | 731/1009 | 0.724 | [0.696, 0.751] |
+| laya (multilingual) | laya-zeroshot-7b928d82 | raw | banking-val, global 0.32 | 827/1009 | 0.820 | [0.795, 0.842] |
+
+- false_positive: a counted message has no gold tag among the scored columns; it is a false positive when at least one scored column is predicted at θ (P >= θ). No-intent: all 48 columns. Out-of-domain: the 22 banking-only columns (the manifest's ood_scoring_tags)
+- wilson: 95% Wilson score interval, z = 1.959963984540054, no continuity correction
+- ood_columns: the manifest's ood_scoring_tags (22 banking-only tags); θ and T come from banking val, never from HOTELS
+
+### Caveat and definitions
+
+- bins: 15 equal-width bins [k/15, (k+1)/15), p = 1.0 in the last bin (Guo et al. 2017, M = 15)
+- brier: mean over every (message, tag) pair of (p - y)^2; the per-message sum over 48 tags is 48 x this
+- classwise_ece: Kull et al. 2019 Eq. 4: per tag, the sum over the 15 equal-width bins of |sum of y - sum of p| / n; averaged over all 48 tags, zero-support tags included
+- nll: mean binary cross-entropy over every (message, tag) pair, p clipped to [1e-12, 1 - 1e-12]
+<!-- final-confidence:end -->
 
 ## Results (Phase 3: baselines and zero-shot, full test split)
 

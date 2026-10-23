@@ -22,9 +22,17 @@ The published verdict (plan 08-12, REP-02, REP-03, ROADMAP Phase 8 criteria 4 an
   frozen criteria block; the six per-seed reports sit at their postfit record's θ (theta_source bound by sha256, the
   shipped val_selected θ == the record's theta.shipped, in_sample false) and their metrics are the verdict's
   per-seed rows
-- README.md's Phase 8 section holds exactly one GO block, equal to pilot.verdict.render_go of the committed verdict
-- data marker: verdict.json is report.verdict_report() serialised as report.py writes it, byte for byte, and every
-  per-seed report is report.run_report(..., postfit=RECORD), byte for byte (needs `make data`)
+- README.md's Phase 8 section holds exactly one GO block, equal to pilot.verdict.render_go of the committed verdict,
+  one final-results block before it, equal to pilot.verdict.render_final_table (every fine-tuned row shows its three
+  per-seed values in seed order: no best seed), and one final-confidence block after it, equal to
+  `report.py --confidence-table results/final/confidence` with its diagram links under results/final/confidence/
+- results/final/confidence/ holds exactly 15 confidence/1 records and 8 reliability SVGs: every final seed on test
+  (with its SVG == report.render_svg) and hotels_probe, bound final_seed to its system's postfit record by sha256,
+  zero-shot Laya on test and hotels_probe and the label prior on test, bound val_selected; never in-sample, a HOTELS
+  record holds ood_fp on the 22 banking-only columns and no calibration block; `make final-reports` lists them
+- data marker: verdict.json is report.verdict_report() serialised as report.py writes it, byte for byte, every
+  per-seed report is report.run_report(..., postfit=RECORD) and every confidence record (and SVG) is
+  report.confidence_report of its dump and binding, byte for byte (needs `make data`)
 """
 import glob
 import json
@@ -36,7 +44,7 @@ import pytest
 
 import pilot.verdict
 import report
-from pilot import dumps, protocol
+from pilot import dumps, pins, protocol
 from pilot.data import DEFAULT_MANIFEST
 
 pytestmark = pytest.mark.unit
@@ -218,6 +226,32 @@ def report_lines():
 
 
 VERDICT_LINE = "$(PYTHON) report.py --verdict --out $(FINAL)/verdict.json > /dev/null"
+CONF_SPLITS = ("test", "hotels_probe")
+REFERENCES = ((ZERO_SHOT, ("test", "hotels_probe")), ("prior", ("test",)))   # bound val_selected (the val rule)
+
+
+def confidence_lines():
+    proto, _ = protocol.require_frozen()
+    out = ["$(PYTHON) report.py --confidence results/dumps/%s --split %s --postfit %s --out "
+           "$(FINAL)/confidence/%s-%s.json > /dev/null" % (s["dump_run_id"], split,
+                                                          proto["systems"][kind]["postfit"]["path"], s["dump_run_id"],
+                                                          split)
+           for kind, s in final_seeds() for split in CONF_SPLITS]
+    for split in ("test", "hotels_probe"):
+        out.append("$(PYTHON) report.py --confidence results/dumps/$(LAYA_ZS) --split %s --out "
+                   "$(FINAL)/confidence/$(LAYA_ZS)-%s.json > /dev/null" % (split, split))
+    out.append("$(PYTHON) report.py --confidence results/dumps/prior --split test --out "
+               "$(FINAL)/confidence/prior-test.json > /dev/null")
+    return out
+
+
+def expected_confidence():
+    """{run_id-split: (system kind or None for a reference, split)} of the 15 committed confidence records."""
+    out = {"%s-%s" % (s["dump_run_id"], split): (kind, split) for kind, s in final_seeds() for split in CONF_SPLITS}
+    for run_id, splits in REFERENCES:
+        for split in splits:
+            out["%s-%s" % (run_id, split)] = (None, split)
+    return out
 
 
 def phase8_section(text):
@@ -252,6 +286,7 @@ def test_makefile_final_reports_matches_the_protocol():
     assert lines[:2] == ["mkdir -p $(FINAL)/reports", "mkdir -p $(FINAL)/confidence"], lines[:2]
     assert lines[2:2 + len(want)] == want, lines[2:2 + len(want)]
     assert lines[2 + len(want)] == VERDICT_LINE, lines[2 + len(want)]
+    assert lines[3 + len(want):] == confidence_lines(), lines[3 + len(want):]
     for line in lines:
         assert "score.py" not in line and "--force" not in line.split(), "final-reports runs no model: %s" % line
 
@@ -361,3 +396,112 @@ def test_final_results_rebuild():
                                 postfit=os.path.join(REPO_ROOT, proto["systems"][kind]["postfit"]["path"]))
         with open(os.path.join(REPO_ROOT, rel), "rb") as f:
             assert as_written(got) == f.read(), "%s does not rebuild" % rel
+
+
+FINAL_RESULTS_START, FINAL_RESULTS_END = "<!-- final-results:start -->", "<!-- final-results:end -->"
+FINAL_CONF_START, FINAL_CONF_END = "<!-- final-confidence:start -->", "<!-- final-confidence:end -->"
+FINAL_CONF_DIR = "results/final/confidence"
+
+
+def final_confidence():
+    """[(repo-relative path, parsed JSON)] of the tracked results/final/confidence/*.json, in sorted path order."""
+    out = []
+    for rel in sorted(f for f in tracked(FINAL_CONF_DIR + "/") if f.endswith(".json")):
+        out.append((rel, load(os.path.join(REPO_ROOT, rel))))
+    return out
+
+
+def test_readme_final_results_block_matches_render():
+    block, i, text = readme_block(FINAL_RESULTS_START, FINAL_RESULTS_END)
+    assert block.strip() == pilot.verdict.render_final_table(committed_verdict()).strip(), (
+        "the README final-results block differs from pilot.verdict.render_final_table of results/final/verdict.json; "
+        "regenerate it with `python report.py --final-table results/final/verdict.json`")
+    assert text.index(PROTOCOL_END) < i < text.index(GO_START), "the results table must sit between protocol and GO"
+
+
+def test_results_table_shows_every_seed():
+    """REP-02, T-08-38: each fine-tuned row holds its three per-seed values in seed order (never a best seed)."""
+    v = committed_verdict()
+    table = pilot.verdict.render_final_table(v)
+    for kind in protocol.KINDS:
+        per = v["systems"][kind]["per_seed"]
+        assert [p["seed"] for p in per] == [0, 1, 2], kind
+        lines = [l for l in table.splitlines() if l.startswith("| %s fine-tuned (final seeds 0, 1, 2) |" % kind)]
+        assert len(lines) == 1, (kind, lines)
+        cells = [c.strip() for c in lines[0].strip("|").split("|")]
+        for m, cell in zip(pilot.verdict.TABLE_METRICS, cells[2:]):
+            mean, std = pilot.verdict.mean_std([p[m] for p in per])
+            want = "%.3f ± %.3f (%s)" % (mean, std, " / ".join("%.3f" % p[m] for p in per))
+            assert cell == want, (kind, m, cell, want)
+
+
+def test_final_confidence_records():
+    proto, _ = protocol.require_frozen()
+    records = final_confidence()
+    want = expected_confidence()
+    assert sorted(rel for rel, _ in records) == sorted("%s/%s.json" % (FINAL_CONF_DIR, k) for k in want), \
+        [rel for rel, _ in records]
+    assert len(records) == 15
+    svgs = sorted(f for f in tracked(FINAL_CONF_DIR + "/") if f.endswith(".svg"))
+    want_svgs = sorted("%s/%s.svg" % (FINAL_CONF_DIR, k) for k, (_, split) in want.items() if split == "test")
+    assert svgs == want_svgs and len(svgs) == 8, svgs
+    for rel, r in records:
+        key = os.path.basename(rel)[:-len(".json")]
+        kind, split = want[key]
+        assert r["schema"] == report.CONFIDENCE_SCHEMA and r["split"]["name"] == split, rel
+        assert r["in_sample"] is False and set(r["variants"]) == {"headline", "raw"}, rel
+        assert r["variants"]["raw"]["temperature"] == 1.0, rel
+        b = r["binding"]
+        assert b["theta_source"]["split"] == "val", (rel, b)
+        if kind is not None:                                # a final seed: its system's postfit record, by sha256
+            system = proto["systems"][kind]
+            record = load(os.path.join(REPO_ROOT, system["postfit"]["path"]))
+            assert b["kind"] == "final_seed" and r["system"]["kind"] == kind, rel
+            assert b["postfit"] == {"path": system["postfit"]["path"], "sha256": system["postfit"]["sha256"],
+                                    "system_kind": kind}, (rel, b)
+            assert b["theta_source"]["postfit_sha256"] == system["postfit"]["sha256"], rel
+            assert b["theta_source"]["chosen"] == record["chosen"]["dump_run_id"], rel
+            assert r["training"]["split"] == "final_train", rel
+            assert abs(r["variants"]["headline"]["temperature"] - record["chosen"]["temperature"]) <= 1e-12, rel
+        else:                                               # a reference: run_report's val rule on its own val dump
+            assert b["kind"] == "val_selected" and b["postfit"] is None and r["training"] is None, (rel, b)
+        for name, var in r["variants"].items():
+            if split == "hotels_probe":
+                assert "calibration" not in var and "selective" not in var and "no_intent_fp" not in var, (rel, name)
+                for row in var["ood_fp"].values():
+                    assert len(row["cols"]) == 22 and set(row["cols"]) == set(pins.OOD_SCORING_TAGS), (rel, name)
+                    assert row["n"] == proto["splits"][split]["n_messages"], (rel, name)
+            else:
+                assert {"calibration", "selective", "no_intent_fp"} <= set(var) and "ood_fp" not in var, (rel, name)
+        if split == "test":
+            with open(os.path.join(REPO_ROOT, rel[:-len(".json")] + ".svg"), encoding="utf-8") as f:
+                assert f.read() == report.render_svg(r), "%s.svg differs from report.render_svg" % rel
+
+
+def test_readme_final_confidence_block_matches_render():
+    block, i, text = readme_block(FINAL_CONF_START, FINAL_CONF_END)
+    paths = [os.path.join(REPO_ROOT, rel) for rel, _ in final_confidence()]
+    assert report.confidence_svg_dir(paths) == FINAL_CONF_DIR
+    rendered = report.render_confidence([r for _, r in final_confidence()], svg_dir=FINAL_CONF_DIR)
+    assert block.strip() == rendered.strip(), (
+        "the README final-confidence block differs from the render of the committed records; regenerate it with "
+        "`python report.py --confidence-table results/final/confidence`")
+    assert text.index(GO_END) < i, "the final-confidence block must follow the GO block"
+    links = re.findall(r"\]\(([^)]+\.svg)\)", block)
+    assert len(links) == 8 and all(l.startswith(FINAL_CONF_DIR + "/") for l in links), links
+    for link in links:
+        assert link in tracked(link), link
+
+
+@pytest.mark.data
+def test_final_confidence_records_rebuild():
+    _need_data()
+    for rel, r in final_confidence():
+        pf = r["binding"]["postfit"]
+        got = report.confidence_report(os.path.join(DUMPS, r["run_id"]), r["split"]["name"], DEFAULT_MANIFEST,
+                                       None if pf is None else os.path.join(REPO_ROOT, pf["path"]))
+        with open(os.path.join(REPO_ROOT, rel), "rb") as f:
+            assert as_written(got) == f.read(), "%s does not rebuild" % rel
+        if r["split"]["name"] == "test":
+            with open(os.path.join(REPO_ROOT, rel[:-len(".json")] + ".svg"), encoding="utf-8") as f:
+                assert report.render_svg(json.loads(json.dumps(got, ensure_ascii=False))) == f.read(), rel

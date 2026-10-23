@@ -121,6 +121,21 @@ final-reports:
 	$(PYTHON) report.py results/dumps/berturk-1f0bb00cd6f7-a14835e4-29446b61 --split test --postfit results/postfit/berturk.json --out $(FINAL)/reports/berturk-1f0bb00cd6f7-a14835e4-29446b61-test.json > /dev/null
 	$(PYTHON) report.py results/dumps/berturk-06685feeb69f-faf017a7-29446b61 --split test --postfit results/postfit/berturk.json --out $(FINAL)/reports/berturk-06685feeb69f-faf017a7-29446b61-test.json > /dev/null
 	$(PYTHON) report.py --verdict --out $(FINAL)/verdict.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/laya-a6a866dd69fc-88cfaa80-cc216d59 --split test --postfit results/postfit/laya.json --out $(FINAL)/confidence/laya-a6a866dd69fc-88cfaa80-cc216d59-test.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/laya-a6a866dd69fc-88cfaa80-cc216d59 --split hotels_probe --postfit results/postfit/laya.json --out $(FINAL)/confidence/laya-a6a866dd69fc-88cfaa80-cc216d59-hotels_probe.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/laya-f43484c8aab4-b43eaa54-cc216d59 --split test --postfit results/postfit/laya.json --out $(FINAL)/confidence/laya-f43484c8aab4-b43eaa54-cc216d59-test.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/laya-f43484c8aab4-b43eaa54-cc216d59 --split hotels_probe --postfit results/postfit/laya.json --out $(FINAL)/confidence/laya-f43484c8aab4-b43eaa54-cc216d59-hotels_probe.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/laya-6f66dfd4c331-23b93830-cc216d59 --split test --postfit results/postfit/laya.json --out $(FINAL)/confidence/laya-6f66dfd4c331-23b93830-cc216d59-test.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/laya-6f66dfd4c331-23b93830-cc216d59 --split hotels_probe --postfit results/postfit/laya.json --out $(FINAL)/confidence/laya-6f66dfd4c331-23b93830-cc216d59-hotels_probe.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/berturk-c500b06ccf34-f37197ee-29446b61 --split test --postfit results/postfit/berturk.json --out $(FINAL)/confidence/berturk-c500b06ccf34-f37197ee-29446b61-test.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/berturk-c500b06ccf34-f37197ee-29446b61 --split hotels_probe --postfit results/postfit/berturk.json --out $(FINAL)/confidence/berturk-c500b06ccf34-f37197ee-29446b61-hotels_probe.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/berturk-1f0bb00cd6f7-a14835e4-29446b61 --split test --postfit results/postfit/berturk.json --out $(FINAL)/confidence/berturk-1f0bb00cd6f7-a14835e4-29446b61-test.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/berturk-1f0bb00cd6f7-a14835e4-29446b61 --split hotels_probe --postfit results/postfit/berturk.json --out $(FINAL)/confidence/berturk-1f0bb00cd6f7-a14835e4-29446b61-hotels_probe.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/berturk-06685feeb69f-faf017a7-29446b61 --split test --postfit results/postfit/berturk.json --out $(FINAL)/confidence/berturk-06685feeb69f-faf017a7-29446b61-test.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/berturk-06685feeb69f-faf017a7-29446b61 --split hotels_probe --postfit results/postfit/berturk.json --out $(FINAL)/confidence/berturk-06685feeb69f-faf017a7-29446b61-hotels_probe.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/$(LAYA_ZS) --split test --out $(FINAL)/confidence/$(LAYA_ZS)-test.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/$(LAYA_ZS) --split hotels_probe --out $(FINAL)/confidence/$(LAYA_ZS)-hotels_probe.json > /dev/null
+	$(PYTHON) report.py --confidence results/dumps/prior --split test --out $(FINAL)/confidence/prior-test.json > /dev/null
 
 clean-data:
 	rm -rf data/splits data/audit

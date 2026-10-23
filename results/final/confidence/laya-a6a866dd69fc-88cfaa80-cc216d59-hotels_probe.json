@@ -1,0 +1,386 @@
+{
+  "schema": "confidence/1",
+  "schema_version": 1,
+  "run_id": "laya-a6a866dd69fc-88cfaa80-cc216d59",
+  "split": {
+    "n_messages": 1009,
+    "name": "hotels_probe",
+    "path": "splits/hotels_probe.jsonl",
+    "role": "ood_probe",
+    "sha256": "6120dadef8443e5a3ea5688cc470b816e840fbc0f0a1b28c3931c2e18a09eea7",
+    "uids_sha256": "78172fd5dbd5666c2d722ab8174f7d8fe625412e1a2e662a9c47682af0c8e647"
+  },
+  "system": {
+    "baseline_source": null,
+    "checkpoint": "ckpt-final-s0",
+    "checkpoint_identity": {
+      "config_sha256": "88cfaa80742be89d3b4c8b0b2efea9bf49a2916ee306adc0da391a65e62fb931",
+      "files_sha256": {
+        "encoder/config.json": "81d6856137aeb1d9cfbc1c1776d5b8196eed2e6ff879e894f517a21a580cc9d3",
+        "tokenizer/tokenizer.json": "dbba919c6e5e492bc22beb80abb64e6fcc7e8744dc696e8388b8c977767afa4b",
+        "tokenizer/tokenizer_config.json#normalized": "56f416183cdd31134a297020bbe9a6f602c129e51ff2d3dce9f99c5279e89928"
+      },
+      "local": true,
+      "model_sha256": "a6a866dd69fcf8d8c3bf5f34ef313412e0bd00daee6edec74e93756219b8ad51"
+    },
+    "clip_eps": null,
+    "kind": "laya"
+  },
+  "training": {
+    "run_id": "laya-final_train-neg8-s0-95cf6955",
+    "split": "final_train",
+    "epoch": 3
+  },
+  "dump_sha256": "e4f70dd83b36d7fe725092e809f910286e63f31c73fcc6b4b347423871c2eea3",
+  "uids_sha256": "78172fd5dbd5666c2d722ab8174f7d8fe625412e1a2e662a9c47682af0c8e647",
+  "n_messages": 1009,
+  "manifest": {
+    "path": "data/splits.json",
+    "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103",
+    "is_committed": true
+  },
+  "binding": {
+    "kind": "final_seed",
+    "postfit": {
+      "path": "results/postfit/laya.json",
+      "sha256": "e08e8735b19c0973606622be546617ef851f1bf06e2b2d60b1d920d8676b6da2",
+      "system_kind": "laya"
+    },
+    "theta_source": {
+      "postfit_sha256": "e08e8735b19c0973606622be546617ef851f1bf06e2b2d60b1d920d8676b6da2",
+      "chosen": "laya-047381259d3b-cf0f7846-cc216d59",
+      "split": "val"
+    }
+  },
+  "in_sample": false,
+  "caveat": null,
+  "definitions": {
+    "false_positive": "a counted message has no gold tag among the scored columns; it is a false positive when at least one scored column is predicted at θ (P >= θ). No-intent: all 48 columns. Out-of-domain: the 22 banking-only columns (the manifest's ood_scoring_tags)",
+    "wilson": "95% Wilson score interval, z = 1.959963984540054, no continuity correction",
+    "ood_columns": "the manifest's ood_scoring_tags (22 banking-only tags); θ and T come from banking val, never from HOTELS"
+  },
+  "variants": {
+    "headline": {
+      "temperature": 4.7698254528950175,
+      "temperature_source": "sidecar shipped T (= the postfit record's chosen T)",
+      "theta": {
+        "global": 0.95,
+        "per_tag": {
+          "transfer_payment_deposit": 0.95,
+          "request_info": 0.5,
+          "wrong_notworking_notshowing": 0.5,
+          "card": 0.5,
+          "make_open_apply_setup_get_activate": 0.46,
+          "account": 0.5,
+          "how_much": 0.5,
+          "affirm": 0.5,
+          "deny": 0.5,
+          "more_higher_after": 0.5,
+          "change": 0.5,
+          "cancel_close_leave_freeze": 0.9,
+          "current": 0.5
+        },
+        "eligible_tags": [
+          "transfer_payment_deposit",
+          "request_info",
+          "wrong_notworking_notshowing",
+          "card",
+          "make_open_apply_setup_get_activate",
+          "account",
+          "how_much",
+          "affirm",
+          "deny",
+          "more_higher_after",
+          "change",
+          "cancel_close_leave_freeze",
+          "current"
+        ],
+        "min_val_positives": 10,
+        "grid": {
+          "start": 0.05,
+          "stop": 0.95,
+          "step": 0.01,
+          "n": 91
+        },
+        "objective": {
+          "global": "val micro-F1",
+          "per_tag": "val per-tag F1"
+        },
+        "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+      },
+      "ood_fp": {
+        "0.5": {
+          "k": 340,
+          "n": 1009,
+          "rate": 0.33696729435084244,
+          "wilson95": [
+            0.30846930522376376,
+            0.3667019694759584
+          ],
+          "per_tag_fp": {
+            "transfer_payment_deposit": 62,
+            "card": 4,
+            "account": 19,
+            "fees_interests": 18,
+            "international": 7,
+            "balance": 11,
+            "current": 2,
+            "overdraft": 12,
+            "savings": 15,
+            "loan": 35,
+            "appointment": 66,
+            "mortgage": 87,
+            "debit": 2,
+            "direct_debit": 2,
+            "withdrawal": 5,
+            "arrival": 50,
+            "pin": 14,
+            "credit": 1,
+            "cheque": 3,
+            "standing_order": 2
+          },
+          "cols": [
+            "transfer_payment_deposit",
+            "card",
+            "account",
+            "fees_interests",
+            "international",
+            "balance",
+            "current",
+            "overdraft",
+            "savings",
+            "loan",
+            "appointment",
+            "contactless",
+            "mortgage",
+            "debit",
+            "direct_debit",
+            "withdrawal",
+            "arrival",
+            "pin",
+            "credit",
+            "cheque",
+            "standing_order",
+            "business"
+          ]
+        },
+        "theta": {
+          "k": 319,
+          "n": 1009,
+          "rate": 0.31615460852329036,
+          "wilson95": [
+            0.2882078146380857,
+            0.3454959632147923
+          ],
+          "per_tag_fp": {
+            "transfer_payment_deposit": 49,
+            "card": 4,
+            "account": 19,
+            "fees_interests": 17,
+            "international": 6,
+            "balance": 10,
+            "current": 2,
+            "overdraft": 12,
+            "savings": 13,
+            "loan": 30,
+            "appointment": 66,
+            "mortgage": 81,
+            "debit": 1,
+            "direct_debit": 2,
+            "withdrawal": 4,
+            "arrival": 48,
+            "pin": 10,
+            "credit": 1,
+            "cheque": 1,
+            "standing_order": 2
+          },
+          "cols": [
+            "transfer_payment_deposit",
+            "card",
+            "account",
+            "fees_interests",
+            "international",
+            "balance",
+            "current",
+            "overdraft",
+            "savings",
+            "loan",
+            "appointment",
+            "contactless",
+            "mortgage",
+            "debit",
+            "direct_debit",
+            "withdrawal",
+            "arrival",
+            "pin",
+            "credit",
+            "cheque",
+            "standing_order",
+            "business"
+          ]
+        }
+      }
+    },
+    "raw": {
+      "temperature": 1.0,
+      "temperature_source": "T = 1 (raw)",
+      "theta": {
+        "global": 0.33,
+        "per_tag": {
+          "transfer_payment_deposit": 0.5,
+          "request_info": 0.5,
+          "wrong_notworking_notshowing": 0.5,
+          "card": 0.5,
+          "make_open_apply_setup_get_activate": 0.33,
+          "account": 0.5,
+          "how_much": 0.5,
+          "affirm": 0.5,
+          "deny": 0.5,
+          "more_higher_after": 0.5,
+          "change": 0.5,
+          "cancel_close_leave_freeze": 0.5,
+          "current": 0.5
+        },
+        "eligible_tags": [
+          "transfer_payment_deposit",
+          "request_info",
+          "wrong_notworking_notshowing",
+          "card",
+          "make_open_apply_setup_get_activate",
+          "account",
+          "how_much",
+          "affirm",
+          "deny",
+          "more_higher_after",
+          "change",
+          "cancel_close_leave_freeze",
+          "current"
+        ],
+        "min_val_positives": 10,
+        "grid": {
+          "start": 0.05,
+          "stop": 0.95,
+          "step": 0.01,
+          "n": 91
+        },
+        "objective": {
+          "global": "val micro-F1",
+          "per_tag": "val per-tag F1"
+        },
+        "tie_break": "closest to 0.5; between two equally close points, the lower θ"
+      },
+      "ood_fp": {
+        "0.5": {
+          "k": 340,
+          "n": 1009,
+          "rate": 0.33696729435084244,
+          "wilson95": [
+            0.30846930522376376,
+            0.3667019694759584
+          ],
+          "per_tag_fp": {
+            "transfer_payment_deposit": 62,
+            "card": 4,
+            "account": 19,
+            "fees_interests": 18,
+            "international": 7,
+            "balance": 11,
+            "current": 2,
+            "overdraft": 12,
+            "savings": 15,
+            "loan": 35,
+            "appointment": 66,
+            "mortgage": 87,
+            "debit": 2,
+            "direct_debit": 2,
+            "withdrawal": 5,
+            "arrival": 50,
+            "pin": 14,
+            "credit": 1,
+            "cheque": 3,
+            "standing_order": 2
+          },
+          "cols": [
+            "transfer_payment_deposit",
+            "card",
+            "account",
+            "fees_interests",
+            "international",
+            "balance",
+            "current",
+            "overdraft",
+            "savings",
+            "loan",
+            "appointment",
+            "contactless",
+            "mortgage",
+            "debit",
+            "direct_debit",
+            "withdrawal",
+            "arrival",
+            "pin",
+            "credit",
+            "cheque",
+            "standing_order",
+            "business"
+          ]
+        },
+        "theta": {
+          "k": 340,
+          "n": 1009,
+          "rate": 0.33696729435084244,
+          "wilson95": [
+            0.30846930522376376,
+            0.3667019694759584
+          ],
+          "per_tag_fp": {
+            "transfer_payment_deposit": 62,
+            "card": 4,
+            "account": 19,
+            "fees_interests": 18,
+            "international": 7,
+            "balance": 11,
+            "current": 2,
+            "overdraft": 12,
+            "savings": 15,
+            "loan": 35,
+            "appointment": 66,
+            "mortgage": 87,
+            "debit": 2,
+            "direct_debit": 2,
+            "withdrawal": 5,
+            "arrival": 50,
+            "pin": 14,
+            "credit": 1,
+            "cheque": 3,
+            "standing_order": 2
+          },
+          "cols": [
+            "transfer_payment_deposit",
+            "card",
+            "account",
+            "fees_interests",
+            "international",
+            "balance",
+            "current",
+            "overdraft",
+            "savings",
+            "loan",
+            "appointment",
+            "contactless",
+            "mortgage",
+            "debit",
+            "direct_debit",
+            "withdrawal",
+            "arrival",
+            "pin",
+            "credit",
+            "cheque",
+            "standing_order",
+            "business"
+          ]
+        }
+      }
+    }
+  }
+}
