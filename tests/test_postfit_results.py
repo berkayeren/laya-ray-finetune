@@ -26,8 +26,9 @@ README tests.
   final_train and exactly seeds 0, 1, 2 (never only the best), with three distinct train run ids carrying their seed and
   one config_sha256_sans_seed; every seed serves the chosen T, has one row per epoch up to the chosen epoch, ran at the
   chosen rung, flags code_changed_on_resume as a bool, names a bare checkpoint dir and carries the dump run id of its
-  checkpoint identity; no tracked results/dumps dir is named after a final seed's dump run id (none was scored in
-  Phase 5)
+  checkpoint identity; a final seed's tracked results/dumps dir (none before the 08-11 scoring run) holds only test
+  and hotels_probe dumps, each sidecar carrying protocol_sha256 == pilot.protocol.PROTOCOL_SHA256 (set): a final seed
+  is scored only behind Phase 8's protocol gate, never on val
 - test_readme_postfit_block_matches_the_record (plan 05-09, LAYA-08): README.md holds exactly one pair of the
   laya-postfit markers, and the block between them equals pilot.postfit.render_markdown of the committed record and
   final manifest, so the reported chosen settings cannot be edited by hand or go stale
@@ -51,7 +52,7 @@ import subprocess
 
 import pytest
 
-from pilot import berturk, compute, dumps, metrics, postfit
+from pilot import berturk, compute, dumps, metrics, postfit, protocol
 from pilot.data import DEFAULT_MANIFEST, sha256_file
 
 pytestmark = pytest.mark.unit
@@ -152,8 +153,8 @@ def test_laya_selection_dumps_are_the_single_lr_grid():
             d, verified["dump_sha256"], side["dump_sha256"])
         assert logits.shape == (len(uids), 48), "%s: logits %s" % (d, logits.shape)
         held = tracked("%s/%s/test.npz" % (DUMPS, d), "%s/%s/test.json" % (DUMPS, d))
-        assert not held, "%s holds a tracked test dump %s; no fine-tuned Laya is scored on test before Phase 8" % (
-            d, held)
+        assert not held, ("%s holds a tracked test dump %s; a selection candidate is scored on val only (Phase 8 "
+                          "scores only the final seeds on test)" % (d, held))
 
     assert len(rungs) == 1, "the Laya selection dumps ran at rungs %s, not one" % sorted(rungs)
     assert len(canons) == 1, "the Laya selection dumps carry %d canonical configs, not one recipe" % len(canons)
@@ -252,8 +253,8 @@ FINAL_RUN_RE = re.compile(r"^laya-final_train-neg8-s([012])-[0-9a-f]{8}$")
 def test_committed_final_manifest():
     """LAYA-08 (plan 05-08): the committed manifest of the 3 Laya final seeds is bound to the committed record (its
     sha256 and chosen settings, the 4-epoch schedule stopped at the chosen epoch, the single encoder LR 2e-05); it lists
-    all three seeds (never only the best), each serving the chosen T at the chosen rung, and no final seed has a tracked
-    dump (none was scored in Phase 5)."""
+    all three seeds (never only the best), each serving the chosen T at the chosen rung, and a final seed's tracked
+    dumps are only its protocol-gated test and hotels_probe dumps (Phase 8)."""
     assert tracked(FINAL) == [FINAL], "%s is not tracked" % FINAL
     record = _laya_record()
     m = load(FINAL)
@@ -284,8 +285,17 @@ def test_committed_final_manifest():
             s, e["code_changed_on_resume"])
         assert "/" not in e["checkpoint_name"] and "\\" not in e["checkpoint_name"], e["checkpoint_name"]
         assert e["dump_run_id"] == dumps.run_id("laya", e["checkpoint_identity"]), "seed %d dump_run_id" % s
-    scored = sorted({f.split("/")[2] for f in tracked(DUMPS + "/")} & {e["dump_run_id"] for e in seeds})
-    assert scored == [], "a Laya final seed was scored in Phase 5: %s" % scored
+    gated = {"test.npz", "test.json", "hotels_probe.npz", "hotels_probe.json"}
+    for e in seeds:                                         # Phase 8: gated test and HOTELS dumps only (08-08)
+        names = [f.split("/")[3] for f in tracked("%s/%s/" % (DUMPS, e["dump_run_id"]))]
+        assert set(names) <= gated, "%s final seed %d's dump dir holds %s; only gated test and hotels_probe dumps" % (
+            "Laya", e["seed"], sorted(set(names) - gated))
+        for n in names:
+            if n.endswith(".json"):
+                pin = load("%s/%s/%s" % (DUMPS, e["dump_run_id"], n)).get("protocol_sha256")
+                assert protocol.PROTOCOL_SHA256 is not None and pin == protocol.PROTOCOL_SHA256, (
+                    "%s/%s carries protocol_sha256 %r, the pinned protocol is %r" % (e["dump_run_id"], n, pin,
+                                                                                    protocol.PROTOCOL_SHA256))
 
 
 README = "README.md"

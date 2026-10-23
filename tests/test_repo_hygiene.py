@@ -22,9 +22,12 @@ BERTurk selections (BASE-03 fixes of the 06-10 and 06-16 gates, pilot.berturk.SU
 results/superseded/, each next to a README that labels it superseded and not comparable, and get the same dump and
 sidecar checks. The Phase 7 confidence records under results/confidence/ (EVAL-03: ids, digests, repo-relative paths
 and numbers only) get the sidecar check too, and only <run_id>-val.json and <run_id>-val.svg may be tracked there.
-A HOTELS dump results/dumps/<run_id>/hotels_probe.{npz,json} is an allowed path for Phase 8 (hotel_<fold>_<index> uids
-only there, bank uids only in val and test dumps), but none may be tracked in Phase 7: score.py scores nothing on HOTELS
-until Phase 8 opens it behind its protocol gate (test_no_hotels_probe_dump_before_phase_8, 07-RESEARCH A7).
+A HOTELS dump results/dumps/<run_id>/hotels_probe.{npz,json} holds hotel_<fold>_<index> uids only (bank uids only
+in val and test dumps). Phase 8 opens score.py for hotels_probe behind its protocol gate, so a HOTELS dump may be
+tracked only where the protocol opens it (test_hotels_probe_dumps_only_where_the_protocol_opens_them): in a final
+seed's dir (its run id is a dump_run_id of results/postfit/{laya,berturk}-final.json; tests/test_results.py checks
+its protocol_sha256) or in the zero-shot dir results/dumps/laya-zeroshot-7b928d82/ (the ungated reference row,
+08-RESEARCH A15), never in a selection candidate's or a baseline's dir and never under results/superseded/.
 The Phase 7 latency reports (EVAL-06: times, digests and repo-relative paths only) get the sidecar check too,
 and only results/latency/(laya|berturk)-(mps|cpu).json and results/latency/latency.md may be tracked there. Their
 per-seed "state" is the checked {device, dtype, amp_enabled} dict, the one "state" value the message-text key check
@@ -328,12 +331,51 @@ def test_dump_path_pin_flags_planted_paths(rel, ok):
 HOTELS_DUMP_FILES = ("hotels_probe.npz", "hotels_probe.json")
 
 
-def test_no_hotels_probe_dump_before_phase_8():
-    # Phase 7 opens the dump reader and this hygiene for hotels_probe, never the scorer (07-RESEARCH A7). Phase 8
-    # removes this guard when it opens score.py for hotels_probe behind its protocol gate (which replaces
-    # refuse_finetuned_test and refuse_berturk_test) and scores each final checkpoint on HOTELS exactly once.
+ZERO_SHOT = "laya-zeroshot-7b928d82"                 # the ungated HOTELS reference row (08-RESEARCH A15)
+
+
+def final_dump_ids():
+    """The dump_run_id of every final seed in the committed final manifests (results/postfit/<kind>-final.json)."""
+    out = set()
+    for kind in ("laya", "berturk"):
+        with open(os.path.join(REPO_ROOT, "results", "postfit", "%s-final.json" % kind), encoding="utf-8") as f:
+            out |= {e["dump_run_id"] for e in json.load(f)["seeds"]}
+    return out
+
+
+def hotels_dump_allowed(rel, final_ids):
+    """True when the tracked HOTELS dump file `rel` sits where the protocol opens it: results/dumps/<rid>/ with rid a
+    final seed's dump run id or the zero-shot run id; never under results/superseded/ or another run dir."""
+    m = re.match(r"^results/dumps/([^/]+)/hotels_probe\.(npz|json)$", rel)
+    return bool(m) and (m.group(1) in final_ids or m.group(1) == ZERO_SHOT)
+
+
+def test_hotels_probe_dumps_only_where_the_protocol_opens_them():
+    # Phase 8 opens score.py for hotels_probe behind its protocol gate (08-07): a final seed is scored on HOTELS once,
+    # and zero-shot Laya is the ungated reference row; a selection candidate, a baseline or a superseded run never is
+    final_ids = final_dump_ids()
+    assert len(final_ids) == 6, final_ids
     found = [f for f in tracked("results/dumps/", "results/superseded/") if os.path.basename(f) in HOTELS_DUMP_FILES]
-    assert found == [], "no HOTELS dump may be tracked before Phase 8: %s" % found
+    bad = [f for f in found if not hotels_dump_allowed(f, final_ids)]
+    assert bad == [], "a HOTELS dump may be tracked only in a final seed's dir or %s: %s" % (ZERO_SHOT, bad)
+
+
+@pytest.mark.parametrize("rel,ok", [
+    ("results/dumps/{final}/hotels_probe.npz", True),
+    ("results/dumps/{final}/hotels_probe.json", True),
+    ("results/dumps/laya-zeroshot-7b928d82/hotels_probe.npz", True),
+    ("results/dumps/{selection}/hotels_probe.npz", False),          # a selection candidate's dir
+    ("results/dumps/prior/hotels_probe.json", False),               # a baseline
+    ("results/superseded/berturk-10-epoch-grid/dumps/{final}/hotels_probe.npz", False),
+    ("results/superseded/x/dumps/laya-zeroshot-7b928d82/hotels_probe.json", False),
+    ("results/dumps/{final}/sub/hotels_probe.npz", False),
+])
+def test_hotels_dump_rule_flags_planted_paths(rel, ok):
+    final_ids = final_dump_ids()
+    with open(os.path.join(REPO_ROOT, "results", "postfit", "laya.json"), encoding="utf-8") as f:
+        selection = json.load(f)["chosen"]["dump_run_id"]
+    rel = rel.format(final=sorted(final_ids)[0], selection=selection)
+    assert bool(hotels_dump_allowed(rel, final_ids)) is ok, rel
 
 
 def _logits(n=2, cols=DUMP_COLUMNS, dtype=np.float32):

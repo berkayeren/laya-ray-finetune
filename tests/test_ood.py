@@ -1,13 +1,14 @@
 """The out-of-domain false-positive rate on HOTELS (EVAL-05, 07-RESEARCH A7) end to end on the synthetic snapshot, with
 no model, torch or Ray.
 
-Phase 7 opens the dump reader, not the scorer: a hotels_probe dump (role ood_probe) is written here by
+No scorer runs here (Phase 7 opened the dump reader): a hotels_probe dump (role ood_probe) is written here by
 pilot.dumps.write_dump with a score.sidecar_base sidecar of the synthetic manifest, next to a prior baseline's val dump
 (score.py --model prior) of the same source. pilot.dumps.load_dump reads it with every check, gold_valid_tags names its
 valid columns (the manifest's ood_scoring_tags; the 22 pins tags under the committed manifest), and
 report.py --confidence RUN_DIR --split hotels_probe reports fp_rate on those columns at θ 0.5 and at the banking-val θ.
-report.run_report and report.compare refuse the dump naming its role, and score.py still refuses hotels_probe
-(tests/test_score_report.py, tests/test_consumers.py).
+report.run_report and report.compare refuse the dump naming its role. score.py scores hotels_probe for --model laya
+or berturk only, a fine-tuned checkpoint only through its Phase 8 protocol gate (tests/test_score_gate.py), and refuses
+it for the baselines and evaluate.py (tests/test_score_report.py, tests/test_consumers.py).
 """
 import json
 import os

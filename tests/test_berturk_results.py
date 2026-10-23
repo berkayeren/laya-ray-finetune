@@ -45,7 +45,9 @@ Final seeds (plan 06-11): test_committed_berturk_final_manifest checks results/p
 (postfit-final/1, system kind berturk): bound to the current record's sha256 (never a superseded one) and its chosen
 settings (30-epoch schedule, the chosen stop epoch and T), seeds exactly [0, 1, 2] on final_train with distinct train
 run ids, one config_sha256_sans_seed, each seed serving the chosen T over the chosen number of epochs, bare checkpoint
-names, and no tracked results/dumps dir named after any seed's dump run id (no final seed is scored in Phase 6).
+names, and a final seed's tracked results/dumps dir (none before the 08-11 scoring run) holds only test and
+hotels_probe dumps whose sidecars carry protocol_sha256 == pilot.protocol.PROTOCOL_SHA256 (set): Phase 8's protocol
+gate is the only way a final seed is scored, never on val.
 
 README block (plan 06-12): test_readme_berturk_block_matches_the_records proves the block between the berturk-postfit
 markers is pilot.berturk.render_markdown of the committed record, reference check and final manifest plus
@@ -63,7 +65,7 @@ from fractions import Fraction
 
 import pytest
 
-from pilot import berturk, dumps, postfit
+from pilot import berturk, dumps, postfit, protocol
 from pilot.data import DEFAULT_MANIFEST, sha256_file
 
 pytestmark = pytest.mark.unit
@@ -369,8 +371,8 @@ FINAL_RUN_RE = re.compile(r"^berturk-final_train-s([012])-[0-9a-f]{8}$")
 def test_committed_berturk_final_manifest():
     """BASE-01 (plan 06-11): the committed manifest of the 3 BERTurk final seeds is bound to the current record (its
     sha256 and chosen settings, the 30-epoch schedule stopped at the chosen epoch), never to a superseded one; it lists
-    all three seeds (never only the best), each serving the chosen T, and no final seed has a tracked dump (none was
-    scored in Phase 6)."""
+    all three seeds (never only the best), each serving the chosen T, and a final seed's tracked dumps are only its
+    protocol-gated test and hotels_probe dumps (Phase 8)."""
     assert tracked(FINAL) == [FINAL], "%s is not tracked" % FINAL
     record = _current_record()
     m = load(FINAL)
@@ -399,8 +401,17 @@ def test_committed_berturk_final_manifest():
         assert [r["epoch"] for r in e["epochs"]] == list(range(1, chosen["epoch"] + 1))
         assert "/" not in e["checkpoint_name"] and "\\" not in e["checkpoint_name"], e["checkpoint_name"]
         assert e["dump_run_id"] == berturk.dump_run_id(e["checkpoint_identity"])
-    scored = sorted({f.split("/")[2] for f in tracked(DUMPS + "/")} & {e["dump_run_id"] for e in seeds})
-    assert scored == [], "a BERTurk final seed was scored in Phase 6: %s" % scored
+    gated = {"test.npz", "test.json", "hotels_probe.npz", "hotels_probe.json"}
+    for e in seeds:                                         # Phase 8: gated test and HOTELS dumps only (08-08)
+        names = [f.split("/")[3] for f in tracked("%s/%s/" % (DUMPS, e["dump_run_id"]))]
+        assert set(names) <= gated, "%s final seed %d's dump dir holds %s; only gated test and hotels_probe dumps" % (
+            "BERTurk", e["seed"], sorted(set(names) - gated))
+        for n in names:
+            if n.endswith(".json"):
+                pin = load("%s/%s/%s" % (DUMPS, e["dump_run_id"], n)).get("protocol_sha256")
+                assert protocol.PROTOCOL_SHA256 is not None and pin == protocol.PROTOCOL_SHA256, (
+                    "%s/%s carries protocol_sha256 %r, the pinned protocol is %r" % (e["dump_run_id"], n, pin,
+                                                                                    protocol.PROTOCOL_SHA256))
 
 
 # ---- the README Phase 6 block (plan 06-12, BASE-03 disclosure, T-06-36, T-06-55, T-06-74) ----
