@@ -114,7 +114,8 @@ from intents import INTENTS, QUESTIONS
 from pilot import berturk, dumps, protocol
 from pilot import laya_adapter as la
 from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, holds_committed, manifest_is_committed, parse_jsonl,
-                        questions_sha256, repo_relpath, sha256_bytes, sha256_file, verify_split_file)
+                        questions_sha256, repo_relpath, require_committed_files, sha256_bytes, sha256_file,
+                        verify_split_file)
 
 SUBSET_SEED = 0                                             # fixed shuffle before --n, so subsets are comparable
 TAGS = list(INTENTS)
@@ -212,7 +213,10 @@ def gate_trigger(model, checkpoint, entry, manifest_path, cases=()):
     any manifest; and for both, a split of any role and manifest holding committed test or hotels_probe content
     (pilot.data.holds_committed: the committed entry's sha256 or uids_sha256, or any (uid, message) pair of `cases`,
     every parsed row). Majority, prior, the pinned zero-shot Laya and a Laya checkpoint that is not fine-tuned are
-    never gated. No hashing, fetch or model load."""
+    never gated. The content check fails closed (pilot.data.require_committed_files, 08-REVIEW WR-01): under a
+    non-committed manifest of the pinned dataset it refuses while the committed test.jsonl or hotels_probe.jsonl is
+    missing, since the pair key would then be empty and a relabelled or row-dropped copy of their content would pass
+    ungated. No hashing, fetch or model load."""
     if model == "laya":
         if not is_finetuned(checkpoint):
             return None
@@ -223,6 +227,7 @@ def gate_trigger(model, checkpoint, entry, manifest_path, cases=()):
             return "is a split with role %s" % entry["role"]
     else:
         return None
+    require_committed_files(GATE + entry["path"], manifest_path, protocol.GATED)
     for name in protocol.GATED:
         if holds_committed(entry, cases, name):
             return "holds committed %s content" % name

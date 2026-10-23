@@ -267,6 +267,32 @@ def test_gate_trigger_texts(snap):
         "holds committed hotels_probe content"
 
 
+def test_gate_trigger_fails_closed_without_the_committed_files(snap):
+    """08-REVIEW WR-01: under a non-committed manifest of the pinned dataset (the same dataset.raw_sha256), a split
+    whose hashes differ from the committed entry's (prepare_data.py --no-include-no-intent --out OTHER drops rows)
+    keys only on the (uid, message) pairs of the committed test.jsonl and hotels_probe.jsonl. While either file is
+    missing the trigger refuses (pilot.data.require_committed_files) instead of returning None, before any hashing."""
+    t_entry, t_cases = _entry_cases(snap, "test")
+    v_entry, v_cases = _entry_cases(snap, "val")
+    other = snap.tmp / "other.json"
+    with open(snap.manifest, "rb") as f:
+        other.write_bytes(f.read() + b"\n")                    # byte-different, same pinned dataset
+    dropped = dict(t_entry, sha256="0" * 64, uids_sha256="1" * 64)
+    assert score.gate_trigger("laya", snap.ckpt, dropped, str(other), t_cases) == "holds committed test content"
+    for name in ("test", "hotels_probe"):
+        os.remove(split(snap, name))
+        for kind, ckpt, entry, cases in (("laya", snap.ckpt, dropped, t_cases), ("berturk", "x", v_entry, v_cases)):
+            with pytest.raises(SystemExit) as e:
+                score.gate_trigger(kind, ckpt, entry, str(other), cases)
+            text = str(e.value.code)
+            assert text.startswith(score.GATE) and "\n" not in text, text
+            assert "is missing" in text and "cannot be content-checked" in text and "make" in text, text
+    # the committed manifest needs no split file (its splits are the committed bytes); ungated kinds never read them
+    assert score.gate_trigger("laya", snap.ckpt, v_entry, snap.manifest, v_cases) is None
+    assert score.gate_trigger("prior", None, dropped, str(other), t_cases) is None
+    assert score.gate_trigger("laya", "multilingual", dropped, str(other), t_cases) is None
+
+
 # ---- BERTurk through the same gate ----
 
 from test_score_berturk import built, ckpt  # noqa: E402,F401  (pytest fixtures: the tiny BERTurk export)

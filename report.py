@@ -149,8 +149,8 @@ import os
 import pilot.protocol                                       # stdlib only at import: require_frozen, prior_floors
 import pilot.verdict
 from pilot import data, dumps, metrics                     # data.DEFAULT_MANIFEST: the committed one, at call time
-from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, TRAINED_ON, committed_content, holds_committed,
-                        manifest_is_committed, parse_jsonl, repo_relpath, sha256_bytes, sha256_file, verify_split_file,
+from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, TRAINED_ON, holds_committed, manifest_is_committed, parse_jsonl,
+                        repo_relpath, require_committed_files, sha256_bytes, sha256_file, verify_split_file,
                         write_atomic)
 
 SCHEMA_VERSION = 1
@@ -277,30 +277,6 @@ def _split_content(entry, manifest_path, roles):
     with open(path, "rb") as f:
         raw = f.read()
     return verify_split_file(path, manifest_path=manifest_path, roles=roles, data=raw), parse_jsonl(raw)
-
-
-def require_committed_files(where, manifest_path, names):
-    """SystemExit when a content check could not key on the (uid, message) pairs (07-09 review WR-02, fail closed):
-    holds_committed reads them from the committed data/splits/<name>.jsonl and, when that file is absent, keys only on
-    the entry hashes, which a relabel of all rows but one changes. Refused for a non-committed manifest prepared from
-    the pinned dataset (its dataset.raw_sha256 is the committed manifest's: a manifest copy, or prepare_data.py --out
-    OTHER without `make data`) while any committed `names` file is missing. The committed manifest needs none (its
-    splits are the committed bytes); a manifest of another snapshot (the offline suite's synthetic data) keys on the
-    hashes as before. Like the pair key itself (07-09 review IN-01), this catches relabelled bytes, not a forged
-    manifest. pilot.data.DEFAULT_MANIFEST is read at call time."""
-    if manifest_is_committed(manifest_path):
-        return
-    with open(manifest_path, encoding="utf-8") as f:
-        raw = (json.load(f).get("dataset") or {}).get("raw_sha256")
-    with open(data.DEFAULT_MANIFEST, encoding="utf-8") as f:
-        if raw != (json.load(f).get("dataset") or {}).get("raw_sha256"):
-            return
-    for name in names:
-        committed, pairs = committed_content(name)
-        if not pairs:
-            raise SystemExit("%s: the committed %s is missing, so %s (prepared from the pinned dataset, not the "
-                             "committed manifest) cannot be content-checked against the committed splits; run `make "
-                             "data` (or drop --manifest)" % (where, committed["path"], manifest_path))
 
 
 def refuse_held_out_theta(where, entry, manifest_path):

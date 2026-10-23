@@ -359,7 +359,32 @@ def holds_committed(entry, cases, name):
         any((c.get("uid"), c.get("state")) in pairs for c in cases)
 
 
-HELD_OUT = {"selection_train": ("val", "test"), "final_train": ("test",)}   # final_train holds the val folds by design
+def require_committed_files(where, manifest_path, names):
+    """SystemExit when a content check could not key on the (uid, message) pairs (07-09 review WR-02, fail closed):
+    holds_committed reads them from the committed data/splits/<name>.jsonl and, when that file is absent, keys only on
+    the entry hashes, which a relabel of all rows but one changes. Refused for a non-committed manifest prepared from
+    the pinned dataset (its dataset.raw_sha256 is the committed manifest's: a manifest copy, or prepare_data.py --out
+    OTHER without `make data`) while any committed `names` file is missing. The committed manifest needs none (its
+    splits are the committed bytes); a manifest of another snapshot (the offline suite's synthetic data) keys on the
+    hashes as before. Like the pair key itself (07-09 review IN-01), this catches relabelled bytes, not a forged
+    manifest. Shared by report.py's content checks and score.py's protocol-gate trigger (08-REVIEW WR-01);
+    DEFAULT_MANIFEST is read at call time."""
+    if manifest_is_committed(manifest_path):
+        return
+    with open(manifest_path, encoding="utf-8") as f:
+        raw = (json.load(f).get("dataset") or {}).get("raw_sha256")
+    with open(DEFAULT_MANIFEST, encoding="utf-8") as f:
+        if raw != (json.load(f).get("dataset") or {}).get("raw_sha256"):
+            return
+    for name in names:
+        committed, pairs = committed_content(name)
+        if not pairs:
+            raise SystemExit("%s: the committed %s is missing, so %s (prepared from the pinned dataset, not the "
+                             "committed manifest) cannot be content-checked against the committed splits; run `make "
+                             "data` (or drop --manifest)" % (where, committed["path"], manifest_path))
+
+
+HELD_OUT ={"selection_train": ("val", "test"), "final_train": ("test",)}   # final_train holds the val folds by design
 
 
 def refuse_held_out(path, entry, cases):
