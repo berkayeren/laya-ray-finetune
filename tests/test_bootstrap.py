@@ -153,6 +153,136 @@ def test_replicate_with_zero_denominators_scores_zero():
     assert r["metrics"]["macro_f1"]["n_undefined"] == 20 and r["metrics"]["macro_f1"]["ci"] is None
 
 
+# --- the (d) statistics on the shared draw (08-01): Brier, classwise ECE, precision at a coverage ----------------
+
+EXTRA = ("brier", "classwise_ece", "precision_at_80")
+
+
+def test_extra_self_comparison_is_zero_width():
+    Y, P = _toy(n=40)
+    r = metrics.paired_bootstrap_extra(Y, P, 0.5, P, 0.5, B=500, seed=0)
+    assert sorted(r["metrics"]) == sorted(EXTRA) and r["coverage"] == 80 and r["B"] == 500 and r["n"] == 40
+    assert r["method"] == metrics.BOOT_METHOD and r["level"] == 0.95 and r["seed"] == 0
+    for name, m in r["metrics"].items():
+        assert m["delta"] == 0.0 and m["ci"] == [0.0, 0.0] and m["width"] == 0.0 and m["n_undefined"] == 0, (name, m)
+    assert metrics.paired_bootstrap_extra(Y, P, 0.5, P.copy(), 0.5, B=500, seed=0) == r   # an identical copy
+
+
+def test_extra_full_data_values_are_the_direct_metrics():
+    Y, P = _toy(n=40)
+    _, Q = _toy(n=40, seed=8)
+    th = np.full(48, 0.5)
+    th[:6] = 0.3
+    r = metrics.paired_bootstrap_extra(Y, P, th, Q, 0.4, B=100, seed=1)["metrics"]
+    for name, sys_p, sys_th in (("a", P, th), ("b", Q, 0.4)):
+        assert r["brier"][name] == metrics.brier(Y, sys_p)
+        assert r["classwise_ece"][name] == metrics.classwise_ece(Y, sys_p)[0]
+        assert r["precision_at_80"][name] == metrics.selective(Y, sys_p, sys_th, (80,))["coverages"]["80"]["precision"]
+    for m in r.values():
+        assert m["delta"] == m["a"] - m["b"] and m["width"] == m["ci"][1] - m["ci"][0] and m["ci"][0] <= m["ci"][1]
+    assert type(r["brier"]["delta"]) is float and type(r["brier"]["ci"][0]) is float
+
+
+def test_extra_replicates_match_direct_recomputation():
+    n, B, seed = 40, 50, 3
+    Y, P = _toy(n=n, seed=11)
+    _, Q = _toy(n=n, seed=12)
+    P[[3, 4, 5]] = P[2]                                      # tied message confidences: draw order breaks the tie
+    th = np.full(48, 0.5)
+    th[:10] = 0.35
+    idx, W = metrics.bootstrap_weights(n, B, seed)
+    rep = metrics.replicate_extra(idx, W, Y, P, th, 80)
+    assert sorted(rep) == sorted(EXTRA) and all(v.shape == (B,) and v.dtype == np.float64 for v in rep.values())
+    for b in range(B):
+        Yb, Pb = Y[idx[b]], P[idx[b]]
+        assert abs(rep["brier"][b] - metrics.brier(Yb, Pb)) <= 1e-12, b
+        assert abs(rep["classwise_ece"][b] - metrics.classwise_ece(Yb, Pb)[0]) <= 1e-12, b
+        assert rep["precision_at_80"][b] == metrics.selective(Yb, Pb, th, (80,))["coverages"]["80"]["precision"], b
+    # the interval is the percentile interval of exactly these replicate deltas
+    rb = metrics.replicate_extra(idx, W, Y, Q, 0.5, 80)
+    r = metrics.paired_bootstrap_extra(Y, P, th, Q, 0.5, B=B, seed=seed)
+    for name in EXTRA:
+        assert r["metrics"][name]["ci"] == [float(v) for v in np.percentile(rep[name] - rb[name], [2.5, 97.5])]
+
+
+def test_extra_shares_the_draw_of_paired_bootstrap(monkeypatch):
+    Y, P = _toy(n=30)
+    _, Q = _toy(n=30, seed=9)
+    calls = []
+    real = metrics.bootstrap_weights
+
+    def recording(n, B, seed):
+        out = real(n, B, seed)
+        calls.append(((n, B, seed), out[0].copy()))
+        return out
+
+    monkeypatch.setattr(metrics, "bootstrap_weights", recording)
+    metrics.paired_bootstrap(Y, P, 0.5, Q, 0.5, B=80, seed=4)
+    metrics.paired_bootstrap_extra(Y, P, 0.5, Q, 0.5, B=80, seed=4)
+    assert len(calls) == 2 and calls[0][0] == calls[1][0] == (30, 80, 4)
+    assert np.array_equal(calls[0][1], calls[1][1])         # one draw, so the (d) deltas pair with the F1 deltas
+
+
+def test_extra_is_deterministic_for_a_seed():
+    Y, P = _toy(n=40)
+    _, Q = _toy(n=40, seed=8)
+    r0 = metrics.paired_bootstrap_extra(Y, P, 0.5, Q, 0.5, B=200, seed=0)
+    assert metrics.paired_bootstrap_extra(Y, P, 0.5, Q, 0.5, B=200, seed=0) == r0
+    assert metrics.paired_bootstrap_extra(Y, P, 0.5, Q, 0.5, B=200, seed=1)["metrics"]["brier"]["ci"] != \
+        r0["metrics"]["brier"]["ci"]
+    r70 = metrics.paired_bootstrap_extra(Y, P, 0.5, Q, 0.5, B=20, seed=0, coverage=70)
+    assert sorted(r70["metrics"]) == ["brier", "classwise_ece", "precision_at_70"] and r70["coverage"] == 70
+
+
+@pytest.mark.parametrize("kw", [{"coverage": 0}, {"coverage": 101}, {"coverage": 80.5}, {"coverage": True},
+                                {"thA": 0.0}, {"thB": 1.0}, {"thA": float("nan")}, {"level": 1.0}])
+def test_extra_refuses_before_any_draw(monkeypatch, kw):
+    Y, P = _toy(n=40)
+
+    def no_draw(*a):
+        raise AssertionError("a replicate was drawn before the refusal")
+
+    monkeypatch.setattr(metrics, "bootstrap_weights", no_draw)
+    args = {"thA": 0.5, "thB": 0.5}
+    args.update(kw)
+    thA, thB = args.pop("thA"), args.pop("thB")
+    with pytest.raises(SystemExit):
+        metrics.paired_bootstrap_extra(Y, P, thA, P, thB, B=10, seed=0, **args)
+
+
+def test_extra_rule_names_the_shared_draw():
+    rule = metrics.BOOT_EXTRA_RULE
+    assert "bootstrap_weights(n, B, seed)" in rule and "paired_bootstrap" in rule and "draw order" in rule
+    assert metrics.BOOT_EXTRA_METRICS == ("brier", "classwise_ece")
+
+
+COMMITTED_CANDIDATES = (("laya", "laya-047381259d3b-cf0f7846-cc216d59"),
+                        ("berturk", "berturk-f24d8fe3c899-50e28523-29446b61"))
+
+
+@pytest.mark.data
+def test_extra_bootstrap_runs_on_the_committed_val_dumps():
+    """The end-to-end slice: two committed val dumps, each at its postfit record's T and θ, through the extra
+    bootstrap (in-sample val numbers; only their shape is asserted, never a value)."""
+    probs, ths, Y = [], [], None
+    for kind, run_id in COMMITTED_CANDIDATES:
+        with open(os.path.join(pilot.data.REPO_ROOT, "results", "postfit", kind + ".json"), encoding="utf-8") as f:
+            rec = json.load(f)
+        assert rec["chosen"]["dump_run_id"] == run_id
+        logits, uids, side, entry = dumps.load_dump(os.path.join(pilot.data.REPO_ROOT, "results", "dumps", run_id),
+                                                    "val", pilot.data.DEFAULT_MANIFEST)
+        assert side["dump_sha256"] == rec["chosen"]["dump_sha256"]
+        gold = dumps.read_gold(entry, pilot.data.DEFAULT_MANIFEST, uids)
+        assert Y is None or np.array_equal(Y, gold)
+        Y = gold
+        probs.append(metrics.probabilities(logits, rec["chosen"]["temperature"]))
+        ths.append(metrics.theta_vector(rec["chosen"]["theta"]["shipped"]))
+    r = metrics.paired_bootstrap_extra(Y, probs[0], ths[0], probs[1], ths[1], B=200, seed=0)
+    assert r["n"] == 208 and sorted(r["metrics"]) == sorted(EXTRA)
+    for name, m in r["metrics"].items():
+        assert np.isfinite(m["delta"]) and m["ci"][0] <= m["ci"][1] and m["n_undefined"] == 0, (name, m)
+
+
 def test_bootstrap_refuses_empty_inputs():
     Y, P = _toy(n=5)
     with pytest.raises(SystemExit, match="no seed dumps"):
