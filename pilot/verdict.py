@@ -625,6 +625,88 @@ def _verdict_record(v):
     return v
 
 
+def check_record(v, protocol, sha):
+    """SystemExit unless the verdict/1 record `v` is the frozen protocol's (08-REVIEW WR-03): its protocol block is
+    {path protocol.json, sha256 `sha`} (the pin), the protocol's verdict rules are this module's (_check_rules), and
+    every gated number it renders recomputes from the record's own numbers and the frozen criteria block, exactly as
+    build_verdict computed them: each collapse component from its value and the protocol's floor (the loss component
+    from its first, last and non_finite), each row's collapsed flag, each final seed's test floor from its test
+    counts, the scored seeds the protocol's; then every criterion ((a), (b), (c), (d), the alternative GO) from the
+    headline seed-averaged deltas, the collapse rows and the latency rows, and the verdict by decide. A hand-edited
+    status, verdict, criterion number or protocol sha256 is refused, never rendered. The headline numbers themselves
+    are bound to the dumps only by the byte rebuild (report.py --verdict)."""
+    v = _verdict_record(v)
+    if v.get("protocol") != {"path": "protocol.json", "sha256": sha}:
+        raise SystemExit("the verdict names protocol %r, not the frozen protocol.json (sha256 %s); rebuild it with "
+                         "report.py --verdict" % (v.get("protocol"), sha))
+    _check_rules(protocol)
+    crit, col = protocol["criteria"], protocol["collapse"]
+    seeded = v.get("seed_averaged") or {}
+    h = seeded.get("headline")
+    if not isinstance(h, dict) or (h.get("a"), h.get("b")) != (KINDS[0], KINDS[1]):
+        raise SystemExit("the verdict's headline deltas are not %s - %s; rebuild it with report.py --verdict" % KINDS)
+    floors = {"val_floor": col["prior_val_fraction"], "test_floor": col["prior_test_fraction"]}
+    c_rows = (v.get("collapse") or {}).get("rows")
+    if not isinstance(c_rows, list) or not c_rows:
+        raise SystemExit("the verdict holds no collapse row; rebuild it with report.py --verdict")
+    counts = {(k, r.get("seed")): r.get("test_counts") for k in KINDS
+              for r in ((v.get("systems") or {}).get(k) or {}).get("per_seed") or []}
+    for r in c_rows:
+        where = "collapse row %s %s s%s" % (r.get("run"), r.get("kind"), r.get("seed"))
+        for c in r.get("components") or []:
+            name = c.get("component")
+            if name in floors:
+                want = _floor(name, c.get("value"), floors[name])
+                if name == "test_floor":
+                    n = counts.get((r.get("kind"), r.get("seed"))) or {}
+                    if parse_fraction(c.get("value")) != micro_fraction(n.get("tp"), n.get("fp"), n.get("fn")):
+                        raise SystemExit("%s: the test floor value %s is not the seed's test counts; rebuild the "
+                                         "verdict with report.py --verdict" % (where, c.get("value")))
+            elif name == "loss":
+                first, last, non_finite = c.get("first"), c.get("last"), c.get("non_finite")
+                want = dict(c, collapsed=bool(non_finite or first is None or last is None or last > first))
+            else:
+                raise SystemExit("%s: unknown component %r" % (where, name))
+            if c != want:
+                raise SystemExit("%s: the %s component %r does not recompute (%r); the record was edited, rebuild it "
+                                 "with report.py --verdict" % (where, name, c, want))
+        if r.get("collapsed") != any(c["collapsed"] for c in r.get("components") or []):
+            raise SystemExit("%s: collapsed %r is not any of its components'; rebuild the verdict with report.py "
+                             "--verdict" % (where, r.get("collapsed")))
+    seeds = {k: [r.get("seed") for r in ((v.get("systems") or {}).get(k) or {}).get("per_seed") or []] for k in KINDS}
+    want_seeds = {k: list(((protocol.get("systems") or {}).get(k) or {}).get("seeds") or []) for k in KINDS}
+    if seeds != want_seeds:
+        raise SystemExit("the verdict's scored seeds %s are not the protocol's %s; rebuild it with report.py --verdict"
+                         % (seeds, want_seeds))
+    cal, abst = _path_rule(crit["d"], "calibration"), _path_rule(crit["d"], "abstention")
+    want = {
+        "a": criterion_a(_metric(h, "micro_f1"), _metric(h, "macro_f1"), crit["a"]),
+        "b": criterion_b(c_rows, seeds, crit["b"]),
+        "c": criterion_c(v.get("latency"), crit["c"]),
+        "d": criterion_d(_metric(h, cal.get("metric")), _metric(h, abst.get("metric")), None, crit["d"]),
+        "alternative_go": alternative_go(_metric(h, "micro_f1"), crit["alternative_go"]),
+    }
+    for k in want:
+        want[k]["name"] = crit[k].get("name")
+    want = json.loads(json.dumps(want, allow_nan=False))
+    got = v.get("criteria") or {}
+    bad = [k for k in want if got.get(k) != want[k]]
+    if bad or set(got) != set(want):
+        raise SystemExit("the verdict's criteria %s do not recompute from its own numbers and the frozen criteria; the "
+                         "record was edited, rebuild it with report.py --verdict"
+                         % ", ".join(bad or sorted(set(got) ^ set(want))))
+    s = {k: want[k]["status"] for k in ("a", "b", "d", "alternative_go")}
+    dec = json.loads(json.dumps(decide(s["a"], s["b"], s["d"], s["alternative_go"])))
+    if v.get("verdict") != dec:
+        raise SystemExit("the verdict %r is not decide() of its recomputed statuses (%r); the record was edited, "
+                         "rebuild it with report.py --verdict" % ((v.get("verdict") or {}).get("verdict"),
+                                                                  dec["verdict"]))
+    if v.get("fewshot") != {"status": PENDING, "phase": FEWSHOT_PHASE}:
+        raise SystemExit("the verdict's few-shot block %r is not PENDING (Phase %d); rebuild it with report.py "
+                         "--verdict" % (v.get("fewshot"), FEWSHOT_PHASE))
+    return v
+
+
 def _md(header, rows):
     return ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"] + \
         ["| " + " | ".join(r) + " |" for r in rows]

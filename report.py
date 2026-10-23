@@ -127,7 +127,10 @@ and the verdict from the protocol's criteria block. --out writes the JSON plus a
 --final-table VERDICT_JSON and --go-block VERDICT_JSON print pilot.verdict.render_final_table (REP-02's one results
 table: references, each fine-tuned model as mean ± sample std with its per-seed values and its seed-averaged system,
 the settings) and pilot.verdict.render_go (REP-03's mechanical GO block) of a saved record (08-12 writes them into the
-README). The Phase 3 results table (--table) and COMPARE_THETA_RULE stay as they are: the committed comparison reports
+README), only after pilot.protocol.require_frozen passes and pilot.verdict.check_record binds the record to it: the
+protocol sha256 is the pin, the verdict rules are the code's, and every criterion, collapse flag and the verdict
+recompute from the record's own numbers and the frozen criteria, so a hand-edited status or verdict is refused, never
+rendered (08-REVIEW WR-03). The Phase 3 results table (--table) and COMPARE_THETA_RULE stay as they are: the committed comparison reports
 embed them and rebuild byte for byte; the frozen seed-averaged θ rule lives in protocol.json.
 
 usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.json] [--manifest splits.json]
@@ -1404,6 +1407,8 @@ def main(argv=None):
         if not os.path.isfile(path):
             raise SystemExit("%s not found; write the verdict with report.py --verdict --out PATH" % path)
         v = _read_json_input(path, "verdict record")
+        proto, pin = pilot.protocol.require_frozen()        # 08-REVIEW WR-03: render only the frozen protocol's
+        pilot.verdict.check_record(v, proto, pin)            # verdict, every status recomputed from its numbers
         text = pilot.verdict.render_final_table(v) if a.final_table is not None else pilot.verdict.render_go(v)
     if text is not None:
         print(text, end="")

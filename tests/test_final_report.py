@@ -846,6 +846,58 @@ def test_cli_verdict_final_table_and_go_block(synthetic_final, synthetic_verdict
     assert capsys.readouterr().out == verdict.render_go(synthetic_verdict)
 
 
+def _edit_verdict(v, how):
+    """A copy of verdict record v with one hand edit (08-REVIEW WR-03)."""
+    v = copy_module.deepcopy(v)
+    if how == "verdict":
+        v["verdict"]["verdict"] = verdict.GO if v["verdict"]["verdict"] != verdict.GO else verdict.NO_GO
+    elif how == "status":
+        v["criteria"]["a"]["status"] = verdict.PASS if v["criteria"]["a"]["status"] != verdict.PASS else verdict.FAIL
+    elif how == "number":
+        v["criteria"]["a"]["micro"]["delta"] += 0.05
+    elif how == "protocol":
+        v["protocol"]["sha256"] = "0" * 64
+    elif how == "collapse":
+        row = v["collapse"]["rows"][0]
+        row["components"][0]["collapsed"] = not row["components"][0]["collapsed"]
+        row["collapsed"] = any(c["collapsed"] for c in row["components"])
+    elif how == "seeds":
+        v["criteria"]["b"]["seeds"]["laya"] = v["criteria"]["b"]["seeds"]["laya"][:1]
+    elif how == "fewshot":
+        v["fewshot"]["status"] = verdict.MET
+    return v
+
+
+@pytest.mark.parametrize("how", ["verdict", "status", "number", "protocol", "collapse", "seeds", "fewshot"])
+def test_cli_renders_refuse_an_edited_verdict(synthetic_final, synthetic_verdict, tmp_path, monkeypatch, capsys, how):
+    """08-REVIEW WR-03: --go-block and --final-table render only a record bound to the frozen protocol, whose every
+    criterion, collapse flag and verdict recompute from its own numbers (pilot.verdict.check_record); a hand-edited
+    status, verdict, number or protocol sha256 is refused with one line, nothing printed."""
+    sf = synthetic_final
+    _frozen(monkeypatch, sf)
+    verdict.check_record(synthetic_verdict, sf.protocol, sf.sha)        # the unedited record passes
+    path = tmp_path / "verdict.json"
+    path.write_text(json.dumps(_edit_verdict(synthetic_verdict, how), ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
+    for mode in ("--go-block", "--final-table"):
+        with pytest.raises(SystemExit) as e:
+            report.main([mode, str(path)])
+        text = str(e.value.code)
+        assert "\n" not in text and ("protocol" in text or "rebuild" in text), (how, text)
+        assert capsys.readouterr().out == "", (how, mode)
+
+
+def test_cli_renders_refuse_while_the_protocol_is_not_frozen(synthetic_final, synthetic_verdict, tmp_path,
+                                                             monkeypatch):
+    """08-REVIEW WR-03: without the frozen protocol (pin unset) no verdict record is rendered."""
+    path = tmp_path / "verdict.json"
+    path.write_text(json.dumps(synthetic_verdict, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    monkeypatch.setattr(pilot_protocol, "PROTOCOL_SHA256", None)
+    for mode in ("--go-block", "--final-table"):
+        with pytest.raises(SystemExit, match="protocol"):
+            report.main([mode, str(path)])
+
+
 def test_cli_verdict_modes_are_exclusive(synthetic_final, tmp_path, capsys):
     path = str(tmp_path / "v.json")
     for argv in (["--verdict", "--final-table", path], ["--final-table", path, "--go-block", path],
