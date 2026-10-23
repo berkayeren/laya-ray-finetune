@@ -22,7 +22,9 @@ A dump of the out-of-domain probe (hotels_probe, role ood_probe; EVAL-05) is rea
 check above. Its gold is valid on the manifest's ood_scoring_tags only (the banking-only tags, all of them negative on
 every HOTELS message), so gold_valid_tags names those columns and every 48-tag metric refuses the dump
 (report.run_report, report.compare); only report.py --confidence turns it into the out-of-domain false-positive rate.
-score.py does not write one before Phase 8, which opens it for hotels_probe behind its protocol gate.
+score.py writes one for --model laya or berturk only (majority and prior have no HOTELS training source), a fine-tuned
+checkpoint only through its protocol gate (Phase 8: a final seed of the frozen protocol, once; protocol_sha256 in the
+sidecar).
 
 Numpy and stdlib only: no torch, Ray or laya.
 
@@ -49,7 +51,8 @@ LOGIT_NOTE = "margin z_true - z_false per tag; P(tag) = sigmoid(logit / T)"
 TAGS = list(INTENTS)
 EVAL_ROLES = ("val", "test")
 # the roles load_dump and read_gold read: a hotels_probe dump (role ood_probe) is readable, but only its
-# ood_scoring_tags columns are valid gold (gold_valid_tags); score.py does not write one before Phase 8
+# ood_scoring_tags columns are valid gold (gold_valid_tags); score.py writes one for laya or berturk only, a fine-tuned
+# checkpoint only through its protocol gate (protocol_sha256 in the sidecar)
 READ_ROLES = EVAL_ROLES + ("ood_probe",)
 OOD_GOLD = "ood_scoring_tags"                               # the manifest entry's gold_valid_tags value on hotels_probe
 
