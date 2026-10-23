@@ -32,7 +32,9 @@ The Phase 7 latency reports (EVAL-06: times, digests and repo-relative paths onl
 and only results/latency/(laya|berturk)-(mps|cpu).json and results/latency/latency.md may be tracked there. Their
 per-seed "state" is the checked {device, dtype, amp_enabled} dict, the one "state" value the message-text key check
 allows (CHECKED_STATE_KEYS); a string or any other "state" is still a finding. The frozen protocol.json (08-10) is
-required to be tracked and gets the text check, with no key named state or text at all.
+required to be tracked and gets the text check, with no key named state or text at all. The published Phase 8
+verdict under results/final/ (plan 08-12) gets the sidecar check too, and only verdict.json, reports/<id>-test.json and
+confidence/<id>-(test.json|test.svg|hotels_probe.json) may be tracked there (FINAL_PATH_RE).
 """
 import io
 import json
@@ -61,6 +63,10 @@ SUPERSEDED_PATH_RE = re.compile(r"^results/superseded/[^/]+/(README\.md|postfit/
 CONFIDENCE_PATH_RE = re.compile(r"^results/confidence/[^/]+-val\.(json|svg)$")
 # Phase 7 latency (EVAL-06): one report per (system, device) of the final seeds, and their markdown
 LATENCY_PATH_RE = re.compile(r"^results/latency/((laya|berturk)-(mps|cpu)\.json|latency\.md)$")
+# Phase 8 (08-12): the verdict record, the per-seed test reports and the test/HOTELS confidence records (a test record
+# with its reliability SVG; a HOTELS record has no diagram)
+FINAL_PATH_RE = re.compile(r"^results/final/(verdict\.json|reports/[^/]+-test\.json|"
+                           r"confidence/[^/]+-(test\.(json|svg)|hotels_probe\.json))$")
 # Coarse backstop only: the longest legitimate manifest value is a 64-char sha256, but message text is often far
 # shorter ("Evet.", "cari hesap"), so length cannot detect it. The key-name check and, when the split files exist
 # locally, the exact-text check below are the real guards.
@@ -279,7 +285,8 @@ def test_tracked_dumps_hold_only_uids_and_logits():
 def test_tracked_sidecars_and_reports_hold_no_text_or_paths():
     home, texts = home_dir(), local_split_texts()
     rels = [f for f in tracked("results/dumps/", "results/reports/", "results/compute/", "results/postfit/",
-                               "results/superseded/", "results/confidence/", "results/latency/") if f.endswith(".json")]
+                               "results/superseded/", "results/confidence/", "results/latency/", "results/final/")
+            if f.endswith(".json")]
     bad = {rel: p for rel in _existing(rels) for p in [sidecar_problems(os.path.join(REPO_ROOT, rel), home, texts)]
            if p}
     assert bad == {}, "tracked sidecars or reports hold text, local paths or subset runs: %s" % bad
@@ -322,6 +329,30 @@ def test_only_latency_files_under_results_latency():
 ])
 def test_latency_path_pin_flags_planted_paths(rel, ok):
     assert bool(LATENCY_PATH_RE.match(rel)) is ok, rel
+
+
+def test_only_final_files_under_results_final():
+    files = tracked("results/final/")
+    assert "results/final/verdict.json" in files, "results/final/verdict.json is not tracked"
+    bad = [f for f in files if not FINAL_PATH_RE.match(f)]
+    assert bad == [], ("only results/final/verdict.json, reports/<id>-test.json and "
+                       "confidence/<id>-(test.json|test.svg|hotels_probe.json) may be tracked: %s" % bad)
+
+
+@pytest.mark.parametrize("rel,ok", [
+    ("results/final/verdict.json", True),
+    ("results/final/reports/x-test.json", True),
+    ("results/final/confidence/x-test.svg", True),
+    ("results/final/confidence/x-test.json", True),
+    ("results/final/confidence/x-hotels_probe.json", True),
+    ("results/final/confidence/x-hotels_probe.svg", False),
+    ("results/final/reports/x-val.json", False),
+    ("results/final/confidence/x-val.json", False),
+    ("results/final/notes.md", False),
+    ("results/final/sub/verdict.json", False),
+])
+def test_final_path_pin_flags_planted_paths(rel, ok):
+    assert bool(FINAL_PATH_RE.match(rel)) is ok, rel
 
 
 def test_only_dump_files_under_results_dumps():
