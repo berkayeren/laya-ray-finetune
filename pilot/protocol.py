@@ -55,8 +55,9 @@ from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, sha2
 
 SCHEMA = "protocol/1"
 PROTOCOL_PATH = os.path.join(REPO_ROOT, "protocol.json")
-# the sha256 of protocol.json's exact bytes; None until the freeze commit (plan 08-10) sets it
-PROTOCOL_SHA256 = None
+# the sha256 of protocol.json's exact bytes, pinned by the freeze commit (plan 08-10, 2026-10-23); protocol.json is
+# never rebuilt or rewritten after it: the file, not build_protocol, is the source of truth from then on
+PROTOCOL_SHA256 = "0d337d2019f9fcb1874fa0eb23f5f2547312e1675c832f886449d573cef54a8a"
 TITLE = "Laya vs BERTurk on Turkish banking intents: the frozen decision protocol (REP-01)"
 UNITS = "fractions in [0, 1]; points = fraction x 100"
 FROZEN = {

@@ -822,6 +822,405 @@ Timed path: laya.load (digests) -> la.force_fp32 -> la.noul_logits of one messag
 Laya's own fp16 autocast default on MPS (laya_default_amp) is not what is timed: every run is fp32 with autocast off, the path that scored the dumps.
 <!-- latency:end -->
 
+## Frozen protocol and head-to-head verdict (Phase 8)
+
+`protocol.json` at the repo root holds the decision rule, with a numeric threshold behind every criterion, and the full few-shot protocol. It was written once, and its hash pinned in `pilot/protocol.py`, by one commit made before any fine-tuned model was scored on test or HOTELS; `score.py`, `fewshot.py` and `report.py --verdict` refuse a missing or changed protocol, and a test fails if the file is ever modified. The head-to-head results and the GO block follow once the six final seeds are scored, each once. The block below is generated from the frozen file by `python -m pilot.protocol --render` (a test fails if it differs).
+
+<!-- protocol:start -->
+### Frozen decision protocol (protocol.json)
+
+Laya vs BERTurk on Turkish banking intents: the frozen decision protocol (REP-01)
+
+- sha256: `0d337d2019f9fcb1874fa0eb23f5f2547312e1675c832f886449d573cef54a8a`
+- Frozen before any fine-tuned model is scored on test or HOTELS (REP-01, ROADMAP Phase 8 criterion 1): every threshold, the seed-averaged bootstrap procedure and the few-shot protocol are fixed before a fine-tuned test number exists, so nothing can be tuned to the result.
+- Identity: the sha256 of this file's exact bytes, pinned in pilot.protocol.PROTOCOL_SHA256 by the freeze commit; every consumer calls pilot.protocol.require_frozen and refuses a missing or changed file.
+- Units: fractions in [0, 1]; points = fraction x 100.
+- Built at git HEAD `68af35c9a9cccded6ac66ebf56471714915582eb` (dirty: false).
+
+#### Criteria
+
+Thresholds as frozen (units: fractions in [0, 1]; points = fraction x 100).
+
+| criterion | name | frozen values |
+|---|---|---|
+| (a) | non-inferiority | micro_ci_lower_min: -0.02 (-2.00 points); micro_fail_ci_upper_below: -0.02 (-2.00 points); macro_point_min: -0.03 (-3.00 points); macro_ci_label: not resolvable at this test size (n = 413) |
+| (b) | seeds and no collapsed run | seeds_per_model: 3 |
+| (c) | latency | label: reported, not gated; status: REPORTED (not gated) |
+| (d) calibration path | a clear edge on calibration, abstention or few-shot learning | metric: brier; delta_below: 0.0 (+0.00 points); ci_upper_below: 0.0 (+0.00 points) |
+| (d) abstention path | a clear edge on calibration, abstention or few-shot learning | metric: precision_at_80; coverage: 80; delta_at_least: 0.03 (+3.00 points); ci_lower_above: 0.0 (+0.00 points) |
+| (d) fewshot path | a clear edge on calibration, abstention or few-shot learning | metric: new_tag_macro_ap; k: 10; mean_delta_at_least: 0.05 (+5.00 points); until_phase_9: PENDING |
+| alternative_go | alternative GO | metric: micro_f1; delta_above: 0.03 (+3.00 points); ci_lower_above: 0.0 (+0.00 points); requires: b PASS |
+
+Rules, as frozen:
+
+- (a) non-inferiority: PASS when the micro-F1 delta 95% CI lower bound >= micro_ci_lower_min and the macro-F1 delta point estimate >= macro_point_min; FAIL when the micro-F1 delta CI upper bound < micro_fail_ci_upper_below or the macro-F1 delta point estimate < macro_point_min; INCONCLUSIVE otherwise. The macro-F1 CI is reported with macro_ci_label, not gated; deltas are Laya - BERTurk fractions in [0, 1] (points = fraction x 100), compared unrounded
+- (b) seeds and no collapsed run: PASS when no run the collapse rule applies to is collapsed and every model has exactly seeds_per_model distinct scored final seeds; FAIL otherwise
+- (c) latency: per-message latency of every final seed is reported, not gated, in v1 (a budget is DEC-01, v2)
+- (d) a clear edge on calibration, abstention or few-shot learning: PASS when any one path is MET; PENDING when none is MET and the few-shot path is pending; FAIL otherwise. calibration: the Brier delta < delta_below and its CI upper bound < ci_upper_below; abstention: the precision at coverage % delta >= delta_at_least and its CI lower bound > ci_lower_above; fewshot: the mean over draws of the new-tag macro-AP delta at k >= mean_delta_at_least (PENDING until Phase 9); deltas are Laya - BERTurk fractions in [0, 1] (points = fraction x 100), compared unrounded
+- alternative GO: MET when the micro-F1 delta > delta_above and its 95% CI lower bound > ci_lower_above; it gives GO only with (b) PASS; deltas are Laya - BERTurk fractions in [0, 1] (points = fraction x 100), compared unrounded
+- (d) reported only, classwise_ece: reported, not gated (A1): its percentile bootstrap is biased (binned ECE replicates are inflated, so the observed delta sat at the 93.8th percentile of its own replicates on val; Roelofs et al., AISTATS 2022) and its direction flips between T = 1 and the fitted T; Brier names the calibration path
+
+#### Collapse rule (b)
+
+- Rule: a run is collapsed when any component applied to it is collapsed; (b) needs no collapsed run
+- Applies to:
+  - the selection run of each model (its postfit record's chosen candidate): val_floor, loss
+  - each final seed (its final-manifest entry and its test dump): loss, test_floor
+- Components:
+  - val_floor: collapsed when the chosen candidate's val micro-F1 at its global val θ after T, the exact fraction 2TP / (2TP + FP + FN) of the record's objective counts, is strictly below the label prior's val micro-F1 at the prior's own global val θ (prior_val_fraction); equal is not collapsed
+  - loss: collapsed when any epoch's mean training loss is NaN or infinite, or the last epoch's is strictly above the first epoch's (divergent); equal is not collapsed
+    - note: the per-epoch loss is the unweighted mean over micro-batches (Laya) or steps (BERTurk); Laya's RLCD sigma anneal makes its epochs not strictly comparable, but the rule still catches a blow-up
+  - test_floor: collapsed when a final seed's test micro-F1 at its record's global shipped θ, the exact fraction 2TP / (2TP + FP + FN), is strictly below the label prior's test micro-F1 at the prior's global val θ (prior_test_fraction); equal is not collapsed
+    - **marked addition**: Claude-recommended addition to the REP-01 default, frozen before any fine-tuned test number (08-RESEARCH Open Question 1)
+- Not applied: the val floor is not applied to final seeds: final_train holds the val folds
+- Label prior floors (results/dumps/prior/{val,test}: the label prior at T = 1; θ = its global val θ (pilot.metrics.select_theta); micro-F1 = 2TP / (2TP + FP + FN) over all 48 tags), at the prior's global val θ 0.12:
+  - val: micro-F1 10/41 = 0.2439 (TP 135, FP 489, FN 348)
+  - test: micro-F1 520/2163 = 0.2404 (TP 260, FP 979, FN 664)
+
+#### Verdict
+
+Units: deltas are Laya - BERTurk fractions in [0, 1] (points = fraction x 100), compared unrounded.
+
+1. (b) FAIL -> NO-GO
+2. alternative GO MET -> GO
+3. (a) FAIL -> NO-GO
+4. (a) INCONCLUSIVE -> INCONCLUSIVE (counts as NO-GO; collect bank data)
+5. (a) PASS and (d) PASS -> GO
+6. (a) PASS and (d) FAIL -> NO-GO
+7. (a) PASS and (d) PENDING -> PROVISIONAL: the verdict is computed with the few-shot path of (d) MET and NOT MET; it is final when both agree
+
+- INCONCLUSIVE means: counts as NO-GO; collect bank data.
+- Provisional form: `PROVISIONAL: %s if the few-shot path of (d) is met, else %s` (each %s is the overall verdict computed with that few-shot outcome).
+- Statuses: (a) PASS, FAIL, INCONCLUSIVE; (b) PASS, FAIL; (c) REPORTED (not gated); (d) PASS, FAIL, PENDING; alternative_go MET, NOT MET; overall GO, NO-GO, INCONCLUSIVE.
+
+#### Seed averaging, θ and bootstrap
+
+Variant:
+
+- headline: each final seed's shipped T (= its postfit record's T) with the record's theta.shipped (global plus per-tag, pilot.metrics.theta_vector); every gating number uses it (A18)
+- raw: T = 1 with the record's theta.raw; reported only, never gating
+- references: majority, prior and zero-shot Laya keep D-12 on their own val dump (pilot.metrics.select_theta)
+
+Seed averaging:
+
+- rule: per seed s, P_s = sigmoid(logit_s / T_s) with T_s the record T; P = the mean over the 3 seeds per message and tag (pilot.metrics.seed_average); θ = the record's theta.shipped (global plus per-tag, theta_vector) applied to P; probabilities are averaged before any threshold, never metrics (EVAL-07, A5)
+- raw: the same with T_s = 1 and the record's theta.raw; reported only
+- theta_source: the postfit record's θ, chosen on val by one selection seed; a final seed has no clean val (final_train holds the val folds), so θ is never re-selected on the final seeds or on test
+
+Bootstrap: B = 10000, seed 0, level 0.95, coverage 80%, unit message, method percentile (numpy linear interpolation).
+
+- procedure: EVAL-07: a paired message-level bootstrap of Laya - BERTurk over the seed-averaged probabilities of each system; one index draw (pilot.metrics.bootstrap_weights(n, B, seed)) is shared by both systems and by every metric; each replicate's delta is computed at each system's fixed θ; the interval is the percentile interval of the replicate deltas; replicates where a delta is undefined are counted and left out
+- extra: the draw is bootstrap_weights(n, B, seed), the same one paired_bootstrap uses, shared by both systems; Brier and classwise ECE replicates are count-weighted sums of per-message terms, so each equals the metric of the resampled rows; a precision-at-coverage replicate is selective on the rows idx[b] in draw order (stable ties follow draw order); the interval is the percentile interval of the replicate deltas A - B (percentile (numpy linear interpolation))
+
+Scoring (each final seed, once per gated split):
+
+- splits: test, hotels_probe
+- device: mps
+- workers: 0
+- dtype: torch.float32
+- amp_enabled: false
+- dump_root: results/dumps
+- once: `each final seed is scored once per split into results/dumps/<dump_run_id>/<split>; an existing dump is never replaced`
+- refused:
+  - --force
+  - --n
+  - an --out-root other than results/dumps
+  - any checkpoint outside systems.*.final_seeds
+  - a device or worker count other than this block's
+  - a manifest other than the committed data/splits.json
+- why: mps, fp32, in-process: the scorer of the val dumps the postfit T and θ were fitted on (A14)
+
+#### Systems, splits and inputs
+
+| system | chosen selection dump | epoch | T | θ shipped / raw (tags with their own θ) | encoder / head LR | postfit record | final manifest |
+|---|---|---|---|---|---|---|---|
+| laya | laya-047381259d3b-cf0f7846-cc216d59 | 3 of 4 | 4.7698 | 0.95 / 0.33 (13 / 13) | 2e-05 / 0.0001 | results/postfit/laya.json e08e8735b19c | results/postfit/laya-final.json 3d0b1a91e00e |
+| berturk | berturk-f24d8fe3c899-50e28523-29446b61 | 29 of 30 | 0.7430 | 0.19 / 0.26 (13 / 13) | 2e-05 / 0.0001 | results/postfit/berturk.json 83b34dfb524e | results/postfit/berturk-final.json 0a611f198fcf |
+
+Final seeds (the only fine-tuned checkpoints scored on the gated splits):
+
+| system | seed | train run id | checkpoint | dump run id |
+|---|---|---|---|---|
+| laya | 0 | laya-final_train-neg8-s0-95cf6955 | ckpt-final-s0 | laya-a6a866dd69fc-88cfaa80-cc216d59 |
+| laya | 1 | laya-final_train-neg8-s1-07a1ee59 | ckpt-final-s1 | laya-f43484c8aab4-b43eaa54-cc216d59 |
+| laya | 2 | laya-final_train-neg8-s2-bbb5230e | ckpt-final-s2 | laya-6f66dfd4c331-23b93830-cc216d59 |
+| berturk | 0 | berturk-final_train-s0-8a167355 | ckpt-berturk-final-s0 | berturk-c500b06ccf34-f37197ee-29446b61 |
+| berturk | 1 | berturk-final_train-s1-3c44e7ff | ckpt-berturk-final-s1 | berturk-1f0bb00cd6f7-a14835e4-29446b61 |
+| berturk | 2 | berturk-final_train-s2-44f81396 | ckpt-berturk-final-s2 | berturk-06685feeb69f-faf017a7-29446b61 |
+
+| split | path | role | messages | no-intent | sha256 | uids sha256 |
+|---|---|---|---|---|---|---|
+| test | data/splits/test.jsonl | test | 413 | 15 | 3abfb1836033 | f0fc53ccb638 |
+| hotels_probe | data/splits/hotels_probe.jsonl | ood_probe | 1009 | 274 | 6120dadef844 | 78172fd5dbd5 |
+| val | data/splits/val.jsonl | val | 208 | 7 | 95f5cfe5ae59 | 6b68eac2f153 |
+| selection_train | data/splits/selection_train.jsonl | train | 1450 | 66 | a3b5fad486b3 | 61dd38e5ee8f |
+| final_train | data/splits/final_train.jsonl | train | 1658 | 73 | 01c7274d7c9b | 12d3ef8a9767 |
+
+- hotels_probe ood_scoring_tags: account, appointment, arrival, balance, business, card, cheque, contactless, credit, current, debit, direct_debit, fees_interests, international, loan, mortgage, overdraft, pin, savings, standing_order, transfer_payment_deposit, withdrawal
+
+- References: reference rows are reported, never gated; their θ is D-12 on their own committed val dump; majority and prior are not scored on hotels_probe; zero-shot Laya is scored once on hotels_probe as an ungated reference OOD row, on the scorer of its committed val dump (cpu, Ray workers 2 x 4 CPUs; A15)
+  - majority:
+    - run_id: majority
+    - report: results/reports/majority.json
+    - gated: false
+    - hotels_probe: null
+  - prior:
+    - run_id: prior
+    - report: results/reports/prior.json
+    - gated: false
+    - hotels_probe: null
+  - laya-zeroshot-7b928d82:
+    - run_id: laya-zeroshot-7b928d82
+    - report: results/reports/laya-zeroshot-7b928d82.json
+    - gated: false
+    - hotels_probe:
+      - device: cpu
+      - workers: 2
+      - cpus_per_worker: 4
+      - gated: false
+      - once: true
+
+Inputs (sha256 of every committed file the verdict reads):
+
+| input | sha256 |
+|---|---|
+| data/splits.json | 7376c5199685 |
+| results/postfit/laya.json | e08e8735b19c |
+| results/postfit/berturk.json | 83b34dfb524e |
+| results/postfit/laya-final.json | 3d0b1a91e00e |
+| results/postfit/berturk-final.json | 0a611f198fcf |
+| results/postfit/berturk-reference.json | 1e65d9d58b3b |
+| results/dumps/prior/val.json | 6b6d532dadd9 |
+| results/dumps/prior/test.json | b628be308dc1 |
+| results/reports/majority.json | 62ff065a1a83 |
+| results/reports/prior.json | a000819eb346 |
+| results/reports/laya-zeroshot-7b928d82.json | 771e4f930dad |
+| results/latency/laya-mps.json | 94e294657de5 |
+| results/latency/laya-cpu.json | 716481b7bbda |
+| results/latency/berturk-mps.json | e409c0ca629b |
+| results/latency/berturk-cpu.json | df598110eb77 |
+| results/dumps/laya-047381259d3b-cf0f7846-cc216d59/val.json | 2ddd80899a20 |
+| results/dumps/berturk-f24d8fe3c899-50e28523-29446b61/val.json | 1309816b664c |
+
+#### Few-shot protocol (Phase 9 executes it unchanged)
+
+| setting | value |
+|---|---|
+| tags | savings, loan, overdraft, appointment, contactless, direct_debit |
+| k_values | 5, 10 |
+| draw_seeds | 0, 1, 2 |
+| neg_per_pos | 4 |
+| replay | 200 |
+| epochs | 10 |
+
+- Source: selection_train, sha256 a3b5fad486b3, uids sha256 61dd38e5ee8f.
+- Eligibility rule:
+  - banking_only: every held-out tag is in pilot.pins.OOD_SCORING_TAGS
+  - min_test_positives: 10
+  - min_final_train_positives: 40
+- Eligibility note: gold labels only, no model output: positives per held-out tag in the committed test and final_train splits
+
+| held-out tag | test positives | final_train positives |
+|---|---|---|
+| savings | 13 | 56 |
+| loan | 11 | 57 |
+| overdraft | 13 | 56 |
+| appointment | 13 | 52 |
+| contactless | 13 | 50 |
+| direct_debit | 12 | 42 |
+
+- Sampler:
+  - schema: fewshot-draw/1
+  - rule: rows sorted by uid; one random.Random(seed) per draw (CPython 3.12 random); for each tag in TAGS order: rng.sample of max(k) positives from the sorted uids carrying the tag, then rng.sample of NEG_PER_POS x max(k) negatives from the sorted uids without it; the k support set is the union over tags of the first k positives and the first NEG_PER_POS x k negatives (in sample order), so the k = 5 set is nested in the k = 10 set; replay = rng.sample of REPLAY from the sorted uids outside the max-k support set; every stored list is sorted; a pool smaller than a draw needs is refused, never shortened
+  - digest: sha256 of the compact (separators ',' and ':'), key-sorted, UTF-8 JSON of {"schema", "seed", "tags", "support": {k: sorted uids}, "replay": sorted uids}; k keys are strings
+
+| draw | seed | base seed | k | support messages | replay messages | new-tag positives | digest |
+|---|---|---|---|---|---|---|---|
+| 0 | 0 | 0 | 5 | 143 | 200 | savings 9, loan 12, overdraft 8, appointment 8, contactless 8, direct_debit 8 | d72d8aa2e2c0 |
+| 0 | 0 | 0 | 10 | 279 | 200 | savings 14, loan 16, overdraft 14, appointment 17, contactless 13, direct_debit 16 | d72d8aa2e2c0 |
+| 1 | 1 | 1 | 5 | 142 | 200 | savings 6, loan 6, overdraft 8, appointment 10, contactless 10, direct_debit 7 | 7ecc9ca984f6 |
+| 1 | 1 | 1 | 10 | 274 | 200 | savings 17, loan 12, overdraft 15, appointment 15, contactless 16, direct_debit 13 | 7ecc9ca984f6 |
+| 2 | 2 | 2 | 5 | 144 | 200 | savings 11, loan 10, overdraft 11, appointment 10, contactless 10, direct_debit 5 | 847dc93d6628 |
+| 2 | 2 | 2 | 10 | 278 | 200 | savings 16, loan 17, overdraft 22, appointment 16, contactless 18, direct_debit 14 | 847dc93d6628 |
+
+Rules:
+
+- base_runs:
+  - split: selection_train
+  - seeds: 0, 1, 2
+  - laya:
+    - trainer: ray_train.py
+    - epochs: 4
+    - stop_after_epoch: 3
+    - neg: 8
+    - encoder_lr: 2e-05
+    - head_lr: 0.0001
+    - device: mps
+    - workers: 1
+    - micro_batch: 8
+    - grad_accum: 4
+    - max_len: 128
+  - berturk:
+    - trainer: berturk_train.py
+    - epochs: 30
+    - stop_after_epoch: 29
+    - encoder_lr: 2e-05
+    - head_lr: 0.0001
+    - batch: 32
+    - max_len: 128
+    - device: mps
+    - dtype: float32
+    - mask_label: -100.0
+  - rule: one label-masked base run per model and seed on selection_train (folds 0-13, so val stays held out for the bases' θ) at the model's chosen recipe: Laya ray_train.py --epochs 4 --stop-after-epoch 3, neg 8, encoder LR 2e-05, head LR 1e-4, mps, one worker; BERTurk berturk_train.py --epochs 30 --stop-after-epoch 29, LR 2e-05, head LR 1e-4, batch 32, mps fp32; seeds 0, 1, 2, base seed d paired with draw d; the same recipe as the main experiment, so the comparison isolates the masking
+- masking: every selection_train message is kept; the six held-out tags are removed from each row's expected before neg8 sampling for Laya (laya.train.items_from_rows skips a question with no expected entry, so the base sees no item of them) and set to pilot.berturk.MASK_LABEL -100 for BERTurk (masked BCE: zero gradient); the masked base sees no label of the six tags (Phase 9 proves it: base items per held-out question = 0, unmasked BERTurk labels in those columns = 0)
+- new_question:
+  - laya: the masked tag's existing intents.py question, QUESTIONS[tag] ({"type": "noul", "instructions": INTENTS[tag]}), never reworded: questions_sha256 is frozen in data/splits.json and a wording change refreezes every split; the base never sees it because items_from_rows skips a question without an expected entry
+  - berturk: the base's own classifier row for the tag, trained on no label (masked BCE gives it zero gradient; weight decay only); no weight imprinting (XCMP-04 is v2)
+- support_labels: every support message carries its full gold labels for all 48 tags; the support set of a k is the union over the six tags of their k positives and 4k negatives; the realised positive count of each new tag per k is reported: it can exceed k, through co-occurrence and because a negative drawn for one tag may carry another held-out tag (negatives lack only their own tag)
+- replay: 200 selection_train messages outside the draw's k = 10 support set (the same replay set for k = 5 and k = 10), with old-tag labels only: the six new tags are masked as in the base runs
+- continued_training:
+  - epochs: 10
+  - encoder_lr: 2e-05
+  - head_lr: 0.0001
+  - rule: 10 epochs from the masked base of seed = draw seed at the base LRs (encoder 2e-05, head 1e-4), on the support set plus the replay set, each trainer's own schedule over the 10 epochs (Laya cosine and sigma anneal, BERTurk linear with 10% warm-up), training seed = draw seed, no early stopping, no selection on val or test; epoch parity, not step parity, disclosed: BERTurk takes about 160 optimizer steps against Laya's about 2,000
+- laya_item_rule: support rows: every positive, every label of the six new tags (positive or negative) and 8 random old-tag negatives; replay rows: neg8 over the 42 old tags; plain neg8 would drop most new-tag negatives; the asymmetry with BERTurk's full labels is disclosed as in the main experiment (neg8 against all 48 labels)
+- primary_metric:
+  - k: 10
+  - rule: per new tag, average precision on test by pilot.metrics.AP_RULE on P = sigmoid(logit) (T-invariant: raw T = 1); macro-AP = mean over the six tags; the aggregate is the mean over the three draws; criterion (d) reads the mean over draws of (Laya - BERTurk) macro-AP at k = 10; k = 5 is reported
+- secondary_metrics:
+  - k = 0 new-tag macro-AP of each masked base (Laya answers the new question zero-shot; BERTurk's untrained row)
+  - new-tag micro-F1 and 42-old-tag micro-F1 at the masked base's val θ (the val rule at T = 1)
+  - forgetting: old-tag micro-F1 of the continued model minus the masked base's
+  - a paired message-level bootstrap CI of the new-tag macro-AP delta (descriptive only)
+  - incremental wall clock per continued-training run
+- compute_fallback:
+  - base_runs_per_model: 1
+  - seed: 0
+  - rule: 1 masked base run per model (seed 0), all three draws continued from it
+  - trigger: the Phase 9 projection from the results/compute rates exceeds 10 h, or a primary base run still fails after the LAYA-03 ladder
+  - disclosure: the results state that base-model variance is not captured
+- gate: the few-shot runner calls pilot.protocol.require_frozen() before anything else and records protocol_sha256 in every Phase 9 record
+- test_admission: a few-shot checkpoint reaches test only through the score.py protocol gate, once Phase 9 binds its run record to this protocol_sha256 and a draw digest; Phase 8's allow-list holds the six final seeds only
+- phase_9_notes:
+  - ray_train.py has no tag masking: add --mask-tags (an IDENTITY key dropped when None), applied to expected before spike.neg8_rows
+  - berturk_train.py refuses continued training from a fine-tuned head (optimizer_groups requires a newly initialised head): add a continued-training mode
+  - support sets are not registered splits: both trainers need a protocol-derived support-set source over the verified selection_train bytes; data/splits.json is never refrozen
+
+#### Known at freeze (val, in-sample, one seed per model)
+
+In-sample val deltas Laya - BERTurk of the two chosen selection candidates (split val, n = 208, in_sample true): Laya laya-047381259d3b-cf0f7846-cc216d59, BERTurk berturk-f24d8fe3c899-50e28523-29446b61.
+
+**headline** (T: laya 4.7698; berturk 0.7430; θ: laya theta.shipped; berturk theta.shipped; n = 208, B = 10000, seed 0, level 0.95, coverage 80%, method percentile (numpy linear interpolation))
+
+| metric | Laya | BERTurk | delta (Laya - BERTurk) | 95% CI | width | undefined replicates |
+|---|---|---|---|---|---|---|
+| micro_f1 | 0.8129 | 0.8284 | -0.0155 | [-0.0427, +0.0120] | 0.0547 | 0 |
+| macro_f1 | 0.7999 | 0.6899 | +0.1100 | [+0.0507, +0.1581] | 0.1074 | 0 |
+| exact_match | 0.4183 | 0.4615 | -0.0433 | [-0.1202, +0.0337] | 0.1538 | 0 |
+| top1_hit | 0.8507 | 0.8856 | -0.0348 | [-0.0829, +0.0100] | 0.0929 | 0 |
+| brier | 0.0204 | 0.0154 | +0.0050 | [+0.0025, +0.0078] | 0.0053 | 0 |
+| classwise_ece | 0.0305 | 0.0193 | +0.0111 | [+0.0062, +0.0118] | 0.0055 | 0 |
+| precision_at_80 | 0.7595 | 0.8956 | -0.1362 | [-0.1798, -0.0938] | 0.0859 | 0 |
+
+**raw** (T: laya 1.0000; berturk 1.0000; θ: laya theta.raw; berturk theta.raw; n = 208, B = 10000, seed 0, level 0.95, coverage 80%, method percentile (numpy linear interpolation))
+
+| metric | Laya | BERTurk | delta (Laya - BERTurk) | 95% CI | width | undefined replicates |
+|---|---|---|---|---|---|---|
+| micro_f1 | 0.8011 | 0.8280 | -0.0269 | [-0.0542, +0.0009] | 0.0551 | 0 |
+| macro_f1 | 0.7805 | 0.6876 | +0.0930 | [+0.0305, +0.1434] | 0.1130 | 0 |
+| exact_match | 0.3942 | 0.4567 | -0.0625 | [-0.1394, +0.0144] | 0.1538 | 0 |
+| top1_hit | 0.8507 | 0.8856 | -0.0348 | [-0.0829, +0.0100] | 0.0929 | 0 |
+| brier | 0.0214 | 0.0155 | +0.0059 | [+0.0032, +0.0089] | 0.0057 | 0 |
+| classwise_ece | 0.0216 | 0.0294 | -0.0078 | [-0.0146, -0.0070] | 0.0077 | 0 |
+| precision_at_80 | 0.7561 | 0.8847 | -0.1286 | [-0.1807, -0.0918] | 0.0890 | 0 |
+
+Note: in-sample val: T, θ and the epoch were chosen on these 208 messages, by one selection seed per model, while the test system is a 3-seed average; the thresholds are the REP-01 defaults, written before any result, and are not tuned to these numbers; both (d) paths (Brier, precision at 80% coverage) favour BERTurk on val and (a) sits near the margin; recorded so that what was known at freeze time is disclosed
+
+#### Power at the test size (research estimates)
+
+research estimate, normal approximation (A19): 08-RESEARCH CI-width research, from the in-sample val deltas (B = 10,000, seed 0) scaled to the test size; the 3-seed average makes the SE somewhat smaller.
+
+- n: 413
+- micro_f1_delta_se: 0.0098
+- p_a_lower_at_least_margin:
+  - 0: 0.53
+  - -0.005: 0.34
+  - -0.01: 0.17
+  - -0.0155: 0.07
+- p_a_lower_note: P(the (a) micro-F1 delta CI lower bound >= -0.02) at a true micro-F1 delta of each key; -0.0155 is the in-sample val estimate
+- margin_80_power: -0.0274
+- margin_80_power_note: the non-inferiority margin with 80% power at a true delta of 0
+- alternative_go_success:
+  - 0.03: 0.5
+  - 0.04: 0.85
+  - 0.05: 0.98
+- alternative_go_note: P(the alternative GO is MET) at a true micro-F1 delta of each key
+- macro_f1_ci_half_width: 0.035
+- precision_at_80_ci_half_width: 0.03
+- precision_at_80_note: extrapolated by the square-root-of-n rule (A19)
+- margin: the -0.02 margin is locked (REP-01) and kept; (a) is three-way, so a non-resolvable result reads INCONCLUSIVE, which counts as NO-GO plus collect bank data
+
+#### Definitions
+
+- brier: mean over every (message, tag) pair of (p - y)^2; the per-message sum over 48 tags is 48 x this
+- nll: mean binary cross-entropy over every (message, tag) pair, p clipped to [1e-12, 1 - 1e-12]
+- classwise_ece: Kull et al. 2019 Eq. 4: per tag, the sum over the 15 equal-width bins of |sum of y - sum of p| / n; averaged over all 48 tags, zero-support tags included
+- bins: 15 equal-width bins [k/15, (k+1)/15), p = 1.0 in the last bin (Guo et al. 2017, M = 15)
+- confidence: message confidence = sum over the 48 tags of log q, q = p if p >= θ (predicted) else 1 - p: the model's probability that every tag decision is right, assuming tag independence
+- coverage: keep the k = ceil(c * n / 100) most confident messages, k computed as (c * n + 99) // 100; ties in confidence keep split-file order (stable sort)
+- aurc: mean over k = 1..n of 1 - exact-match rate of the k most confident messages (Geifman et al. 2019); lower is better
+- theta_tie: closest to 0.5; between two equally close points, the lower θ
+- bootstrap_method: percentile (numpy linear interpolation)
+- bootstrap_extra: the draw is bootstrap_weights(n, B, seed), the same one paired_bootstrap uses, shared by both systems; Brier and classwise ECE replicates are count-weighted sums of per-message terms, so each equals the metric of the resampled rows; a precision-at-coverage replicate is selective on the rows idx[b] in draw order (stable ties follow draw order); the interval is the percentile interval of the replicate deltas A - B (percentile (numpy linear interpolation))
+- false_positive: a counted message has no gold tag among the scored columns; it is a false positive when at least one scored column is predicted at θ (P >= θ). No-intent: all 48 columns. Out-of-domain: the 22 banking-only columns (the manifest's ood_scoring_tags)
+- average_precision: average precision of one tag: AP = sum over the distinct score thresholds, in decreasing order, of (R_n - R_(n-1)) * P_n, with P_n and R_n the precision and recall of the messages scoring at or above the n-th threshold; tied scores form one threshold; not interpolated (sklearn average_precision_score); a tag with no positive is refused; T-invariant (a monotone transform of the logits keeps the ranking)
+- fewshot_sampler: rows sorted by uid; one random.Random(seed) per draw (CPython 3.12 random); for each tag in TAGS order: rng.sample of max(k) positives from the sorted uids carrying the tag, then rng.sample of NEG_PER_POS x max(k) negatives from the sorted uids without it; the k support set is the union over tags of the first k positives and the first NEG_PER_POS x k negatives (in sample order), so the k = 5 set is nested in the k = 10 set; replay = rng.sample of REPLAY from the sorted uids outside the max-k support set; every stored list is sorted; a pool smaller than a draw needs is refused, never shortened
+- fewshot_digest: sha256 of the compact (separators ',' and ':'), key-sorted, UTF-8 JSON of {"schema", "seed", "tags", "support": {k: sorted uids}, "replay": sorted uids}; k keys are strings
+
+#### Assumptions and delegation
+
+- A1: (d)'s calibration path is Brier at the headline T; classwise ECE is reported only, its percentile bootstrap being biased
+- A2: (a) is three-way: PASS when the micro-F1 delta CI lower bound >= -0.02 and the macro-F1 delta point >= -0.03; FAIL when the micro-F1 CI upper bound < -0.02 or the macro-F1 point < -0.03; INCONCLUSIVE otherwise
+- A3: the overall verdict follows the verdict rules in order; INCONCLUSIVE counts as NO-GO; with (d) PENDING the verdict is PROVISIONAL only when the few-shot MET and NOT MET outcomes differ
+- A4: the alternative GO is a micro-F1 delta > +0.03 with a CI lower bound > 0, and still needs (b) PASS
+- A5: a seed-averaged final system uses its postfit record's theta.shipped at the record T
+- A6: the collapse rule applies to each selection run (val floor 10/41 and loss) and to each final seed (loss and a test floor against the prior's 520/2163, a marked addition)
+- A7: the held-out few-shot tags are the FEATURES TS-14 list; eligibility checks the list, never selects it
+- A8: one masked base run per model and seed on selection_train at the chosen recipe; seeds 0-2 pair with draws 0-2
+- A9: k is nested (5 within 10), 4k negatives per tag, full-label support rows, the union over tags, and 200 replay messages outside the k = 10 support set
+- A10: the Laya few-shot item rule: every positive, every new-tag label and 8 old-tag negatives per message
+- A11: 10 epochs of continued training at the base LRs with each trainer's schedule (epoch parity, not step parity)
+- A12: new-tag AP has sklearn semantics, macro over the 6 tags, at T = 1, as the mean over draws; (d) reads k = 10
+- A13: the compute fallback (1 base run per model, seed 0) triggers on a projection over 10 h or a base-run failure after the ladder
+- A14: final seeds are scored on MPS, fp32, --workers 0: the device the postfit T was fitted on
+- A15: zero-shot Laya on HOTELS is an ungated reference row (cpu, Ray workers 2 x 4 CPUs); majority and prior are not scored on HOTELS
+- A16: the table's standard deviation over seeds is the sample std (ddof 1)
+- A17: protocol.json sits at the repo root; its sha256 pin is in pilot/protocol.py
+- A18: every gating number uses the headline variant (record T, theta.shipped); raw (T = 1, theta.raw) is reported only
+- A19: power numbers are normal-approximation estimates; the precision at 80% coverage widths are extrapolated by the square-root-of-n rule
+- OQ1: the test-floor collapse component is frozen, marked as a Claude-recommended addition to the REP-01 default
+- OQ2: zero-shot Laya is scored once on HOTELS as an ungated reference OOD row; majority and prior are not
+- OQ3: Phase 8 ships fewshot.py --support-sets behind require_frozen; Phase 9 extends the same entry point
+
+All 22 were taken as 08-RESEARCH recommended under the standing delegation.
+
+Delegation:
+
+- standing:
+  - given: 06-15 (2026-10-21)
+  - quote: do the programatical control. i will not do manual control until all phases done.
+  - meaning: every blocking-human gate is resolved by programmatic checks; the recommended option is taken and the delegation recorded
+- restated:
+  - given: 2026-10-23
+  - quote: i already told you that i will not made a manual control untill all phases are done
+- single_lr:
+  - given: 2026-10-15
+  - reply: assume it okey for now. defer for further learning rate grid search. we know that at least one hyperparameter works.
+  - choice: Single LR now (Recommended)
+  - decision: one encoder LR 2e-05 for both models, fixed, not tuned (head LR 1e-4)
+- bank_name: the bank-name check is deferred to the end-of-milestone review
+<!-- protocol:end -->
+
 ## Results (Phase 3: baselines and zero-shot, full test split)
 
 Majority (the most frequent `final_train` tag), the label prior (each tag's `final_train`

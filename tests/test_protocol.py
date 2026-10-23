@@ -12,6 +12,11 @@
 - render_markdown(protocol, sha256), the README protocol block (08-06): every value read from the dict passed in,
   deterministic, display rounding only (2 decimals for points, 4 for metrics); `--render PATH` previews a file with its
   own sha256, `--render` alone renders require_frozen()'s protocol and refuses while unpinned.
+- 08-10, the freeze: test_freeze_rehearsal (data) rehearses it on the committed inputs with a temp pinned protocol;
+  protocol.json is then committed once with its pin and the README block, and these tests read the frozen file (never
+  a rebuild): it hashes to PROTOCOL_SHA256, exactly one commit touches it, the README block equals render_markdown of
+  it, its inputs are the committed files, its decision blocks equal the code that applies them, and (data) its prior
+  floors, known_at_freeze and few-shot draws recompute exactly.
 Offline except the `data` tests.
 """
 import copy
@@ -93,8 +98,9 @@ def test_require_frozen_refuses_a_missing_file(tmp_path):
         pr.require_frozen(str(tmp_path / "protocol.json"), "0" * 64)
 
 
-def test_require_frozen_refuses_an_unset_pin(tmp_path):
+def test_require_frozen_refuses_an_unset_pin(tmp_path, monkeypatch):
     path, _ = frozen(tmp_path)
+    monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)        # pin=None falls back to the module pin, set since 08-10
     with pytest.raises(SystemExit, match="not frozen"):
         pr.require_frozen(path, None)
 
@@ -144,8 +150,10 @@ def test_require_frozen_reads_the_module_pin_at_call_time(tmp_path, monkeypatch)
     assert pr.require_frozen() == (small(), sha)
 
 
-def test_the_repo_protocol_is_not_frozen_by_this_plan():
-    assert pr.PROTOCOL_SHA256 is None
+def test_the_repo_protocol_is_pinned_at_the_repo_root():
+    # 08-10 froze protocol.json: the pin is the sha256 hex of its bytes (test_protocol_json_matches_the_pin)
+    assert isinstance(pr.PROTOCOL_SHA256, str) and len(pr.PROTOCOL_SHA256) == 64
+    assert int(pr.PROTOCOL_SHA256, 16) >= 0 and pr.PROTOCOL_SHA256 == pr.PROTOCOL_SHA256.lower()
     assert pr.PROTOCOL_PATH == os.path.join(pilot.data.REPO_ROOT, "protocol.json")
 
 
@@ -250,7 +258,8 @@ def test_protocol_module_is_stdlib_only_at_import():
     assert out == "[]"
 
 
-def test_cli_check_refuses_while_unpinned(capsys):
+def test_cli_check_refuses_while_unpinned(monkeypatch):
+    monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)
     with pytest.raises(SystemExit, match="not frozen|not found"):
         pr.main(["--check"])
 
@@ -578,8 +587,8 @@ def test_cli_render_previews_a_path_with_its_own_sha(tmp_path, capsys):
     assert capsys.readouterr().out == pr.render_markdown(tiny(), sha)
 
 
-def test_cli_render_without_path_refuses_while_unpinned():
-    assert pr.PROTOCOL_SHA256 is None
+def test_cli_render_without_path_refuses_while_unpinned(monkeypatch):
+    monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)
     with pytest.raises(SystemExit, match="not frozen|not found"):
         pr.main(["--render"])
 
@@ -821,3 +830,121 @@ def test_freeze_rehearsal(tmp_path, monkeypatch, capsys):
     for want in ["-2.00 points", "10/41", "520/2163", sha] + [d["digest"][:12] for d in p["fewshot"]["draws"]]:
         assert want in md, want
     assert sorted(os.listdir(tmp_path)) == ["laya-ckpt", "protocol.json"]
+
+
+# ---- 08-10: the frozen protocol.json (never rebuilt: these tests read the file, they never compare it to a build) ----
+
+README = os.path.join(pilot.data.REPO_ROOT, "README.md")
+PHASE8_HEADING = "## Frozen protocol and head-to-head verdict (Phase 8)"
+PROTOCOL_START, PROTOCOL_END = "<!-- protocol:start -->", "<!-- protocol:end -->"
+
+
+def git(*args):
+    return subprocess.run(("git",) + args, cwd=pilot.data.REPO_ROOT, capture_output=True, text=True,
+                          check=True).stdout
+
+
+@pytest.fixture(scope="module")
+def frozen_protocol():
+    """(protocol dict, sha256) of the repo's frozen protocol.json through the pinned reader."""
+    return pr.require_frozen()
+
+
+def test_protocol_json_matches_the_pin(frozen_protocol, capsys):
+    assert pilot.data.sha256_file(pr.PROTOCOL_PATH) == pr.PROTOCOL_SHA256, (
+        "protocol.json does not hash to pilot.protocol.PROTOCOL_SHA256: the frozen protocol may never change "
+        "(restore it with `git checkout -- protocol.json`)")
+    protocol, sha = frozen_protocol
+    assert sha == pr.PROTOCOL_SHA256 and protocol["schema"] == pr.SCHEMA and tuple(protocol) == pr.REQUIRED_KEYS
+    assert pr.main(["--check"]) == pr.PROTOCOL_SHA256
+    assert pr.PROTOCOL_SHA256 in capsys.readouterr().out
+    with open(pr.PROTOCOL_PATH, "rb") as f:
+        assert f.read() == pr.protocol_bytes(protocol), "protocol.json is not in the protocol_bytes encoding"
+    assert protocol["code"]["dirty"] is False, "the protocol was frozen from a tree with tracked changes"
+
+
+def test_protocol_json_is_committed_once():
+    """Exactly one commit touches protocol.json: the freeze commit, which also sets the pin in pilot/protocol.py and
+    adds the README block. A later commit that modifies, re-serialises or deletes it fails here."""
+    if not git("ls-files", "--", "protocol.json").strip():
+        pytest.skip("protocol.json is not committed yet (the freeze commit adds it)")
+    commits = git("log", "--format=%H", "--", "protocol.json").split()
+    assert len(commits) == 1, "protocol.json is touched by %d commits %s; it is frozen once and never changed" % (
+        len(commits), [c[:12] for c in commits])
+    files = set(git("diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commits[0]).split())
+    assert {"protocol.json", "pilot/protocol.py", "README.md"} <= files, (
+        "the freeze commit %s must carry protocol.json, its pin and the README block together; it has %s"
+        % (commits[0][:12], sorted(files)))
+    assert git("diff", "--name-only", "HEAD", "--", "protocol.json").strip() == "", \
+        "protocol.json differs from its committed bytes"
+
+
+def test_readme_protocol_block_matches_render(frozen_protocol):
+    protocol, sha = frozen_protocol
+    with open(README, encoding="utf-8") as f:
+        text = f.read()
+    assert text.count(PHASE8_HEADING + "\n") == 1, "README.md must hold exactly one %r section" % PHASE8_HEADING
+    assert text.count(PROTOCOL_START) == 1 and text.count(PROTOCOL_END) == 1, \
+        "README.md must hold exactly one pair of the protocol markers"
+    h, i, j = text.index(PHASE8_HEADING + "\n"), text.index(PROTOCOL_START), text.index(PROTOCOL_END)
+    nxt = text.find("\n## ", h + len(PHASE8_HEADING))
+    assert h < i < j and (nxt == -1 or j < nxt), "the protocol block must sit inside the Phase 8 README section"
+    block = text[i + len(PROTOCOL_START):j]
+    assert block.strip() == pr.render_markdown(protocol, sha).strip(), (
+        "the README protocol block differs from pilot.protocol.render_markdown of the frozen protocol.json; "
+        "regenerate it with `python -m pilot.protocol --render`")
+
+
+def test_frozen_inputs_match_committed_files(frozen_protocol):
+    protocol, _ = frozen_protocol
+    inputs = protocol["inputs"]
+    assert set(pr.INPUT_PATHS) <= set(inputs)
+    for rel, sha in inputs.items():
+        assert not os.path.isabs(rel) and ".." not in rel.split("/"), rel
+        assert git("ls-files", "--", rel).strip() == rel, "%s is a frozen input but not tracked" % rel
+        assert pilot.data.sha256_file(os.path.join(pilot.data.REPO_ROOT, rel)) == sha, (
+            "%s changed after the freeze (frozen sha256 %s); restore it with git" % (rel, sha))
+    assert protocol["splits"] == pr.splits_block(pilot.data.DEFAULT_MANIFEST)
+    assert protocol["systems"] == pr.systems_block(pilot.data.REPO_ROOT)
+
+
+def test_frozen_definitions_and_criteria_match_code(frozen_protocol):
+    """Decision code and frozen protocol stay one: the criteria, verdict rules, definitions, collapse rule texts,
+    bootstrap, scoring and few-shot settings the code applies are the frozen ones."""
+    from pilot import fewshot, verdict
+    protocol, _ = frozen_protocol
+    assert protocol["criteria"] == verdict.DEFAULT_CRITERIA
+    assert protocol["verdict"] == pr.verdict_block()
+    assert protocol["verdict"]["rules"] == list(verdict.VERDICT_RULES)
+    assert protocol["definitions"] == _definitions() == pr.definitions_block()
+    assert {k: x for k, x in protocol["collapse"].items() if not k.startswith("prior_")} == verdict.DEFAULT_COLLAPSE
+    assert protocol["bootstrap"] == pr.bootstrap_block()
+    assert protocol["scoring"] == pr.SCORING
+    f = protocol["fewshot"]
+    assert (f["tags"], f["k_values"], f["draw_seeds"]) == (list(fewshot.TAGS), list(fewshot.K_VALUES),
+                                                          list(fewshot.DRAW_SEEDS))
+    assert (f["neg_per_pos"], f["replay"], f["epochs"]) == (fewshot.NEG_PER_POS, fewshot.REPLAY, fewshot.EPOCHS)
+    assert f["sampler"] == {"schema": fewshot.DRAW_SCHEMA, "rule": fewshot.SAMPLER_RULE, "digest": fewshot.DIGEST_RULE}
+    assert f["rules"] == json.loads(json.dumps(fewshot.RULES))
+    assert [d["seed"] for d in f["draws"]] == list(fewshot.DRAW_SEEDS) and all(len(d["digest"]) == 64
+                                                                              for d in f["draws"])
+
+
+@pytest.mark.data
+def test_frozen_values_recompute(frozen_protocol):
+    """The frozen numbers recompute exactly from the committed dumps and splits: the prior's collapse floors,
+    known_at_freeze (pilot.verdict.system_deltas on the chosen candidates' val dumps), and the few-shot draws."""
+    from pilot import fewshot
+    protocol, _ = frozen_protocol
+    c = protocol["collapse"]
+    floors = json.loads(json.dumps(pr.prior_floors(pilot.data.DEFAULT_MANIFEST, pilot.data.REPO_ROOT)))
+    assert {k: x for k, x in c.items() if k.startswith("prior_")} == floors
+    assert (c["prior_val_fraction"], c["prior_test_fraction"]) == ("10/41", "520/2163")
+    known = pr.known_at_freeze_block(pilot.data.DEFAULT_MANIFEST, pilot.data.REPO_ROOT, protocol["systems"],
+                                     protocol["bootstrap"])
+    assert json.loads(json.dumps(known)) == protocol["known_at_freeze"]
+    path = os.path.join(pilot.data.REPO_ROOT, protocol["splits"]["selection_train"]["path"])
+    with open(path, "rb") as f:
+        rows = pilot.data.parse_jsonl(f.read())
+    fewshot.check_draws(protocol["fewshot"], rows)
+    assert protocol["fewshot"] == fewshot.protocol_block(), "the few-shot block no longer regenerates exactly"

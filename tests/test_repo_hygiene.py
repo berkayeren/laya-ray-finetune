@@ -31,7 +31,8 @@ its protocol_sha256) or in the zero-shot dir results/dumps/laya-zeroshot-7b928d8
 The Phase 7 latency reports (EVAL-06: times, digests and repo-relative paths only) get the sidecar check too,
 and only results/latency/(laya|berturk)-(mps|cpu).json and results/latency/latency.md may be tracked there. Their
 per-seed "state" is the checked {device, dtype, amp_enabled} dict, the one "state" value the message-text key check
-allows (CHECKED_STATE_KEYS); a string or any other "state" is still a finding.
+allows (CHECKED_STATE_KEYS); a string or any other "state" is still a finding. The frozen protocol.json (08-10) is
+required to be tracked and gets the text check, with no key named state or text at all.
 """
 import io
 import json
@@ -64,7 +65,8 @@ LATENCY_PATH_RE = re.compile(r"^results/latency/((laya|berturk)-(mps|cpu)\.json|
 # shorter ("Evet.", "cari hesap"), so length cannot detect it. The key-name check and, when the split files exist
 # locally, the exact-text check below are the real guards.
 MAX_MANIFEST_STRING = 200
-REQUIRED_TRACKED = ("requirements.txt", "pyproject.toml", "Makefile", "pilot/pins.py", "data/splits.json")
+REQUIRED_TRACKED = ("requirements.txt", "pyproject.toml", "Makefile", "pilot/pins.py", "data/splits.json",
+                    "protocol.json")
 
 
 def tracked(*pathspec):
@@ -239,6 +241,17 @@ def test_no_local_home_path_in_tracked_files():
 @pytest.mark.parametrize("rel", REQUIRED_TRACKED)
 def test_required_files_tracked(rel):
     assert tracked(rel) == [rel], "%s must be tracked (reproducibility depends on it)" % rel
+
+
+def test_frozen_protocol_holds_no_text_or_paths():
+    """protocol.json (08-10, frozen once) holds ids, digests, repo-relative paths, numbers and rule texts only: no
+    message-text key (no key named state or text at all), no local home path, no split message text."""
+    path = os.path.join(REPO_ROOT, "protocol.json")
+    with open(path, encoding="utf-8") as f:
+        obj = json.load(f)
+    problems = text_problems(obj, home_dir(), local_split_texts())
+    problems += ["key %r at %s" % (k, p) for p, k, _ in walk(obj) if k in MESSAGE_TEXT_KEYS]
+    assert problems == [], "protocol.json holds text or local paths: %s" % problems
 
 
 BERTURK_RUN = "berturk_runs/berturk-selection_train-s0-0123abcd/"
