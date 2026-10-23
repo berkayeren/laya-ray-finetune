@@ -781,6 +781,8 @@ def test_freeze_rehearsal(tmp_path, monkeypatch, capsys):
     sha = pr.write_protocol(p, path)
     monkeypatch.setattr(pr, "PROTOCOL_PATH", path)
     monkeypatch.setattr(pr, "PROTOCOL_SHA256", sha)
+    import pilot.fewshot
+    monkeypatch.setattr(pilot.fewshot, "RUNS_PATH", str(tmp_path / "no-runs.json"))   # no Phase 9 allow-list here
 
     # (1) the pinned reader
     assert pr.require_frozen() == (p, sha)
@@ -804,12 +806,12 @@ def test_freeze_rehearsal(tmp_path, monkeypatch, capsys):
             assert (proto, pin, gated) == (p, sha, split)
             head = score._gate_head(kind, ckpt, entry, trigger)
             for rid in finals[kind]:
-                score.require_final_seed(proto, kind, rid, head)
+                assert score.require_admitted(proto, pin, kind, rid, split, head) == ("final", None)
                 assert pr.final_seed_allowed(proto, kind, rid)
             for chosen in (LAYA_CHOSEN, BERTURK_CHOSEN):
                 assert not pr.final_seed_allowed(proto, kind, chosen)
                 with pytest.raises(SystemExit) as e:
-                    score.require_final_seed(proto, kind, chosen, head)
+                    score.require_admitted(proto, pin, kind, chosen, split, head)
                 assert str(e.value.code).startswith(score.GATE), e.value.code
             for a, device in ((ns(force=True), "mps"), (ns(n=5), "mps"), (ns(out_root="elsewhere"), "mps"),
                               (ns(workers=2), "mps"), (ns(), "cpu")):

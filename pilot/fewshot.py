@@ -32,6 +32,14 @@ usage:
     fewshot.draw_digest(d)
     block = fewshot.protocol_block()          # the "fewshot" block of protocol.json (08-05)
     fewshot.check_draws(block, rows)          # SystemExit unless a regeneration gives the frozen lists and digests
+    runs, sha = fewshot.read_runs(protocol, pin)   # results/fewshot/runs.json checked (check_runs), or (None, None)
+    fewshot.admitted(protocol, pin, "laya", dump_run_id)   # (entry, runs sha256) of a listed checkpoint, else None
+
+Phase 9 test admission (09-05, D-04, D-09): results/fewshot/runs.json (RUNS_SCHEMA fewshot-runs/1, written once by
+fewshot.py --runs-manifest from the checkpoints' own records) lists every masked base and continued run of the recorded
+D-08 mode, one entry per (kind, base seed) and per (kind, draw, k), each with its train and dump run ids, its masking
+proof (PROOF_KEYS) and its wall clock (WALL_RULE). check_runs validates it against the frozen block; admitted, which
+score.py's protocol gate calls, reads it at every call.
 """
 import hashlib
 import json
@@ -711,3 +719,270 @@ def protocol_block(manifest_path=DEFAULT_MANIFEST):
              "rules": json.loads(json.dumps(RULES))}
     check_draws(block, rows)
     return block
+
+
+# ---- Phase 9: test admission through a committed runs manifest (D-04, D-09; 09-05) ----
+
+RUNS_SCHEMA = "fewshot-runs/1"
+# the committed allow-list of few-shot checkpoints (fewshot.py --runs-manifest writes it once, before any few-shot test
+# dump); read at call time, so a test can monkeypatch it
+RUNS_PATH = os.path.join(REPO_ROOT, "results", "fewshot", "runs.json")
+KINDS = ("laya", "berturk")
+RUNS_KEYS = ("schema", "protocol_sha256", "mode", "decision", "tags", "wall_rule", "entries")
+ENTRY_KEYS = ("kind", "stage", "seed", "draw", "k", "digest", "base_seed", "base_run_id", "train_run_id",
+              "dump_run_id", "checkpoint_name", "rung", "fallback", "weaker", "proof", "wall_clock_s", "loss_by_epoch")
+# A7 (09-RESEARCH): the incremental wall clock of a run, copied from its own run record
+WALL_RULE = ("incremental wall clock of a run, from its own run record (A7): Laya: the sum over its epochs of train_s "
+             "and save_s, plus load_s and final_save_s; BERTurk: the sum over its epochs of train_s, plus load_s; "
+             "reported, not gated")
+# the masking proof (D-04) each entry copies from its run record, per (kind, stage); the first key holds the per-tag
+# counts: 0 for a base (no held-out item or unmasked label reached it), the support rows for a continued run (one
+# item or label per support row, so the replay rows contributed none)
+PROOF_KEYS = {("laya", "base"): ("held_out_items",),
+              ("laya", "continued"): ("new_tag_items", "support_rows", "replay_rows"),
+              ("berturk", "base"): ("unmasked_held_out_labels",),
+              ("berturk", "continued"): ("new_tag_labels", "support_rows", "replay_rows",
+                                         "replay_unmasked_held_out_labels")}
+_RUNS_FIX = "rebuild it with `python fewshot.py --runs-manifest` from the checkpoints' own records"
+
+
+def entry_key(e):
+    """The sort key of a runs-manifest entry: (kind, stage, seed, draw, k), a base's draw and k as -1."""
+    return (e["kind"], e["stage"], e["seed"], -1 if e["draw"] is None else e["draw"], -1 if e["k"] is None else e["k"])
+
+
+def slot_name(slot):
+    """A slot (kind, stage, seed, draw, k) as text: 'laya base seed 0' or 'berturk draw 1 k 10'."""
+    kind, stage, seed, draw, k = slot
+    return "%s base seed %s" % (kind, seed) if stage == "base" else "%s draw %s k %s" % (kind, draw, k)
+
+
+def slots(block, mode):
+    """Every (kind, stage, seed, draw, k) a complete runs manifest lists under `mode`, sorted as entry_key: per kind
+    the masked base of each allowed_base_seeds seed and one continued run per frozen (draw, k)."""
+    out = []
+    for kind in KINDS:
+        out += [(kind, "base", s, None, None) for s in allowed_base_seeds(block, mode)]
+        out += [(kind, "continued", d["seed"], i, k) for i, d in enumerate(block["draws"]) for k in block["k_values"]]
+    return sorted(out, key=lambda s: entry_key(dict(zip(("kind", "stage", "seed", "draw", "k"), s))))
+
+
+def _count(v):
+    return _int(v) and v >= 0
+
+
+def proof_problems(kind, stage, proof, tags):
+    """[what is wrong] of an entry's masking proof (D-04), empty when it proves the masking: exactly the PROOF_KEYS of
+    (kind, stage); per-tag counts over exactly the held-out tags; a base's counts all 0; a continued run's counts each
+    equal to its support_rows (> 0), its replay_rows a count, and BERTurk's replay_unmasked_held_out_labels 0."""
+    want = PROOF_KEYS.get((kind, stage))
+    if want is None:
+        return ["no masking proof is defined for kind %r stage %r" % (kind, stage)]
+    if not isinstance(proof, dict) or sorted(proof) != sorted(want):
+        return ["proof keys %s, expected exactly %s" % (sorted(proof) if isinstance(proof, dict) else proof,
+                                                        sorted(want))]
+    tags, counts, out = sorted(tags), proof[want[0]], []
+    if not isinstance(counts, dict) or sorted(counts) != tags:
+        return ["%s covers %s, not the held-out tags %s" % (want[0], sorted(counts) if isinstance(counts, dict)
+                                                           else counts, tags)]
+    if stage == "base":
+        out += ["%s %s is %r, not 0: a held-out label reached the masked base" % (want[0], t, counts[t])
+                for t in tags if not (_int(counts[t]) and counts[t] == 0)]
+        return out
+    n = proof["support_rows"]
+    if not _int(n) or n < 1:
+        return ["support_rows %r is not a positive count" % (n,)]
+    if not _count(proof["replay_rows"]):
+        out.append("replay_rows %r is not a count" % (proof["replay_rows"],))
+    out += ["%s %s is %r, not one per support row (%d): a replay row labelled a held-out tag or a support row lacked "
+            "it" % (want[0], t, counts[t], n) for t in tags if not (_int(counts[t]) and counts[t] == n)]
+    if kind == "berturk" and not (_int(proof["replay_unmasked_held_out_labels"])
+                                  and proof["replay_unmasked_held_out_labels"] == 0):
+        out.append("replay_unmasked_held_out_labels is %r, not 0: a replay row labelled a held-out tag"
+                   % (proof["replay_unmasked_held_out_labels"],))
+    return out
+
+
+def _number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and v not in (float("inf"),
+                                                                                           float("-inf"))
+
+
+def check_entry(e, block, mode, where="entry"):
+    """None when one runs-manifest entry is well formed for the frozen block under `mode` (the entry alone: exact
+    ENTRY_KEYS, kind and stage, the run ids and checkpoint name, the proof, the wall clock and losses, a base's seed
+    one of allowed_base_seeds and no draw fields, a continued run's frozen (draw, k), draw seed, digest,
+    base_seed_of pairing and support and replay sizes); SystemExit naming the entry and what is wrong otherwise."""
+    if not isinstance(e, dict) or sorted(e) != sorted(ENTRY_KEYS):
+        have = sorted(e) if isinstance(e, dict) else []
+        raise SystemExit("%s: keys %s, expected exactly %s (unknown %s, missing %s); %s"
+                         % (where, have, list(ENTRY_KEYS), sorted(set(have) - set(ENTRY_KEYS)) or "none",
+                            sorted(set(ENTRY_KEYS) - set(have)) or "none", _RUNS_FIX))
+    kind, stage = e["kind"], e["stage"]
+    if kind not in KINDS or stage not in STAGES:
+        raise SystemExit("%s: kind %r stage %r, expected one of %s and %s; %s"
+                         % (where, kind, stage, ", ".join(KINDS), ", ".join(STAGES), _RUNS_FIX))
+    for key in ("train_run_id", "dump_run_id"):
+        if not isinstance(e[key], str) or not e[key].startswith(kind + "-"):
+            raise SystemExit("%s: %s %r is not a %s run id; %s" % (where, key, e[key], kind, _RUNS_FIX))
+    name = e["checkpoint_name"]
+    if not isinstance(name, str) or not name or name in (".", "..") or "/" in name or os.sep in name:
+        raise SystemExit("%s: checkpoint_name %r is not a directory name; %s" % (where, name, _RUNS_FIX))
+    bad = proof_problems(kind, stage, e["proof"], block["tags"])
+    if bad:
+        raise SystemExit("%s: its masking proof fails: %s; %s" % (where, bad[0], _RUNS_FIX))
+    if not _number(e["wall_clock_s"]) or e["wall_clock_s"] <= 0:
+        raise SystemExit("%s: wall_clock_s %r is not a positive number (WALL_RULE); %s"
+                         % (where, e["wall_clock_s"], _RUNS_FIX))
+    if not isinstance(e["loss_by_epoch"], list) or not e["loss_by_epoch"] or \
+            not all(_number(v) for v in e["loss_by_epoch"]):
+        raise SystemExit("%s: loss_by_epoch %r is not a list of numbers; %s" % (where, e["loss_by_epoch"], _RUNS_FIX))
+    if kind == "laya":
+        if not isinstance(e["rung"], str) or not isinstance(e["fallback"], bool) or \
+                not isinstance(e["weaker"], bool):
+            raise SystemExit("%s: a Laya entry records its LAYA-03 rung (text), fallback and weaker (booleans), got "
+                             "%r, %r, %r; %s" % (where, e["rung"], e["fallback"], e["weaker"], _RUNS_FIX))
+    elif (e["rung"], e["fallback"], e["weaker"]) != (None, None, None):
+        raise SystemExit("%s: a BERTurk entry has no rung, fallback or weaker (None), got %r, %r, %r; %s"
+                         % (where, e["rung"], e["fallback"], e["weaker"], _RUNS_FIX))
+    if stage == "base":
+        allowed = allowed_base_seeds(block, mode)
+        if not _int(e["seed"]) or e["seed"] not in allowed:
+            raise SystemExit("%s: base seed %r is not one of the base seeds %s of the %s protocol; %s"
+                             % (where, e["seed"], allowed, mode, _RUNS_FIX))
+        given = [key for key in ("draw", "k", "digest", "base_seed", "base_run_id") if e[key] is not None]
+        if given:
+            raise SystemExit("%s: a masked base entry has no %s (None); %s" % (where, given[0], _RUNS_FIX))
+        return
+    sel = selection(block, e["draw"], e["k"])               # a frozen (draw, k), or SystemExit naming it
+    d = block["draws"][e["draw"]]
+    if e["seed"] != d["seed"] or not _int(e["seed"]):
+        raise SystemExit("%s: seed %r is not draw %d's seed %r (the training seed is the draw seed); %s"
+                         % (where, e["seed"], e["draw"], d["seed"], _RUNS_FIX))
+    if e["digest"] != d["digest"]:
+        raise SystemExit("%s: digest %r is not frozen draw %d's %s; Phase 9 trains on the frozen lists only; %s"
+                         % (where, e["digest"], e["draw"], d["digest"], _RUNS_FIX))
+    want = base_seed_of(block, e["draw"], mode)
+    if e["base_seed"] != want or not _int(e["base_seed"]):
+        raise SystemExit("%s: base_seed %r, but draw %d continues from the base of seed %r under the %s protocol "
+                         "(base_seed_of); %s" % (where, e["base_seed"], e["draw"], want, mode, _RUNS_FIX))
+    if not isinstance(e["base_run_id"], str) or not e["base_run_id"].startswith(kind + "-"):
+        raise SystemExit("%s: base_run_id %r is not a %s run id; %s" % (where, e["base_run_id"], kind, _RUNS_FIX))
+    for key, n in (("support_rows", len(sel["support"])), ("replay_rows", len(sel["replay"]))):
+        if e["proof"][key] != n:
+            raise SystemExit("%s: proof %s %r, but frozen draw %d at k %d holds %d; %s"
+                             % (where, key, e["proof"][key], e["draw"], e["k"], n, _RUNS_FIX))
+
+
+def _where(i, e):
+    if isinstance(e, dict) and all(key in e for key in ("kind", "stage", "seed", "draw", "k")):
+        return "runs manifest entry %d (%s)" % (i, slot_name((e["kind"], e["stage"], e["seed"], e["draw"], e["k"])))
+    return "runs manifest entry %d" % i
+
+
+def check_runs(runs, protocol, pin, mode):
+    """The entries of a runs manifest (RUNS_SCHEMA) when it is the complete allow-list of this protocol and mode
+    (D-04, D-07, D-09): exactly RUNS_KEYS; protocol_sha256 the pin; mode `mode`; the frozen tags (sorted); WALL_RULE;
+    a decision {path, sha256}; every entry check_entry-valid; one entry per (kind, base seed) and per (kind, draw, k),
+    no repeated train run id, dump run id or checkpoint name; every slot of slots(block, mode) present; entries sorted
+    by entry_key; every continued entry's base_run_id the train_run_id of the listed base of its base_seed. SystemExit
+    naming the first problem otherwise."""
+    block = _block(protocol)
+    _check_mode(mode)
+    if not isinstance(runs, dict) or sorted(runs) != sorted(RUNS_KEYS):
+        raise SystemExit("the runs manifest has keys %s, expected exactly %s; %s"
+                         % (sorted(runs) if isinstance(runs, dict) else type(runs).__name__, list(RUNS_KEYS),
+                            _RUNS_FIX))
+    if runs["schema"] != RUNS_SCHEMA:
+        raise SystemExit("the runs manifest has schema %r, expected %s; %s" % (runs["schema"], RUNS_SCHEMA, _RUNS_FIX))
+    if runs["protocol_sha256"] != pin:
+        raise SystemExit("the runs manifest was written under protocol sha256 %s, not the frozen %s; a few-shot "
+                         "checkpoint is admitted only under the protocol it was trained for; %s"
+                         % (runs["protocol_sha256"], pin, _RUNS_FIX))
+    if runs["mode"] != mode:
+        raise SystemExit("the runs manifest lists the %r protocol, the D-08 decision record names %s; %s"
+                         % (runs["mode"], mode, _RUNS_FIX))
+    if runs["tags"] != sorted(block["tags"]):
+        raise SystemExit("the runs manifest names tags %r, the frozen held-out tags are %s; %s"
+                         % (runs["tags"], sorted(block["tags"]), _RUNS_FIX))
+    if runs["wall_rule"] != WALL_RULE:
+        raise SystemExit("the runs manifest's wall_rule is not pilot.fewshot.WALL_RULE; %s" % _RUNS_FIX)
+    dec = runs["decision"]
+    if not isinstance(dec, dict) or sorted(dec) != ["path", "sha256"] or not all(isinstance(v, str) for v in
+                                                                                 dec.values()):
+        raise SystemExit("the runs manifest's decision is %r, expected {path, sha256} of the D-08 record; %s"
+                         % (dec, _RUNS_FIX))
+    entries = runs["entries"]
+    if not isinstance(entries, list):
+        raise SystemExit("the runs manifest's entries are not a list; %s" % _RUNS_FIX)
+    seen = {}
+    for i, e in enumerate(entries):
+        where = _where(i, e)
+        check_entry(e, block, mode, where)
+        slot = (e["kind"], e["stage"], e["seed"], e["draw"], e["k"])
+        what = "(kind %s, base seed %s)" % (e["kind"], e["seed"]) if e["stage"] == "base" else \
+            "(kind %s, draw %s, k %s)" % (e["kind"], e["draw"], e["k"])
+        if slot in seen:
+            raise SystemExit("%s: a second entry for %s (entry %d holds it); one checkpoint per slot; %s"
+                             % (where, what, seen[slot], _RUNS_FIX))
+        seen[slot] = i
+    for key in ("train_run_id", "dump_run_id", "checkpoint_name"):
+        values = [e[key] for e in entries]
+        dup = sorted({v for v in values if values.count(v) > 1})
+        if dup:
+            raise SystemExit("the runs manifest repeats %s %s; every entry is its own checkpoint; %s"
+                             % (key, dup[0], _RUNS_FIX))
+    missing = [s for s in slots(block, mode) if s not in seen]
+    if missing:
+        raise SystemExit("the runs manifest is incomplete: it lacks %s; list every base and continued run of the %s "
+                         "protocol; %s" % ("; ".join(slot_name(s) for s in missing), mode, _RUNS_FIX))
+    if [entry_key(e) for e in entries] != sorted(entry_key(e) for e in entries):
+        raise SystemExit("the runs manifest's entries are not sorted by (kind, stage, seed, draw, k); %s" % _RUNS_FIX)
+    bases = {(e["kind"], e["seed"]): e for e in entries if e["stage"] == "base"}
+    for i, e in enumerate(entries):
+        if e["stage"] == "continued":
+            base = bases[(e["kind"], e["base_seed"])]
+            if e["base_run_id"] != base["train_run_id"]:
+                raise SystemExit("%s: base_run_id %s is not the listed %s base of seed %s (%s); a continued run "
+                                 "continues from the base of base_seed_of(draw, mode); %s"
+                                 % (_where(i, e), e["base_run_id"], e["kind"], e["base_seed"], base["train_run_id"],
+                                    _RUNS_FIX))
+    return entries
+
+
+def read_runs(protocol, pin, path=None):
+    """(runs manifest, sha256 of its bytes) of RUNS_PATH (read at call time) or `path`, or (None, None) when the file
+    does not exist; SystemExit on invalid JSON, a manifest check_runs refuses under read_mode(pin), or a D-08 decision
+    record whose bytes are not the ones the manifest names."""
+    path = RUNS_PATH if path is None else path
+    if not os.path.lexists(path):
+        return None, None
+    if os.path.islink(path) or not os.path.isfile(path):
+        raise SystemExit("%s is a symlink or not a file; the runs manifest is a committed file (`git checkout -- "
+                         "results/fewshot/runs.json`)" % path)
+    with open(path, "rb") as f:
+        raw = f.read()
+    try:
+        runs = json.loads(raw.decode("utf-8"))
+    except ValueError as e:
+        raise SystemExit("%s is not valid JSON (%s); %s" % (path, " ".join(str(e).split()), _RUNS_FIX))
+    check_runs(runs, protocol, pin, read_mode(pin))
+    with open(DECISION_PATH, "rb") as f:
+        have = sha256_bytes(f.read())
+    if runs["decision"]["sha256"] != have:
+        raise SystemExit("%s names the D-08 decision record sha256 %s, but %s hashes to %s; the allow-list binds the "
+                         "decision it was written under; %s" % (path, runs["decision"]["sha256"], DECISION_PATH, have,
+                                                               _RUNS_FIX))
+    return runs, sha256_bytes(raw)
+
+
+def admitted(protocol, pin, kind, dump_run_id, path=None):
+    """(entry, runs manifest sha256) of the listed entry of system `kind` whose dump_run_id is `dump_run_id`, or None
+    when it is not listed or no runs manifest exists (read_runs: the file is read and checked at every call, D-09)."""
+    runs, sha = read_runs(protocol, pin, path)
+    if runs is None:
+        return None
+    for e in runs["entries"]:
+        if e["kind"] == kind and e["dump_run_id"] == dump_run_id:
+            return e, sha
+    return None

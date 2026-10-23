@@ -86,12 +86,19 @@ pilot.protocol.require_frozen passes (protocol.json exists and its bytes hash to
 changed protocol stops it); no --n; no --force; no --out-root other than results/dumps; the manifest is the committed
 one and pilot.protocol.gated_split names the split; --device and --workers are the protocol's scoring device and
 workers (mps, 0). After the identity is hashed, and still before any file is parsed or a model loads, the dump run id
-must be one of the protocol's final seeds of that system (require_final_seed, pilot.protocol.final_seed_allowed), so a
-selection export, a retrained or an edited checkpoint never reaches test or HOTELS. Once means once: an existing
-gated dump is refused (and --force with it), and an npz an interrupted gated run left without its sidecar is refused
-naming the recovery (load_dump never read it: delete it and rerun the one command). An admitted dump's sidecar carries
-protocol_sha256, the pin; every other dump (val, zero-shot Laya, the baselines) has no such key and is scored
-exactly as before. Every gate refusal is one line starting GATE that names the checkpoint, the
+must be admitted (require_admitted): one of the protocol's final seeds of that system (pilot.protocol.
+final_seed_allowed), on test or HOTELS, or (Phase 9, D-09) a few-shot checkpoint of that system listed in the committed
+allow-list results/fewshot/runs.json, on test only. pilot.fewshot.admitted reads and checks that file at the call
+(pilot.fewshot.check_runs: this protocol's pin, the recorded D-08 mode, one entry per base seed and per (draw, k), the
+frozen draw digests and the base pairing, the masking proofs); a dump run id hashes the weights, the config or record
+and the tokenizer files, so a retrained or edited checkpoint is not listed. A selection export, a retrained or an
+edited checkpoint, an unlisted few-shot checkpoint, a listed one on HOTELS (fewshot.rules.test_admission) and any run
+under a runs manifest of another protocol never reach test or HOTELS. Once means once: an existing gated dump is
+refused (and --force with it), and an npz an interrupted gated run left without its sidecar is refused naming the
+recovery (load_dump never read it: delete it and rerun the one command). An admitted dump's sidecar carries
+protocol_sha256, the pin, and an admitted few-shot dump's also fewshot_runs_sha256, the sha256 of the runs manifest
+that listed it; every other dump (val, a masked base on val included, zero-shot Laya, the baselines) has no such key
+and is scored exactly as before. Every gate refusal is one line starting GATE that names the checkpoint, the
 split, the trigger and the fix.
 
 Module-level imports stay torch-, Ray- and laya-free.
@@ -113,7 +120,7 @@ import time
 import numpy as np
 
 from intents import INTENTS, QUESTIONS
-from pilot import berturk, dumps, protocol
+from pilot import berturk, dumps, fewshot, protocol
 from pilot import laya_adapter as la
 from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, holds_committed, manifest_is_committed, parse_jsonl,
                         questions_sha256, repo_relpath, require_committed_files, sha256_bytes, sha256_file,
@@ -241,8 +248,8 @@ def protocol_gate(a, kind, checkpoint, entry, manifest_path, device, trigger):
     pilot.protocol.require_frozen passes (protocol.json exists, its bytes hash to the pin); no --n; no --force; no
     --out-root other than results/dumps (dumps.DUMP_ROOT); the manifest is the committed data/splits.json and the
     protocol names the split (pilot.protocol.gated_split: its sha256 and uids_sha256); the device and worker count
-    are the protocol's scoring device and workers. The final-seed allow-list needs the hashed identity, so it runs
-    later (require_final_seed)."""
+    are the protocol's scoring device and workers. The allow-lists need the hashed identity, so they run later
+    (require_admitted)."""
     head = _gate_head(kind, checkpoint, entry, trigger)
     try:
         proto, pin = protocol.require_frozen()
@@ -268,17 +275,35 @@ def protocol_gate(a, kind, checkpoint, entry, manifest_path, device, trigger):
     return proto, pin, split
 
 
-def require_final_seed(proto, kind, rid, head):
-    """SystemExit (head + the reason) unless the dump run id `rid` of the hashed checkpoint identity is one of the
-    protocol's final seeds of system `kind` (pilot.protocol.final_seed_allowed). Runs after the identity is hashed and
-    before any checkpoint file is parsed or any model loads."""
+def require_admitted(proto, pin, kind, rid, split, head):
+    """("final", None) for a protocol final seed, ("fewshot", runs manifest sha256) for a few-shot checkpoint the
+    committed allow-list lists on test; SystemExit (head + the reason) otherwise. Runs after the identity is hashed
+    and before any checkpoint file is parsed or any model loads (D-09).
+
+    A final seed is the dump run id `rid` among the protocol's final seeds of system `kind` (Phase 8,
+    pilot.protocol.final_seed_allowed), admitted on test and HOTELS exactly as before. A few-shot checkpoint is `rid`
+    listed for `kind` in results/fewshot/runs.json, which pilot.fewshot.admitted reads and checks (pilot.fewshot.
+    check_runs: this pin, the recorded mode, the frozen draws and pairing, the masking proofs) at this call; it is
+    scored on test only (the frozen fewshot.rules.test_admission), never on HOTELS. A refused or unreadable runs
+    manifest, an unlisted checkpoint and a listed one on another split are refused in one line."""
     if protocol.final_seed_allowed(proto, kind, rid):
-        return
+        return "final", None
+    try:
+        got = fewshot.admitted(proto, pin, kind, rid)
+    except SystemExit as e:
+        raise SystemExit(head + "results/fewshot/runs.json is refused: %s" % " ".join(str(e.code).split())) from None
+    if got is not None:
+        if split != "test":
+            raise SystemExit(head + "it is the few-shot checkpoint %s of results/fewshot/runs.json, and a few-shot "
+                                    "checkpoint is scored on test only (fewshot.rules.test_admission); HOTELS is never "
+                                    "opened for it" % got[0]["checkpoint_name"])
+        return "fewshot", got[1]
     have = (proto.get("systems") or {}).get(kind)
     ids = [s.get("dump_run_id") for s in have.get("final_seeds") or []] if isinstance(have, dict) else []
-    raise SystemExit(head + "its dump run id %s is not one of the protocol's %s final seeds (%s); a selection export, "
-                            "a retrained or an edited checkpoint is never scored on test or HOTELS"
-                     % (rid, kind, ", ".join(map(str, ids)) or "none"))
+    raise SystemExit(head + "its dump run id %s is not one of the protocol's %s final seeds (%s) nor a %s few-shot "
+                            "checkpoint listed in results/fewshot/runs.json; a selection export, a retrained or an "
+                            "edited checkpoint is never scored on test or HOTELS"
+                     % (rid, kind, ", ".join(map(str, ids)) or "none", kind))
 
 
 def training_block(checkpoint, ident):
@@ -739,8 +764,9 @@ def main(argv=None, roles=None):
     else:
         rid = dumps.run_id(a.model)
     head = _gate_head(a.model, checkpoint, entry, trigger) if gate else None
-    if gate:
-        require_final_seed(gate[0], a.model, rid, head)      # the hashed identity in the allow-list, before any load
+    admission = None
+    if gate:                                                 # the hashed identity in an allow-list, before any load
+        admission = require_admitted(gate[0], gate[1], a.model, rid, gate[2], head)
     if a.model == "laya":
         seed, training = training_block(checkpoint, ident)   # WR-05: the training seed and recipe, bound by ident
     if a.n is None:
@@ -786,6 +812,8 @@ def main(argv=None, roles=None):
                   "timing": {"seconds": time.time() - t0}}
     if gate:
         fields = dict(fields, protocol_sha256=gate[1])       # admitted by the protocol gate: bound to its pin
+        if admission[0] == "fewshot":                        # and to the allow-list that listed it (D-09)
+            fields = dict(fields, fewshot_runs_sha256=admission[1])
     sidecar = dict(sidecar_base(entry, split_name, a.manifest, n_subset), **fields)
     path = dumps.write_dump(run_dir, split_name, logits, uids, sidecar)
     print("%s dump -> %s" % (rid, _shown(path)))

@@ -35,12 +35,34 @@ rewrites an existing primary record of this protocol into the fallback record na
 trigger, a primary base run that still fails after the LAYA-03 ladder); it refuses a missing PATH, a fallback record
 and a record of another protocol. Both trainers read the mode through pilot.fewshot.read_mode.
 
+--inspect CKPT... (09-05, D-01, D-04): require_frozen() first, the mode from the D-08 decision record; then each
+checkpoint on its own (entry_of): its kind from its files (rl_agent_config.json with training.ray_train: Laya;
+berturk_train.json: BERTurk), its identity and dump run id exactly as score.py computes them (pilot.weights.identity and
+pilot.dumps.run_id; pilot.berturk.identity and dump_run_id), its record read from the bytes that identity hashed, a run
+id that is its canonical config's, a finished run (Laya: final.json of that run and one epoch row per trained epoch;
+BERTurk: the record's epoch and rows), its binding re-checked under the recorded mode (a base: pilot.fewshot.check_base
+against the protocol-pinned chosen canonical, the Laya rung the record's; a continued run: check_continued against the
+base canonical and run id its record carries), and its masking proof (pilot.fewshot.proof_problems and check_entry). It
+prints one runs-manifest entry per checkpoint (pilot.fewshot.ENTRY_KEYS: ids, digests, counts, wall clock by
+WALL_RULE and losses; never a uid list or message text).
+
+--runs-manifest CKPT... --out PATH (09-05, D-04, D-07, D-09): require_frozen() first; an existing PATH is refused (the
+allow-list is written once); every checkpoint through entry_of; every continued entry's base among the inputs (the
+same train run id), its canonical base digests (base_model_sha256, base_config_sha256, base_files_sha256) that base
+checkpoint's identity and its record's base canonical that base's own; a missing slot (pilot.fewshot.slots) is refused
+naming it; then pilot.fewshot.check_runs, and the manifest (schema fewshot-runs/1: protocol_sha256, mode, the decision
+record's path and sha256, the sorted tags, WALL_RULE, the entries sorted by (kind, stage, seed, draw, k)) is written
+atomically as key-sorted JSON with one trailing newline. score.py's protocol gate admits exactly its dump run ids, on
+test only, once (pilot.fewshot.admitted).
+
 usage:
     python fewshot.py --support-sets                     # refused until protocol.json is frozen (plan 08-10)
     python fewshot.py --support-sets --manifest OTHER_DIR/splits.json
     python fewshot.py --counts                           # rows, items and steps of every Phase 9 training run
     python fewshot.py --projection --out results/fewshot/projection.json          # the D-08 record, written once
     python fewshot.py --projection --ladder-failure TEXT --out results/fewshot/projection.json   # primary -> fallback
+    python fewshot.py --inspect ckpt-fewshot-base-s0 ckpt-fewshot-d0-k10   # one allow-list entry per checkpoint
+    python fewshot.py --runs-manifest ckpt-fewshot-* ckpt-berturk-fewshot-* --out results/fewshot/runs.json   # once
 """
 import argparse
 import json
@@ -48,7 +70,7 @@ import math
 import os
 
 import pilot.data
-from pilot import compute, fewshot, protocol, runs, spike
+from pilot import berturk, compute, dumps, fewshot, protocol, runs, spike
 from pilot.data import REPO_ROOT, parse_jsonl, repo_relpath, sha256_bytes, verify_split_file, write_atomic
 
 SOURCE_SPLIT = fewshot.SOURCE_SPLIT
@@ -243,6 +265,211 @@ def projection_mode(manifest_path, out, ladder_failure=None):
     return record
 
 
+# ---- 09-05: the allow-list of few-shot checkpoints (D-01, D-04, D-09) ----
+
+def _read_bound(path, sha, what):
+    """The bytes of `path`, refused unless they hash to `sha` (the digest the checkpoint identity recorded)."""
+    with open(path, "rb") as f:
+        raw = f.read()
+    if sha256_bytes(raw) != sha:
+        raise SystemExit("%s changed after it was hashed (%s); rerun the command" % (what, os.path.basename(path)))
+    return raw
+
+
+def checkpoint_kind(ckpt):
+    """'laya' or 'berturk' from the files of a checkpoint dir; SystemExit for a missing dir, both or neither."""
+    if not os.path.isdir(ckpt):
+        raise SystemExit("%s is not a checkpoint dir; pass a ray_train.py or berturk_train.py few-shot checkpoint"
+                         % ckpt)
+    laya = os.path.isfile(os.path.join(ckpt, "rl_agent_config.json"))
+    bert = os.path.isfile(os.path.join(ckpt, berturk.RECORD))
+    if laya == bert:
+        raise SystemExit("%s holds %s; a few-shot checkpoint is a ray_train.py checkpoint (rl_agent_config.json) or a "
+                         "berturk_train.py one (%s)" % (ckpt, "both" if laya else "neither", berturk.RECORD))
+    return "laya" if laya else "berturk"
+
+
+def _laya_run(ckpt):
+    """(identity, dump run id, run id, canonical, record, wall clock, losses) of a finished ray_train.py checkpoint,
+    read from the config bytes its identity hashed; SystemExit on a missing run record, a run id that is not its
+    canonical's, or an unfinished run (no final.json of this run, or not one epoch row per trained epoch)."""
+    from pilot.weights import identity
+    ident = identity(ckpt)
+    rid = dumps.run_id("laya", ident)
+    cfg = json.loads(_read_bound(os.path.join(ckpt, "rl_agent_config.json"), ident["config_sha256"],
+                                 "rl_agent_config.json").decode("utf-8"))
+    tr = cfg.get("training") if isinstance(cfg, dict) else None
+    rt = tr.get("ray_train") if isinstance(tr, dict) else None
+    if not isinstance(rt, dict) or not isinstance(rt.get("canonical"), dict) or not isinstance(rt.get("record"),
+                                                                                                dict):
+        raise SystemExit("%s holds no ray_train.py run record (training.ray_train run_id, canonical, record); a "
+                         "few-shot checkpoint is the --out of a ray_train.py --fewshot-* run" % ckpt)
+    run, canon, rec = rt.get("run_id"), rt["canonical"], rt["record"]
+    if run != runs.run_id(canon):
+        raise SystemExit("%s names run %r, but its canonical config is run %s; pass an unedited checkpoint"
+                         % (ckpt, run, runs.run_id(canon)))
+    final = os.path.join(ckpt, "final.json")
+    try:
+        with open(final, encoding="utf-8") as f:
+            mark = json.load(f)
+    except (OSError, ValueError):
+        mark = None
+    stop = canon.get("stop_after_epoch") or canon.get("epochs")
+    rows = rec.get("epochs") or []
+    if not isinstance(mark, dict) or mark.get("run_id") != run or tr.get("epoch") != stop or len(rows) != stop:
+        done = "of this run" if isinstance(mark, dict) and mark.get("run_id") == run else "missing"
+        raise SystemExit("%s is not a finished run of %s (final.json %s, epoch %r and %d epoch rows of %r); pass the "
+                         "--out of a ray_train.py run that finished" % (ckpt, run, done, tr.get("epoch"), len(rows),
+                                                                        stop))
+    terms = [row.get(key) for row in rows for key in ("train_s", "save_s")] + [rec.get("load_s"),
+                                                                              rec.get("final_save_s")]
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in terms):
+        raise SystemExit("%s: the run record lacks a train_s, save_s, load_s or final_save_s (WALL_RULE); pass the "
+                         "--out of a ray_train.py run that finished" % ckpt)
+    return ident, rid, run, canon, rec, float(sum(terms)), [row.get("loss") for row in rows]
+
+
+def _berturk_run(ckpt):
+    """(identity, dump run id, run id, canonical, record, wall clock, losses) of a finished berturk_train.py
+    checkpoint, from the berturk_train.json bytes its identity hashed (pilot.berturk.read_record); SystemExit on a
+    missing file, a run id that is not its canonical's, or an unfinished run."""
+    berturk.require_files(ckpt, "few-shot checkpoint")
+    ident = berturk.identity(ckpt)
+    rid = berturk.dump_run_id(ident)
+    doc = berturk.read_record(ckpt, ident)
+    run, canon, rec = doc["run_id"], doc["canonical"], doc.get("record")
+    if run != berturk.run_id(canon):
+        raise SystemExit("%s names run %r, but its canonical config is run %s; pass an unedited checkpoint"
+                         % (ckpt, run, berturk.run_id(canon)))
+    stop = canon.get("stop_after_epoch") or canon.get("epochs")
+    rows = (rec.get("epochs") or []) if isinstance(rec, dict) else []
+    if not isinstance(rec, dict) or doc.get("epoch") != stop or len(rows) != stop:
+        raise SystemExit("%s is not a finished run of %s (epoch %r and %d epoch rows of %r); pass the --out of a "
+                         "berturk_train.py run that finished" % (ckpt, run, doc.get("epoch"), len(rows), stop))
+    terms = [row.get("train_s") for row in rows] + [rec.get("load_s")]
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in terms):
+        raise SystemExit("%s: the run record lacks a train_s or load_s (WALL_RULE); pass the --out of a "
+                         "berturk_train.py run that finished" % ckpt)
+    return ident, rid, run, canon, rec, float(sum(terms)), [row.get("loss") for row in rows]
+
+
+def entry_of(ckpt, proto, pin, mode):
+    """(runs-manifest entry, {"identity", "canonical", "base"}) of one few-shot checkpoint, re-validated on its own
+    (see the module docstring); SystemExit naming the checkpoint and what fails."""
+    block = fewshot._block(proto)
+    kind = checkpoint_kind(ckpt)
+    ident, rid, run, canon, rec, wall, losses = (_laya_run if kind == "laya" else _berturk_run)(ckpt)
+    name = os.path.basename(os.path.normpath(os.path.abspath(ckpt)))
+    bind = canon.get("fewshot")
+    if not isinstance(bind, dict) or bind.get("stage") not in fewshot.STAGES:
+        raise SystemExit("%s (run %s) is not a Phase 9 run: its canonical config carries no few-shot binding; only "
+                         "a --fewshot-base or --fewshot-draw checkpoint is listed" % (name, run))
+    stage, proof = bind["stage"], rec.get("fewshot")
+    if not isinstance(proof, dict) or proof.get("stage") != stage or proof.get("protocol_sha256") != pin:
+        raise SystemExit("%s (run %s): its record's masking proof is %s, not a %s proof under the frozen protocol %s; "
+                         "retrain it with this trainer" % (name, run, "absent" if not isinstance(proof, dict) else
+                                                           "stage %r of protocol %s" % (proof.get("stage"),
+                                                                                        proof.get("protocol_sha256")),
+                                                           stage, pin))
+    if proof.get("tags") != sorted(block["tags"]):
+        raise SystemExit("%s (run %s): its proof covers tags %r, not the frozen held-out tags %s"
+                         % (name, run, proof.get("tags"), sorted(block["tags"])))
+    try:
+        if stage == "base":
+            rung = fewshot.check_base(proto, pin, kind, canon, fewshot.chosen_canonical(proto, kind), mode)
+            if kind == "laya" and rec.get("rung") != rung:
+                raise SystemExit("its record names rung %r, its canonical config rung %s" % (rec.get("rung"), rung))
+            base, draw, k, digest, base_seed, base_run = None, None, None, None, None, None
+        else:
+            base = proof.get("base")
+            if not isinstance(base, dict) or not isinstance(base.get("canonical"), dict):
+                raise SystemExit("its record names no base run id and canonical config")
+            base_run = base.get("run_id")
+            want = (runs.run_id if kind == "laya" else berturk.run_id)(base["canonical"])
+            if base_run != want:
+                raise SystemExit("its record's base names run %r, but that canonical config is run %s"
+                                 % (base_run, want))
+            draw, k, digest = bind.get("draw"), bind.get("k"), bind.get("digest")
+            fewshot.check_continued(proto, pin, kind, canon, base["canonical"], base_run, draw, k, mode)
+            if (proof.get("draw"), proof.get("k"), proof.get("digest")) != (draw, k, digest):
+                raise SystemExit("its proof names draw %r k %r digest %r, its binding draw %r k %r digest %r"
+                                 % (proof.get("draw"), proof.get("k"), proof.get("digest"), draw, k, digest))
+            base_seed = fewshot.base_seed_of(block, draw, mode)
+    except SystemExit as e:
+        raise SystemExit("%s (run %s) no longer binds to the frozen protocol: %s"
+                         % (name, run, " ".join(str(e.code).split()))) from None
+    missing = [key for key in fewshot.PROOF_KEYS[(kind, stage)] if key not in proof]
+    if missing:
+        raise SystemExit("%s (run %s): its masking proof lacks %s; retrain it with this trainer"
+                         % (name, run, ", ".join(missing)))
+    entry = {"kind": kind, "stage": stage, "seed": canon.get("seed"), "draw": draw, "k": k, "digest": digest,
+             "base_seed": base_seed, "base_run_id": base_run, "train_run_id": run, "dump_run_id": rid,
+             "checkpoint_name": name, "rung": rec.get("rung") if kind == "laya" else None,
+             "fallback": rec.get("fallback") if kind == "laya" else None,
+             "weaker": rec.get("weaker") if kind == "laya" else None,
+             "proof": {key: proof[key] for key in fewshot.PROOF_KEYS[(kind, stage)]}, "wall_clock_s": wall,
+             "loss_by_epoch": losses}
+    fewshot.check_entry(entry, block, mode, "%s (run %s)" % (name, run))
+    return entry, {"identity": ident, "canonical": canon, "base": base}
+
+
+def inspect_mode(ckpts):
+    """--inspect: require_frozen first, the recorded mode, then entry_of per checkpoint, printed as JSON."""
+    proto, _, pin = frozen_protocol()                           # first: nothing is read without the frozen protocol
+    mode = fewshot.read_mode(pin)
+    out = [entry_of(c, proto, pin, mode)[0] for c in ckpts]
+    print(json.dumps(out, ensure_ascii=False, indent=2, sort_keys=True))
+    return out
+
+
+def _base_digests(kind, ident):
+    """{base_model_sha256, base_config_sha256, base_files_sha256} a continued run's canonical config carries for a
+    base checkpoint of this identity (as ray_train.py and berturk_train.py compute them)."""
+    return {"base_model_sha256": ident["model_sha256"], "base_config_sha256": ident["config_sha256"],
+            "base_files_sha256": dumps.files_digest(ident["files_sha256"])}
+
+
+def runs_manifest_mode(ckpts, out):
+    """--runs-manifest: the allow-list, written once (see the module docstring)."""
+    proto, block, pin = frozen_protocol()                       # first: nothing is read without the frozen protocol
+    mode = fewshot.read_mode(pin)
+    if os.path.lexists(out):
+        raise SystemExit("%s exists; the runs manifest is written once, before any few-shot test dump" % out)
+    got = [entry_of(c, proto, pin, mode) for c in ckpts]
+    bases = {(e["kind"], e["train_run_id"]): (e, info) for e, info in got if e["stage"] == "base"}
+    for e, info in got:
+        if e["stage"] != "continued":
+            continue
+        name = e["checkpoint_name"]
+        if (e["kind"], e["base_run_id"]) not in bases:
+            raise SystemExit("%s continues from base run %s, which is not among the checkpoints given; list its base "
+                             "too" % (name, e["base_run_id"]))
+        b, b_info = bases[(e["kind"], e["base_run_id"])]
+        for key, want in sorted(_base_digests(e["kind"], b_info["identity"]).items()):
+            if info["canonical"].get(key) != want:
+                raise SystemExit("%s: its canonical %s is %s, but its base %s holds %s; the continued run must come "
+                                 "from that base checkpoint, unedited" % (name, key, info["canonical"].get(key),
+                                                                         b["checkpoint_name"], want))
+        if info["base"]["canonical"] != b_info["canonical"]:
+            raise SystemExit("%s: its record's base canonical config is not its base %s's own; pass the base it "
+                             "continued from" % (name, b["checkpoint_name"]))
+    entries = sorted((e for e, _ in got), key=fewshot.entry_key)
+    have = {(e["kind"], e["stage"], e["seed"], e["draw"], e["k"]) for e in entries}
+    missing = [s for s in fewshot.slots(block, mode) if s not in have]
+    if missing:
+        raise SystemExit("the few-shot set is incomplete: no checkpoint for %s; train and list every base and "
+                         "continued run of the %s protocol" % ("; ".join(fewshot.slot_name(s) for s in missing),
+                                                               mode))
+    with open(fewshot.DECISION_PATH, "rb") as f:
+        decision = {"path": repo_relpath(fewshot.DECISION_PATH), "sha256": sha256_bytes(f.read())}
+    record = {"schema": fewshot.RUNS_SCHEMA, "protocol_sha256": pin, "mode": mode, "decision": decision,
+              "tags": sorted(block["tags"]), "wall_rule": fewshot.WALL_RULE, "entries": entries}
+    fewshot.check_runs(record, proto, pin, mode)
+    write_record(out, record)
+    print(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True))
+    return record
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     mode = ap.add_mutually_exclusive_group()
@@ -252,15 +479,31 @@ def main(argv=None):
                       help="print the rows, items and optimizer steps of every Phase 9 training run")
     mode.add_argument("--projection", action="store_true",
                       help="compute the D-08 projection and compute-fallback decision and write it to --out (once)")
-    ap.add_argument("--out", default=None, help="--projection: the decision record (results/fewshot/projection.json)")
+    mode.add_argument("--inspect", nargs="+", metavar="CKPT",
+                      help="re-validate few-shot checkpoints and print one runs-manifest entry each")
+    mode.add_argument("--runs-manifest", nargs="+", metavar="CKPT",
+                      help="write the allow-list of every few-shot checkpoint to --out (once)")
+    ap.add_argument("--out", default=None, help="--projection: the decision record (results/fewshot/projection.json); "
+                                                "--runs-manifest: the allow-list (results/fewshot/runs.json)")
     ap.add_argument("--ladder-failure", default=None, metavar="TEXT",
                     help="--projection: turn the recorded primary decision at --out into the fallback, naming the "
                          "primary base run that still failed after the LAYA-03 ladder")
     ap.add_argument("--manifest", default=None, help="the splits manifest (default data/splits.json)")
     a = ap.parse_args(argv)
     manifest = a.manifest or pilot.data.DEFAULT_MANIFEST
-    if not a.projection and (a.out is not None or a.ladder_failure is not None):
-        ap.error("--out and --ladder-failure belong to --projection")
+    if a.ladder_failure is not None and not a.projection:
+        ap.error("--out and --ladder-failure belong to --projection (--out also to --runs-manifest)")
+    if a.out is not None and not (a.projection or a.runs_manifest):
+        ap.error("--out and --ladder-failure belong to --projection (--out also to --runs-manifest)")
+    if a.manifest is not None and (a.inspect or a.runs_manifest):
+        ap.error("--manifest belongs to --support-sets, --counts and --projection; --inspect and --runs-manifest read "
+                 "the checkpoints' own records")
+    if a.inspect:
+        return inspect_mode(a.inspect)
+    if a.runs_manifest:
+        if not a.out:
+            ap.error("--runs-manifest needs --out PATH (results/fewshot/runs.json)")
+        return runs_manifest_mode(a.runs_manifest, a.out)
     if a.projection:
         if not a.out:
             ap.error("--projection needs --out PATH (results/fewshot/projection.json)")
@@ -268,7 +511,7 @@ def main(argv=None):
     if a.counts:
         return counts_mode(manifest)
     if not a.support_sets:
-        ap.error("pass a mode: --support-sets, --counts or --projection (Phase 9 adds the training and scoring modes)")
+        ap.error("pass a mode: --support-sets, --counts, --projection, --inspect or --runs-manifest")
     return support_sets(manifest)
 
 

@@ -5,8 +5,8 @@ The gate replaced the Phase 5 Laya and Phase 6 BERTurk test interlocks (refuse_f
 It triggers for a fine-tuned checkpoint on the same content as they did, extended to HOTELS (score.gate_trigger), and
 admits a run only when pilot.protocol.require_frozen passes, no --n, --force or --out-root other than results/dumps is
 given, the manifest is the committed one and names a gated split, the device and worker count are the protocol's, and
-the hashed dump run id is one of the protocol's final seeds of that system (score.require_final_seed). An admitted
-dump carries protocol_sha256; an existing gated dump, or an npz an interrupted gated run left without its sidecar, is
+the hashed dump run id is one of the protocol's final seeds of that system or a listed few-shot checkpoint on test
+(score.require_admitted). An admitted dump carries protocol_sha256; an existing gated dump, or an npz an interrupted gated run left without its sidecar, is
 refused.
 
 Every test runs on the synthetic snapshot with pilot.data.DEFAULT_MANIFEST, pilot.protocol.PROTOCOL_PATH and
