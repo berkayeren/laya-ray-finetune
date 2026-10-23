@@ -1,0 +1,267 @@
+"""score.py's protocol gate (REP-01; ROADMAP Phase 8 criteria 1 and 4): the one place a model runs opens test and
+HOTELS to the protocol-bound final seeds, once, and to nothing else.
+
+The gate replaced the Phase 5 Laya and Phase 6 BERTurk test interlocks (refuse_finetuned_test, refuse_berturk_test).
+It triggers for a fine-tuned checkpoint on the same content as they did, extended to HOTELS (score.gate_trigger), and
+admits a run only when pilot.protocol.require_frozen passes, no --n, --force or --out-root other than results/dumps is
+given, the manifest is the committed one and names a gated split, the device and worker count are the protocol's, and
+the hashed dump run id is one of the protocol's final seeds of that system (score.require_final_seed). An admitted
+dump carries protocol_sha256; an existing gated dump, or an npz an interrupted gated run left without its sidecar, is
+refused.
+
+Every test runs on the synthetic snapshot with pilot.data.DEFAULT_MANIFEST, pilot.protocol.PROTOCOL_PATH and
+PROTOCOL_SHA256 and pilot.dumps.DUMP_ROOT monkeypatched to temporary stand-ins (fake_protocol writes a minimal
+protocol/1 file holding every REQUIRED_KEYS entry), with the tiny offline Laya checkpoint (tests/tiny_laya.py) and the
+tiny BERTurk export of tests/test_score_berturk.py. Offline, no Ray: runs in `make test`.
+"""
+import json
+import os
+import shutil
+
+import pytest
+
+import pilot.data
+import pilot.weights
+import score
+from conftest import prepared
+from pilot import dumps
+from pilot import protocol as pr
+from tiny_laya import tiny_checkpoint
+
+pytestmark = pytest.mark.unit
+
+TINY_T = 1.3
+
+
+def fake_protocol(path, manifest, systems, device="cpu", workers=0):
+    """Write a minimal protocol/1 file to `path` and return (path, sha256): every pilot.protocol.REQUIRED_KEYS entry,
+    the splits of `manifest` (pilot.protocol.splits_block: the manifest must be the monkeypatched committed one),
+    systems {kind: [dump run id, ...]} as final seeds 0, 1, ... and a scoring block on `device` with `workers`."""
+    p = {k: {} for k in pr.REQUIRED_KEYS}
+    p.update(schema=pr.SCHEMA, splits=pr.splits_block(manifest),
+             systems={kind: {"final_seeds": [{"seed": i, "dump_run_id": r} for i, r in enumerate(ids)],
+                             "dump_run_ids": list(ids)} for kind, ids in systems.items()},
+             scoring={"splits": list(pr.GATED), "device": device, "workers": workers})
+    raw = pr.protocol_bytes(p)
+    with open(str(path), "wb") as f:
+        f.write(raw)
+    return str(path), pilot.data.sha256_bytes(raw)
+
+
+def finetuned(path, temperature=TINY_T):
+    """A tiny Laya checkpoint marked fine-tuned (rl_agent_config.json fine_tuned true); returns its dir."""
+    ckpt = tiny_checkpoint(path, temperature=temperature)
+    cfg_path = os.path.join(ckpt, "rl_agent_config.json")
+    with open(cfg_path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    cfg["fine_tuned"] = True
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
+    return ckpt
+
+
+class Snap:
+    """The gate's test bench: synthetic splits, the committed-manifest stand-in, a fine-tuned tiny checkpoint, its
+    dump run id and a temp protocol binding it under systems.laya."""
+
+
+@pytest.fixture
+def snap(tmp_path, synthetic_raw, monkeypatch):
+    import torch
+    threads = torch.get_num_threads()
+    s = Snap()
+    s.out_dir, s.manifest = prepared(tmp_path, synthetic_raw)
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", s.manifest)
+    s.root = str(tmp_path / "dumps")
+    monkeypatch.setattr(dumps, "DUMP_ROOT", s.root)
+    s.ckpt = finetuned(tmp_path / "ckpt")
+    s.rid = dumps.run_id("laya", pilot.weights.identity(s.ckpt))
+    s.tmp = tmp_path
+    s.bind = lambda systems=None, device="cpu", workers=0: _bind(monkeypatch, s, systems, device, workers)
+    s.path, s.sha = s.bind()
+    yield s
+    torch.set_num_threads(threads)
+
+
+def _bind(monkeypatch, s, systems, device, workers):
+    path, sha = fake_protocol(s.tmp / "protocol.json", s.manifest, systems or {"laya": [s.rid]}, device, workers)
+    monkeypatch.setattr(pr, "PROTOCOL_PATH", path)
+    monkeypatch.setattr(pr, "PROTOCOL_SHA256", sha)
+    return path, sha
+
+
+def split(s, name):
+    return os.path.join(s.out_dir, "splits", name + ".jsonl")
+
+
+def laya_argv(s, name, *extra, ckpt=None):
+    return [split(s, name), "--model", "laya", "--checkpoint", ckpt or s.ckpt, "--workers", "0", "--device", "cpu",
+            "--manifest", s.manifest] + list(extra)
+
+
+def files(root):
+    """Every file under root (relative paths), for 'nothing was written' checks."""
+    out = []
+    for d, _, names in os.walk(str(root)):
+        out += [os.path.relpath(os.path.join(d, n), str(root)) for n in names]
+    return sorted(out)
+
+
+def refused(argv, *needles):
+    """Run score.main(argv); assert a one-line gate refusal holding every needle; return its text."""
+    with pytest.raises(SystemExit) as e:
+        score.main(argv)
+    text = str(e.value.code)
+    assert text.startswith(score.GATE), text
+    assert "\n" not in text, text
+    for n in needles:
+        assert n in text, (n, text)
+    return text
+
+
+def no_identity(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("the checkpoint was hashed before the gate refused")
+    monkeypatch.setattr(pilot.weights, "identity", boom)
+
+
+def no_laya_load(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("the checkpoint was loaded before the gate refused")
+    monkeypatch.setattr(score, "load_agent", boom)
+
+
+def sidecar(run_dir, name):
+    with open(os.path.join(run_dir, name + ".json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+# ---- admitted, once ----
+
+def test_gate_admits_a_bound_final_seed_once(snap, monkeypatch):
+    run_dir, name = score.main(laya_argv(snap, "test"))
+    assert (run_dir, name) == (os.path.join(snap.root, snap.rid), "test")
+    assert sidecar(run_dir, "test")["protocol_sha256"] == snap.sha
+    run_dir, name = score.main(laya_argv(snap, "hotels_probe"))
+    assert name == "hotels_probe"
+    side = sidecar(run_dir, "hotels_probe")
+    assert side["protocol_sha256"] == snap.sha and side["split"]["role"] == "ood_probe"
+    logits, uids, _, entry = dumps.load_dump(run_dir, "hotels_probe", snap.manifest)
+    assert logits.shape == (entry["n_messages"], 48) and all(u.startswith("hotel_") for u in uids)
+    before = files(snap.root)
+    refused(laya_argv(snap, "test"), "already exists", "once")
+    refused(laya_argv(snap, "test", "--force"), "--force")
+    refused(laya_argv(snap, "hotels_probe", "--n", "3"), "--n")
+    refused(laya_argv(snap, "test", "--out-root", str(snap.tmp / "elsewhere")), "--out-root")
+    assert files(snap.root) == before and not (snap.tmp / "elsewhere").exists()
+
+
+def test_gate_accepts_the_dump_root_spelled_out(snap):
+    run_dir, _ = score.main(laya_argv(snap, "test", "--out-root", snap.root))
+    assert sidecar(run_dir, "test")["protocol_sha256"] == snap.sha
+
+
+# ---- refused before hashing: the protocol itself ----
+
+@pytest.mark.parametrize("how", ["missing", "unpinned", "changed"])
+def test_gate_refuses_without_the_frozen_protocol_before_hashing(snap, monkeypatch, how):
+    if how == "missing":
+        os.remove(snap.path)
+    elif how == "unpinned":
+        monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)
+    else:
+        with open(snap.path, "rb") as f:
+            raw = f.read()
+        with open(snap.path, "wb") as f:
+            f.write(raw.replace(b'"workers": 0', b'"workers": 1'))
+    no_identity(monkeypatch)
+    for name in ("test", "hotels_probe"):
+        refused(laya_argv(snap, name), "fine-tuned laya checkpoint", "protocol")
+    assert files(snap.root) == []
+
+
+@pytest.mark.parametrize("device, workers, flags, needle", [
+    ("mps", 0, [], "device"),
+    ("cpu", 0, ["--workers", "2"], "workers"),
+], ids=["device", "workers"])
+def test_gate_refuses_another_device_or_worker_count_before_hashing(snap, monkeypatch, device, workers, flags,
+                                                                     needle):
+    snap.bind(device=device, workers=workers)
+    no_identity(monkeypatch)
+    argv = laya_argv(snap, "test")
+    argv[argv.index("--workers"):argv.index("--workers") + 2] = []
+    refused(argv + (flags or ["--workers", "0"]), needle)
+    assert files(snap.root) == []
+
+
+def test_gate_refuses_a_manifest_copy_of_the_committed_splits(snap, monkeypatch):
+    """Committed test content under a byte-different manifest triggers the gate (content key) and is refused: only
+    the committed manifest admits a gated run."""
+    shutil.copytree(os.path.join(snap.out_dir, "splits"), str(snap.tmp / "copy" / "splits"))
+    with open(snap.manifest, "rb") as f:
+        (snap.tmp / "copy" / "splits.json").write_bytes(f.read() + b"\n")
+    no_identity(monkeypatch)
+    argv = laya_argv(snap, "test")
+    argv[0] = str(snap.tmp / "copy" / "splits" / "test.jsonl")
+    argv[argv.index("--manifest") + 1] = str(snap.tmp / "copy" / "splits.json")
+    refused(argv, "holds committed test content", "committed")
+
+
+# ---- refused after hashing, before any load: not a final seed ----
+
+def test_gate_refuses_a_checkpoint_outside_the_final_seeds(snap, monkeypatch):
+    other = finetuned(snap.tmp / "other", temperature=0.7)
+    rid = dumps.run_id("laya", pilot.weights.identity(other))
+    assert rid != snap.rid
+    no_laya_load(monkeypatch)
+    text = refused(laya_argv(snap, "test", ckpt=other), rid, snap.rid)
+    assert "never scored on test or HOTELS" in text
+    assert files(snap.root) == []
+
+
+def test_gate_refuses_an_orphan_npz(snap, monkeypatch):
+    os.makedirs(os.path.join(snap.root, snap.rid))
+    with open(os.path.join(snap.root, snap.rid, "test.npz"), "wb") as f:
+        f.write(b"half")
+    no_laya_load(monkeypatch)
+    text = refused(laya_argv(snap, "test"), "without its sidecar")
+    assert "load_dump never read it" in text and "delete it" in text
+
+
+# ---- ungated: val, zero-shot, the trigger texts ----
+
+def test_val_of_the_same_checkpoint_is_ungated(snap, monkeypatch):
+    monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)           # val never consults the protocol
+    run_dir, _ = score.main(laya_argv(snap, "val", "--out-root", str(snap.tmp / "val-dumps")))
+    assert "protocol_sha256" not in sidecar(run_dir, "val")
+
+
+def _entry_cases(s, name, manifest=None):
+    path = split(s, name)
+    with open(path, "rb") as f:
+        raw = f.read()
+    entry = pilot.data.verify_split_file(path, manifest_path=manifest or s.manifest, data=raw)
+    return entry, pilot.data.parse_jsonl(raw)
+
+
+def test_gate_trigger_texts(snap):
+    t_entry, t_cases = _entry_cases(snap, "test")
+    h_entry, h_cases = _entry_cases(snap, "hotels_probe")
+    v_entry, v_cases = _entry_cases(snap, "val")
+    m = snap.manifest
+    assert score.gate_trigger("laya", "multilingual", h_entry, m, h_cases) is None
+    assert score.gate_trigger("laya", "multilingual", t_entry, m, t_cases) is None
+    assert score.gate_trigger("laya", snap.ckpt, v_entry, m, v_cases) is None
+    assert score.gate_trigger("laya", snap.ckpt, t_entry, m, t_cases) == "is a test split under the committed manifest"
+    assert score.gate_trigger("laya", snap.ckpt, h_entry, m, h_cases) == \
+        "is a ood_probe split under the committed manifest"
+    for kind in ("majority", "prior"):
+        assert score.gate_trigger(kind, None, t_entry, m, t_cases) is None
+    assert score.gate_trigger("berturk", "x", t_entry, m, t_cases) == "is a split with role test"
+    assert score.gate_trigger("berturk", "x", h_entry, m, h_cases) == "is a split with role ood_probe"
+    assert score.gate_trigger("berturk", "x", v_entry, m, v_cases) is None
+    # committed content under a role that does not trigger: the content texts
+    assert score.gate_trigger("laya", snap.ckpt, dict(v_entry, sha256=t_entry["sha256"]), m, []) == \
+        "holds committed test content"
+    assert score.gate_trigger("berturk", "x", v_entry, m, v_cases + h_cases[:1]) == \
+        "holds committed hotels_probe content"
