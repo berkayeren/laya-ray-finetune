@@ -20,11 +20,13 @@ import json
 import os
 import subprocess
 import sys
+from fractions import Fraction
 
 import numpy as np
 import pytest
 
 import pilot.data
+import pilot.latency
 from pilot import verdict as v
 
 pytestmark = pytest.mark.unit
@@ -325,3 +327,144 @@ def test_verdict_is_numpy_and_stdlib_only():
     env = {k: val for k, val in os.environ.items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable, "-c", code], cwd=pilot.data.REPO_ROOT, env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+# ---- the collapse rule (A6) and criteria (b) and (c) ----
+
+def test_micro_fraction_is_exact():
+    assert v.micro_fraction(135, 489, 348) == Fraction(10, 41)              # the label prior on val, global θ 0.12
+    assert v.micro_fraction(0, 0, 0) == Fraction(0)
+    assert v.micro_fraction(np.int64(426), np.int64(57), np.int64(142)) == Fraction(852, 1051)
+    assert isinstance(v.micro_fraction(1, 2, 3), Fraction)
+
+
+@pytest.mark.parametrize("counts", [(-1, 0, 0), (1.0, 0, 0), (True, 0, 0), ("1", 0, 0), (None, 0, 0), (1, 0, -2)])
+def test_micro_fraction_refuses_a_negative_or_non_integer_count(counts):
+    with pytest.raises(SystemExit, match="count"):
+        v.micro_fraction(*counts)
+
+
+def test_parse_fraction():
+    assert v.parse_fraction("10/41") == Fraction(10, 41)
+    assert v.parse_fraction("520/2163") == Fraction(520, 2163)
+    assert v.parse_fraction("0/1") == Fraction(0)
+
+
+@pytest.mark.parametrize("text", ["0.2439", "10/0", "-1/2", " 1/2", "1/2 ", "1 / 2", "01/2", "1/02", "", "1/2/3",
+                                  0.5, None, Fraction(1, 2)])
+def test_parse_fraction_refuses_anything_but_a_over_b(text):
+    with pytest.raises(SystemExit, match="fraction"):
+        v.parse_fraction(text)
+
+
+def test_collapse_val_floor_is_strict():
+    r = v.collapse_val(Fraction(10, 41), Fraction(10, 41))
+    assert r == {"component": "val_floor", "value": "10/41", "floor": "10/41", "collapsed": False}
+    assert v.collapse_val(Fraction(9, 41), Fraction(10, 41))["collapsed"] is True
+    assert v.collapse_val(Fraction(852, 1051), Fraction(10, 41))["collapsed"] is False
+    assert v.collapse_val("852/1051", "10/41")["value"] == "852/1051"          # "a/b" text is parsed exactly
+
+
+def test_collapse_test_floor_follows_the_val_rule():
+    r = v.collapse_test_floor(Fraction(520, 2163), Fraction(520, 2163))
+    assert r == {"component": "test_floor", "value": "520/2163", "floor": "520/2163", "collapsed": False}
+    assert v.collapse_test_floor(Fraction(519, 2163), Fraction(520, 2163))["collapsed"] is True
+    # just below the floor in exact arithmetic, though equal as a float64 rounding would say otherwise
+    tiny = Fraction(520, 2163) - Fraction(1, 10 ** 30)
+    assert float(tiny) == float(Fraction(520, 2163)) and v.collapse_test_floor(tiny, Fraction(520, 2163))["collapsed"]
+
+
+@pytest.mark.parametrize("fn", ["collapse_val", "collapse_test_floor"])
+@pytest.mark.parametrize("value, floor", [(0.2439, Fraction(10, 41)), (Fraction(10, 41), 0.2439),
+                                          (None, Fraction(10, 41)), (Fraction(10, 41), None)])
+def test_collapse_floors_refuse_floats_and_missing_values(fn, value, floor):
+    with pytest.raises(SystemExit):
+        getattr(v, fn)(value, floor)
+
+
+def test_collapse_loss():
+    assert v.collapse_loss([0.8, 0.5, 0.28])["collapsed"] is False
+    r = v.collapse_loss([0.5, 0.6])
+    assert r["collapsed"] is True and r["component"] == "loss" and r["first"] == 0.5 and r["last"] == 0.6
+    assert v.collapse_loss([0.5, 0.5])["collapsed"] is False                  # equal first and last: not divergent
+    assert v.collapse_loss([0.5, up(0.5)])["collapsed"] is True
+    assert v.collapse_loss([0.42])["collapsed"] is False
+    for bad in ([0.5, float("nan")], [float("inf"), 0.1], [0.3, float("-inf"), 0.1]):
+        r = v.collapse_loss(bad)
+        assert r["collapsed"] is True and r["non_finite"] is True
+    assert v.collapse_loss([0.8, 0.5])["non_finite"] is False
+    assert json.loads(json.dumps(v.collapse_loss([float("nan"), 0.1]), allow_nan=False))["collapsed"] is True
+
+
+@pytest.mark.parametrize("losses", [[], None, (), "0.5", [0.5, None], [0.5, "0.4"], [True, 0.4]])
+def test_collapse_loss_refuses_an_empty_or_malformed_list(losses):
+    with pytest.raises(SystemExit, match="loss"):
+        v.collapse_loss(losses)
+
+
+SEEDS = {"laya": [0, 1, 2], "berturk": [0, 1, 2]}
+
+
+def _rows(*collapsed):
+    return [dict(v.collapse_loss([0.8, 0.3 if not c else 0.9]), run="run-%d" % i) for i, c in enumerate(collapsed)]
+
+
+def test_criterion_b():
+    rule = v.DEFAULT_CRITERIA["b"]
+    r = v.criterion_b(_rows(False, False), SEEDS, rule)
+    assert r["status"] == "PASS" and r["seeds"] == SEEDS and len(r["rows"]) == 2 and r["rule"] == rule["rule"]
+    assert v.criterion_b(_rows(False, True), SEEDS, rule)["status"] == "FAIL"
+    assert v.criterion_b(_rows(False), {"laya": [0, 1], "berturk": [0, 1, 2]}, rule)["status"] == "FAIL"
+    assert v.criterion_b(_rows(False), {"laya": [0, 0, 1], "berturk": [0, 1, 2]}, rule)["status"] == "FAIL"
+    assert v.criterion_b(_rows(False), {"laya": [0, 1, 2, 3], "berturk": [0, 1, 2]}, rule)["status"] == "FAIL"
+    rule2 = dict(rule, seeds_per_model=2)                                      # the count is read from the rule
+    assert v.criterion_b(_rows(False), {"laya": [0, 1], "berturk": [3, 4]}, rule2)["status"] == "PASS"
+
+
+@pytest.mark.parametrize("rows, seeds", [([], SEEDS), (None, SEEDS), ([{"run": "x"}], SEEDS),
+                                         ([{"collapsed": "no"}], SEEDS), ([{"collapsed": 0}], SEEDS),
+                                         ("ok", {}), ("ok", None), ("ok", {"laya": None}),
+                                         ("ok", {"laya": [0, 1, "2"]}), ("ok", {"laya": [0, 1, True]})])
+def test_criterion_b_refuses_empty_or_malformed_inputs(rows, seeds):
+    rows = _rows(False) if rows == "ok" else rows                              # "ok": one valid row
+    with pytest.raises(SystemExit):
+        v.criterion_b(rows, seeds, v.DEFAULT_CRITERIA["b"])
+
+
+def test_criterion_c_is_reported_whatever_the_numbers():
+    rule = v.DEFAULT_CRITERIA["c"]
+    for rows in ([{"system": "laya", "device": "mps", "p50": 0.03, "p95": 0.05}],
+                 [{"system": "laya", "device": "cpu", "p50": 999.0, "p95": 1e9}]):
+        r = v.criterion_c(rows, rule)
+        assert r["status"] == "REPORTED (not gated)" == v.REPORTED and r["rows"] == rows
+        assert r["label"] == pilot.latency.LABEL == "reported, not gated"
+    with pytest.raises(SystemExit):
+        v.criterion_c([], rule)
+
+
+def test_criterion_c_label_is_the_latency_label():
+    assert v.DEFAULT_CRITERIA["c"]["label"] == pilot.latency.LABEL
+
+
+def test_default_collapse_states_the_runs_and_components():
+    c = v.DEFAULT_COLLAPSE
+    assert json.loads(json.dumps(c)) == c
+    applies = {a["runs"]: a for a in c["applies_to"]}
+    assert len(applies) == 2
+    sel = [a for a in c["applies_to"] if "selection" in a["runs"]][0]
+    fin = [a for a in c["applies_to"] if "final seed" in a["runs"]][0]
+    assert sel["components"] == ["val_floor", "loss"] and fin["components"] == ["loss", "test_floor"]
+    assert set(c["components"]) == {"val_floor", "loss", "test_floor"}
+    assert "strictly below" in c["components"]["val_floor"]["rule"]
+    assert "strictly above" in c["components"]["loss"]["rule"] and "sigma" in c["components"]["loss"]["note"]
+    assert c["components"]["test_floor"]["addition"].startswith("Claude-recommended addition to the REP-01 default")
+    assert "Open Question 1" in c["components"]["test_floor"]["addition"]
+    assert c["not_applied"] == "the val floor is not applied to final seeds: final_train holds the val folds"
+    assert "prior_val_fraction" not in c and "prior_test_fraction" not in c          # 08-05 adds the data-derived values
+
+
+def test_criterion_b_holds_no_threshold_literal():
+    tree = ast.parse(inspect.getsource(v.criterion_b).lstrip())
+    nums = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant)
+            and isinstance(n.value, (int, float)) and not isinstance(n.value, bool)}
+    assert nums <= {0, 1}, nums
