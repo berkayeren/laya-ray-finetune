@@ -21,6 +21,7 @@ import sys
 import pytest
 
 import pilot.data
+from conftest import prepared
 from intents import INTENTS
 from pilot import fewshot as fs
 
@@ -190,3 +191,151 @@ def test_committed_selection_train_draws():
         assert set(a["support"]["10"]) | set(a["replay"]) <= uids
         assert set(a["support"]["5"]) <= set(a["support"]["10"]) and len(a["replay"]) == 200
         assert (a["support"], a["replay"]) == by_rule(rows, seed)
+
+
+# ---- eligibility, the protocol block and check_draws (Task 2) ----
+
+TEST_POSITIVES = dict(zip(TAGS, (13, 11, 13, 13, 13, 12)))          # committed test.jsonl, labels only
+FINAL_TRAIN_POSITIVES = dict(zip(TAGS, (56, 57, 56, 52, 50, 42)))   # committed final_train.jsonl, labels only
+RULE_KEYS = ("base_runs", "masking", "new_question", "support_labels", "replay", "continued_training",
+             "laya_item_rule", "primary_metric", "secondary_metrics", "compute_fallback", "gate", "test_admission",
+             "phase_9_notes")
+
+
+def test_settings_match_the_approved_matrix():
+    from pilot import compute
+    m = compute.MATRIX
+    assert fs.TAGS == TAGS and len(fs.TAGS) == m["fewshot_tags"]
+    assert fs.K_VALUES == tuple(m["fewshot_k"]) and len(fs.DRAW_SEEDS) == m["fewshot_draws"]
+    assert fs.DRAW_SEEDS == (0, 1, 2)
+    assert (fs.NEG_PER_POS, fs.REPLAY, fs.EPOCHS) == (m["fewshot_neg_per_pos"], m["fewshot_replay"],
+                                                      m["fewshot_epochs"])
+    assert len(fs.BASE_RUNS["seeds"]) == m["fewshot_base_runs"]
+
+
+def test_base_runs_are_the_chosen_recipes():
+    """The masked base runs use each model's committed chosen recipe (postfit records) and shared LRs."""
+    from pilot import berturk, postfit
+    for kind in ("laya", "berturk"):
+        with open(os.path.join(pilot.data.REPO_ROOT, "results", "postfit", kind + ".json"), encoding="utf-8") as f:
+            chosen = json.load(f)["chosen"]
+        b = fs.BASE_RUNS[kind]
+        assert (b["epochs"], b["stop_after_epoch"], b["encoder_lr"]) == (chosen["epochs_schedule"],
+                                                                         chosen["stop_after_epoch"],
+                                                                         chosen["encoder_lr"])
+        assert b["head_lr"] == postfit.HEAD_LR and b["device"] == "mps"
+    assert fs.BASE_RUNS["laya"]["neg"] == 8 and fs.BASE_RUNS["berturk"]["batch"] == berturk.BATCH
+    assert fs.BASE_RUNS["berturk"]["mask_label"] == berturk.MASK_LABEL
+    assert fs.BASE_RUNS["split"] == "selection_train" and list(fs.BASE_RUNS["seeds"]) == list(fs.DRAW_SEEDS)
+
+
+def test_check_eligibility_passes_the_committed_counts():
+    from pilot import pins
+    counts = {"test": dict(TEST_POSITIVES), "final_train": dict(FINAL_TRAIN_POSITIVES)}
+    got = fs.check_eligibility(TAGS, counts, pins.OOD_SCORING_TAGS)
+    assert got == {"rule": fs.ELIGIBILITY, "counts": counts}
+    assert fs.ELIGIBILITY["min_test_positives"] == 10 and fs.ELIGIBILITY["min_final_train_positives"] == 40
+
+
+@pytest.mark.parametrize("split,tag,n,word", [("test", "loan", 9, "test"), ("final_train", "direct_debit", 39,
+                                                                              "final_train")])
+def test_check_eligibility_refuses_a_short_count(split, tag, n, word):
+    from pilot import pins
+    counts = {"test": dict(TEST_POSITIVES), "final_train": dict(FINAL_TRAIN_POSITIVES)}
+    counts[split][tag] = n
+    with pytest.raises(SystemExit) as e:
+        fs.check_eligibility(TAGS, counts, pins.OOD_SCORING_TAGS)
+    assert tag in str(e.value) and str(n) in str(e.value) and word in str(e.value)
+
+
+def test_check_eligibility_refuses_a_generic_or_uncounted_tag():
+    from pilot import pins
+    counts = {"test": dict(TEST_POSITIVES, affirm=40), "final_train": dict(FINAL_TRAIN_POSITIVES, affirm=200)}
+    with pytest.raises(SystemExit, match="affirm"):
+        fs.check_eligibility(TAGS + ("affirm",), counts, pins.OOD_SCORING_TAGS)
+    del counts["final_train"]["savings"]
+    with pytest.raises(SystemExit, match="savings"):
+        fs.check_eligibility(TAGS, counts, pins.OOD_SCORING_TAGS)
+
+
+def synthetic_block(rows, seeds=(0, 1)):
+    """A few-shot block around the synthetic rows, built the way a consumer would: draw, then draw_digest."""
+    draws = []
+    for i, s in enumerate(seeds):
+        d = fs.draw(rows, s)
+        draws.append({"draw": i, "seed": s, "base_seed": s, "support": d["support"], "replay": d["replay"],
+                      "positives": d["positives"], "digest": fs.draw_digest(d)})
+    uids = pilot.data.sha256_bytes("\n".join(r["uid"] for r in rows).encode("utf-8"))
+    return {"tags": list(TAGS), "k_values": [5, 10], "draw_seeds": list(seeds), "neg_per_pos": 4, "replay": 200,
+            "source": {"split": "selection_train", "sha256": "0" * 64, "uids_sha256": uids}, "draws": draws}
+
+
+def test_check_draws_passes_its_own_rows():
+    rows = synthetic_rows()
+    assert fs.check_draws(synthetic_block(rows), rows) is None
+
+
+def test_check_draws_refuses_a_changed_support_list():
+    rows = synthetic_rows()
+    b = synthetic_block(rows)
+    lst = b["draws"][1]["support"]["10"]
+    lst[0] = next(r["uid"] for r in sorted(rows, key=lambda r: r["uid"]) if r["uid"] not in lst)
+    lst.sort()
+    with pytest.raises(SystemExit, match="draw 1"):
+        fs.check_draws(b, rows)
+
+
+def test_check_draws_refuses_a_changed_digest():
+    rows = synthetic_rows()
+    b = synthetic_block(rows)
+    b["draws"][0]["digest"] = "f" * 64
+    with pytest.raises(SystemExit, match="draw 0.*digest"):
+        fs.check_draws(b, rows)
+
+
+def test_check_draws_refuses_rows_of_another_split():
+    rows, other = synthetic_rows(), synthetic_rows(n=700)
+    with pytest.raises(SystemExit, match="draw 0"):
+        fs.check_draws(synthetic_block(rows), other)
+
+
+def test_check_draws_refuses_a_misnumbered_or_missing_draw():
+    rows = synthetic_rows()
+    b = synthetic_block(rows)
+    b["draws"][1]["base_seed"] = 0
+    with pytest.raises(SystemExit, match="draw 1"):
+        fs.check_draws(b, rows)
+    b = synthetic_block(rows)
+    b["draws"].pop()
+    with pytest.raises(SystemExit, match="draw"):
+        fs.check_draws(b, rows)
+
+
+def test_protocol_block_refuses_another_manifest(tmp_path, synthetic_raw):
+    _, manifest = prepared(tmp_path, synthetic_raw)
+    with pytest.raises(SystemExit, match="committed"):
+        fs.protocol_block(manifest)
+
+
+@pytest.mark.data
+def test_protocol_block_on_the_committed_data():
+    b = fs.protocol_block()
+    assert b == fs.protocol_block()                                     # deterministic
+    assert json.loads(json.dumps(b)) == b
+    assert b["tags"] == list(TAGS) and b["k_values"] == [5, 10] and b["draw_seeds"] == [0, 1, 2]
+    assert (b["neg_per_pos"], b["replay"], b["epochs"]) == (4, 200, 10)
+    assert b["eligibility"]["counts"] == {"test": TEST_POSITIVES, "final_train": FINAL_TRAIN_POSITIVES}
+    assert b["eligibility"]["rule"] == fs.ELIGIBILITY and "labels only, no model output" in b["eligibility"]["note"]
+    with open(pilot.data.DEFAULT_MANIFEST, encoding="utf-8") as f:
+        entry = json.load(f)["splits"]["selection_train"]
+    assert b["source"] == {"split": "selection_train", "sha256": entry["sha256"], "uids_sha256": entry["uids_sha256"]}
+    assert b["sampler"] == {"schema": fs.DRAW_SCHEMA, "rule": fs.SAMPLER_RULE, "digest": fs.DIGEST_RULE}
+    rows = committed_rows("selection_train", ("train",))
+    assert len(b["draws"]) == 3
+    for i, d in enumerate(b["draws"]):
+        assert (d["draw"], d["seed"], d["base_seed"]) == (i, i, i)
+        assert d["digest"] == fs.draw_digest(fs.draw(rows, i)) and len(d["replay"]) == 200
+    assert sorted(b["rules"]) == sorted(RULE_KEYS)
+    assert "pilot.metrics.AP_RULE" in b["rules"]["primary_metric"]["rule"]
+    assert b["rules"]["compute_fallback"]["base_runs_per_model"] == 1
+    assert fs.check_draws(b, rows) is None
