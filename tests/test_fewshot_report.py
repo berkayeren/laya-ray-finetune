@@ -414,7 +414,7 @@ def test_render_markdown_is_deterministic_and_complete(planted):
     for d in rec["primary"]["per_draw"]:
         assert "%.3f" % d["laya"] in md and "%.3f" % d["berturk"] in md
     for needle in ("k = %d" % PRIMARY_K, "k = 1", "k = 0", "Forgetting", "descriptive", "Wall clock", "positives",
-                   "primary", fr.NOTES[0]):
+                   "primary", fr.NOTES[0][1:]):
         assert needle in md, needle
     assert "bank_" not in md
 

@@ -13,6 +13,7 @@
 #   make confidence-reports  rebuild the Phase 7 val confidence records from the committed dumps and postfit records (no model)
 #   make final-scoring  score the six final seeds once on test and HOTELS behind the protocol gate (model, about 35 min on the M4; never rerun: the gate refuses an existing dump)
 #   make final-reports  rebuild results/final/ (per-seed reports, verdict, confidence records) from the committed dumps (no model)
+#   make fewshot-reports  rebuild results/fewshot/fewshot.json from the committed few-shot dumps (no model)
 PYTHON ?= python
 UV ?= uv
 PY312 ?= python3.12
@@ -31,8 +32,9 @@ FINAL_ROOT ?= .
 LAYA_FINAL := laya-a6a866dd69fc-88cfaa80-cc216d59 laya-f43484c8aab4-b43eaa54-cc216d59 laya-6f66dfd4c331-23b93830-cc216d59
 BERTURK_FINAL := berturk-c500b06ccf34-f37197ee-29446b61 berturk-1f0bb00cd6f7-a14835e4-29446b61 berturk-06685feeb69f-faf017a7-29446b61
 FINAL := results/final
+FEWSHOT := results/fewshot
 
-.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports
+.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports fewshot-reports
 
 env:
 	$(PY312) -m venv $(VENV)
@@ -136,6 +138,9 @@ final-reports:
 	$(PYTHON) report.py --confidence results/dumps/$(LAYA_ZS) --split test --out $(FINAL)/confidence/$(LAYA_ZS)-test.json > /dev/null
 	$(PYTHON) report.py --confidence results/dumps/$(LAYA_ZS) --split hotels_probe --out $(FINAL)/confidence/$(LAYA_ZS)-hotels_probe.json > /dev/null
 	$(PYTHON) report.py --confidence results/dumps/prior --split test --out $(FINAL)/confidence/prior-test.json > /dev/null
+
+fewshot-reports:
+	$(PYTHON) fewshot.py --report --out $(FEWSHOT)/fewshot.json
 
 clean-data:
 	rm -rf data/splits data/audit

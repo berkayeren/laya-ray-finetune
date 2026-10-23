@@ -18,6 +18,21 @@ What it computes (D-12; protocol.json rules.primary_metric and rules.secondary_m
   primary k; draws = the per-draw deltas and mean_delta = float(np.mean(np.asarray(draws, dtype=np.float64))), exactly
   the value pilot.verdict.criterion_d checks
 - ap: per model the per-tag AP and macro-AP of every masked base ("s<seed>", k = 0) and continued run ("d<draw>-k<k>")
+- by_k: the primary block's per-draw table at every k: "0" (each draw's masked base, pilot.fewshot.base_seed_of) and
+  every frozen k (k = 5 is the reported secondary)
+- theta (A1, THETA_RULE): each masked base's θ, pilot.metrics.select_theta on its own val dump at T = 1 over all 48
+  columns; f1: new-tag (held-out columns) and old-tag (the other 42) micro-F1 = 2TP / (2TP + FP + FN) of the summed
+  per-tag counts at that θ (0.0 when the denominator is 0), for every base and every continued run from it, and
+  forgetting = the continued run's old-tag micro-F1 minus its base's
+- bootstrap (A3, BOOT_PAIRING): per k a descriptive paired percentile interval of the mean-over-draws macro-AP delta on
+  one pilot.metrics.bootstrap_weights(n, B, seed) draw with the protocol's B, seed and level; a replicate in which a
+  held-out tag has no positive is counted in n_undefined and left out, never scored as 0 (on the full split such a tag
+  is refused by pilot.metrics.new_tag_ap)
+- wall_clock_s: the incremental wall clock of every continued run, copied from the runs manifest (WALL_RULE); positives:
+  the realised positives per tag, draw and k, copied from the protocol's frozen draws
+
+render_markdown(record) is the README Phase 9 block (points with 2 decimals, AP and F1 with 3; rounding for display
+only); fewshot.py --render PATH prints it for a record of the frozen protocol.
 
 Values are float64 and never rounded (rounding happens only in render_markdown). The record holds no timestamp, no uid
 list, no message text and no local path (repo-relative paths, ids and digests), and is written as key-sorted JSON, so it
@@ -30,7 +45,9 @@ usage:
     from pilot import fewshot_report as fr
     rec = fr.build_record(protocol, pin)                # results/fewshot/runs.json and the dumps it lists
     fr.write_record(rec, fr.RECORD_PATH)
+    print(fr.render_markdown(rec))
     python fewshot.py --report --out results/fewshot/fewshot.json      # make fewshot-reports
+    python fewshot.py --render results/fewshot/fewshot.json            # the README Phase 9 block
 """
 import json
 import os
@@ -196,6 +213,65 @@ def primary(protocol, pin, runs, runs_sha256, dump_root=None, manifest_path=None
     return _primary(block, load_all(protocol, pin, runs, runs_sha256, dump_root, manifest_path), runs["mode"])
 
 
+def subset_micro_f1(per_tag, tags):
+    """Micro-F1 2TP / (2TP + FP + FN) of the tp/fp/fn counts of pilot.metrics.metrics()'s per_tag, summed over `tags`;
+    0.0 when the denominator is 0."""
+    tp = sum(per_tag[t]["tp"] for t in tags)
+    fp = sum(per_tag[t]["fp"] for t in tags)
+    fn = sum(per_tag[t]["fn"] for t in tags)
+    den = 2 * tp + fp + fn
+    return 2 * tp / den if den else 0.0
+
+
+def _f1(data, kind, key, sel, held, old):
+    m = metrics.metrics(data["Y"]["test"], data["P"][("test", kind, key)], metrics.theta_vector(sel))["per_tag"]
+    return {"new": subset_micro_f1(m, held), "old": subset_micro_f1(m, old)}
+
+
+def ap_delta_bootstrap(Y, PA_by_draw, PB_by_draw, tags, B, seed, level):
+    """BOOT_PAIRING: {"delta", "ci", "B", "seed", "level", "method", "n_undefined", "pairing"} of the mean over draws of
+    (A - B) new-tag macro-AP. Y is the gold [n, 48], PA_by_draw / PB_by_draw the per-draw probabilities of A (Laya) and
+    B (BERTurk) on the same messages in the same order. delta is the full-data mean (mean_delta); every defined
+    replicate is the same statistic on the rows idx[b] of one bootstrap_weights(n, B, seed) draw (each AP exactly
+    pilot.metrics.average_precision of the resampled column, the macro new_tag_ap's mean); ci is the percentile interval
+    at `level` over the defined replicates (None when none is defined)."""
+    Y = np.asarray(Y, dtype=bool)
+    if len(PA_by_draw) != len(PB_by_draw) or not PA_by_draw:
+        raise SystemExit("the bootstrap needs one A and one B probability array per draw, got %d and %d"
+                         % (len(PA_by_draw), len(PB_by_draw)))
+    tags = list(tags)
+    q = metrics._percentiles(level)
+    observed = [metrics.new_tag_ap(Y, a, tags)["macro"] - metrics.new_tag_ap(Y, b, tags)["macro"]
+                for a, b in zip(PA_by_draw, PB_by_draw)]       # validates every array; refuses a tag with no positive
+    cols = [metrics.TAGS.index(t) for t in tags]
+    Ys = Y[:, cols]
+    pairs = [(np.asarray(a, dtype=np.float64)[:, cols], np.asarray(b, dtype=np.float64)[:, cols])
+             for a, b in zip(PA_by_draw, PB_by_draw)]
+    idx, _ = metrics.bootstrap_weights(Y.shape[0], B, seed)    # ONE draw shared by every model and draw (pairing)
+
+    def macro(y, s):
+        return float(sum(metrics.average_precision(y[:, i], s[:, i]) for i in range(len(cols))) / len(cols))
+
+    reps, undefined = [], 0
+    for r in idx:
+        Yr = Ys[r]
+        if not Yr.any(axis=0).all():                         # a held-out tag without a positive: AP undefined
+            undefined += 1
+            continue
+        reps.append(mean_delta([macro(Yr, a[r]) - macro(Yr, b[r]) for a, b in pairs]))
+    ci = [float(v) for v in np.percentile(np.asarray(reps, dtype=np.float64), q)] if reps else None
+    return {"delta": mean_delta(observed), "ci": ci, "B": int(B), "seed": seed, "level": level,
+            "method": metrics.BOOT_METHOD, "n_undefined": int(undefined), "pairing": BOOT_PAIRING}
+
+
+def _boot_settings(protocol):
+    boot = protocol.get("bootstrap") if isinstance(protocol, dict) else None
+    if not isinstance(boot, dict) or not all(key in boot for key in ("B", "seed", "level")):
+        raise SystemExit("the frozen protocol holds no bootstrap block with B, seed and level; restore protocol.json "
+                         "(`git checkout -- protocol.json`)")
+    return boot["B"], boot["seed"], boot["level"]
+
+
 def _check(protocol, pin, runs):
     """The recorded mode, after check_runs of `runs` in entry_key order under read_mode(pin) (any listing order)."""
     mode = fewshot.read_mode(pin)
@@ -215,10 +291,37 @@ def record_of(protocol, pin, runs, runs_sha256, runs_path, dump_root=None, manif
                          "runs manifest" % (runs["decision"]["sha256"], repo_relpath(fewshot.DECISION_PATH), dec_sha))
     data = load_all(protocol, pin, runs, runs_sha256, dump_root, manifest_path)
     fallback = block["rules"]["compute_fallback"]
+    B, seed, level = _boot_settings(protocol)
     entries = _sorted_entries(runs)
+    held = list(block["tags"])
+    old = [t for t in metrics.TAGS if t not in set(held)]
     ap = {kind: {"base": {}, "continued": {}} for kind in KINDS}
+    theta, sels = {kind: {} for kind in KINDS}, {}
+    f1 = {kind: {"base": {}, "continued": {}} for kind in KINDS}
+    wall = {kind: {} for kind in KINDS}
     for e in entries:
         ap[e["kind"]][e["stage"]][run_key(e)] = _ap(data, block, e["kind"], run_key(e))
+        if e["stage"] == "base":
+            sel = metrics.select_theta(data["Y"]["val"], data["P"][("val", e["kind"], run_key(e))])
+            sels[(e["kind"], e["seed"])] = sel
+            theta[e["kind"]][run_key(e)] = {"global": sel["global"], "per_tag": dict(sel["per_tag"]),
+                                            "n_per_tag": len(sel["per_tag"])}
+            f1[e["kind"]]["base"][run_key(e)] = _f1(data, e["kind"], run_key(e), sel, held, old)
+    for e in entries:
+        if e["stage"] == "continued":
+            b = fewshot.base_seed_of(block, e["draw"], mode)
+            row = _f1(data, e["kind"], run_key(e), sels[(e["kind"], b)], held, old)
+            row.update(forgetting=row["old"] - f1[e["kind"]]["base"]["s%d" % b]["old"], base_seed=b)
+            f1[e["kind"]]["continued"][run_key(e)] = row
+            wall[e["kind"]][run_key(e)] = e["wall_clock_s"]
+    by_k, boot = {}, {}
+    for k in [0] + sorted(block["k_values"]):
+        by_k[str(k)] = k_block(block, data, k, mode)
+        keys = ["s%d" % fewshot.base_seed_of(block, d, mode) if k == 0 else "d%d-k%d" % (d, k)
+                for d in range(len(block["draws"]))]
+        boot[str(k)] = ap_delta_bootstrap(data["Y"]["test"], [data["P"][("test", "laya", key)] for key in keys],
+                                          [data["P"][("test", "berturk", key)] for key in keys], held, B, seed, level)
+    k_primary = _primary_k(block)
     return {
         "schema": RESULTS_SCHEMA, "protocol_sha256": pin,
         "runs": {"path": repo_relpath(runs_path), "sha256": runs_sha256},
@@ -232,8 +335,10 @@ def record_of(protocol, pin, runs, runs_sha256, runs_path, dump_root=None, manif
                       "n": int(data["Y"][s].shape[0]),
                       "positives": {t: int(data["Y"][s][:, metrics.TAGS.index(t)].sum()) for t in block["tags"]}}
                   for s in ("test", "val")},
-        "primary": _primary(block, data, mode),
-        "ap": ap,
+        "primary": dict({"k": k_primary, "metric": PRIMARY_METRIC}, **by_k[str(k_primary)]),
+        "by_k": by_k, "ap": ap, "theta": theta, "f1": f1, "bootstrap": boot,
+        "wall_clock_s": wall, "wall_rule": runs["wall_rule"],
+        "positives": {"d%d" % d["draw"]: d["positives"] for d in block["draws"]},
         "dumps": data["dumps"],
         "rules": {"ap": metrics.AP_RULE, "primary": block["rules"]["primary_metric"]["rule"], "theta": THETA_RULE,
                   "laya_rows": fewshot.LAYA_ROWS_RULE, "bootstrap": BOOT_PAIRING, "wall": fewshot.WALL_RULE},
@@ -280,3 +385,108 @@ def read_record(path):
         raise SystemExit("%s: schema %r, expected %s" % (path, rec.get("schema") if isinstance(rec, dict) else None,
                                                          RESULTS_SCHEMA))
     return rec, sha256_bytes(raw)
+
+
+# ---- the README Phase 9 block (rounding for display only) ----
+
+def _md(header, rows):
+    return ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"] + \
+        ["| " + " | ".join(r) + " |" for r in rows]
+
+
+def _ap_text(x):
+    return "n/a" if x is None else "%.3f" % x
+
+
+def _points(x):
+    return "n/a" if x is None else "%+.2f points" % (x * 100)
+
+
+def _ci(ci):
+    return "n/a (every replicate undefined)" if ci is None else "[%+.2f, %+.2f] points" % (ci[0] * 100, ci[1] * 100)
+
+
+def _k_label(k):
+    return "k = 0 (masked base)" if k == "0" else "k = %s" % k
+
+
+def render_markdown(record):
+    """The README Phase 9 block of a few-shot results record (deterministic; points with 2 decimals, AP and F1 with
+    3)."""
+    r = record
+    mode, dec = r["decision"]["mode"], r["decision"]
+    p = r["primary"]
+    lines = ["### Few-shot new-intent results (Phase 9)", "",
+             "Protocol `%s`, runs manifest `%s`, decision record `%s`, mode %s. Held-out tags: %s; k values %s; "
+             "draws %s." % (r["protocol_sha256"][:12], r["runs"]["sha256"][:12], dec["sha256"][:12], mode,
+                            ", ".join(r["tags"]), ", ".join("%d" % k for k in r["k_values"]),
+                            ", ".join("%d (digest `%s`, base seed %d)" % (d["draw"], d["digest"][:12],
+                                                                          d["base_seed_used"]) for d in r["draws"]))]
+    if dec.get("disclosure"):
+        lines += ["", "Compute fallback: %s." % dec["disclosure"].rstrip(".")]
+    lines += ["", "Test split: %d messages; positives per held-out tag: %s." % (
+        r["split"]["test"]["n"], ", ".join("%s %d" % (t, r["split"]["test"]["positives"][t]) for t in r["tags"]))]
+
+    lines += ["", "#### The primary metric: new-tag macro-AP at k = %d (test, raw T = 1)" % p["k"], ""]
+    rows = [("%d" % d["draw"], _ap_text(d["laya"]), _ap_text(d["berturk"]), _points(d["delta"]))
+            for d in p["per_draw"]]
+    rows.append(("mean over draws", "", "", _points(p["mean_delta"])))
+    lines += _md(("Draw", "Laya", "BERTurk", "Laya - BERTurk"), rows)
+    lines += ["", "Criterion (d)'s few-shot path reads the mean over draws of Laya - BERTurk at k = %d, unrounded."
+              % p["k"]]
+
+    lines += ["", "#### New-tag macro-AP by k (mean over draws)", ""]
+    rows = []
+    for k in sorted(r["by_k"], key=int):
+        b = r["by_k"][k]
+        rows.append((_k_label(k), _ap_text(float(np.mean([d["laya"] for d in b["per_draw"]]))),
+                     _ap_text(float(np.mean([d["berturk"] for d in b["per_draw"]]))), _points(b["mean_delta"])))
+    lines += _md(("k", "Laya", "BERTurk", "Laya - BERTurk"), rows)
+
+    lines += ["", "#### Per-tag AP at k = %d (mean over draws)" % p["k"], ""]
+    keys = ["d%d-k%d" % (d["draw"], p["k"]) for d in r["draws"]]
+    rows = [(t, _ap_text(float(np.mean([r["ap"]["laya"]["continued"][key]["per_tag"][t] for key in keys]))),
+             _ap_text(float(np.mean([r["ap"]["berturk"]["continued"][key]["per_tag"][t] for key in keys]))))
+            for t in r["tags"]]
+    lines += _md(("Tag", "Laya", "BERTurk"), rows)
+
+    lines += ["", "#### Forgetting: micro-F1 at each masked base's val θ (test)", ""]
+    rows = []
+    for kind, name in (("laya", "Laya"), ("berturk", "BERTurk")):
+        for key in sorted(r["f1"][kind]["base"], key=lambda x: int(x[1:])):
+            f = r["f1"][kind]["base"][key]
+            rows.append((name, "base seed %s, k = 0" % key[1:], "%.3f" % f["new"], "%.3f" % f["old"], ""))
+        for key in sorted(r["f1"][kind]["continued"], key=lambda x: tuple(int(v[1:]) for v in x.split("-"))):
+            f = r["f1"][kind]["continued"][key]
+            d, k = (int(v[1:]) for v in key.split("-"))
+            rows.append((name, "draw %d, k = %d" % (d, k), "%.3f" % f["new"], "%.3f" % f["old"],
+                         _points(f["forgetting"])))
+    lines += _md(("Model", "Run", "New-tag micro-F1", "Old-tag micro-F1", "Old-tag change vs base (negative = "
+                                                                          "forgetting)"), rows)
+
+    lines += ["", "#### Bootstrap of the mean-over-draws delta (descriptive, not gated)", ""]
+    rows = []
+    for k in sorted(r["bootstrap"], key=int):
+        b = r["bootstrap"][k]
+        rows.append((_k_label(k), _points(b["delta"]), _ci(b["ci"]), "%d" % b["n_undefined"], "%d" % b["B"]))
+    level = "%g%% CI" % (next(iter(r["bootstrap"].values()))["level"] * 100) if r["bootstrap"] else "CI"
+    lines += _md(("k", "Laya - BERTurk", level, "Undefined replicates", "B"), rows)
+
+    lines += ["", "#### Wall clock of each continued run (seconds, reported, not gated)", ""]
+    rows = []
+    for kind, name in (("laya", "Laya"), ("berturk", "BERTurk")):
+        for key in sorted(r["wall_clock_s"][kind], key=lambda x: tuple(int(v[1:]) for v in x.split("-"))):
+            d, k = (int(v[1:]) for v in key.split("-"))
+            rows.append((name, "%d" % d, "%d" % k, "%.1f" % r["wall_clock_s"][kind][key]))
+    lines += _md(("Model", "Draw", "k", "Seconds"), rows)
+
+    lines += ["", "#### Realised positives per held-out tag in each support set", ""]
+    rows = [("%s" % key[1:], k, *("%d" % r["positives"][key][k][t] for t in r["tags"]))
+            for key in sorted(r["positives"], key=lambda x: int(x[1:]))
+            for k in sorted(r["positives"][key], key=int)]
+    lines += _md(("Draw", "k") + tuple(r["tags"]), rows)
+
+    lines += ["", "#### Notes", ""]
+    lines += ["- %s." % n.rstrip(".") for n in (r["rules"]["theta"], r["rules"]["bootstrap"])]
+    lines += ["- %s%s." % (n[0].upper(), n[1:].rstrip(".")) for n in r["notes"]]
+    return "\n".join(lines)

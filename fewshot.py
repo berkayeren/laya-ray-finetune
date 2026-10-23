@@ -76,6 +76,9 @@ results/fewshot/runs.json; pilot.fewshot_report.build_record computes the few-sh
 fewshot-results/1) from the dumps the manifest lists only (numpy, no model), writes it to PATH atomically (a rebuild
 overwrites it: make fewshot-reports) and prints its primary block.
 
+--render PATH (09-06, D-10): require_frozen() first; pilot.fewshot_report.read_record; a record built under another
+protocol sha256 is refused; prints pilot.fewshot_report.render_markdown, the README Phase 9 block (no torch, no dump).
+
 usage:
     python fewshot.py --support-sets                     # refused until protocol.json is frozen (plan 08-10)
     python fewshot.py --support-sets --manifest OTHER_DIR/splits.json
@@ -87,6 +90,7 @@ usage:
     python fewshot.py --prune ckpt-fewshot-d0-k10          # after its verified gated test dump exists
     python fewshot.py --drop-storage ckpt-fewshot-d0-k10 --storage ray_results   # that run's Ray storage only
     python fewshot.py --report --out results/fewshot/fewshot.json   # the results record (make fewshot-reports)
+    python fewshot.py --render results/fewshot/fewshot.json         # the README Phase 9 block
 """
 import argparse
 import json
@@ -630,6 +634,19 @@ def report_mode(out):
     return record
 
 
+def render_mode(path):
+    """--render: require_frozen first, then the README Phase 9 block of the results record at `path`, refused unless
+    the record was built under the frozen protocol."""
+    _, _, pin = frozen_protocol()                               # first: nothing is read without the frozen protocol
+    record, _ = fewshot_report.read_record(path)
+    if record.get("protocol_sha256") != pin:
+        raise SystemExit("%s was built under protocol sha256 %s, not the frozen %s; rebuild it with `make "
+                         "fewshot-reports`" % (path, record.get("protocol_sha256"), pin))
+    text = fewshot_report.render_markdown(record)
+    print(text)
+    return text
+
+
 # which mode each optional flag belongs to (each mode refuses the others' flags, the postfit.py convention)
 FLAG_MODES = {"out": ("projection", "runs_manifest", "report"), "ladder_failure": ("projection",),
               "storage": ("drop_storage",), "manifest": ("support_sets", "counts", "projection", "prune")}
@@ -654,6 +671,8 @@ def main(argv=None):
                       help="delete the Ray storage dir (--storage/<run id>) of a finished ray_train.py few-shot run")
     mode.add_argument("--report", action="store_true",
                       help="build the few-shot results record from the listed dumps and write it to --out")
+    mode.add_argument("--render", metavar="PATH",
+                      help="print the README Phase 9 block of a few-shot results record")
     ap.add_argument("--out", default=None, help="--projection: the decision record (results/fewshot/projection.json); "
                                                 "--runs-manifest: the allow-list (results/fewshot/runs.json); "
                                                 "--report: the results record (results/fewshot/fewshot.json)")
@@ -665,7 +684,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     manifest = a.manifest or pilot.data.DEFAULT_MANIFEST
     chosen = next((m for m in ("support_sets", "counts", "projection", "inspect", "runs_manifest", "prune",
-                               "drop_storage", "report") if getattr(a, m)), None)
+                               "drop_storage", "report", "render") if getattr(a, m)), None)
     if a.ladder_failure is not None and chosen != "projection":
         ap.error("--out and --ladder-failure belong to --projection (--out also to --runs-manifest)")
     if a.out is not None and chosen not in FLAG_MODES["out"]:
@@ -674,11 +693,14 @@ def main(argv=None):
         ap.error("--storage belongs to --drop-storage")
     if a.manifest is not None and chosen not in FLAG_MODES["manifest"]:
         ap.error("--manifest belongs to --support-sets, --counts, --projection and --prune; --inspect, "
-                 "--runs-manifest and --drop-storage read the checkpoints' own records, --report the committed splits")
+                 "--runs-manifest and --drop-storage read the checkpoints' own records, --report and --render the "
+                 "committed splits")
     if a.drop_storage:
         if not a.storage:
             ap.error("--drop-storage needs --storage DIR (the Ray storage the run trained under)")
         return drop_storage_mode(a.drop_storage, a.storage)
+    if a.render:
+        return render_mode(a.render)
     if a.report:
         if not a.out:
             ap.error("--report needs --out PATH (results/fewshot/fewshot.json)")
@@ -699,7 +721,7 @@ def main(argv=None):
         return counts_mode(manifest)
     if not a.support_sets:
         ap.error("pass a mode: --support-sets, --counts, --projection, --inspect, --runs-manifest, --prune, "
-                 "--drop-storage or --report")
+                 "--drop-storage, --report or --render")
     return support_sets(manifest)
 
 
