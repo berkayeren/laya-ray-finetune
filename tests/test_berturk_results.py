@@ -39,7 +39,9 @@ the current selection is one train run: every tracked BERTurk selection val side
 record's chosen train run, the BERTurk dump dirs there are exactly the record's candidates, and that run's canonical
 config is pilot.berturk.SUPERSEDED[-1]'s chosen one with SUPERSEDED[-1]["delta"] applied and nothing else changed (the
 end of the chain that test_superseded_runs_change_one_recorded_key_per_step checks step by step), and its run id is no
-superseded one.
+superseded one. Both selection checks read berturk_val_sidecars, which skips a val sidecar whose training canonical
+carries a fewshot binding: a Phase 9 masked BERTurk base trains on selection_train too and is never a selection run
+(FEW-01; proven on a planted sidecar by test_berturk_selection_checks_skip_a_fewshot_dump).
 
 Final seeds (plan 06-11): test_committed_berturk_final_manifest checks results/postfit/berturk-final.json
 (postfit-final/1, system kind berturk): bound to the current record's sha256 (never a superseded one) and its chosen
@@ -101,6 +103,25 @@ def load(rel):
 
 def as_json(v):
     return json.loads(json.dumps(v, ensure_ascii=False))
+
+
+def fewshot_bound(side):
+    """True when a sidecar's training canonical config carries a fewshot binding: a Phase 9 masked BERTurk base
+    (FEW-01) trains on selection_train too, and its val dump is never a selection run's."""
+    canon = (side.get("training") or {}).get("canonical")
+    return isinstance(canon, dict) and "fewshot" in canon
+
+
+def berturk_val_sidecars():
+    """{rel: parsed val.json} of every tracked BERTurk val dump under results/dumps without a few-shot binding."""
+    out = {}
+    for rel in tracked(DUMPS + "/"):
+        if not rel.endswith("/val.json") or not os.path.isfile(path(rel)):
+            continue
+        side = load(rel)
+        if (side.get("system") or {}).get("kind") == "berturk" and not fewshot_bound(side):
+            out[rel] = side
+    return out
 
 
 def _check_record(record_rel, dumps_rel, proto):
@@ -214,12 +235,7 @@ def test_no_superseded_run_is_current():
     named = sorted({f.split("/")[2] for f in files} & cand_ids)
     assert named == [], "results/dumps holds dirs named after superseded candidates: %s" % named
     held, selection_runs = [], set()
-    for rel in files:
-        if not rel.endswith("/val.json") or not os.path.isfile(path(rel)):
-            continue
-        side = load(rel)
-        if (side.get("system") or {}).get("kind") != "berturk":
-            continue
+    for rel, side in berturk_val_sidecars().items():
         tr = side.get("training") or {}
         if tr.get("run_id") in train_ids:
             held.append(rel)
@@ -334,12 +350,7 @@ def test_exactly_one_current_berturk_selection_run():
     record = _current_record()
     chosen_run = record["chosen"]["train_run_id"]
     runs, dirs = set(), set()
-    for rel in tracked(DUMPS + "/"):
-        if not rel.endswith("/val.json") or not os.path.isfile(path(rel)):
-            continue
-        side = load(rel)
-        if (side.get("system") or {}).get("kind") != "berturk":
-            continue
+    for rel, side in berturk_val_sidecars().items():
         dirs.add(rel.split("/")[2])
         tr = side.get("training") or {}
         if tr.get("split") == "selection_train":

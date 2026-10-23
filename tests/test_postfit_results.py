@@ -8,7 +8,9 @@ README tests.
   those constants; BERTurk shares the one LR (A1). The approved compute budget (pilot.compute.MATRIX lr_grid 3,
   results/compute/) is not rewritten: Laya runs one of its three approved LR runs, a deviation the README discloses
 - test_laya_selection_dumps_are_the_single_lr_grid: the tracked Laya selection val dumps (system.kind laya, training
-  split selection_train; the zero-shot dump has no training block and the kind filter keeps the BERTurk dumps out) are
+  split selection_train; the zero-shot dump has no training block, the kind filter keeps the BERTurk dumps out, and a
+  Phase 9 masked base's val dump, whose training canonical carries a fewshot binding, is skipped: proven on a planted
+  sidecar by test_laya_selection_collector_skips_a_fewshot_dump) are
   exactly the grid postfit reads: one train run, one full val dump per (LR, epoch) of LR_GRID x 1..EPOCHS, seed 0,
   uncalibrated (shipped T 1.0), one rung and one canonical recipe, every dump verified (pilot.dumps.load_dump), and no
   test dump. A dump at any other encoder LR (3e-05, 5e-05) fails it
@@ -84,9 +86,17 @@ def as_json(v):
     return json.loads(json.dumps(v, ensure_ascii=False))
 
 
+def fewshot_bound(side):
+    """True when a sidecar's training canonical config carries a fewshot binding: a Phase 9 masked base (FEW-01)
+    trains on selection_train too, and its val dump is never a selection candidate."""
+    canon = (side.get("training") or {}).get("canonical")
+    return isinstance(canon, dict) and "fewshot" in canon
+
+
 def laya_selection_sidecars():
     """{dump dir name: parsed val.json} of every tracked Laya selection val dump: system.kind laya with a training
-    block on selection_train (the kind is filtered first: BERTurk selection dumps carry that split too)."""
+    block on selection_train (the kind is filtered first: BERTurk selection dumps carry that split too), without a
+    few-shot binding (fewshot_bound: a Phase 9 masked base's val dump is skipped)."""
     out = {}
     for rel in tracked(DUMPS + "/"):
         if not rel.endswith("/val.json") or not os.path.isfile(path(rel)):
@@ -95,7 +105,7 @@ def laya_selection_sidecars():
         if (side.get("system") or {}).get("kind") != "laya":
             continue
         tr = side.get("training")
-        if isinstance(tr, dict) and tr.get("split") == postfit.SELECTION_SPLIT:
+        if isinstance(tr, dict) and tr.get("split") == postfit.SELECTION_SPLIT and not fewshot_bound(side):
             out[rel.split("/")[2]] = side
     return out
 

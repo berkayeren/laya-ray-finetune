@@ -34,7 +34,13 @@ per-seed "state" is the checked {device, dtype, amp_enabled} dict, the one "stat
 allows (CHECKED_STATE_KEYS); a string or any other "state" is still a finding. The frozen protocol.json (08-10) is
 required to be tracked and gets the text check, with no key named state or text at all. The published Phase 8
 verdict under results/final/ (plan 08-12) gets the sidecar check too, and only verdict.json, reports/<id>-test.json and
-confidence/<id>-(test.json|test.svg|hotels_probe.json) may be tracked there (FINAL_PATH_RE).
+confidence/<id>-(test.json|test.svg|hotels_probe.json) may be tracked there (FINAL_PATH_RE). The Phase 9 records
+under results/fewshot/ (D-10: the D-08 projection record, the runs manifest and the few-shot results record) get the
+sidecar check too, only projection.json, runs.json and fewshot.json may be tracked there (FEWSHOT_PATH_RE), and no
+string in them may be a bank_ or hotel_ uid (uid_problems): the frozen support-set uid lists live in protocol.json
+only. A few-shot checkpoint's dumps sit under results/dumps/<run_id>/ like every other dump (tests/test_results.py
+checks them against the runs manifest); none of them is a HOTELS dump, so the HOTELS rule still allows HOTELS dumps
+only in the final seeds' dirs and the zero-shot dir.
 """
 import io
 import json
@@ -67,6 +73,8 @@ LATENCY_PATH_RE = re.compile(r"^results/latency/((laya|berturk)-(mps|cpu)\.json|
 # with its reliability SVG; a HOTELS record has no diagram)
 FINAL_PATH_RE = re.compile(r"^results/final/(verdict\.json|reports/[^/]+-test\.json|"
                            r"confidence/[^/]+-(test\.(json|svg)|hotels_probe\.json))$")
+# Phase 9 (D-10): the D-08 projection record, the few-shot runs manifest and the few-shot results record
+FEWSHOT_PATH_RE = re.compile(r"^results/fewshot/(projection|runs|fewshot)\.json$")
 # Coarse backstop only: the longest legitimate manifest value is a 64-char sha256, but message text is often far
 # shorter ("Evet.", "cari hesap"), so length cannot detect it. The key-name check and, when the split files exist
 # locally, the exact-text check below are the real guards.
@@ -170,6 +178,18 @@ def text_problems(obj, home, texts):
                 problems.append("local home path at %s" % where)
             if v in texts:
                 problems.append("split message text at %s" % where)
+    return problems
+
+
+def uid_problems(obj):
+    """Findings for a parsed JSON value: every key or string value that is a bank_ or hotel_ uid (UID_RE,
+    HOTEL_UID_RE). A Phase 9 record names runs and counts, never messages (the uid lists live in protocol.json)."""
+    problems = []
+    for p, k, v in walk(obj):
+        if k is not None and (UID_RE.match(k) or HOTEL_UID_RE.match(k)):
+            problems.append("uid used as a key under %s" % p)
+        if isinstance(v, str) and (UID_RE.match(v) or HOTEL_UID_RE.match(v)):
+            problems.append("uid string at %s" % (p if k is None else "%s.%s" % (p, k)))
     return problems
 
 
@@ -285,7 +305,8 @@ def test_tracked_dumps_hold_only_uids_and_logits():
 def test_tracked_sidecars_and_reports_hold_no_text_or_paths():
     home, texts = home_dir(), local_split_texts()
     rels = [f for f in tracked("results/dumps/", "results/reports/", "results/compute/", "results/postfit/",
-                               "results/superseded/", "results/confidence/", "results/latency/", "results/final/")
+                               "results/superseded/", "results/confidence/", "results/latency/", "results/final/",
+                               "results/fewshot/")
             if f.endswith(".json")]
     bad = {rel: p for rel in _existing(rels) for p in [sidecar_problems(os.path.join(REPO_ROOT, rel), home, texts)]
            if p}
