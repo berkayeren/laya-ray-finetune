@@ -203,6 +203,36 @@ def test_per_tag_tie_ignores_global_theta():
     assert sel["per_tag"] == {"card": 0.30, "lost_stolen": 0.70}
 
 
+def test_pick_multi_point_tie():
+    # 03-REVIEW-gap-09 IN-03: three or more tied points on both sides of 0.5, and an asymmetric tie
+    assert metrics.pick(_scores(0.40, 0.45, 0.55, 0.60)) == 0.45
+    assert metrics.pick(_scores(0.05, 0.95, 0.20)) == 0.20
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
+def test_pick_refuses_non_finite_scores(bad):
+    s = _scores(0.40)
+    s[10] = bad
+    with pytest.raises(SystemExit, match="non-finite"):
+        metrics.pick(s)
+    with pytest.raises(SystemExit, match="non-finite"):
+        metrics.pick(np.full(91, bad))
+
+
+def test_grid_is_read_only():
+    # 03-REVIEW-gap-09 IN-02: pick reads GRID_CENTI for the tie distance and GRID for the value; neither may drift
+    for arr, value in ((metrics.GRID, 0.5), (metrics.GRID_CENTI, 50)):
+        keep = arr.copy()
+        try:
+            assert not arr.flags.writeable
+            with pytest.raises(ValueError):
+                arr[0] = value
+        finally:
+            if arr.flags.writeable:                         # never leave a corrupted grid behind a failing run
+                arr[:] = keep
+    assert metrics.GRID[0] == 0.05 and metrics.GRID_CENTI[0] == 5
+
+
 def test_pick_all_zero_scores_returns_half():
     assert metrics.pick(np.zeros(91)) == 0.5
 

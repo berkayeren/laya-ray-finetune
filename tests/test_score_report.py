@@ -540,6 +540,18 @@ def _arrays(run_dir):
     return z["logits"], z["uids"]
 
 
+def _truncate_zip(run_dir):
+    """Cut the npz to half its bytes (the zip's central directory is lost) and rewrite dump_sha256 to match, so only
+    the npz parser can catch it (03-REVIEW IN-03)."""
+    path = os.path.join(run_dir, "test.npz")
+    with open(path, "rb") as f:
+        data = f.read()
+    data = data[:len(data) // 2]
+    with open(path, "wb") as f:
+        f.write(data)
+    _edit_sidecar(run_dir, lambda s: s.update(dump_sha256=pilot.data.sha256_bytes(data)))
+
+
 TAMPER = {
     "npz_byte_flipped": _flip_byte,
     "sidecar_split_sha256": lambda d: _edit_sidecar(d, lambda s: s["split"].update(sha256="0" * 64)),
@@ -550,6 +562,7 @@ TAMPER = {
     "extra_npz_key": lambda d: _rewrite_npz(d, logits=_arrays(d)[0], uids=_arrays(d)[1], extra=np.zeros(1)),
     "float64_logits": lambda d: _rewrite_npz(d, logits=_arrays(d)[0].astype(np.float64), uids=_arrays(d)[1]),
     "pickled_uids": lambda d: _rewrite_npz(d, logits=_arrays(d)[0], uids=np.array(list(_arrays(d)[1]), dtype=object)),
+    "truncated_zip": _truncate_zip,
 }
 
 
@@ -577,7 +590,10 @@ def test_report_refuses_tampered_dump(tmp_path, good_run, case):
         report.run_report(bad, "test", manifest)
     assert "score.py" in str(e.value.code)                  # a "<what>; rescore with score.py" refusal
     if case == "pickled_uids":
-        assert "pickled" in str(e.value.code)
+        assert "pickled" in str(e.value.code) and "allow_pickle" in str(e.value.code)
+    if case == "truncated_zip":                             # one line naming the exception, no traceback (IN-03)
+        assert "cannot be read" in str(e.value.code) and "BadZipFile" in str(e.value.code)
+        assert "pickled" not in str(e.value.code) and "\n" not in str(e.value.code)
 
 
 def test_report_refuses_renamed_run_dir(tmp_path, good_run):
