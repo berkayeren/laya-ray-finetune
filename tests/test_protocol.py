@@ -9,6 +9,9 @@
   final_seed_allowed is true for exactly the three dump run ids of a system's final manifest.
 - pilot.protocol imports the stdlib only.
 - data-marked: build_protocol on the committed inputs (deterministic bytes, the CLI).
+- render_markdown(protocol, sha256), the README protocol block (08-06): every value read from the dict passed in,
+  deterministic, display rounding only (2 decimals for points, 4 for metrics); `--render PATH` previews a file with its
+  own sha256, `--render` alone renders require_frozen()'s protocol and refuses while unpinned.
 Offline except the `data` tests.
 """
 import copy
@@ -427,3 +430,200 @@ def test_power_assumptions_and_delegation_are_the_constants(built):
     assert built["power_context"] == pr.POWER_CONTEXT
     assert built["assumptions"] == pr.ASSUMPTIONS
     assert built["delegation"] == pr.DELEGATION
+
+
+# ---- 08-06: render_markdown and --render ----
+
+HEADING = "### Frozen decision protocol (protocol.json)"
+
+
+def _system(kind):
+    return {"kind": kind,
+            "final_manifest": {"path": "results/postfit/%s-final.json" % kind, "sha256": "1" * 64},
+            "postfit": {"path": "results/postfit/%s.json" % kind, "sha256": "2" * 64},
+            "chosen": {"dump_run_id": "%s-chosen" % kind, "epoch": 1, "epochs_schedule": 2, "temperature": 1.5,
+                       "theta": {"shipped": {"global": 0.55, "n_per_tag": 1}, "raw": {"global": 0.45, "n_per_tag": 0}},
+                       "encoder_lr": 2e-05, "head_lr": 0.0001},
+            "seeds": [0],
+            "final_seeds": [{"seed": 0, "train_run_id": "%s-train-s0" % kind, "checkpoint_name": "ckpt-%s-s0" % kind,
+                             "dump_run_id": "%s-final-s0" % kind}],
+            "dump_run_ids": ["%s-final-s0" % kind]}
+
+
+def _deltas(T):
+    return {"n": 4, "B": 7, "seed": 3, "level": 0.9, "method": "percentile", "coverage": 50,
+            "metrics": {"micro_f1": {"a": 0.5, "b": 0.75, "delta": -0.25, "ci": [-0.5, 0.125], "width": 0.625,
+                                     "n_undefined": 0}},
+            "temperature": {"laya": T, "berturk": T}, "theta": {"laya": "theta.shipped", "berturk": "theta.shipped"}}
+
+
+def tiny():
+    """A hand-written protocol/1 dict holding every block render_markdown reads, in small form (no build, no data)."""
+    p = small()
+    p.update({
+        "frozen": {"when": "before any tiny test number", "why": "nothing tiny is tuned to the result",
+                   "identity": "the sha256 of the tiny bytes"},
+        "inputs": {"data/splits.json": "a" * 64},
+        "splits": {"test": {"path": "data/splits/test.jsonl", "role": "test", "sha256": "b" * 64,
+                            "uids_sha256": "c" * 64, "n_messages": 4, "n_no_intent": 1},
+                   "hotels_probe": {"path": "data/splits/hotels_probe.jsonl", "role": "ood_probe", "sha256": "d" * 64,
+                                    "uids_sha256": "e" * 64, "n_messages": 3, "n_no_intent": 0,
+                                    "ood_scoring_tags": ["card", "loan"]}},
+        "systems": {"laya": _system("laya"), "berturk": _system("berturk")},
+        "references": {"rule": "tiny references are reported, never gated",
+                       "rows": {"prior": {"run_id": "prior", "report": "results/reports/prior.json", "gated": False,
+                                          "hotels_probe": None}}},
+        "scoring": {"splits": ["test"], "device": "mps", "workers": 0, "refused": ["--force", "--n"],
+                    "why": "the tiny scorer of the val dumps"},
+        "variant": {"headline": "the tiny record T", "raw": "tiny T = 1, reported only"},
+        "seed_averaging": {"rule": "tiny probabilities are averaged before any threshold"},
+        "bootstrap": {"B": 7, "seed": 3, "level": 0.9, "coverage": 50, "unit": "message", "method": "percentile",
+                      "procedure": "a tiny paired bootstrap", "extra": "one tiny draw"},
+        "criteria": {
+            "a": {"name": "non-inferiority", "rule": "PASS when the tiny CI lower bound >= micro_ci_lower_min",
+                  "micro_ci_lower_min": -0.02, "macro_point_min": -0.03,
+                  "macro_ci_label": "not resolvable at this tiny size"},
+            "c": {"name": "latency", "rule": "tiny latency is reported", "label": "reported, not gated"},
+            "d": {"name": "an edge", "rule": "PASS when any tiny path is MET",
+                  "paths": [{"path": "calibration", "metric": "brier", "delta_below": 0.0},
+                            {"path": "fewshot", "metric": "new_tag_macro_ap", "k": 10, "mean_delta_at_least": 0.05}],
+                  "reported_only": {"classwise_ece": "tiny classwise ECE is reported, not gated"}},
+            "alternative_go": {"name": "alternative GO", "rule": "MET when the tiny delta > delta_above",
+                               "delta_above": 0.03, "requires": "b PASS"}},
+        "collapse": {"rule": "a tiny run is collapsed when any component is",
+                     "applies_to": [{"runs": "each tiny final seed", "source": "its tiny dump",
+                                     "components": ["loss", "test_floor"]}],
+                     "components": {"loss": {"rule": "collapsed on a NaN tiny loss", "note": "a tiny note"},
+                                    "test_floor": {"rule": "collapsed below the tiny prior",
+                                                   "addition": "a tiny marked addition"}},
+                     "not_applied": "no tiny val floor on final seeds",
+                     "prior_theta_global": 0.12, "prior_counts": {"test": {"tp": 1, "fp": 2, "fn": 3}},
+                     "prior_test_fraction": "2/7", "prior_test_micro_f1": 2 / 7,
+                     "prior_source": "the tiny prior's dumps"},
+        "verdict": {"rules": ["(b) FAIL -> NO-GO", "(a) INCONCLUSIVE -> INCONCLUSIVE (counts as NO-GO; tiny)"],
+                    "inconclusive_means": "counts as NO-GO; tiny bank data",
+                    "provisional": "PROVISIONAL: %s if the tiny path is met, else %s",
+                    "units": "tiny deltas are fractions", "statuses": {"overall": ["GO", "NO-GO", "INCONCLUSIVE"]}},
+        "definitions": {"brier": "tiny mean of (p - y)^2", "classwise_ece": "tiny |sum of y - sum of p| / n"},
+        "fewshot": {"tags": ["loan", "card"], "k_values": [1, 2], "draw_seeds": [0], "neg_per_pos": 4, "replay": 2,
+                    "epochs": 10,
+                    "eligibility": {"rule": {"min_test_positives": 10},
+                                    "counts": {"test": {"loan": 11, "card": 12}, "final_train": {"loan": 40, "card": 41}},
+                                    "note": "tiny gold labels only"},
+                    "source": {"split": "selection_train", "sha256": "f" * 64, "uids_sha256": "0" * 64},
+                    "sampler": {"schema": "fewshot-draw/1", "rule": "tiny sorted uids", "digest": "tiny sha256"},
+                    "draws": [{"draw": 0, "seed": 0, "base_seed": 0, "support": {"1": ["u1", "u2"], "2": ["u1", "u2", "u5"]},
+                               "replay": ["u3", "u4"], "positives": {"1": {"loan": 1, "card": 1},
+                                                                    "2": {"loan": 2, "card": 3}},
+                               "digest": "9876543210ab" + "c" * 52}],
+                    "rules": {"masking": "the tiny tags are masked",
+                              "base_runs": {"laya": {"epochs": 4, "encoder_lr": 2e-05}, "rule": "one tiny base run"},
+                              "phase_9_notes": ["add a tiny --mask-tags"]}},
+        "known_at_freeze": {"split": "val", "in_sample": True, "n": 4, "laya": "laya-chosen",
+                            "berturk": "berturk-chosen", "headline": _deltas(1.5), "raw": _deltas(1.0),
+                            "note": "tiny in-sample val"},
+        "power_context": {"label": "tiny research estimate", "n": 4, "p_a_lower_at_least_margin": {"0": 0.5},
+                          "margin": "the tiny margin is locked"},
+        "assumptions": [{"id": "A1", "decision": "tiny Brier names (d)", "taken": "tiny taken"},
+                        {"id": "OQ1", "decision": "a tiny open question", "taken": "tiny taken"}],
+        "delegation": {"standing": {"given": "today", "quote": "do the tiny control."}, "bank_name": "tiny deferred"},
+        "code": {"git_head": "abc123", "dirty": False},
+    })
+    return p
+
+
+def test_render_starts_with_the_heading_and_shows_the_sha():
+    md = pr.render_markdown(tiny(), "5" * 64)
+    assert md.startswith(HEADING + "\n") and md.endswith("\n")
+    assert "5" * 64 in md
+    for text in ("before any tiny test number", "nothing tiny is tuned to the result", "#### Criteria",
+                 "#### Collapse rule (b)", "#### Verdict"):
+        assert text in md, text
+
+
+def test_render_is_deterministic_on_a_hand_written_dict():
+    a = pr.render_markdown(tiny(), "5" * 64)
+    assert a == pr.render_markdown(tiny(), "5" * 64) == pr.render_markdown(copy.deepcopy(tiny()), "5" * 64)
+
+
+def test_render_shows_thresholds_in_points_and_the_decision_texts():
+    md = pr.render_markdown(tiny(), "5" * 64)
+    for text in ("-2.00 points", "-3.00 points", "+3.00 points", "+5.00 points", "+0.00 points",
+                 "not resolvable at this tiny size", "reported, not gated", "tiny classwise ECE is reported, not gated",
+                 "2/7", "0.2857", "a tiny marked addition", "a tiny note", "no tiny val floor on final seeds",
+                 "counts as NO-GO; tiny bank data", "PROVISIONAL: %s if the tiny path is met, else %s",
+                 "tiny deltas are fractions"):
+        assert text in md, text
+    p = tiny()
+    for rule in p["verdict"]["rules"]:
+        assert rule in md, rule
+    for c in p["criteria"].values():
+        assert c["rule"] in md, c["rule"]
+
+
+def test_render_reads_every_value_from_the_dict_passed_in():
+    p = tiny()
+    p["criteria"]["a"]["micro_ci_lower_min"] = -0.04
+    p["collapse"]["prior_test_fraction"], p["collapse"]["prior_test_micro_f1"] = "3/11", 3 / 11
+    p["verdict"]["rules"] = ["(z) a changed rule -> GO"]
+    md = pr.render_markdown(p, "5" * 64)
+    assert "-4.00 points" in md and "-2.00 points" not in md
+    assert "3/11" in md and "0.2727" in md and "2/7" not in md
+    assert "(z) a changed rule -> GO" in md and "(b) FAIL -> NO-GO" not in md
+
+
+def test_cli_render_previews_a_path_with_its_own_sha(tmp_path, capsys):
+    path, sha = frozen(tmp_path, tiny())
+    pr.main(["--render", path])
+    assert capsys.readouterr().out == pr.render_markdown(tiny(), sha)
+
+
+def test_cli_render_without_path_refuses_while_unpinned():
+    assert pr.PROTOCOL_SHA256 is None
+    with pytest.raises(SystemExit, match="not frozen|not found"):
+        pr.main(["--render"])
+
+
+def test_cli_render_without_path_renders_the_pinned_protocol(tmp_path, monkeypatch, capsys):
+    path, sha = frozen(tmp_path, tiny())
+    monkeypatch.setattr(pr, "PROTOCOL_PATH", path)
+    monkeypatch.setattr(pr, "PROTOCOL_SHA256", sha)
+    pr.main(["--render"])
+    assert capsys.readouterr().out == pr.render_markdown(tiny(), sha)
+
+
+@pytest.mark.parametrize("raw, what", [(b"{not json", "not valid JSON"), (b"[1]\n", "not a JSON object"),
+                                       (b'{"schema": "other/1"}\n', "schema")])
+def test_cli_render_refuses_a_file_that_is_not_a_protocol(tmp_path, raw, what):
+    path = tmp_path / "p.json"
+    path.write_bytes(raw)
+    with pytest.raises(SystemExit, match=what):
+        pr.main(["--render", str(path)])
+
+
+def test_cli_render_refuses_out():
+    with pytest.raises(SystemExit):
+        pr.main(["--render", "--out", "x.json"])
+
+
+@pytest.mark.data
+def test_render_shows_the_decision_sections(built):
+    md = pr.render_markdown(built, "5" * 64)
+    assert md.startswith(HEADING + "\n") and "5" * 64 in md
+    for text in ("-2.00 points", "-3.00 points", "+3.00 points", "+5.00 points", "Brier", "10/41", "520/2163",
+                 "not resolvable at this test size (n = 413)", "counts as NO-GO; collect bank data", "PROVISIONAL"):
+        assert text in md, text
+    assert md == pr.render_markdown(copy.deepcopy(built), "5" * 64)
+
+
+@pytest.mark.data
+def test_cli_render_of_a_built_protocol(tmp_path, capsys):
+    out = str(tmp_path / "p.json")
+    pr.main(["--build", "--out", out])
+    capsys.readouterr()
+    with open(out, "rb") as f:
+        raw = f.read()
+    pr.main(["--render", out])
+    md = capsys.readouterr().out
+    assert md == pr.render_markdown(json.loads(raw.decode("utf-8")), pilot.data.sha256_bytes(raw))
+    assert "counts as NO-GO; collect bank data" in md
