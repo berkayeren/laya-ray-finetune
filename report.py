@@ -127,6 +127,8 @@ import argparse
 import json
 import os
 
+import pilot.protocol                                       # stdlib only at import: require_frozen, prior_floors
+import pilot.verdict
 from pilot import data, dumps, metrics                     # data.DEFAULT_MANIFEST: the committed one, at call time
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, TRAINED_ON, committed_content, holds_committed,
                         manifest_is_committed, parse_jsonl, repo_relpath, sha256_bytes, sha256_file, verify_split_file,
@@ -701,6 +703,247 @@ def compare(a_dirs, b_dirs, split="test", manifest_path=DEFAULT_MANIFEST, B=1000
                          "is_committed": manifest_is_committed(manifest_path)},
             "a": info["a"], "b": info["b"], "theta_in_sample": split == "val", "thresholds": thresholds,
             "procedure": COMPARE_PROCEDURE, "theta_rule": COMPARE_THETA_RULE, "note": COMPARE_NOTE}
+
+
+def _protocol_inputs(protocol, root):
+    """SystemExit unless every protocol input exists under root and its bytes still hash to the frozen sha256 (named,
+    before anything is read or computed); returns the inputs block."""
+    inputs = protocol.get("inputs")
+    if not isinstance(inputs, dict) or not inputs:
+        raise SystemExit("the protocol lists no inputs; the verdict reads only inputs the frozen protocol binds")
+    for rel, want in inputs.items():
+        p = os.path.join(root, rel)
+        if not os.path.isfile(p):
+            raise SystemExit("protocol input %s not found under %s; restore it with git (the protocol is never "
+                             "rebuilt)" % (rel, root))
+        have = sha256_file(p)
+        if have != want:
+            raise SystemExit("protocol input %s changed: sha256 %s, the frozen protocol has %s; restore it with git "
+                             "(the protocol is never rebuilt)" % (rel, have, want))
+    return inputs
+
+
+def _bound_input(inputs, root, ref, what):
+    """root/<ref path> after checking that the protocol lists it as an input with ref's sha256."""
+    if not isinstance(ref, dict) or inputs.get(ref.get("path")) is None or inputs[ref["path"]] != ref.get("sha256"):
+        raise SystemExit("%s %r is not a protocol input with that sha256; the verdict reads only bound inputs"
+                         % (what, ref))
+    return os.path.join(root, ref["path"])
+
+
+def _read_json_input(path, what):
+    with open(path, encoding="utf-8") as f:
+        try:
+            return json.load(f)
+        except ValueError as e:
+            raise SystemExit("%s %s is not valid JSON (%s); restore it with git" % (what, path, e))
+
+
+def _final_manifest(inputs, root, s, kind, rec_sha):
+    """(final manifest, {seed: entry}) of a system's postfit-final/1 manifest, refused unless it is bound to the
+    system's record and holds every protocol final seed with the same dump and train run ids. A protocol whose final
+    seeds are fewer (or other) than its listed seeds is refused: every listed seed is reported, none dropped."""
+    final = _read_json_input(_bound_input(inputs, root, s.get("final_manifest"), "%s final manifest" % kind),
+                             "%s final manifest" % kind)
+    if final.get("schema") != "postfit-final/1" or (final.get("postfit") or {}).get("sha256") != rec_sha:
+        raise SystemExit("%s final manifest is not a postfit-final/1 bound to the record %s" % (kind, rec_sha))
+    fs = s.get("final_seeds") or []
+    if [f.get("seed") for f in fs] != list(s.get("seeds") or []) or not fs:
+        raise SystemExit("%s: the protocol has final seeds %s for the listed seeds %s; every listed final seed is "
+                         "scored and reported" % (kind, [f.get("seed") for f in fs], s.get("seeds")))
+    entries = {e.get("seed"): e for e in final.get("seeds") or []}
+    for f in fs:
+        e = entries.get(f["seed"]) or {}
+        if (e.get("dump_run_id"), e.get("train_run_id")) != (f["dump_run_id"], f["train_run_id"]):
+            raise SystemExit("%s final seed %s: the final manifest holds %r, the protocol %r"
+                             % (kind, f["seed"], (e.get("dump_run_id"), e.get("train_run_id")),
+                                (f["dump_run_id"], f["train_run_id"])))
+    return final, entries
+
+
+def _final_seed_dump(dump_root, kind, f, sha, rec_sha, manifest_path):
+    """(run dir, load_dump result) of one protocol final seed's test dump: it exists, carries the protocol's sha256,
+    the protocol seed, a final seed's training block bound to the system's postfit record and the system's kind."""
+    d = os.path.join(dump_root, f["dump_run_id"])
+    if not all(os.path.isfile(os.path.join(d, "test." + ext)) for ext in ("npz", "json")):
+        raise SystemExit("%s final seed %s (dump run id %s) has no test dump under %s; score it once through the "
+                         "protocol gate (score.py, 08-11)" % (kind, f["seed"], f["dump_run_id"], dump_root))
+    dump = dumps.load_dump(d, "test", manifest_path)
+    side = dump[2]
+    where = "%s final seed %s (%s)" % (kind, f["seed"], f["dump_run_id"])
+    if side.get("protocol_sha256") != sha:
+        raise SystemExit("%s: the test dump carries protocol_sha256 %s, the frozen protocol is %s; only a dump "
+                         "scored through this protocol's gate is read" % (where, side.get("protocol_sha256"), sha))
+    if side.get("seed") != f["seed"]:
+        raise SystemExit("%s: the test dump records seed %s" % (where, side.get("seed")))
+    tr = side.get("training") if is_final_seed(side) else {}
+    if tr.get("postfit_sha256") != rec_sha:
+        raise SystemExit("%s: the test dump is bound to postfit_sha256 %s, the system's record is %s"
+                         % (where, tr.get("postfit_sha256"), rec_sha))
+    if (side.get("system") or {}).get("kind") != kind or tr.get("run_id") != f["train_run_id"]:
+        raise SystemExit("%s: the test dump is a %s dump of train run %s, not %s"
+                         % (where, (side.get("system") or {}).get("kind"), tr.get("run_id"), f["train_run_id"]))
+    return d, dump
+
+
+def _global_counts(Y, P, theta):
+    """Micro (tp, fp, fn) summed over the 48 tags at one global θ (the collapse rule's test floor)."""
+    tags = metrics.metrics(Y, P, theta)["per_tag"].values()
+    return {k: int(sum(t[k] for t in tags)) for k in ("tp", "fp", "fn")}
+
+
+def _reference_rows(protocol, inputs, root, test):
+    """REP-02's reference rows from the protocol's reference reports (bound inputs): each a full report on the
+    protocol's test split, its shipped val-selected row (D-12 on its own val dump)."""
+    rows = []
+    for name, ref in ((protocol.get("references") or {}).get("rows") or {}).items():
+        rel = ref.get("report")
+        if rel not in inputs:
+            raise SystemExit("reference %s: report %s is not a protocol input" % (name, rel))
+        r = _read_json_input(os.path.join(root, rel), "reference report")
+        split = r.get("split") or {}
+        if (split.get("sha256"), split.get("uids_sha256")) != (test["sha256"], test["uids_sha256"]) or r.get("subset"):
+            raise SystemExit("reference %s: %s is not a full report on the protocol's test split" % (name, rel))
+        v = (r.get("variants") or {}).get("shipped") or {}
+        sel = (v.get("rows") or {}).get("val_selected")
+        if not sel:
+            raise SystemExit("reference %s: %s has no val-selected row" % (name, rel))
+        system = r.get("system") or {}
+        rows.append(dict({"name": name, "run_id": r.get("run_id"), "report": {"path": rel, "sha256": inputs[rel]},
+                          "kind": system.get("kind"), "checkpoint": system.get("checkpoint"),
+                          "baseline_split": (system.get("baseline_source") or {}).get("split"),
+                          "temperature": v.get("temperature"),
+                          "theta": {"global": sel["theta"]["global"], "n_per_tag": len(sel["theta"]["per_tag"])}},
+                         **{k: sel[k] for k in pilot.verdict.TABLE_METRICS + ("n", "n_top1")}))
+    if not rows:
+        raise SystemExit("the protocol lists no reference report; REP-02's table needs its reference rows")
+    return rows
+
+
+def _latency_rows(inputs, root):
+    """(c)'s rows {system, device, n, p50, p95} of the pooled summary of every latency report among the inputs."""
+    rows = []
+    for rel in inputs:
+        if rel.startswith("results/latency/") and rel.endswith(".json"):
+            r = _read_json_input(os.path.join(root, rel), "latency report")
+            p = r.get("pooled") or {}
+            rows.append({"system": r.get("system"), "device": r.get("device"), "n": p.get("n"), "p50": p.get("p50"),
+                         "p95": p.get("p95")})
+    return rows
+
+
+def verdict_from(protocol, sha, manifest_path=DEFAULT_MANIFEST, root=None, dump_root=None):
+    """The verdict/1 record (REP-02, REP-03) of a frozen protocol (the dict and its sha256), computed mechanically by
+    pilot.verdict.build_verdict from protocol-bound inputs only (08-RESEARCH A3, A5, A6, A16, A18):
+    - every protocol input exists under root (default the repo) and hashes to its frozen sha256, and the manifest is
+      the protocol's data/splits.json;
+    - per system (laya, berturk) its postfit record and final manifest are bound inputs; the final seeds are exactly
+      the listed seeds; each final seed's test dump (dump_root, default root/<scoring.dump_root>) exists, carries
+      protocol_sha256 == sha, its seed and a final seed's training block bound to the record; all six score the
+      protocol's test uids in one order (unpaired otherwise), none a --n subset;
+    - the per-seed rows are run_report(..., postfit=RECORD)'s shipped val-selected rows at the record θ (08-04), plus
+      the micro counts at the record's global shipped θ (the test floor) and the final manifest's loss_by_epoch;
+    - each model's probabilities at each seed's shipped T (the record T, by the binding) are seed-averaged and
+      thresholded at the record's theta.shipped (raw: T 1, theta.raw); pilot.verdict.system_deltas with the protocol's
+      bootstrap block gives the headline and raw deltas, Laya - BERTurk;
+    - the label prior's val and test fractions and θ are recomputed (pilot.protocol.prior_floors) and refused unless
+      equal to the frozen ones; the selection runs' objective counts and loss come from each record's chosen candidate;
+    - the latency rows come from the protocol's latency reports and the reference rows from its reference reports.
+    numpy only; SystemExit naming the first failure."""
+    root = REPO_ROOT if root is None else root
+    inputs = _protocol_inputs(protocol, root)
+    if "data/splits.json" in inputs and sha256_file(manifest_path) != inputs["data/splits.json"]:
+        raise SystemExit("%s is not the protocol's data/splits.json (sha256 %s); drop --manifest"
+                         % (manifest_path, inputs["data/splits.json"]))
+    dump_root = os.path.join(root, protocol["scoring"]["dump_root"]) if dump_root is None else dump_root
+    test = protocol["splits"]["test"]
+    systems, runs, recs = {}, [], {}
+    for kind in pilot.verdict.KINDS:
+        s = (protocol.get("systems") or {}).get(kind)
+        if not isinstance(s, dict):
+            raise SystemExit("the protocol has no %s system" % kind)
+        rec_path = _bound_input(inputs, root, s.get("postfit"), "%s postfit record" % kind)
+        record, rec_sha = read_postfit(rec_path)
+        if record.get("system_kind") != kind:
+            raise SystemExit("%s is a %s record, not %s" % (s["postfit"]["path"], record.get("system_kind"), kind))
+        recs[kind] = (record, rec_sha, rec_path) + _final_manifest(inputs, root, s, kind, rec_sha)
+        for f in s["final_seeds"]:
+            runs.append((kind, f) + _final_seed_dump(dump_root, kind, f, sha, rec_sha, manifest_path))
+    _check_paired([(r[2], r[3]) for r in runs], 1)          # one message order over all six seeds (EVAL-07)
+    _, uids, _, entry = runs[0][3]
+    if (entry["sha256"], dumps.uids_sha256(uids)) != (test["sha256"], test["uids_sha256"]):
+        raise SystemExit("the final-seed test dumps score split %s (uids_sha256 %s), not the protocol's test split"
+                         % (entry["sha256"], dumps.uids_sha256(uids)))
+    for kind, f, d, dump in runs:
+        if dump[2]["n_subset"] is not None:
+            raise SystemExit("%s: a --n subset dump is never part of the verdict" % d)
+    Y = dumps.read_gold(entry, manifest_path, uids)
+    P = {k: {"headline": [], "raw": []} for k in pilot.verdict.KINDS}
+    for kind, f, d, (logits, _, side, _) in runs:
+        record, rec_sha, rec_path, _, entries = recs[kind]
+        sel = run_report(d, "test", manifest_path, postfit=rec_path)["variants"]["shipped"]
+        row = sel["rows"]["val_selected"]
+        T = side["temperature"]["shipped"]
+        Ps = metrics.probabilities(logits, T)
+        P[kind]["headline"].append(Ps)
+        P[kind]["raw"].append(metrics.probabilities(logits, 1.0))
+        systems.setdefault(kind, []).append(dict(
+            {"seed": f["seed"], "dump_run_id": f["dump_run_id"], "dump_sha256": side["dump_sha256"],
+             "train_run_id": side["training"]["run_id"], "temperature": T},
+            **{m: row[m] for m in pilot.verdict.TABLE_METRICS + ("n_top1",)},
+            test_counts=_global_counts(Y, Ps, record["chosen"]["theta"]["shipped"]["global"]),
+            loss_by_epoch=entries[f["seed"]].get("loss_by_epoch")))
+    seeded = {}
+    for variant, key in (("headline", "shipped"), ("raw", "raw")):
+        Pv = {k: metrics.seed_average(P[k][variant]) for k in pilot.verdict.KINDS}
+        th = {k: metrics.theta_vector(recs[k][0]["chosen"]["theta"][key]) for k in pilot.verdict.KINDS}
+        d = pilot.verdict.system_deltas(Y, Pv["laya"], th["laya"], Pv["berturk"], th["berturk"], protocol["bootstrap"])
+        seeded[variant] = dict(d, a="laya", b="berturk",
+                               temperature={k: (recs[k][0]["chosen"]["temperature"] if variant == "headline" else 1.0)
+                                            for k in pilot.verdict.KINDS},
+                               theta={k: "theta.%s" % key for k in pilot.verdict.KINDS})
+    floors = pilot.protocol.prior_floors(manifest_path, root)
+    for k in pilot.verdict.PRIOR_KEYS:
+        if floors[k] != protocol["collapse"].get(k):
+            raise SystemExit("the label prior's %s recomputes to %r, the frozen protocol has %r; restore the prior's "
+                             "dumps with git" % (k, floors[k], protocol["collapse"].get(k)))
+    selection = []
+    for kind in pilot.verdict.KINDS:
+        record = recs[kind][0]
+        chosen = record["chosen"]
+        cands = [c for c in record.get("candidates") or [] if c.get("dump_run_id") == chosen["dump_run_id"]]
+        if len(cands) != 1:
+            raise SystemExit("%s: the record lists %d candidates for its chosen dump %s" % (kind, len(cands),
+                                                                                         chosen["dump_run_id"]))
+        selection.append({"kind": kind, "seed": cands[0].get("seed"), "train_run_id": chosen["train_run_id"],
+                          "dump_run_id": chosen["dump_run_id"], "objective": cands[0]["objective"],
+                          "loss_by_epoch": cands[0]["loss_by_epoch"]})
+    out_systems = {}
+    for kind in pilot.verdict.KINDS:
+        s, (record, _, _, final, _) = protocol["systems"][kind], recs[kind]
+        c = record["chosen"]
+        out_systems[kind] = {
+            "kind": kind, "postfit": dict(s["postfit"]), "final_manifest": dict(s["final_manifest"]),
+            "settings": {"chosen": c["dump_run_id"], "train_run_id": c["train_run_id"], "temperature": c["temperature"],
+                         "theta": {v: {"global": c["theta"][v]["global"], "n_per_tag": len(c["theta"][v]["per_tag"])}
+                                   for v in ("shipped", "raw")},
+                         "epoch": c["epoch"], "epochs_schedule": c["epochs_schedule"], "encoder_lr": c["encoder_lr"],
+                         "head_lr": (c.get("canonical") or {}).get("head_lr"),
+                         "config_sha256_sans_seed": final.get("config_sha256_sans_seed")},
+            "seeds": list(s["seeds"]), "per_seed": systems[kind]}
+    inputs_v = {"split": {"name": "test", "path": test.get("path"), "sha256": test["sha256"],
+                          "uids_sha256": test["uids_sha256"], "n": int(Y.shape[0]),
+                          "n_no_intent": int((~Y.any(axis=1)).sum())},
+                "systems": out_systems, "references": _reference_rows(protocol, inputs, root, test),
+                "seed_averaged": seeded, "collapse": {"selection": selection}, "latency": _latency_rows(inputs, root)}
+    return pilot.verdict.build_verdict(protocol, sha, inputs_v)
+
+
+def verdict_report(manifest_path=DEFAULT_MANIFEST, root=None, dump_root=None):
+    """verdict_from of the frozen protocol: pilot.protocol.require_frozen() (refused while protocol.json is missing
+    or PROTOCOL_SHA256 is unset or differs), so the verdict is never computed under an unfrozen rule."""
+    protocol, sha = pilot.protocol.require_frozen()
+    return verdict_from(protocol, sha, manifest_path, root, dump_root)
 
 
 SINGLE_HEADER = ("system", "run_id", "temperature", "θ global (val)", "per-tag θ", "micro-F1 @0.5", "micro-F1 @val-θ",

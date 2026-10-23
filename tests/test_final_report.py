@@ -580,7 +580,7 @@ def test_verdict_refuses_an_unpaired_uid_order(synthetic_final, tmp_path):
 
 
 @pytest.mark.parametrize("key, value", [("prior_val_fraction", "1/3"), ("prior_test_fraction", "1/3"),
-                                        ("prior_theta_global", 0.5)])
+                                        ("prior_theta_global", 0.37)])
 def test_verdict_refuses_a_prior_fraction_off_the_frozen_one(synthetic_final, key, value):
     """The prior's floors are recomputed from its dumps (pilot.protocol.prior_floors) and must equal the frozen ones."""
     protocol = copy_module.deepcopy(synthetic_final.protocol)
@@ -592,7 +592,7 @@ def test_verdict_refuses_a_prior_fraction_off_the_frozen_one(synthetic_final, ke
 def test_verdict_refuses_a_system_with_fewer_final_seeds_than_listed(synthetic_final):
     protocol = copy_module.deepcopy(synthetic_final.protocol)
     protocol["systems"]["laya"]["final_seeds"].pop()
-    with pytest.raises(SystemExit, match="laya .*final seeds \\[0, 1\\].*\\[0, 1, 2\\]"):
+    with pytest.raises(SystemExit, match="laya: .*final seeds \\[0, 1\\].*\\[0, 1, 2\\]"):
         _verdict(synthetic_final, protocol=protocol)
 
 

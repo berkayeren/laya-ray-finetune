@@ -29,6 +29,13 @@ Decisions taken as 08-RESEARCH recommended, under the user's standing delegation
 Inputs are validated before any comparison: a missing or non-finite delta, a missing, non-finite or misordered CI and
 an unknown status raise SystemExit naming the input, so an empty result is refused, never scored.
 
+The verdict record (08-09): build_verdict(protocol, sha, inputs) turns report.verdict_from's protocol-bound inputs into
+verdict/1 (VERDICT_KEYS): the per-seed rows, settings and summary of each fine-tuned system (mean_std: the mean and the
+sample std, ddof 1, A16, exact for equal values), the reference rows, the seed-averaged deltas (headline gates, raw is
+reported, A18), the collapse rows (A6: selection laya, selection berturk, then each model's final seeds), the latency
+rows, the few-shot path PENDING (Phase 9), every criterion from the protocol's criteria block and the overall verdict
+by decide. It refuses a protocol whose verdict rules are not this module's, holds no timestamp and rounds nothing.
+
 numpy and stdlib only: no torch, scipy, Ray, laya or sklearn (report.py imports this module).
 
 usage: from pilot import verdict
@@ -41,10 +48,14 @@ usage: from pilot import verdict
        b = verdict.criterion_b(rows, {"laya": [0, 1, 2], "berturk": [0, 1, 2]}, criteria["b"])
        c = verdict.criterion_c(latency_rows, criteria["c"])
        deltas = verdict.system_deltas(Y, P_laya, th_laya, P_berturk, th_berturk, protocol["bootstrap"])
+       mean, std = verdict.mean_std([x0, x1, x2])                            # sample std, ddof 1
+       v = verdict.build_verdict(protocol, sha, inputs)                      # verdict/1 (report.verdict_from)
 """
+import json
 import math
 import numbers
 import re
+import statistics
 from fractions import Fraction
 
 import numpy as np
@@ -452,3 +463,135 @@ def system_deltas(Y, PA, thA, PB, thB, boot):
                                                                                    (extra["n"], extra["B"])))
     return {"n": base["n"], "B": base["B"], "seed": base["seed"], "level": base["level"], "method": base["method"],
             "coverage": extra["coverage"], "metrics": dict(base["metrics"], **extra["metrics"])}
+
+
+# ---- the verdict record (08-09, REP-02 and REP-03) ----
+
+VERDICT_SCHEMA = "verdict/1"
+KINDS = ("laya", "berturk")                                 # A - B: every delta is Laya - BERTurk
+TABLE_METRICS = ("micro_f1", "macro_f1", "exact_match", "top1_hit")
+VERDICT_KEYS = ("schema", "protocol", "split", "systems", "references", "seed_averaged", "collapse", "latency",
+                "fewshot", "criteria", "verdict")
+PRIOR_KEYS = ("prior_val_fraction", "prior_test_fraction", "prior_theta_global")
+FEWSHOT_PHASE = 9                                           # the phase that runs the few-shot path of (d)
+
+
+def mean_std(values):
+    """(mean, sample standard deviation with ddof 1) of per-seed values as floats (A16), computed exactly (the
+    statistics module sums exact rationals), so equal values give their own value and a std of exactly 0.0. Fewer
+    than two values, or a value that is not a finite number, is refused."""
+    if not isinstance(values, (list, tuple)) or len(values) < 2:
+        raise SystemExit("mean_std needs at least two per-seed values, got %r; a seed is never dropped" % (values,))
+    xs = [_finite(x, "a per-seed value") for x in values]
+    return float(statistics.mean(xs)), float(statistics.stdev(xs))
+
+
+def _check_rules(protocol):
+    """SystemExit unless the protocol's verdict block holds exactly the rules, INCONCLUSIVE meaning and provisional
+    text this module implements: decide runs this code, so it must be the code of the frozen rules."""
+    v = protocol.get("verdict") if isinstance(protocol, dict) else None
+    want = {"rules": list(VERDICT_RULES), "inconclusive_means": INCONCLUSIVE_MEANS, "provisional": PROVISIONAL_TEXT}
+    got = {k: (v or {}).get(k) for k in want}
+    if got != want:
+        raise SystemExit("the protocol's verdict rules differ from pilot.verdict's (%s); the verdict is computed by "
+                         "the code of the frozen rules only" % ", ".join(k for k in want if got[k] != want[k]))
+
+
+def _run_row(run, kind, seed, train_run_id, dump_run_id, components):
+    return {"run": run, "kind": kind, "seed": seed, "train_run_id": train_run_id, "dump_run_id": dump_run_id,
+            "components": components, "collapsed": any(c["collapsed"] for c in components)}
+
+
+def _collapse_rows(protocol, inputs, systems):
+    """A6, one row per run in the order selection laya, selection berturk, final laya s0.., final berturk s0..:
+    each selection run (its record's chosen candidate) by the val floor and the loss, each final seed by the loss and
+    the test floor, against the protocol's frozen prior fractions."""
+    col = protocol["collapse"]
+    val_floor, test_floor = parse_fraction(col["prior_val_fraction"]), parse_fraction(col["prior_test_fraction"])
+    sel = {s.get("kind"): s for s in (inputs.get("collapse") or {}).get("selection") or []}
+    rows = []
+    for kind in KINDS:
+        s = sel.get(kind)
+        if s is None:
+            raise SystemExit("no selection run of %s in the collapse inputs; it is refused, never scored" % kind)
+        o = s["objective"]
+        rows.append(_run_row("selection", kind, s["seed"], s["train_run_id"], s["dump_run_id"],
+                             [collapse_val(micro_fraction(o["tp"], o["fp"], o["fn"]), val_floor),
+                              collapse_loss(s["loss_by_epoch"])]))
+    for kind in KINDS:
+        for r in systems[kind]["per_seed"]:
+            n = r["test_counts"]
+            rows.append(_run_row("final", kind, r["seed"], r["train_run_id"], r["dump_run_id"],
+                                 [collapse_loss(r["loss_by_epoch"]),
+                                  collapse_test_floor(micro_fraction(n["tp"], n["fp"], n["fn"]), test_floor)]))
+    return {"rule": col.get("rule"), "prior_val_fraction": col["prior_val_fraction"],
+            "prior_test_fraction": col["prior_test_fraction"], "prior_theta_global": col.get("prior_theta_global"),
+            "rows": rows}
+
+
+def _systems(inputs):
+    """Each fine-tuned system as given plus its summary: per TABLE_METRICS metric the mean and sample std over its
+    seeds and the per-seed values in seed order; the per-seed rows must be exactly the protocol's listed seeds."""
+    out = {}
+    for kind in KINDS:
+        s = (inputs.get("systems") or {}).get(kind)
+        if not isinstance(s, dict) or not isinstance(s.get("per_seed"), list):
+            raise SystemExit("no per-seed rows of %s in the verdict inputs; it is refused, never scored" % kind)
+        got = [r.get("seed") for r in s["per_seed"]]
+        if got != list(s.get("seeds") or []):
+            raise SystemExit("%s has per-seed rows for seeds %s, the protocol lists seeds %s; every listed final seed "
+                             "is reported, none dropped" % (kind, got, s.get("seeds")))
+        summary = {}
+        for m in TABLE_METRICS:
+            values = [r.get(m) for r in s["per_seed"]]
+            mean, std = mean_std(values)
+            summary[m] = {"mean": mean, "std": std, "values": values}
+        out[kind] = dict(s, summary=summary)
+    return out
+
+
+def _metric(deltas, name):
+    m = (deltas.get("metrics") or {}).get(name) if isinstance(deltas, dict) else None
+    if not isinstance(m, dict):
+        raise SystemExit("the headline deltas have no %r metric; the verdict needs every gated statistic" % name)
+    return m
+
+
+def build_verdict(protocol, sha, inputs):
+    """The verdict/1 record (REP-03) from the frozen protocol and verdict_from's inputs: per system the per-seed rows,
+    settings and summary (mean and sample std, A16), the seed-averaged deltas (headline gates, raw is reported, A18),
+    the collapse rows (A6), the latency and reference rows, and the criteria from the protocol's criteria block: (a)
+    on the headline micro-F1 and macro-F1 deltas, (b) on the collapse rows and the scored seeds, (c) on the latency
+    rows, (d) on the headline Brier and precision-at-coverage deltas with the few-shot path PENDING until Phase 9, the
+    alternative GO on the headline micro-F1 delta, and the overall verdict by decide (A3). No timestamp and no
+    rounding: the same inputs give the same bytes. The protocol's verdict rules must be this module's."""
+    _check_rules(protocol)
+    crit = protocol["criteria"]
+    systems = _systems(inputs)
+    seeded = inputs.get("seed_averaged") or {}
+    for variant in ("headline", "raw"):
+        if not isinstance(seeded.get(variant), dict) or "metrics" not in seeded[variant]:
+            raise SystemExit("the verdict inputs lack the %s seed-averaged deltas" % variant)
+    h = seeded["headline"]
+    collapse = _collapse_rows(protocol, inputs, systems)
+    cal, abst = _path_rule(crit["d"], "calibration"), _path_rule(crit["d"], "abstention")
+    criteria = {
+        "a": criterion_a(_metric(h, "micro_f1"), _metric(h, "macro_f1"), crit["a"]),
+        "b": criterion_b(collapse["rows"], {k: [r["seed"] for r in systems[k]["per_seed"]] for k in KINDS},
+                         crit["b"]),
+        "c": criterion_c(inputs.get("latency"), crit["c"]),
+        "d": criterion_d(_metric(h, cal.get("metric")), _metric(h, abst.get("metric")), None, crit["d"]),
+        "alternative_go": alternative_go(_metric(h, "micro_f1"), crit["alternative_go"]),
+    }
+    for k in criteria:
+        criteria[k]["name"] = crit[k].get("name")
+    s = {k: criteria[k]["status"] for k in ("a", "b", "d", "alternative_go")}
+    out = {"schema": VERDICT_SCHEMA, "protocol": {"path": "protocol.json", "sha256": sha},
+           "split": inputs.get("split"), "systems": systems, "references": inputs.get("references") or [],
+           "seed_averaged": seeded, "collapse": collapse, "latency": inputs.get("latency"),
+           "fewshot": {"status": PENDING, "phase": FEWSHOT_PHASE}, "criteria": criteria,
+           "verdict": decide(s["a"], s["b"], s["d"], s["alternative_go"])}
+    try:
+        return json.loads(json.dumps(out, allow_nan=False))     # plain JSON values only, strict (no NaN)
+    except ValueError as e:
+        raise SystemExit("the verdict holds a value that is not strict JSON (%s); it is refused" % e)
