@@ -659,7 +659,7 @@ def test_final_seed_run_report_refuses_training_content(tmp_path, snap, fitted, 
         evaluate.main([os.path.join(rsnap[0], "splits", "test.jsonl"), "--manifest", rsnap[1]])
     rep = report.run_report(ok, "test", snap[1])
     assert rep["split"]["name"] == "test" and rep["theta_source"] is None
-    assert rep["variants"]["shipped"]["val_selected_reason"] == report.NO_VAL_REASON
+    assert rep["variants"]["shipped"]["val_selected_reason"] == report.FINAL_SEED_REASON     # θ never self-selected
 
 
 def test_final_seed_subset_val_dump_is_never_reported(tmp_path, snap, fitted):
@@ -913,8 +913,8 @@ def test_confidence_out_writes_the_svg_next_to_the_json(tmp_path, snap, capsys):
 
 def test_confidence_argument_errors(tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
-        report.main(["--postfit", "x.json", "results/dumps/prior"])
-    assert e.value.code == 2 and "--postfit applies only to --confidence" in capsys.readouterr().err
+        report.main(["--table", "results/reports", "--postfit", "x.json"])
+    assert e.value.code == 2 and "--postfit applies only to RUN_DIR or --confidence" in capsys.readouterr().err
     with pytest.raises(SystemExit) as e:
         report.main(["--confidence", "results/dumps/prior"])
     assert e.value.code == 2 and "--confidence needs an explicit --split" in capsys.readouterr().err
