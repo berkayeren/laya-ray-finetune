@@ -220,8 +220,9 @@ def test_evaluate_defaults_to_a_temp_out_root(tmp_path, monkeypatch):
     import evaluate
     calls = []
 
-    def fake_score(argv):
+    def fake_score(argv, roles=None):
         calls.append(list(argv))
+        assert roles == ("test", "val")                     # evaluate.py never scores hotels_probe (08-07)
         return str(tmp_path / "run"), "test"
     monkeypatch.setattr(score, "main", fake_score)
     monkeypatch.setattr(report, "run_report", lambda *a, **k: {})

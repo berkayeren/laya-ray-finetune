@@ -7,7 +7,9 @@ report.run_report on the dump it wrote, so its output equals `report.py RUN_DIR 
 It holds no metric, threshold or model-loading code of its own (tests/test_consumers.py checks this).
 
 Every refusal comes from score.py, before any model load or ray.init: a tampered, unregistered, missing or wrong-role
-split (only test and val are scored), --n 0 or negative, and a --checkpoint that is neither 'multilingual' (the
+split (only test and val: score.main(..., roles=("test", "val")), so hotels_probe, which score.py opens to Laya and
+BERTurk, is still refused here, since report.run_report has no 48-tag report of it), a fine-tuned checkpoint on test
+outside score.py's protocol gate, --n 0 or negative, and a --checkpoint that is neither 'multilingual' (the
 pinned, sha256-verified hub weights) nor a local Laya checkpoint dir, and an existing dump without --force.
 
 The dump lands under --out-root/RUN_ID. Without --out-root that is a fresh temp dir (printed on the console), so
@@ -58,7 +60,7 @@ def main(argv=None):
     score_argv += ["--device", a.device] if a.device is not None else []
     score_argv += ["--force"] if a.force else []
     score_argv += ["--out-root", a.out_root if a.out_root is not None else tempfile.mkdtemp(prefix="evaluate-")]
-    run_dir, split_name = score.main(score_argv)
+    run_dir, split_name = score.main(score_argv, roles=("test", "val"))   # never hotels_probe: no 48-tag report
     rep = report.run_report(run_dir, split_name, a.manifest)
     text = json.dumps(rep, ensure_ascii=False, indent=2)
     print(text)

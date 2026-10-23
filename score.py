@@ -27,12 +27,10 @@ into metrics with numpy alone (D-05). Systems (--model, default laya):
   in any order, are reassembled by uid into split-file order (a duplicate, missing or unexpected uid is refused).
   --gpus-per-worker is the Ray actors' GPU resource (cuda).
 - berturk: a BERTurk checkpoint written by berturk_train.py (--checkpoint DIR: an epoch export or a final seed holding
-  pilot.berturk.CHECKPOINT_FILES), scored in-process only (--workers 0; seconds for a split) by score_berturk. Once
-  the split is parsed, before any hashing, checkpoint file read or model load, the driver refuses a split with role
-  test under any manifest and any split holding committed test content, keyed on the content as for Laya (the sha256
-  or uids_sha256 of the committed test entry, or any (uid, message) pair of the committed test.jsonl:
-  pilot.data.holds_committed; 06-REVIEW CR-01), since every BERTurk checkpoint is fine-tuned and Phase 8's protocol
-  freeze decides test scoring (refuse_berturk_test). It then checks the five files, names the
+  pilot.berturk.CHECKPOINT_FILES), scored in-process only (--workers 0; seconds for a split) by score_berturk. Every
+  BERTurk checkpoint is fine-tuned, so on test or HOTELS it goes through the protocol gate below (role test or
+  ood_probe under any manifest, or committed test or hotels_probe content), before any hashing, checkpoint file read
+  or model load. It then checks the five files, names the
   dump by pilot.berturk.dump_run_id (berturk-<model sha256[:12]>-<berturk_train.json sha256[:8]>-<digest of
   config.json and the tokenizer files[:8]>), refuses an existing dump, reads config.json and berturk_train.json from
   the bytes the identity hashed, and refuses a config.json whose labels are not the 48 INTENTS tags in INTENTS order
@@ -41,16 +39,19 @@ into metrics with numpy alone (D-05). Systems (--model, default laya):
   the checkpoint dir with local_files_only and fp32, and check_bert refuses parameters off the device or not float32,
   or autocast on, after the load and after every batch. That load is load_bert, which latency.py shares, so the
   latency harness times the checkpoint exactly as it is scored. The logits are the classifier's raw logits (P =
-  sigmoid(logit / T)); the shipped T is berturk_train.json's temperature (1.0 for an export); seed and training come from that
-  record (pilot.berturk.training_block, the keys pilot.postfit reads).
+  sigmoid(logit / T)); the shipped T is berturk_train.json's temperature (1.0 for an export); seed and training come
+  from that record (pilot.berturk.training_block, the keys pilot.postfit reads).
 - prior: p_t = messages carrying tag t / all messages, no-intent rows counted, in the training split the scored
   role's models are trained on (pilot.data.TRAINED_ON: final_train for test, selection_train for val)
 - majority: p = 1 on the most frequent tag of that training split (ties -> the earlier INTENTS tag), 0 elsewhere
 Both are clipped to [1e-6, 1 - 1e-6] and stored as logits with T = 1, the same row for every message. They are never
 derived from the labels being scored; the sidecar records the source split and its sha256.
 
-The input must be a split registered in the manifest with a matching sha256 and role test or val (train splits and
-hotels_probe are refused, before any work). A full dump keeps split-file order. --n scores a fixed random subset
+The input must be a split registered in the manifest with a matching sha256 and a role in main's `roles` (default
+SCORE_ROLES: test, val and ood_probe; train splits are refused before any work). hotels_probe (role ood_probe) is open
+to --model laya and berturk only: majority and prior are refused on it naming the role, since pilot.data.TRAINED_ON
+has no HOTELS training source, and evaluate.py passes roles ("test", "val"), so it still refuses hotels_probe before
+any load. A full dump keeps split-file order. --n scores a fixed random subset
 (shuffled with seed 0, as evaluate.py did) for debugging only: a subset dump never lands under results/dumps (refused
 there; without --out-root it goes to a fresh temp dir) and its sidecar records n_subset.
 
@@ -69,17 +70,27 @@ the canonical config without seed and neg_seed, plus the epoch). report.py --com
 when they are distinct seeds of one recipe by that digest. The pinned zero-shot checkpoint, a local checkpoint without
 training.ray_train and the baselines record seed None and training None.
 
-The Phase 5 test interlock (RESEARCH A6; ROADMAP Phase 5 criterion 4): a fine-tuned Laya checkpoint (rl_agent_config
-.json fine_tuned true or a training.ray_train block) is refused on committed test content, right after the checkpoint
-argument check and before any hashing, fetch, model load or Ray start (refuse_finetuned_test; evaluate.py forwards to
-score.main and inherits it). It is keyed on the scored content, not on the manifest bytes (05-REVIEW CR-02): refused
-are a split with role test under the committed manifest, a split (any role, any manifest) whose sha256 or uids_sha256
-is the committed test entry's in data/splits.json, and any scored (uid, message) pair of the committed
-data/splits/test.jsonl when that file exists (pilot.data.holds_committed), so a byte-different manifest copy or the
---no-include-no-intent variant cannot turn it off. A uid alone is not the key: the synthetic splits of the tests reuse
-the uid scheme with other messages, so the CPU smoke test (tests/test_smoke_cpu.py) stays outside it. Val scoring of
-the same checkpoint, and the pinned zero-shot or a not fine-tuned checkpoint on test, are unaffected; hotels_probe is
-already refused by the role gate. Phase 8 replaces it with the protocol-hash gate (protocol.json).
+The protocol gate (Phase 8; REP-01, ROADMAP Phase 8 criteria 1 and 4) replaced the Phase 5 Laya and Phase 6 BERTurk
+test interlocks (refuse_finetuned_test, refuse_berturk_test). It triggers (gate_trigger) on the content they keyed on,
+extended to HOTELS, computed on every parsed row before --n: a fine-tuned Laya checkpoint (rl_agent_config.json
+fine_tuned true or a training.ray_train block) on a split with role test or ood_probe under the committed manifest, any
+BERTurk checkpoint on a split with role test or ood_probe under any manifest, and either on a split of any role and
+manifest whose sha256 or uids_sha256 is the committed test or hotels_probe entry's, or that holds any (uid, message)
+pair of the committed test.jsonl or hotels_probe.jsonl (pilot.data.holds_committed; 05-REVIEW CR-02, 06-REVIEW
+CR-01), so a byte-different manifest copy cannot turn it off. A uid alone is not the key: the synthetic splits of the
+tests reuse the uid scheme with other messages, so the CPU smoke test stays outside it. A triggered run is refused,
+before any checkpoint hashing, fetch, model load or Ray start (protocol_gate), unless every one of these holds:
+pilot.protocol.require_frozen passes (protocol.json exists and its bytes hash to the pin, so a missing, unpinned or
+changed protocol stops it); no --n; no --force; no --out-root other than results/dumps; the manifest is the committed
+one and pilot.protocol.gated_split names the split; --device and --workers are the protocol's scoring device and
+workers (mps, 0). After the identity is hashed, and still before any file is parsed or a model loads, the dump run id
+must be one of the protocol's final seeds of that system (require_final_seed, pilot.protocol.final_seed_allowed), so a
+selection export, a retrained or an edited checkpoint never reaches test or HOTELS. Once means once: an existing
+gated dump is refused (and --force with it), and an npz an interrupted gated run left without its sidecar is refused
+naming the recovery (load_dump never read it: delete it and rerun the one command). An admitted dump's sidecar carries
+protocol_sha256, the pin; every other dump (val, zero-shot Laya, a not fine-tuned checkpoint, the baselines) has no
+such key and is scored exactly as before. Every gate refusal is one line starting GATE that names the checkpoint, the
+split, the trigger and the fix.
 
 Module-level imports stay torch-, Ray- and laya-free.
 
@@ -87,6 +98,8 @@ usage: python score.py data/splits/test.jsonl [--model laya|berturk|majority|pri
                        [--device cpu|mps|cuda] [--workers W] [--cpus-per-worker C] [--gpus-per-worker G] [--n N]
                        [--out-root DIR] [--force] [--manifest M]
        python score.py data/splits/val.jsonl --model berturk --checkpoint DIR --workers 0 [--device cpu|mps|cuda]
+       python score.py data/splits/test.jsonl --checkpoint ckpt-final-s0 --device mps --workers 0   # gated: a final
+                       seed of the frozen protocol, once per split (test or hotels_probe)
 """
 import argparse
 import json
@@ -98,7 +111,7 @@ import time
 import numpy as np
 
 from intents import INTENTS, QUESTIONS
-from pilot import berturk, dumps
+from pilot import berturk, dumps, protocol
 from pilot import laya_adapter as la
 from pilot.data import (DEFAULT_MANIFEST, TRAINED_ON, holds_committed, manifest_is_committed, parse_jsonl,
                         questions_sha256, repo_relpath, sha256_bytes, sha256_file, verify_split_file)
@@ -110,6 +123,9 @@ BATCHING = "one message per forward (laya.calibrate.records_from_labeled via pil
 TEMPERATURE_SOURCE = "laya.load (clamped noul:2 temperature, what the public API serves)"
 REFUSAL = "score.py refusal: "                              # marks a scoring actor's SystemExit (04-REVIEW WR-01)
 EXIT_DETAIL = "Worker exit detail: "                        # ray 2.59: precedes why a dead actor's worker exited
+GATE = "protocol gate (Phase 8): "                          # the prefix of every protocol gate refusal
+SCORE_ROLES = ("test", "val", "ood_probe")                  # the roles score.py scores (main's default `roles`)
+GATED_ROLES = ("test", "ood_probe")                         # a fine-tuned model on these goes through the gate
 
 
 def train_counts(manifest_path, role):
@@ -187,18 +203,82 @@ def is_finetuned(checkpoint):
     return cfg.get("fine_tuned") is True or bool(isinstance(tr, dict) and tr.get("ray_train"))
 
 
-def refuse_finetuned_test(checkpoint, entry, manifest_path, cases=()):
-    """The Phase 5 test interlock (RESEARCH A6, ROADMAP Phase 5 criterion 4): SystemExit when a fine-tuned Laya
-    checkpoint would be scored on committed test content: a split with role test under the committed manifest, a split
-    whose sha256 or uids_sha256 is the committed test entry's, or any scored case (`cases`, the parsed rows) whose
-    (uid, message) pair is in the committed test.jsonl (05-REVIEW CR-02: keyed on the content, not the manifest bytes).
-    Runs before any hashing, fetch, model load or Ray start; Phase 8 replaces it with the protocol-hash gate."""
-    if not is_finetuned(checkpoint):
+def gate_trigger(model, checkpoint, entry, manifest_path, cases=()):
+    """Why the protocol gate applies to this run (the text of the refusal), or None for an ungated run.
+
+    The trigger is the content the Phase 5 and Phase 6 test interlocks keyed on, extended to HOTELS (05-REVIEW CR-02,
+    06-REVIEW CR-01): a fine-tuned Laya checkpoint (is_finetuned) on a split with role test or ood_probe under the
+    committed manifest; any BERTurk checkpoint (every one is fine-tuned) on a split with role test or ood_probe under
+    any manifest; and for both, a split of any role and manifest holding committed test or hotels_probe content
+    (pilot.data.holds_committed: the committed entry's sha256 or uids_sha256, or any (uid, message) pair of `cases`,
+    every parsed row). Majority, prior, the pinned zero-shot Laya and a Laya checkpoint that is not fine-tuned are
+    never gated. No hashing, fetch or model load."""
+    if model == "laya":
+        if not is_finetuned(checkpoint):
+            return None
+        if entry["role"] in GATED_ROLES and manifest_is_committed(manifest_path):
+            return "is a %s split under the committed manifest" % entry["role"]
+    elif model == "berturk":
+        if entry["role"] in GATED_ROLES:
+            return "is a split with role %s" % entry["role"]
+    else:
+        return None
+    for name in protocol.GATED:
+        if holds_committed(entry, cases, name):
+            return "holds committed %s content" % name
+    return None
+
+
+def _gate_head(kind, checkpoint, entry, trigger):
+    """The opening of every gate refusal: GATE, the checkpoint, the split and the trigger."""
+    return GATE + "%s is a fine-tuned %s checkpoint and %s %s; " % (_shown(checkpoint), kind, entry["path"], trigger)
+
+
+def protocol_gate(a, kind, checkpoint, entry, manifest_path, device, trigger):
+    """(protocol dict, its pinned sha256, the gated split name) of a triggered run (gate_trigger); SystemExit, one line
+    starting GATE, unless every condition of the frozen protocol's scoring block holds, checked in this order before
+    any checkpoint hashing, fetch, model load or Ray start (REP-01, ROADMAP Phase 8 criteria 1 and 4):
+    pilot.protocol.require_frozen passes (protocol.json exists, its bytes hash to the pin); no --n; no --force; no
+    --out-root other than results/dumps (dumps.DUMP_ROOT); the manifest is the committed data/splits.json and the
+    protocol names the split (pilot.protocol.gated_split: its sha256 and uids_sha256); the device and worker count
+    are the protocol's scoring device and workers. The final-seed allow-list needs the hashed identity, so it runs
+    later (require_final_seed)."""
+    head = _gate_head(kind, checkpoint, entry, trigger)
+    try:
+        proto, pin = protocol.require_frozen()
+    except SystemExit as e:
+        raise SystemExit(head + "it is scored only as one of the final seeds bound in the frozen protocol.json, and "
+                         + str(e.code).replace("\n", " ")) from None
+    if a.n is not None:
+        raise SystemExit(head + "--n is refused: a final seed is scored on the whole split, once")
+    if a.force:
+        raise SystemExit(head + "--force is refused: a final seed is scored once per split and never rescored "
+                                "(the protocol's scoring.once)")
+    if a.out_root is not None and os.path.realpath(a.out_root) != os.path.realpath(dumps.DUMP_ROOT):
+        raise SystemExit(head + "--out-root %s is refused: a gated dump goes only to results/dumps; drop --out-root"
+                         % a.out_root)
+    split = protocol.gated_split(proto, entry) if manifest_is_committed(manifest_path) else None
+    if split is None:
+        raise SystemExit(head + "only the test or hotels_probe split of the committed data/splits.json that the "
+                                "protocol names is scored; drop --manifest, or run `make data`")
+    sc = proto.get("scoring") or {}
+    if device != sc.get("device") or a.workers != sc.get("workers"):
+        raise SystemExit(head + "the protocol scores final seeds with --device %s --workers %s, not --device %s "
+                                "--workers %s" % (sc.get("device"), sc.get("workers"), device, a.workers))
+    return proto, pin, split
+
+
+def require_final_seed(proto, kind, rid, head):
+    """SystemExit (head + the reason) unless the dump run id `rid` of the hashed checkpoint identity is one of the
+    protocol's final seeds of system `kind` (pilot.protocol.final_seed_allowed). Runs after the identity is hashed and
+    before any checkpoint file is parsed or any model loads."""
+    if protocol.final_seed_allowed(proto, kind, rid):
         return
-    if (entry["role"] == "test" and manifest_is_committed(manifest_path)) or holds_committed(entry, cases, "test"):
-        raise SystemExit("%s is a fine-tuned Laya checkpoint and %s holds committed test content; no fine-tuned model "
-                         "is scored on test before the Phase 8 protocol freeze (protocol.json); score val instead"
-                         % (_shown(checkpoint), entry["path"]))
+    have = (proto.get("systems") or {}).get(kind)
+    ids = [s.get("dump_run_id") for s in have.get("final_seeds") or []] if isinstance(have, dict) else []
+    raise SystemExit(head + "its dump run id %s is not one of the protocol's %s final seeds (%s); a selection export, "
+                            "a retrained or an edited checkpoint is never scored on test or HOTELS"
+                     % (rid, kind, ", ".join(map(str, ids)) or "none"))
 
 
 def training_block(checkpoint, ident):
@@ -479,19 +559,6 @@ def score_laya(a, checkpoint, cases, device, ident):
     return logits, fields
 
 
-def refuse_berturk_test(checkpoint, entry, cases=()):
-    """No BERTurk checkpoint is scored on test content in Phase 6 (ROADMAP Phase 6 criterion 4): every BERTurk
-    checkpoint is fine-tuned. Refused are a split with role test under any manifest and, keyed on the content as for
-    Laya (pilot.data.holds_committed; 06-REVIEW CR-01), a split of any role whose sha256 or uids_sha256 is the
-    committed test entry's or any scored (uid, message) pair (`cases`, the parsed rows) of the committed test.jsonl.
-    Runs right after the split is parsed, before any hashing, checkpoint file read or model load; hotels_probe is
-    already refused by the role gate."""
-    if entry["role"] == "test" or holds_committed(entry, cases, "test"):
-        raise SystemExit("%s is a BERTurk checkpoint and %s is a test split or holds committed test content; no "
-                         "fine-tuned model is scored on test before the Phase 8 protocol freeze (protocol.json); "
-                         "score val instead" % (_shown(checkpoint), entry["path"]))
-
-
 def _bound_bytes(path, sha256):
     """The bytes of `path`, refused unless their sha256 is the one the checkpoint identity recorded."""
     with open(path, "rb") as f:
@@ -589,7 +656,9 @@ def score_berturk(a, checkpoint, cases, device, ident, rec):
     return logits, fields
 
 
-def main(argv=None):
+def main(argv=None, roles=None):
+    """Score one system on one split (argv: the CLI flags); returns (run dir, split name). roles: the split roles
+    admitted (default SCORE_ROLES; evaluate.py passes ("test", "val"), so it never scores hotels_probe)."""
     ap = argparse.ArgumentParser(description="score a system on a val/test split into a logit dump")
     ap.add_argument("split_jsonl")
     ap.add_argument("--model", default="laya", choices=("laya", "berturk", "majority", "prior"))
@@ -637,11 +706,19 @@ def main(argv=None):
                          % a.split_jsonl)
     with open(a.split_jsonl, "rb") as f:
         raw = f.read()                                       # hash and parse the same bytes (no reread window)
-    entry = verify_split_file(a.split_jsonl, manifest_path=a.manifest, roles=("test", "val"), data=raw)
+    entry = verify_split_file(a.split_jsonl, manifest_path=a.manifest, roles=roles or SCORE_ROLES, data=raw)
+    if a.model not in ("laya", "berturk") and entry["role"] not in TRAINED_ON:
+        raise SystemExit("%s has role %s; majority and prior have no HOTELS training source (pilot.data.TRAINED_ON "
+                         "maps val and test only); only --model laya or berturk scores hotels_probe"
+                         % (a.split_jsonl, entry["role"]))
     split_name = os.path.splitext(os.path.basename(entry["path"]))[0]
     cases = parse_jsonl(raw)                                 # split-file order: a full dump verifies by uids_sha256
-    if a.model == "berturk":
-        refuse_berturk_test(a.checkpoint, entry, cases)      # every row, before any hashing, file read or model load
+    checkpoint = a.checkpoint or "multilingual"
+    if a.model == "laya":
+        check_checkpoint_arg(checkpoint)
+    # the protocol gate (Phase 8): keyed on every parsed row, before --n, hashing, fetch, file read, load or Ray
+    trigger = gate_trigger(a.model, checkpoint, entry, a.manifest, cases)
+    gate = protocol_gate(a, a.model, checkpoint, entry, a.manifest, device, trigger) if trigger else None
     if a.n is not None:
         random.Random(SUBSET_SEED).shuffle(cases)
         cases = cases[:a.n]
@@ -651,13 +728,9 @@ def main(argv=None):
     n_subset = None if a.n is None else len(cases)
 
     # the run id from hashes alone, so an existing dump is refused before any fetch, model load or Ray start (WR-03)
-    checkpoint = a.checkpoint or "multilingual"
     if a.model == "laya":
         from pilot.weights import identity
-        check_checkpoint_arg(checkpoint)
-        refuse_finetuned_test(checkpoint, entry, a.manifest, cases)   # Phase 5: before any hash, fetch, load, Ray
         ident = identity(checkpoint)
-        seed, training = training_block(checkpoint, ident)   # WR-05: the training seed and recipe, bound by ident
         rid = dumps.run_id("laya", ident)
     elif a.model == "berturk":
         berturk.require_files(checkpoint, "--checkpoint")
@@ -665,6 +738,11 @@ def main(argv=None):
         rid = berturk.dump_run_id(ident)
     else:
         rid = dumps.run_id(a.model)
+    head = _gate_head(a.model, checkpoint, entry, trigger) if gate else None
+    if gate:
+        require_final_seed(gate[0], a.model, rid, head)      # the hashed identity in the allow-list, before any load
+    if a.model == "laya":
+        seed, training = training_block(checkpoint, ident)   # WR-05: the training seed and recipe, bound by ident
     if a.n is None:
         root = a.out_root or dumps.DUMP_ROOT
     else:
@@ -672,6 +750,14 @@ def main(argv=None):
     run_dir = os.path.join(root, rid)
     for ext in (".npz", ".json"):
         dst = os.path.join(run_dir, split_name + ext)
+        if gate and ext == ".npz" and os.path.exists(dst) and not os.path.exists(os.path.join(run_dir, split_name +
+                                                                                              ".json")):
+            raise SystemExit(head + "%s exists without its sidecar: an interrupted gated run left it, and load_dump "
+                                    "never read it (it needs the sidecar); delete it and rerun this one command"
+                             % _shown(dst))
+        if gate and os.path.exists(dst):
+            raise SystemExit(head + "%s already exists; a final seed is scored once per split (the protocol's "
+                                    "scoring.once) and never rescored" % _shown(dst))
         if os.path.exists(dst) and not a.force:
             raise SystemExit("%s already exists; pass --force to rescore it (results/dumps is the committed audit "
                              "record), or --out-root DIR to write elsewhere" % _shown(dst))
@@ -698,6 +784,8 @@ def main(argv=None):
                   "temperature": {"shipped": 1.0, "source": "baseline: logit of a train-split frequency (T = 1)"},
                   "scorer": {"numpy_version": np.__version__, "workers": 0, "device": None},
                   "timing": {"seconds": time.time() - t0}}
+    if gate:
+        fields = dict(fields, protocol_sha256=gate[1])       # admitted by the protocol gate: bound to its pin
     sidecar = dict(sidecar_base(entry, split_name, a.manifest, n_subset), **fields)
     path = dumps.write_dump(run_dir, split_name, logits, uids, sidecar)
     print("%s dump -> %s" % (rid, _shown(path)))
