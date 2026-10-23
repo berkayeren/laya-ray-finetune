@@ -322,6 +322,31 @@ def test_inspect_refuses_a_record_that_is_not_its_identity(planted):
     cli_refused(["--inspect", ckpt], "holds both")
 
 
+def test_proof_tags_match_any_order_of_exactly_the_frozen_tags():
+    """09-10: a Laya continued proof lists the held-out tags in protocol order, a base or BERTurk proof sorted; both
+    name the frozen tags. Another set, a repeated tag or a non-list never matches."""
+    tags = list(fs.TAGS)
+    assert runner.proof_tags_match(tags, tags) and runner.proof_tags_match(sorted(tags), tags)
+    assert runner.proof_tags_match(list(reversed(tags)), sorted(tags))
+    assert not runner.proof_tags_match(tags[:-1], tags)
+    assert not runner.proof_tags_match(tags + ["card"], tags)
+    assert not runner.proof_tags_match(tags[:-1] + [tags[0]], tags)
+    assert not runner.proof_tags_match(tags + [tags[0]], tags)
+    assert not runner.proof_tags_match(tuple(tags), tags) and not runner.proof_tags_match(None, tags)
+    assert not runner.proof_tags_match(tags[:-1] + [None], tags)
+
+
+def test_inspect_refuses_a_proof_of_other_tags(planted):
+    """A continued checkpoint whose record's proof names another tag set than the frozen held-out tags is refused."""
+    from fewshot_synthetic import plant_laya
+    src = planted.ckpts["laya-d0-k2"]
+    with open(os.path.join(src, "rl_agent_config.json"), encoding="utf-8") as f:
+        rt = json.load(f)["training"]["ray_train"]
+    record = dict(rt["record"], fewshot=dict(rt["record"]["fewshot"], tags=["card", "loan"]))
+    other = plant_laya(str(planted.tmp / "tags" / "laya-d0-k2"), rt["canonical"], record)
+    cli_refused(["--inspect", other], "its proof covers tags", "not the frozen held-out tags")
+
+
 # ---- guarded deletion: --prune after verified dumps, --drop-storage of a finished Laya run (D-14; 09-05 Task 3) ----
 
 def gated_test(ns, name):

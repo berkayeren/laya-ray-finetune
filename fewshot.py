@@ -382,6 +382,14 @@ def _berturk_run(ckpt):
     return ident, rid, run, canon, rec, float(sum(terms)), [row.get("loss") for row in rows]
 
 
+def proof_tags_match(got, tags):
+    """True when a record's proof names exactly the frozen held-out tags, each once, in any order. The order carries
+    no meaning: the per-tag counts are a dict, a base and a BERTurk proof list the tags sorted and a Laya continued
+    proof lists them in protocol order (ray_train.py takes them from the frozen block, 09-10)."""
+    return (isinstance(got, list) and all(isinstance(t, str) for t in got) and len(set(got)) == len(got)
+            and sorted(got) == sorted(tags))
+
+
 def entry_of(ckpt, proto, pin, mode):
     """(runs-manifest entry, {"identity", "canonical", "base"}) of one few-shot checkpoint, re-validated on its own
     (see the module docstring); SystemExit naming the checkpoint and what fails."""
@@ -400,7 +408,7 @@ def entry_of(ckpt, proto, pin, mode):
                                                            "stage %r of protocol %s" % (proof.get("stage"),
                                                                                         proof.get("protocol_sha256")),
                                                            stage, pin))
-    if proof.get("tags") != sorted(block["tags"]):
+    if not proof_tags_match(proof.get("tags"), block["tags"]):
         raise SystemExit("%s (run %s): its proof covers tags %r, not the frozen held-out tags %s"
                          % (name, run, proof.get("tags"), sorted(block["tags"])))
     try:
