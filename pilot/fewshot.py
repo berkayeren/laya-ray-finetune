@@ -40,7 +40,8 @@ import random
 
 from intents import INTENTS
 from pilot import pins
-from pilot.data import DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, sha256_bytes, verify_split_file
+from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, sha256_bytes,
+                        verify_split_file)
 
 TAGS = ("savings", "loan", "overdraft", "appointment", "contactless", "direct_debit")   # FEATURES TS-14, A7
 K_VALUES = (5, 10)
@@ -409,6 +410,265 @@ def check_source(block, entry, rows):
             raise SystemExit("the source entry has %s %s, the frozen few-shot source %s; the draws are bound to the "
                              "split the protocol froze (run `make data`)" % (key, entry.get(key), src.get(key)))
     check_draws(block, rows)
+
+
+# ---- Phase 9: protocol binding by refusal, never by transcription (D-01, D-03, D-06, D-07, D-08; 09-01) ----
+
+STAGES = ("base", "continued")
+MODES = ("primary", "fallback")
+FALLBACK_HOURS = 10                          # the frozen compute_fallback trigger's "exceeds 10 h" (a test checks it)
+DECISION_SCHEMA = "fewshot-projection/1"
+# the D-08 decision record (09-04 writes it before any base run); read at call time, so a test can monkeypatch it
+DECISION_PATH = os.path.join(REPO_ROOT, "results", "fewshot", "projection.json")
+# canonical keys each trainer's base must hold at the frozen rules.base_runs.<kind> value (Laya micro_batch and
+# grad_accum through the matched LAYA-03 ladder configuration)
+RECIPE_KEYS = {"laya": ("epochs", "stop_after_epoch", "neg", "encoder_lr", "head_lr", "device", "workers", "max_len",
+                        "micro_batch", "grad_accum"),
+               "berturk": ("epochs", "stop_after_epoch", "encoder_lr", "head_lr", "batch", "max_len", "device")}
+# keys a masked base may hold apart from the chosen selection run's canonical config; each is bound on its own
+BASE_FREE = ("seed", "neg_seed", "stop_after_epoch", "mask_tags", "fewshot", "freeze_embeddings", "freeze_encoder",
+             "micro_batch", "grad_accum")
+# keys a continued run may hold apart from its base's canonical config; each is bound on its own
+CONTINUED_FREE = ("base_model_sha256", "base_config_sha256", "base_files_sha256", "epochs", "stop_after_epoch",
+                  "mask_tags", "fewshot", "seed", "neg_seed")
+_MISSING = object()
+_FIX = "Phase 9 runs the frozen protocol unchanged: pass the frozen value"
+
+
+def _json(v):
+    return json.dumps(v, sort_keys=True, ensure_ascii=False)
+
+
+def _shown(v):
+    return "<absent>" if v is _MISSING else repr(v)
+
+
+def _same(have, want):
+    return have is not _MISSING and want is not _MISSING and _json(have) == _json(want)
+
+
+def _block(protocol):
+    block = protocol.get("fewshot") if isinstance(protocol, dict) else None
+    if not isinstance(block, dict) or not isinstance(block.get("rules"), dict):
+        raise SystemExit("the protocol holds no few-shot block with rules; restore protocol.json with `git checkout -- "
+                         "protocol.json`")
+    return block
+
+
+def _int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def binding(pin, stage, draw=None, k=None, digest=None, base_run_id=None):
+    """The `fewshot` value of a Phase 9 run's canonical config: {"protocol_sha256", "stage": "base"} for a masked
+    base, plus draw, k, digest and base_run_id for a continued run; SystemExit on a stage outside STAGES, a missing
+    continued field, or a draw field on a base."""
+    if stage not in STAGES:
+        raise SystemExit("few-shot stage %r is not one of %s" % (stage, ", ".join(STAGES)))
+    extra = {"draw": draw, "k": k, "digest": digest, "base_run_id": base_run_id}
+    if stage == "base":
+        given = sorted(key for key, v in extra.items() if v is not None)
+        if given:
+            raise SystemExit("a masked base binding carries no %s; only a continued run names a draw" % given[0])
+        return {"protocol_sha256": pin, "stage": "base"}
+    for key, v in extra.items():
+        if v is None:
+            raise SystemExit("a continued few-shot binding needs its %s" % key)
+    return dict({"protocol_sha256": pin, "stage": "continued"}, **extra)
+
+
+def ladder_configs(rule):
+    """{LAYA-03 rung label: (freeze_embeddings, freeze_encoder, micro_batch, grad_accum)} relative to the frozen
+    rules.base_runs.laya `rule` (A5): none, embeddings_frozen, embeddings_frozen+smaller_batch (half the micro-batch,
+    twice the accumulation: the same effective batch) and encoder_frozen; the labels are pilot.runs.RUNG_NEXT's."""
+    mb, ga = rule["micro_batch"], rule["grad_accum"]
+    return {"none": (False, False, mb, ga), "embeddings_frozen": (True, False, mb, ga),
+            "embeddings_frozen+smaller_batch": (True, False, mb // 2, ga * 2), "encoder_frozen": (False, True, mb, ga)}
+
+
+def chosen_canonical(protocol, kind, root=REPO_ROOT):
+    """The chosen selection run's canonical config of `kind`, read from the postfit record the protocol pins
+    (systems.<kind>.postfit path, relative to `root` unless absolute, and sha256); SystemExit on a missing system,
+    a missing file or bytes that do not hash to the pin."""
+    pf = (((protocol.get("systems") or {}).get(kind) or {}).get("postfit") or {}) if isinstance(protocol, dict) else {}
+    path, want = pf.get("path"), pf.get("sha256")
+    if not path or not want:
+        raise SystemExit("the protocol pins no postfit record for system %r (systems.%s.postfit path and sha256)"
+                         % (kind, kind))
+    full = path if os.path.isabs(path) else os.path.join(root, path)
+    if not os.path.isfile(full):
+        raise SystemExit("%s not found; the protocol binds the %s base runs to that postfit record (`git checkout -- "
+                         "%s`)" % (full, kind, path))
+    with open(full, "rb") as f:
+        raw = f.read()
+    have = sha256_bytes(raw)
+    if have != want:
+        raise SystemExit("%s has sha256 %s, the protocol pins %s; the chosen recipe is read from the pinned record "
+                         "only (`git checkout -- %s`)" % (path, have, want, path))
+    canon = (json.loads(raw.decode("utf-8")).get("chosen") or {}).get("canonical")
+    if not isinstance(canon, dict):
+        raise SystemExit("%s holds no chosen.canonical config" % path)
+    return canon
+
+
+def _check_mode(mode):
+    if mode not in MODES:
+        raise SystemExit("few-shot mode %r is not one of %s (the D-08 decision record names it)"
+                         % (mode, ", ".join(MODES)))
+
+
+def allowed_base_seeds(block, mode):
+    """The base seeds a masked base may train under `mode`: rules.base_runs.seeds (primary) or the compute
+    fallback's seed alone (fallback)."""
+    _check_mode(mode)
+    rules = block["rules"]
+    if mode == "primary":
+        return list(rules["base_runs"]["seeds"])
+    return [rules["compute_fallback"]["seed"]]
+
+
+def base_seed_of(block, draw, mode):
+    """The base seed draw `draw` continues from: its own frozen base_seed under primary, the compute fallback's seed
+    under fallback (D-07, D-08). The only place the draw-to-base pairing is decided."""
+    _check_mode(mode)
+    draws = block.get("draws") or []
+    if not _int(draw) or not 0 <= draw < len(draws):
+        raise SystemExit("few-shot draw %r is not one of the frozen draws 0..%d" % (draw, len(draws) - 1))
+    if mode == "primary":
+        return draws[draw]["base_seed"]
+    return block["rules"]["compute_fallback"]["seed"]
+
+
+def read_mode(pin, path=None):
+    """'primary' or 'fallback' from the D-08 decision record (DECISION_PATH, read at call time, or `path`); SystemExit
+    on a missing or invalid record, another schema, a record of another protocol sha256, a mode outside MODES, or a
+    mode that disagrees with its trigger fields (fallback exactly when projection_fired or ladder_failure)."""
+    path = DECISION_PATH if path is None else path
+    if not os.path.isfile(path):
+        raise SystemExit("%s not found; run `python fewshot.py --projection --out results/fewshot/projection.json` "
+                         "first: D-08 records the projection before any base run" % path)
+    try:
+        with open(path, encoding="utf-8") as f:
+            rec = json.load(f)
+    except ValueError as e:
+        raise SystemExit("%s is not valid JSON (%s); rebuild it with `python fewshot.py --projection`" % (path, e))
+    if not isinstance(rec, dict) or rec.get("schema") != DECISION_SCHEMA:
+        raise SystemExit("%s: schema %r, expected %s" % (path, rec.get("schema") if isinstance(rec, dict) else None,
+                                                         DECISION_SCHEMA))
+    if rec.get("protocol_sha256") != pin:
+        raise SystemExit("%s was recorded under protocol sha256 %s, not the frozen %s; the decision binds one protocol"
+                         % (path, rec.get("protocol_sha256"), pin))
+    mode = rec["decision"].get("mode") if isinstance(rec.get("decision"), dict) else None
+    if mode not in MODES:
+        raise SystemExit("%s: decision mode %r is not one of %s" % (path, mode, ", ".join(MODES)))
+    trig = rec.get("trigger")
+    flags = (trig.get("projection_fired"), trig.get("ladder_failure")) if isinstance(trig, dict) else (None, None)
+    if not all(isinstance(v, bool) for v in flags):
+        raise SystemExit("%s: the trigger needs boolean projection_fired and ladder_failure, got %r" % (path, trig))
+    if (mode == "fallback") != any(flags):
+        raise SystemExit("%s: decision mode %s disagrees with its trigger (projection_fired %s, ladder_failure %s); "
+                         "the frozen trigger decides the mode" % (path, mode, flags[0], flags[1]))
+    return mode
+
+
+def _differ(canon, want, free, what):
+    """SystemExit naming the first key in sorted order (outside `free`) whose JSON value differs, a key missing on
+    one side shown as <absent>."""
+    for key in sorted((set(canon) | set(want)) - set(free)):
+        have, ref = canon.get(key, _MISSING), want.get(key, _MISSING)
+        if not _same(have, ref):
+            raise SystemExit("%s is %s here but %s in %s; %s" % (key, _shown(have), _shown(ref), what, _FIX))
+
+
+def _equal(key, have, want, what):
+    if not _same(have, want):
+        raise SystemExit("%s is %s here but %s in %s; %s" % (key, _shown(have), _shown(want), what, _FIX))
+
+
+def check_base(protocol, pin, kind, canon, chosen, mode):
+    """The LAYA-03 rung label ("none" for BERTurk) of a masked base command whose canonical config `canon` binds to
+    the frozen protocol; SystemExit naming the first difference otherwise (D-01, D-03, A5). The split and data_sha256
+    are the frozen source's; the seed one of allowed_base_seeds(mode), Laya's neg_seed the seed; mask_tags the sorted
+    held-out tags; fewshot binding(pin, "base"); every RECIPE_KEYS value the frozen rules.base_runs.<kind> (Laya's
+    freeze flags, micro-batch and grad-accum exactly one ladder configuration); every other key outside BASE_FREE
+    equal to the chosen selection run's `chosen` canonical config, the first differing key in sorted order named."""
+    block = _block(protocol)
+    if kind not in RECIPE_KEYS:
+        raise SystemExit("few-shot system kind %r is not one of %s" % (kind, ", ".join(sorted(RECIPE_KEYS))))
+    _check_mode(mode)
+    rules = block["rules"]["base_runs"]
+    rule, src = rules[kind], block.get("source") or {}
+    _equal("split", canon.get("split", _MISSING), rules["split"], "the frozen rules.base_runs")
+    _equal("data_sha256", canon.get("data_sha256", _MISSING), src.get("sha256"), "the frozen few-shot source")
+    seed, allowed = canon.get("seed"), allowed_base_seeds(block, mode)
+    if not _int(seed) or seed not in allowed:
+        raise SystemExit("seed %r is not one of the base seeds %s of the %s protocol; %s"
+                         % (seed, allowed, mode, _FIX))
+    if kind == "laya" and not _same(canon.get("neg_seed", _MISSING), seed):
+        raise SystemExit("neg_seed is %s here but the seed is %r; a masked base draws its negatives with neg_seed == "
+                         "seed (omit --neg-seed)" % (_shown(canon.get("neg_seed", _MISSING)), seed))
+    _equal("mask_tags", canon.get("mask_tags", _MISSING), sorted(block["tags"]), "the frozen held-out tags (sorted)")
+    _equal("fewshot", canon.get("fewshot", _MISSING), binding(pin, "base"), "this protocol's base binding")
+    rung = "none"
+    if kind == "laya":
+        have = [canon.get(key, _MISSING) for key in ("freeze_embeddings", "freeze_encoder", "micro_batch",
+                                                     "grad_accum")]
+        ladder = ladder_configs(rule)
+        match = [label for label, cfg in ladder.items() if _same(have, list(cfg))]
+        if not match:
+            raise SystemExit("freeze_embeddings, freeze_encoder, micro_batch, grad_accum are %s here, not one LAYA-03 "
+                             "ladder configuration (%s); a base walks the ladder by its flags only"
+                             % (", ".join(_shown(v) for v in have),
+                                "; ".join("%s %s" % (label, list(cfg)) for label, cfg in ladder.items())))
+        rung = match[0]
+    for key in RECIPE_KEYS[kind]:
+        if key not in ("micro_batch", "grad_accum"):
+            _equal(key, canon.get(key, _MISSING), rule.get(key, _MISSING), "the frozen rules.base_runs.%s" % kind)
+    _differ(canon, chosen, BASE_FREE, "the chosen %s selection run" % kind)
+    return rung
+
+
+def check_continued(protocol, pin, kind, canon, base_canon, base_run_id, draw, k, mode):
+    """None when a continued command's canonical config `canon` binds to the frozen protocol and to its masked base
+    `base_canon` (run id `base_run_id`); SystemExit naming the first difference otherwise (D-01, D-06, D-07). The
+    (draw, k) is a frozen selection; seed (and Laya's neg_seed) the draw seed; fewshot the continued binding of this
+    draw's digest and base; epochs and LRs the frozen continued_training's; no stop_after_epoch, mask_tags or
+    postfit_sha256; the base a masked base of this protocol (its own binding, base_seed_of(block, draw, mode), the
+    sorted held-out tags); every other key outside CONTINUED_FREE equal to the base's, so the base's rung carries
+    over."""
+    block = _block(protocol)
+    if kind not in RECIPE_KEYS:
+        raise SystemExit("few-shot system kind %r is not one of %s" % (kind, ", ".join(sorted(RECIPE_KEYS))))
+    selection(block, draw, k)
+    d = block["draws"][draw]
+    seed = canon.get("seed", _MISSING)
+    if not _int(seed) or seed != d["seed"]:
+        raise SystemExit("seed is %s here but draw %d's seed is %r; the training seed is the draw seed; %s"
+                         % (_shown(seed), draw, d["seed"], _FIX))
+    if kind == "laya":
+        _equal("neg_seed", canon.get("neg_seed", _MISSING), d["seed"], "draw %d (neg_seed = draw seed)" % draw)
+    _equal("fewshot", canon.get("fewshot", _MISSING), binding(pin, "continued", draw, k, d["digest"], base_run_id),
+           "this protocol's continued binding of draw %d (digest %s), k %d and base %s"
+           % (draw, d["digest"], k, base_run_id))
+    ct = block["rules"]["continued_training"]
+    for key in ("epochs", "encoder_lr", "head_lr"):
+        _equal(key, canon.get(key, _MISSING), ct[key], "the frozen continued_training")
+    for key in ("stop_after_epoch", "mask_tags", "postfit_sha256"):
+        if canon.get(key) is not None:
+            raise SystemExit("%s is %r here; a continued run trains every one of its %d epochs on the frozen support "
+                             "and replay rows, with no %s; %s" % (key, canon[key], ct["epochs"], key, _FIX))
+    if not _same(base_canon.get("fewshot", _MISSING), binding(pin, "base")):
+        raise SystemExit("the base %s carries fewshot binding %s, not a masked base of this protocol (%s); continue "
+                         "from a bound masked base" % (base_run_id, _shown(base_canon.get("fewshot", _MISSING)),
+                                                        _json(binding(pin, "base"))))
+    want = base_seed_of(block, draw, mode)
+    if base_canon.get("seed") != want or not _int(base_canon.get("seed")):
+        raise SystemExit("the base %s has seed %r, but draw %d continues from the base of seed %r under the %s "
+                         "protocol (base_seed_of); %s" % (base_run_id, base_canon.get("seed"), draw, want, mode, _FIX))
+    if not _same(base_canon.get("mask_tags", _MISSING), sorted(block["tags"])):
+        raise SystemExit("the base %s masks %s, not the frozen held-out tags %s"
+                         % (base_run_id, _shown(base_canon.get("mask_tags", _MISSING)), sorted(block["tags"])))
+    _differ(canon, base_canon, CONTINUED_FREE, "its base %s" % base_run_id)
 
 
 def _read_split(manifest_path, m, name, roles):

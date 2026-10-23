@@ -47,13 +47,13 @@ def edit(canon, change):
     return out
 
 
-def base_canon(proto, pin, kind, seed, **change):
+def base_canon(proto, pin, kind, base_seed, **change):
     """The canonical config of a masked base command: the chosen selection run's, plus the base changes."""
     c = dict(fs.chosen_canonical(proto, kind))
-    c.update(seed=seed, stop_after_epoch=proto["fewshot"]["rules"]["base_runs"][kind]["stop_after_epoch"],
+    c.update(seed=base_seed, stop_after_epoch=proto["fewshot"]["rules"]["base_runs"][kind]["stop_after_epoch"],
              mask_tags=sorted(TAGS), fewshot=fs.binding(pin, "base"))
     if kind == "laya":
-        c["neg_seed"] = seed
+        c["neg_seed"] = base_seed
     return edit(c, change)
 
 
@@ -72,14 +72,14 @@ def continued_canon(proto, pin, kind, base, draw, k, base_run_id="base-run", **c
 
 # ---- check_base (D-01, D-03, A5) ----
 
-@pytest.mark.parametrize("kind", ["laya", "berturk"])
-def test_check_base_accepts_the_chosen_recipe_with_the_base_changes(kind):
+def test_check_base_accepts_the_chosen_recipe_with_the_base_changes():
     proto, pin = frozen()
-    with open(os.path.join(REPO_ROOT, proto["systems"][kind]["postfit"]["path"]), encoding="utf-8") as f:
-        assert fs.chosen_canonical(proto, kind) == json.load(f)["chosen"]["canonical"]
-    chosen = fs.chosen_canonical(proto, kind)
-    for s in (0, 1, 2):
-        assert fs.check_base(proto, pin, kind, base_canon(proto, pin, kind, s), chosen, "primary") == "none"
+    for kind in ("laya", "berturk"):
+        with open(os.path.join(REPO_ROOT, proto["systems"][kind]["postfit"]["path"]), encoding="utf-8") as f:
+            assert fs.chosen_canonical(proto, kind) == json.load(f)["chosen"]["canonical"]
+        chosen = fs.chosen_canonical(proto, kind)
+        for s in (0, 1, 2):
+            assert fs.check_base(proto, pin, kind, base_canon(proto, pin, kind, s), chosen, "primary") == "none"
 
 
 BASE_REFUSALS = [
@@ -90,7 +90,7 @@ BASE_REFUSALS = [
     ("laya", "data_sha256", {"data_sha256": "0" * 64}), ("laya", "split", {"split": "final_train"}),
     ("laya", "mask_tags", {"mask_tags": sorted(TAGS)[:5]}), ("laya", "mask_tags", {"mask_tags": list(TAGS)}),
     ("laya", "mask_tags", {"mask_tags": DROP}), ("laya", "seed", {"seed": 3, "neg_seed": 3}),
-    ("laya", "seed", {"seed": True, "neg_seed": True}), ("laya", "neg_seed", {"neg_seed": 1}),
+    ("laya", "seed", {"seed": True, "neg_seed": True}), ("laya", "neg_seed", {"neg_seed": 2}),
     ("laya", "fewshot", {"fewshot": {"protocol_sha256": "f" * 64, "stage": "base"}}),
     ("laya", "fewshot", {"fewshot": DROP}), ("laya", "weight_decay", {"weight_decay": 0.0}),
     ("laya", "postfit_sha256", {"postfit_sha256": "a" * 64}), ("laya", "max_messages", {"max_messages": 100}),
@@ -248,10 +248,10 @@ def test_base_seed_follows_the_recorded_mode():
                 base = base_canon(proto, pin, "berturk", bs)
                 canon = continued_canon(proto, pin, "berturk", base, draw, 10)
                 if bs == fs.base_seed_of(block, draw, mode):
-                    assert fs.check_continued(proto, pin, "berturk", canon, base, "b", draw, 10, mode) is None
+                    assert fs.check_continued(proto, pin, "berturk", canon, base, "base-run", draw, 10, mode) is None
                 else:
                     with pytest.raises(SystemExit, match="base"):
-                        fs.check_continued(proto, pin, "berturk", canon, base, "b", draw, 10, mode)
+                        fs.check_continued(proto, pin, "berturk", canon, base, "base-run", draw, 10, mode)
     chosen = fs.chosen_canonical(proto, "laya")
     assert fs.check_base(proto, pin, "laya", base_canon(proto, pin, "laya", 0), chosen, "fallback") == "none"
     for bs in (1, 2):
@@ -301,7 +301,7 @@ def test_fallback_hours_is_the_frozen_trigger():
 
 
 @pytest.mark.parametrize("mode,ladder", [("primary", False), ("fallback", False), ("fallback", True)])
-def test_read_mode_returns_the_recorded_mode(tmp_path, synthetic_raw, monkeypatch, mode, ladder):
+def test_read_mode_returns_the_decision_mode(tmp_path, synthetic_raw, monkeypatch, mode, ladder):
     ns = synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, mode=mode)
     if ladder:
         write_decision(ns.decision_path, decision_record(ns.pin, mode, projection_fired=False, ladder_failure=True))
