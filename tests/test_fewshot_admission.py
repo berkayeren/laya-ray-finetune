@@ -10,6 +10,7 @@ Offline, no Ray: runs in `make test`.
 """
 import json
 import os
+import shutil
 
 import pytest
 
@@ -319,3 +320,173 @@ def test_inspect_refuses_a_record_that_is_not_its_identity(planted):
     with open(os.path.join(ckpt, "rl_agent_config.json"), "w", encoding="utf-8") as f:
         f.write("{}")
     cli_refused(["--inspect", ckpt], "holds both")
+
+
+# ---- guarded deletion: --prune after verified dumps, --drop-storage of a finished Laya run (D-14; 09-05 Task 3) ----
+
+def gated_test(ns, name):
+    """score.py of a listed checkpoint on test (the gate admits it once); returns the run dir."""
+    return score.main(laya_argv(ns, "test", ns.ckpts[name]))[0]
+
+
+def set_side(run_dir, split_name, edit):
+    path = os.path.join(run_dir, split_name + ".json")
+    with open(path, encoding="utf-8") as f:
+        side = json.load(f)
+    edit(side)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(side, f)
+
+
+def test_prune_deletes_a_listed_continued_checkpoint_after_its_gated_test_dump(listed, capsys):
+    gated_test(listed, "laya-d0-k2")
+    keep = sorted(n for n in listed.ckpts if n != "laya-d0-k2")
+    capsys.readouterr()
+    got = runner.main(["--prune", listed.ckpts["laya-d0-k2"]])
+    out = capsys.readouterr().out
+    rid = entry(listed.runs, "laya", "continued", 0, 2)["dump_run_id"]
+    assert got == [rid] and "laya-d0-k2" in out and rid in out
+    assert not os.path.exists(listed.ckpts["laya-d0-k2"])
+    assert all(os.path.isdir(listed.ckpts[n]) for n in keep)
+    assert dumps.load_dump(os.path.join(listed.root, rid), "test", listed.manifest)[2]["fewshot_runs_sha256"]
+
+
+def test_prune_refuses_a_continued_checkpoint_before_its_test_dump(listed):
+    cli_refused(["--prune", listed.ckpts["laya-d0-k1"]], "laya-d0-k1", "no verified test dump", "score")
+    assert os.path.isdir(listed.ckpts["laya-d0-k1"])
+
+
+@pytest.mark.parametrize("case, needle", [
+    ("identity", "another checkpoint's"),
+    ("ungated", "not scored through the protocol gate"),
+    ("other_runs", "not scored through the protocol gate"),
+    ("subset", "subset dump"),
+])
+def test_prune_refuses_a_dump_that_is_not_this_checkpoints_gated_one(listed, case, needle):
+    run_dir = gated_test(listed, "laya-d0-k2")
+    if case == "identity":
+        set_side(run_dir, "test", lambda s: s["system"]["checkpoint_identity"].update(model_sha256="0" * 64))
+    elif case == "ungated":
+        set_side(run_dir, "test", lambda s: (s.pop("protocol_sha256"), s.pop("fewshot_runs_sha256")))
+    elif case == "other_runs":
+        set_side(run_dir, "test", lambda s: s.update(fewshot_runs_sha256="e" * 64))
+    else:
+        set_side(run_dir, "test", lambda s: s.update(n_subset=7))
+    cli_refused(["--prune", listed.ckpts["laya-d0-k2"]], needle)
+    assert os.path.isdir(listed.ckpts["laya-d0-k2"])
+
+
+def test_prune_refuses_an_unlisted_dir_a_symlink_and_no_manifest(listed):
+    from tiny_laya import tiny_checkpoint
+    final = tiny_checkpoint(listed.tmp / "ckpt-final-s0")             # a Phase 8 final checkpoint stand-in
+    cli_refused(["--prune", final], "not listed in results/fewshot/runs.json")
+    assert os.path.isdir(final)
+    gated_test(listed, "laya-d0-k2")
+    link = str(listed.tmp / "link-d0-k2")
+    os.symlink(listed.ckpts["laya-d0-k2"], link)
+    cli_refused(["--prune", link], "symlink")
+    assert os.path.isdir(listed.ckpts["laya-d0-k2"]) and os.path.islink(link)
+    os.remove(listed.runs_path)
+    cli_refused(["--prune", listed.ckpts["laya-d0-k2"]], "no results/fewshot/runs.json")
+    assert os.path.isdir(listed.ckpts["laya-d0-k2"])
+
+
+def test_prune_deletes_a_base_only_after_its_val_test_and_continued_dumps(listed):
+    base = listed.ckpts["laya-base-s0"]
+    text = cli_refused(["--prune", base], "laya-base-s0", "val dump", "test dump")
+    assert "laya-d0-k1" in text and "laya-d0-k2" in text            # names every missing continued test dump
+    score.main(laya_argv(listed, "val", base))                        # ungated val dump
+    gated_test(listed, "laya-base-s0")
+    gated_test(listed, "laya-d0-k1")
+    text = cli_refused(["--prune", base], "laya-d0-k2")
+    assert "laya-d0-k1" not in text and "val dump" not in text
+    assert os.path.isdir(base)
+    gated_test(listed, "laya-d0-k2")
+    rid = entry(listed.runs, "laya", "base")["dump_run_id"]
+    assert runner.main(["--prune", base]) == [rid]
+    assert not os.path.exists(base) and os.path.isdir(listed.ckpts["berturk-base-s0"])
+
+
+def test_prune_refuses_a_base_whose_val_dump_is_gated(listed):
+    """The base's θ source is its own ungated val dump (D-05); a val dump carrying protocol_sha256 is not it."""
+    base = listed.ckpts["laya-base-s0"]
+    run_dir, _ = score.main(laya_argv(listed, "val", base))
+    set_side(run_dir, "val", lambda s: s.update(protocol_sha256=listed.pin))
+    cli_refused(["--prune", base], "val dump", "gated")
+    assert os.path.isdir(base)
+
+
+def ray_storage(ns, name):
+    """A Ray storage dir holding the run dir of planted checkpoint `name` and another run's dir; returns (storage,
+    run dir, other dir)."""
+    from pilot import runs as rr
+    rid = rr.read_record(ns.ckpts[name])["run_id"]
+    storage = ns.tmp / "ray"
+    for d in (storage / rid / "epoch-001", storage / "laya-selection_train-neg8-s0-other"):
+        d.mkdir(parents=True)
+        (d / "state.bin").write_bytes(b"x")
+    return str(storage), str(storage / rid), str(storage / "laya-selection_train-neg8-s0-other")
+
+
+def test_drop_storage_deletes_the_run_dir_of_a_finished_laya_checkpoint(planted, capsys):
+    storage, run_dir, other = ray_storage(planted, "laya-d0-k1")
+    capsys.readouterr()
+    got = runner.main(["--drop-storage", planted.ckpts["laya-d0-k1"], "--storage", storage])
+    assert got == os.path.basename(run_dir) and os.path.basename(run_dir) in capsys.readouterr().out
+    assert not os.path.exists(run_dir) and os.path.isdir(other) and os.path.isdir(planted.ckpts["laya-d0-k1"])
+
+
+def test_drop_storage_refuses_a_missing_or_symlinked_run_dir(planted):
+    storage, run_dir, other = ray_storage(planted, "laya-d0-k1")
+    cli_refused(["--drop-storage", planted.ckpts["laya-d0-k2"], "--storage", storage], "not found")
+    os.rename(run_dir, run_dir + "-real")
+    os.symlink(run_dir + "-real", run_dir)
+    cli_refused(["--drop-storage", planted.ckpts["laya-d0-k1"], "--storage", storage], "symlink")
+    assert os.path.isdir(run_dir + "-real") and os.path.isdir(other)
+
+
+def test_drop_storage_refuses_an_unfinished_checkpoint_or_one_inside_the_run_dir(planted):
+    storage, run_dir, _ = ray_storage(planted, "laya-d0-k1")
+    os.remove(os.path.join(planted.ckpts["laya-d0-k1"], "final.json"))
+    cli_refused(["--drop-storage", planted.ckpts["laya-d0-k1"], "--storage", storage], "not a finished run")
+    assert os.path.isdir(run_dir)
+    from pilot import runs as rr
+    src = planted.ckpts["laya-d0-k2"]
+    rid = rr.read_record(src)["run_id"]
+    inside = planted.tmp / "ray2" / rid / "final"
+    shutil.copytree(src, str(inside))
+    cli_refused(["--drop-storage", str(inside), "--storage", str(planted.tmp / "ray2")], "holds the checkpoint")
+    assert os.path.isdir(str(inside))
+
+
+def test_drop_storage_refuses_a_berturk_or_non_phase_9_checkpoint(planted):
+    from tiny_laya import tiny_checkpoint
+    storage, run_dir, _ = ray_storage(planted, "laya-d0-k1")
+    cli_refused(["--drop-storage", planted.ckpts["berturk-d0-k1"], "--storage", storage], "ray_train.py")
+    plain = tiny_checkpoint(planted.tmp / "plain")
+    cli_refused(["--drop-storage", plain, "--storage", storage], "ray_train.py run record")
+    assert os.path.isdir(run_dir)
+
+
+@pytest.mark.parametrize("argv, needle", [
+    (["--prune", "x", "--out", "y"], "--out"),
+    (["--prune", "x", "--storage", "y"], "--storage belongs to --drop-storage"),
+    (["--drop-storage", "x"], "--drop-storage needs --storage"),
+    (["--drop-storage", "x", "--storage", "y", "--manifest", "m"], "--manifest"),
+    (["--inspect", "x", "--storage", "y"], "--storage belongs to --drop-storage"),
+    (["--counts", "--storage", "y"], "--storage belongs to --drop-storage"),
+], ids=["prune_out", "prune_storage", "drop_no_storage", "drop_manifest", "inspect_storage", "counts_storage"])
+def test_prune_and_drop_storage_refuse_other_modes_flags(argv, needle, capsys):
+    with pytest.raises(SystemExit) as e:
+        runner.main(argv)
+    assert e.value.code == 2 and needle in capsys.readouterr().err
+
+
+def test_no_mode_error_lists_every_mode(capsys):
+    with pytest.raises(SystemExit) as e:
+        runner.main([])
+    err = capsys.readouterr().err
+    assert e.value.code == 2
+    for flag in ("--support-sets", "--counts", "--projection", "--inspect", "--runs-manifest", "--prune",
+                 "--drop-storage"):
+        assert flag in err, flag
