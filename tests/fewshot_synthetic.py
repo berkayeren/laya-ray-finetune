@@ -35,6 +35,9 @@ on the synthetic snapshot: a base's ungated val dump (no protocol_sha256, no few
 gated test dump (protocol_sha256 the pin, fewshot_runs_sha256 the manifest's), each sidecar carrying the entry's system
 kind, identity, dump run id, seed and training run id. The logits are seeded float32 normals unless `logits(entry,
 split, Y, rng)` returns them. `extra` of synthetic_protocol sets top-level protocol keys (e.g. the bootstrap block).
+
+fewshot_block(manifest, ...) is the few-shot block synthetic_protocol writes, on its own (09-08: the verdict's synthetic
+protocol in tests/test_final_report.py carries one over its own snapshot).
 """
 import copy
 import json
@@ -257,11 +260,9 @@ def write_decision(path, record):
     return path
 
 
-def synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, tags=("card",), k_values=(1, 2), draw_seeds=(0,),
-                       neg_per_pos=1, replay=2, rules=None, systems=None, scoring=None, mode="primary", splits=None,
-                       extra=None):
-    out_dir, manifest = prepared(tmp_path, synthetic_raw)
-    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", manifest)   # first: splits_block reads the committed one
+def fewshot_block(manifest, tags=("card",), k_values=(1, 2), draw_seeds=(0,), neg_per_pos=1, replay=2, rules=None):
+    """The protocol's few-shot block over the synthetic snapshot's selection_train at `manifest`: the draws (base seed
+    and digest included) and a deep copy of pilot.fewshot.RULES with the top-level keys of `rules` replaced."""
     entry, rows = _rows(manifest)
     draws = []
     for i, s in enumerate(draw_seeds):
@@ -271,10 +272,19 @@ def synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, tags=("card",), k_v
     block_rules = copy.deepcopy(fs.RULES)
     for key, value in (rules or {}).items():
         block_rules[key] = copy.deepcopy(value)
-    block = {"tags": list(tags), "k_values": list(k_values), "draw_seeds": list(draw_seeds),
-             "neg_per_pos": neg_per_pos, "replay": replay, "epochs": fs.EPOCHS,
-             "source": {"split": "selection_train", "sha256": entry["sha256"], "uids_sha256": entry["uids_sha256"]},
-             "draws": draws, "rules": json.loads(json.dumps(block_rules))}
+    return {"tags": list(tags), "k_values": list(k_values), "draw_seeds": list(draw_seeds),
+            "neg_per_pos": neg_per_pos, "replay": replay, "epochs": fs.EPOCHS,
+            "source": {"split": "selection_train", "sha256": entry["sha256"], "uids_sha256": entry["uids_sha256"]},
+            "draws": draws, "rules": json.loads(json.dumps(block_rules))}
+
+
+def synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, tags=("card",), k_values=(1, 2), draw_seeds=(0,),
+                       neg_per_pos=1, replay=2, rules=None, systems=None, scoring=None, mode="primary", splits=None,
+                       extra=None):
+    out_dir, manifest = prepared(tmp_path, synthetic_raw)
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", manifest)   # first: splits_block reads the committed one
+    _, rows = _rows(manifest)
+    block = fewshot_block(manifest, tags, k_values, draw_seeds, neg_per_pos, replay, rules)
     protocol = {k: {} for k in pr.REQUIRED_KEYS}
     protocol.update(schema=pr.SCHEMA, fewshot=block)
     if systems is not None:

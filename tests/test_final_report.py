@@ -50,7 +50,11 @@ import postfit as postfit_cli
 import report
 import score
 from conftest import make_raw
+from fewshot_synthetic import (decision_record, fewshot_block, plant_fewshot_dumps, plant_rules, plant_runs,
+                               write_decision)
 from pilot import dumps, metrics
+from pilot import fewshot as fs
+from pilot import fewshot_report
 from pilot import protocol as pilot_protocol
 from pilot import verdict
 from pilot.data import repo_relpath
@@ -274,6 +278,11 @@ SEEDS = (0, 1, 2)
 SEVEN = ("micro_f1", "macro_f1", "exact_match", "top1_hit", "brier", "classwise_ece", "precision_at_80")
 LATENCY = {"laya": {"system": "laya", "device": "mps", "pooled": {"n": 21, "p50": 0.33, "p95": 0.41}},
            "berturk": {"system": "berturk", "device": "mps", "pooled": {"n": 21, "p50": 0.012, "p95": 0.015}}}
+# the synthetic few-shot block (09-08): tag card, k 1 and 2, two draws on base seeds 0 and 1, primary metric at k = 2,
+# which the synthetic criteria (d) fewshot path names too (the real protocol has k = 10 in both places)
+FEWSHOT_K = 2
+FEWSHOT_RULES = dict(plant_rules((0, 1)), primary_metric={"k": FEWSHOT_K, "rule": "the synthetic primary metric at "
+                                                                                 "k = %d" % FEWSHOT_K})
 
 
 def _rewrite(run_dir, manifest, split, reverse=False, **over):
@@ -373,23 +382,29 @@ def synthetic_final(tmp_path_factory):
             + ["results/reports/%s.json" % m for m in refs] + ["results/latency/%s-mps.json" % k for k in KINDS]
             + ["results/dumps/%s/val.json" % records[k][0]["chosen"]["dump_run_id"] for k in KINDS])
     with open(manifest, encoding="utf-8") as f:
-        test = json.load(f)["splits"]["test"]
+        msplits = json.load(f)["splits"]
+    test = msplits["test"]
     systems = pilot_protocol.systems_block(str(root))
+    criteria = copy_module.deepcopy(verdict.DEFAULT_CRITERIA)
+    for p in criteria["d"]["paths"]:
+        if p["path"] == "fewshot":
+            p["k"] = FEWSHOT_K                              # criteria (d)'s fewshot k is the few-shot block's primary k
     protocol = {
         "schema": pilot_protocol.SCHEMA, "title": "synthetic", "units": pilot_protocol.UNITS,
         "frozen": dict(pilot_protocol.FROZEN),
         "inputs": {rel: pilot.data.sha256_file(str(root / rel)) for rel in rels},
-        "splits": {"test": dict({"path": "data/" + test["path"]},
-                                **{k: test[k] for k in pilot_protocol.SPLIT_KEYS})},
+        "splits": {name: dict({"path": "data/" + msplits[name]["path"]},
+                              **{k: msplits[name][k] for k in pilot_protocol.SPLIT_KEYS}) for name in ("test", "val")},
         "systems": systems,
         "references": {"rule": pilot_protocol.REFERENCES_RULE, "rows": refs},
         "scoring": copy_module.deepcopy(pilot_protocol.SCORING),
         "variant": dict(pilot_protocol.VARIANT), "seed_averaging": dict(pilot_protocol.SEED_AVERAGING),
         "bootstrap": dict(pilot_protocol.bootstrap_block(), B=200),
-        "criteria": copy_module.deepcopy(verdict.DEFAULT_CRITERIA),
+        "criteria": criteria,
         "collapse": pilot_protocol.collapse_block(manifest, str(root)),
         "verdict": pilot_protocol.verdict_block(), "definitions": pilot_protocol.definitions_block(),
-        "fewshot": {"note": "synthetic"}, "known_at_freeze": {"note": "synthetic"},
+        "fewshot": fewshot_block(manifest, draw_seeds=(0, 1), rules=FEWSHOT_RULES),
+        "known_at_freeze": {"note": "synthetic"},
         "power_context": copy_module.deepcopy(pilot_protocol.POWER_CONTEXT),
         "assumptions": copy_module.deepcopy(pilot_protocol.ASSUMPTIONS),
         "delegation": copy_module.deepcopy(pilot_protocol.DELEGATION),
@@ -614,6 +629,89 @@ def test_verdict_refuses_a_system_with_fewer_final_seeds_than_listed(synthetic_f
     protocol["systems"]["laya"]["final_seeds"].pop()
     with pytest.raises(SystemExit, match="laya: .*final seeds \\[0, 1\\].*\\[0, 1, 2\\]"):
         _verdict(synthetic_final, protocol=protocol)
+
+
+# --- the verdict with the few-shot record (09-08, D-13): criterion (d)'s few-shot path at its frozen threshold --------
+
+def _separating(good):
+    """A logits callback: `good` kind ranks every positive above every negative, the other kind inverts the ranking."""
+    def make(e, split, Y, rng):
+        sign = 1.0 if e["kind"] == good else -1.0
+        return np.where(Y, 4.0, -4.0) * sign + rng.normal(0.0, 0.1, size=Y.shape)
+    return make
+
+
+@pytest.fixture(scope="module")
+def synthetic_fewshot(synthetic_final):
+    """The few-shot results of the synthetic protocol, planted after its freeze under its root: the D-08 decision record
+    (primary mode), the complete runs manifest, every dump it lists in the verdict's dump root (Laya ranks the new tag
+    perfectly, BERTurk inverts it, so the few-shot path is MET) and the record pilot.fewshot_report.build_record writes,
+    with repo-relative paths under the synthetic root. fewshot.DECISION_PATH must point at `decision` while a test
+    reads it (monkeypatch)."""
+    sf = synthetic_final
+    ns = types.SimpleNamespace(manifest=sf.manifest, pin=sf.sha, block=sf.protocol["fewshot"], protocol=sf.protocol)
+    base = os.path.join(sf.root, "results", "fewshot")
+    decision = write_decision(os.path.join(base, "projection.json"), decision_record(sf.sha))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(fs, "DECISION_PATH", decision)
+        with pytest.MonkeyPatch.context() as rooted:        # repo-relative paths under the synthetic root
+            rooted.setattr(pilot.data, "REPO_ROOT", sf.root)
+            runs_path = plant_runs(ns, os.path.join(base, "runs.json"))
+        runs, runs_sha = fs.read_runs(sf.protocol, sf.sha, runs_path)
+        plant_fewshot_dumps(ns, runs, runs_sha, sf.dump_root, logits=_separating("laya"))
+        with pytest.MonkeyPatch.context() as rooted:
+            rooted.setattr(pilot.data, "REPO_ROOT", sf.root)
+            rec = fewshot_report.build_record(sf.protocol, sf.sha, runs_path, sf.dump_root, sf.manifest)
+    path = fewshot_report.write_record(rec, os.path.join(base, "fewshot.json"))
+    return types.SimpleNamespace(path=path, record=rec, sha=pilot.data.sha256_file(path), runs_path=runs_path,
+                                 runs_sha=runs_sha, decision=decision)
+
+
+def _fewshot_verdict(sf, fw, monkeypatch, path=None, protocol=None, dump_root=None):
+    monkeypatch.setattr(fs, "DECISION_PATH", fw.decision)
+    return report.verdict_from(sf.protocol if protocol is None else protocol, sf.sha, sf.manifest, sf.root,
+                               sf.dump_root if dump_root is None else dump_root,
+                               fewshot=fw.path if path is None else path)
+
+
+def test_verdict_with_the_fewshot_record(synthetic_final, synthetic_fewshot, synthetic_verdict, monkeypatch):
+    """D-13: verdict_from(..., fewshot=RECORD) recomputes the record's primary block from the dumps and gives criterion
+    (d)'s few-shot path its status (MET: Laya - BERTurk mean macro-AP at k = 2 is far above 0.05); (d) is PASS, the
+    verdict is not provisional and names no few-shot branch; the fewshot block holds the path's numbers, the record's
+    path and sha256 and the mode; check_record accepts it and render_go shows the mean delta and the few-shot line.
+    Everything but fewshot, (d) and the verdict is the PENDING verdict's, which verdict_from without fewshot still
+    gives byte for byte."""
+    sf, fw = synthetic_final, synthetic_fewshot
+    v = _fewshot_verdict(sf, fw, monkeypatch)
+    p = fw.record["primary"]
+    assert p["k"] == FEWSHOT_K and p["mean_delta"] >= 0.05
+    assert v["fewshot"] == {"status": verdict.MET, "phase": 9, "k": FEWSHOT_K, "mean_delta": p["mean_delta"],
+                            "draws": p["draws"], "record": {"path": "results/fewshot/fewshot.json", "sha256": fw.sha},
+                            "mode": "primary", "disclosure": None}
+    assert list(v["fewshot"]) == list(verdict.FEWSHOT_KEYS)
+    d = v["criteria"]["d"]
+    assert d["paths"][2] == {"path": "fewshot", "metric": "new_tag_macro_ap", "status": verdict.MET,
+                             "mean_delta": p["mean_delta"], "draws": p["draws"]}
+    assert d["paths"][:2] == synthetic_verdict["criteria"]["d"]["paths"][:2]
+    assert d["status"] == verdict.PASS
+    s = {k: v["criteria"][k]["status"] for k in ("a", "b", "d", "alternative_go")}
+    assert v["verdict"] == json.loads(json.dumps(verdict.decide(s["a"], s["b"], s["d"], s["alternative_go"])))
+    assert v["verdict"]["provisional"] is False
+    assert v["verdict"]["if_fewshot_met"] is None and v["verdict"]["if_fewshot_not_met"] is None
+    for key in verdict.VERDICT_KEYS:
+        if key not in ("fewshot", "criteria", "verdict"):
+            assert v[key] == synthetic_verdict[key], key
+    for key in ("a", "b", "c", "alternative_go"):
+        assert v["criteria"][key] == synthetic_verdict["criteria"][key], key
+    assert verdict.check_record(v, sf.protocol, sf.sha) is v
+    text = verdict.render_go(v)
+    d_row = [r for r in _table_rows(text) if r.startswith("| (d) ")][0]
+    assert "fewshot (new_tag_macro_ap): MET, mean delta %+.2f points" % (p["mean_delta"] * 100) in d_row
+    assert "PENDING (Phase 9)" not in text and "PROVISIONAL" not in text
+    assert ("- Few-shot path (Phase 9): k = %d, mean over %d draws, mode primary; record results/fewshot/fewshot.json "
+            "sha256 `%s`." % (FEWSHOT_K, len(p["draws"]), fw.sha[:12])) in text
+    assert _verdict(sf) == synthetic_verdict                # without the record: the PENDING verdict, unchanged
+    assert verdict.render_go(synthetic_verdict).count("Few-shot path") == 0
 
 
 # --- build_verdict on hand-made inputs ------------------------------------------------------------------------------
