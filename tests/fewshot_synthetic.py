@@ -10,6 +10,9 @@ with it), and pins both by monkeypatch: pilot.protocol.PROTOCOL_PATH and PROTOCO
 and pilot.fewshot.DECISION_PATH. It returns a namespace (manifest, out_dir, protocol_path, pin, decision_path, block,
 rows, protocol).
 
+`splits` (optional) replaces the protocol's splits block, e.g. {"val": {"n_messages": 5}, "test": {"n_messages": 7}}
+for fewshot.py --projection (09-04).
+
 postfit_systems(tmp_path, canonicals) writes one minimal postfit record per system kind ({"chosen": {"canonical":
 ...}}) and returns the protocol "systems" block that binds each by absolute path and sha256.
 """
@@ -63,7 +66,7 @@ def write_decision(path, record):
 
 
 def synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, tags=("card",), k_values=(1, 2), draw_seeds=(0,),
-                       neg_per_pos=1, replay=2, rules=None, systems=None, scoring=None, mode="primary"):
+                       neg_per_pos=1, replay=2, rules=None, systems=None, scoring=None, mode="primary", splits=None):
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     entry, rows = _rows(manifest)
     draws = []
@@ -84,6 +87,8 @@ def synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, tags=("card",), k_v
         protocol["systems"] = systems
     if scoring is not None:
         protocol["scoring"] = scoring
+    if splits is not None:
+        protocol["splits"] = splits
     path = str(tmp_path / "protocol.json")
     pin = pr.write_protocol(protocol, path)
     decision_path = write_decision(str(tmp_path / "fewshot" / "projection.json"), decision_record(pin, mode))

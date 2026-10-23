@@ -11,6 +11,13 @@ runs manifest, the few-shot result record and the README block.
 - the projection and the decision recompute from the committed compute rates and the record's own counts
   (pilot.compute.fewshot_projection, fewshot_decision), offline; the Laya lines use calib_s None (LAYA-05) and the
   notes say so.
+- the frozen trigger at its boundary: a projection of exactly 36,000 s (10 h) does not fire it ("exceeds 10 h"), one
+  microsecond more does, and the fallback carries the frozen disclosure; a recorded ladder failure gives the fallback
+  too (base seed 0 only); read_mode accepts every such record.
+- `fewshot.py --projection` (synthetic protocol, temp paths): a fresh run refuses an existing --out without writing;
+  --ladder-failure TEXT refuses a missing --out, a fallback record, a record of another protocol, a record without a
+  projection and an empty text, and rewrites a primary record of this protocol into the fallback record naming the
+  failure, everything else unchanged.
 - data-marked: `fewshot.py --projection` rebuilds the record byte for byte from the committed data.
 Offline except the `data` tests.
 """
@@ -21,6 +28,7 @@ import subprocess
 import pytest
 
 import fewshot as runner
+from fewshot_synthetic import decision_record, synthetic_protocol, write_decision
 from pilot import compute
 from pilot import fewshot as fs
 from pilot import protocol as pr
@@ -134,3 +142,138 @@ def test_projection_rebuilds(tmp_path):
     runner.main(["--projection", "--out", out])
     with open(out, "rb") as f:
         assert f.read() == raw
+
+
+# ---- the trigger at its boundary, the fallback disclosure and the ladder-failure branch (09-04 Task 2) ----
+
+SPLITS = {"val": {"n_messages": 5}, "test": {"n_messages": 7}}
+
+
+def record_of(pin, decision):
+    return dict({"schema": fs.DECISION_SCHEMA, "protocol_sha256": pin}, **decision)
+
+
+def test_projection_trigger_boundary(tmp_path):
+    proto, pin = frozen()
+    block = proto["fewshot"]
+    fb = block["rules"]["compute_fallback"]
+    assert fs.FALLBACK_HOURS * 3600 == 36000
+    at = compute.fewshot_decision({"total_s": 36000.0}, block)
+    assert at["decision"]["mode"] == "primary" and at["trigger"]["projection_fired"] is False
+    assert at["decision"]["disclosure"] is None and at["decision"]["base_seeds"] == [0, 1, 2]
+    over = compute.fewshot_decision({"total_s": 36000.000001}, block)
+    assert over["decision"]["mode"] == "fallback" and over["trigger"]["projection_fired"] is True
+    assert over["trigger"]["ladder_failure"] is False and over["trigger"]["ladder_failure_text"] is None
+    assert over["decision"]["disclosure"] == fb["disclosure"] == "the results state that base-model variance is not " \
+        "captured"
+    assert over["decision"]["rule"] == fb["rule"] and over["decision"]["base_seeds"] == [0]
+    assert over["trigger"]["rule"] == fb["trigger"] and over["trigger"]["threshold_hours"] == 10
+    for name, d in (("at", at), ("over", over)):
+        path = write_decision(str(tmp_path / name / "projection.json"), record_of(pin, d))
+        assert fs.read_mode(pin, path) == d["decision"]["mode"]
+
+
+def test_projection_ladder_failure_gives_the_disclosed_fallback(tmp_path):
+    proto, pin = frozen()
+    block = proto["fewshot"]
+    _, rec = committed()
+    d = compute.fewshot_decision(rec["projection"], block, "laya base seed 1: MPS out of memory on encoder_frozen")
+    assert d["trigger"]["projection_fired"] is False and d["trigger"]["ladder_failure"] is True
+    assert d["trigger"]["ladder_failure_text"] == "laya base seed 1: MPS out of memory on encoder_frozen"
+    assert d["decision"]["mode"] == "fallback"
+    assert d["decision"]["disclosure"] == block["rules"]["compute_fallback"]["disclosure"]
+    path = write_decision(str(tmp_path / "projection.json"), record_of(pin, d))
+    assert fs.read_mode(pin, path) == "fallback"
+    assert fs.allowed_base_seeds(block, "fallback") == [0] == d["decision"]["base_seeds"]
+    for bad in ("", "   ", 3):
+        with pytest.raises(SystemExit, match="non-empty text"):
+            compute.fewshot_decision(rec["projection"], block, bad)
+
+
+def test_projection_fallback_total_is_one_base_per_model():
+    _, rec = committed()
+    p = rec["projection"]
+    assert p["base_runs_per_model"] == 3 and p["fallback_base_runs_per_model"] == 1
+    assert p["fallback_total_s"] < p["total_s"] and p["fallback_total_h"] == pytest.approx(p["fallback_total_s"] / 3600)
+
+
+def synthetic(tmp_path, synthetic_raw, monkeypatch):
+    return synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, splits=SPLITS)
+
+
+def read_bytes(path):
+    with open(path, "rb") as f:
+        return f.read()
+
+
+def test_projection_cli_writes_the_record_once(tmp_path, synthetic_raw, monkeypatch, capsys):
+    ns = synthetic(tmp_path, synthetic_raw, monkeypatch)
+    out = str(tmp_path / "rec" / "projection.json")
+    capsys.readouterr()
+    rec = runner.main(["--projection", "--out", out])
+    assert json.loads(capsys.readouterr().out) == rec
+    assert read_bytes(out) == runner.record_bytes(rec)
+    assert rec["protocol_sha256"] == ns.pin and rec["decision"]["mode"] == "primary"
+    assert rec["projection"]["n_scored"] == {"val": 5, "test": 7}
+    assert fs.read_mode(ns.pin, out) == "primary"
+    before = read_bytes(out)
+    with pytest.raises(SystemExit, match="recorded once") as e:
+        runner.main(["--projection", "--out", out])
+    assert "\n" not in str(e.value) and read_bytes(out) == before
+
+
+def test_projection_cli_ladder_failure_rewrites_a_primary_record(tmp_path, synthetic_raw, monkeypatch, capsys):
+    ns = synthetic(tmp_path, synthetic_raw, monkeypatch)
+    out = str(tmp_path / "rec" / "projection.json")
+    rec = runner.main(["--projection", "--out", out])
+    text = "berturk base seed 2: MPS out of memory after one rerun"
+    new = runner.main(["--projection", "--ladder-failure", text, "--out", out])
+    assert read_bytes(out) == runner.record_bytes(new)
+    assert new["decision"]["mode"] == "fallback" and new["trigger"]["ladder_failure_text"] == text
+    assert new["trigger"]["ladder_failure"] is True and new["trigger"]["projection_fired"] is False
+    assert new["decision"]["disclosure"] == ns.block["rules"]["compute_fallback"]["disclosure"]
+    assert {k: v for k, v in new.items() if k not in ("trigger", "decision")} == \
+        {k: v for k, v in rec.items() if k not in ("trigger", "decision")}
+    assert fs.read_mode(ns.pin, out) == "fallback"
+    before = read_bytes(out)
+    with pytest.raises(SystemExit, match="already records the fallback"):
+        runner.main(["--projection", "--ladder-failure", text, "--out", out])
+    assert read_bytes(out) == before
+
+
+@pytest.mark.parametrize("case,match", [
+    ("missing", "not found"),
+    ("fallback", "already records the fallback"),
+    ("other_pin", "protocol sha256"),
+    ("no_projection", "no projection"),
+    ("empty_text", "non-empty text"),
+])
+def test_projection_cli_ladder_failure_refuses(tmp_path, synthetic_raw, monkeypatch, case, match):
+    ns = synthetic(tmp_path, synthetic_raw, monkeypatch)
+    out = str(tmp_path / "rec" / "projection.json")
+    text = "laya base seed 0: failed after encoder_frozen"
+    if case == "fallback":
+        write_decision(out, decision_record(ns.pin, "fallback"))
+    elif case == "other_pin":
+        write_decision(out, decision_record("f" * 64, "primary"))
+    elif case == "no_projection":
+        write_decision(out, decision_record(ns.pin, "primary"))
+    elif case == "empty_text":
+        runner.main(["--projection", "--out", out])
+        text = "  "
+    before = read_bytes(out) if os.path.exists(out) else None
+    with pytest.raises(SystemExit, match=match) as e:
+        runner.main(["--projection", "--ladder-failure", text, "--out", out])
+    assert "\n" not in str(e.value)
+    assert (read_bytes(out) if os.path.exists(out) else None) == before
+
+
+@pytest.mark.parametrize("argv,match", [
+    (["--projection"], "needs --out"),
+    (["--counts", "--out", "x.json"], "belong to --projection"),
+    (["--support-sets", "--ladder-failure", "x"], "belong to --projection"),
+])
+def test_projection_cli_refuses_misplaced_flags(argv, match, capsys):
+    with pytest.raises(SystemExit):
+        runner.main(argv)
+    assert match in capsys.readouterr().err
