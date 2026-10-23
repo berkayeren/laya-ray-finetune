@@ -49,6 +49,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 
 import pytest
 
@@ -97,6 +98,37 @@ def laya_selection_sidecars():
         if isinstance(tr, dict) and tr.get("split") == postfit.SELECTION_SPLIT:
             out[rel.split("/")[2]] = side
     return out
+
+
+def _plant_selection_copy(tmp_path, monkeypatch, collect, kind, fewshot_binding):
+    """Plant a copy of a committed `kind` selection val sidecar (planted dir laya-fewshot-planted) beside the tracked
+    ones, its training canonical given a fewshot binding when `fewshot_binding`; returns the planted dir name."""
+    module = sys.modules[__name__]
+    real_tracked, real_path = module.tracked, module.path
+    src = sorted(collect())[0]
+    side = load("%s/%s/val.json" % (DUMPS, src))
+    assert side["system"]["kind"] == kind and isinstance(side["training"]["canonical"], dict)
+    if fewshot_binding:
+        side["training"]["canonical"]["fewshot"] = {"protocol_sha256": "a" * 64, "stage": "base"}
+    name = "%s-fewshot-planted" % kind
+    rel = "%s/%s/val.json" % (DUMPS, name)
+    (tmp_path / name).mkdir(parents=True)
+    (tmp_path / name / "val.json").write_text(json.dumps(side), encoding="utf-8")
+    monkeypatch.setattr(module, "tracked", lambda *spec: real_tracked(*spec) + ([rel] if DUMPS + "/" in spec else []))
+    monkeypatch.setattr(module, "path", lambda r: str(tmp_path / name / "val.json") if r == rel else real_path(r))
+    return name
+
+
+def test_laya_selection_collector_skips_a_fewshot_dump(tmp_path, monkeypatch):
+    # a Phase 9 masked base trains on selection_train too (FEW-01): its val dump is never a selection candidate
+    committed = laya_selection_sidecars()
+    assert len(committed) == postfit.EPOCHS
+    with monkeypatch.context() as m:
+        name = _plant_selection_copy(tmp_path / "plain", m, laya_selection_sidecars, "laya", False)
+        assert name in laya_selection_sidecars()                # without the binding the copy would count
+    name = _plant_selection_copy(tmp_path, monkeypatch, laya_selection_sidecars, "laya", True)
+    assert laya_selection_sidecars() == committed and name not in laya_selection_sidecars()
+    test_laya_selection_dumps_are_the_single_lr_grid()
 
 
 def test_single_lr_protocol_constants():

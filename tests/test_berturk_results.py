@@ -61,6 +61,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from fractions import Fraction
 
 import pytest
@@ -363,6 +364,28 @@ def test_exactly_one_current_berturk_selection_run():
     assert _sorted_json(applied) == _sorted_json(canon), \
         "the current run's canonical config is not the superseded %s's with its delta applied" % last["name"]
     assert berturk.run_id(applied) == chosen_run
+
+
+def test_berturk_selection_checks_skip_a_fewshot_dump(tmp_path, monkeypatch):
+    # a Phase 9 masked BERTurk base trains on selection_train too (FEW-01): its val dump is never a selection run
+    module = sys.modules[__name__]
+    real_tracked, real_path = module.tracked, module.path
+    src = sorted(c["dump_run_id"] for c in _current_record()["candidates"])[0]
+    side = load("%s/%s/val.json" % (DUMPS, src))
+    assert side["system"]["kind"] == "berturk" and isinstance(side["training"]["canonical"], dict)
+    side["training"]["run_id"] = "berturk-selection_train-s0-0badf00d"   # a second train run on selection_train
+    rel = DUMPS + "/berturk-fewshot-planted/val.json"
+    monkeypatch.setattr(module, "tracked", lambda *spec: real_tracked(*spec) + ([rel] if any(
+        p.startswith(DUMPS) for p in spec) else []))
+    monkeypatch.setattr(module, "path", lambda r: str(tmp_path / "val.json") if r == rel else real_path(r))
+    (tmp_path / "val.json").write_text(json.dumps(side), encoding="utf-8")
+    with pytest.raises(AssertionError):                         # without the binding the copy is a second run
+        test_exactly_one_current_berturk_selection_run()
+    side["training"]["canonical"]["fewshot"] = {"protocol_sha256": "a" * 64, "stage": "base"}
+    (tmp_path / "val.json").write_text(json.dumps(side), encoding="utf-8")
+    test_exactly_one_current_berturk_selection_run()
+    test_no_superseded_run_is_current()
+    assert rel not in berturk_val_sidecars() and len(berturk_val_sidecars()) == len(_current_record()["candidates"])
 
 
 FINAL_RUN_RE = re.compile(r"^berturk-final_train-s([012])-[0-9a-f]{8}$")

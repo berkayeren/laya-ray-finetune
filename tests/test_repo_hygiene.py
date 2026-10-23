@@ -331,6 +331,49 @@ def test_latency_path_pin_flags_planted_paths(rel, ok):
     assert bool(LATENCY_PATH_RE.match(rel)) is ok, rel
 
 
+def test_only_fewshot_files_under_results_fewshot():
+    files = tracked("results/fewshot/")
+    assert "results/fewshot/projection.json" in files, "results/fewshot/projection.json (09-04, D-08) is not tracked"
+    bad = [f for f in files if not FEWSHOT_PATH_RE.match(f)]
+    assert bad == [], "only results/fewshot/(projection|runs|fewshot).json may be tracked: %s" % bad
+
+
+@pytest.mark.parametrize("rel,ok", [
+    ("results/fewshot/projection.json", True),
+    ("results/fewshot/runs.json", True),
+    ("results/fewshot/fewshot.json", True),
+    ("results/fewshot/fewshot.md", False),
+    ("results/fewshot/x.json", False),
+    ("results/fewshot/sub/runs.json", False),
+    ("results/fewshot/runs.json.bak", False),
+])
+def test_fewshot_path_pin_flags_planted_paths(rel, ok):
+    assert bool(FEWSHOT_PATH_RE.match(rel)) is ok, rel
+
+
+def test_no_uid_strings_under_results_fewshot():
+    # uid lists live in protocol.json only (the frozen support sets); a Phase 9 record names runs, never messages
+    bad = {}
+    for rel in _existing(f for f in tracked("results/fewshot/") if f.endswith(".json")):
+        with open(os.path.join(REPO_ROOT, rel), encoding="utf-8") as f:
+            found = uid_problems(json.load(f))
+        if found:
+            bad[rel] = found
+    assert bad == {}, "tracked results/fewshot/ records hold uid strings: %s" % bad
+
+
+@pytest.mark.parametrize("obj,n", [
+    ({"schema": "fewshot-runs/1", "entries": [{"dump_run_id": "laya-0123456789ab-01234567-89abcdef"}]}, 0),
+    ({"support": ["bank_3_17"]}, 1),
+    ({"draws": [{"replay": ["bank_0_1", "bank_12_40"]}]}, 2),
+    ({"x": {"hotel_4_2": 1}}, 1),
+    ({"note": "hotel_0_9"}, 1),
+    ({"note": "bank_card", "tag": "bank_transfer"}, 0),
+])
+def test_uid_scan_flags_planted_uids(obj, n):
+    assert len(uid_problems(obj)) == n, uid_problems(obj)
+
+
 def test_only_final_files_under_results_final():
     files = tracked("results/final/")
     assert "results/final/verdict.json" in files, "results/final/verdict.json is not tracked"
@@ -413,6 +456,8 @@ def test_hotels_probe_dumps_only_where_the_protocol_opens_them():
     ("results/superseded/berturk-10-epoch-grid/dumps/{final}/hotels_probe.npz", False),
     ("results/superseded/x/dumps/laya-zeroshot-7b928d82/hotels_probe.json", False),
     ("results/dumps/{final}/sub/hotels_probe.npz", False),
+    ("results/dumps/laya-0123456789ab-01234567-89abcdef/hotels_probe.npz", False),  # a few-shot dir (09-07, D-09)
+    ("results/dumps/berturk-0123456789ab-01234567-89abcdef/hotels_probe.json", False),
 ])
 def test_hotels_dump_rule_flags_planted_paths(rel, ok):
     final_ids = final_dump_ids()
