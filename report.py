@@ -877,11 +877,12 @@ def fewshot_input(protocol, sha, path, root, dump_root, manifest_path):
     """Criterion (d)'s few-shot input {"mean_delta", "draws", "k", "record": {path, sha256}, "mode", "disclosure"} of
     the few-shot results record at `path` (09-08, D-13), refused (one line) unless: its schema is
     pilot.fewshot_report.RESULTS_SCHEMA (read_record); its protocol_sha256 is the pin `sha`; its primary k is the frozen
-    criteria (d)'s fewshot k; the runs manifest it names exists under root, passes pilot.fewshot.read_runs (check_runs
-    under the D-08 decision record, whose bytes it names) and hashes to the record's runs sha256; the record's decision
-    is that manifest's (sha256, mode) with the frozen disclosure; and its primary block equals
-    pilot.fewshot_report.primary recomputed from that manifest and the dumps under dump_root (a JSON round trip, no
-    tolerance). The numbers criterion (d) reads are thus the dumps', never a hand edit of the record."""
+    criteria (d)'s fewshot k; the runs manifest it names (a relative path, never outside root) exists under root,
+    passes pilot.fewshot.read_runs (check_runs under the D-08 decision record, whose bytes it names) and hashes to the
+    record's runs sha256; the record's decision is that manifest's (sha256, mode) with the frozen disclosure; and its
+    primary block equals pilot.fewshot_report.primary recomputed from that manifest and the dumps under dump_root (a
+    JSON round trip, no tolerance). The numbers criterion (d) reads are thus the dumps', never a hand edit of the
+    record; pilot.verdict binds their count to the frozen draws."""
     record, rec_sha = pilot.fewshot_report.read_record(path)
     what = "few-shot record %s" % _root_relpath(path, root)
     if record.get("protocol_sha256") != sha:
@@ -895,6 +896,10 @@ def fewshot_input(protocol, sha, path, root, dump_root, manifest_path):
     ref = record.get("runs") if isinstance(record.get("runs"), dict) else {}
     if not isinstance(ref.get("path"), str) or not isinstance(ref.get("sha256"), str):
         raise SystemExit("%s names no runs manifest {path, sha256}; %s" % (what, FEWSHOT_FIX))
+    rel = os.path.normpath(ref["path"])
+    if os.path.isabs(ref["path"]) or rel == ".." or rel.startswith(".." + os.sep):
+        raise SystemExit("%s names runs manifest %s outside the repo; the few-shot path reads the committed "
+                         "results/fewshot/runs.json only; %s" % (what, ref["path"], FEWSHOT_FIX))
     runs, runs_sha = pilot.fewshot.read_runs(protocol, sha, os.path.join(root, ref["path"]))
     if runs is None:
         raise SystemExit("%s: its runs manifest %s is not found under %s; restore it with git" % (what, ref["path"],

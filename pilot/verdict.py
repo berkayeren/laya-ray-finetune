@@ -581,6 +581,13 @@ def _fewshot_k(protocol):
     return _path_rule(protocol["criteria"]["d"], "fewshot").get("k")
 
 
+def _fewshot_draws(protocol):
+    """The number of frozen few-shot draws (the protocol's few-shot block), or None when it lists none."""
+    block = protocol.get("fewshot") if isinstance(protocol, dict) else None
+    draws = block.get("draws") if isinstance(block, dict) else None
+    return len(draws) if isinstance(draws, list) and draws else None
+
+
 def _fallback_disclosure(protocol):
     """The frozen compute-fallback disclosure of the protocol's few-shot block (None when it names none)."""
     block = protocol.get("fewshot") if isinstance(protocol, dict) else None
@@ -592,9 +599,10 @@ def _fallback_disclosure(protocol):
 
 def _check_fewshot(block, protocol, what):
     """SystemExit (one line naming `what` and the fix) unless `block` is the few-shot record's form of the fewshot block
-    but for its status: exactly FEWSHOT_KEYS, phase FEWSHOT_PHASE, k criteria (d)'s fewshot k, mode one of
-    FEWSHOT_MODES, disclosure None under primary and the protocol's compute-fallback disclosure under fallback, record
-    {path, sha256} with a 64-hex sha256. mean_delta and draws are checked by criterion_d."""
+    but for its status: exactly FEWSHOT_KEYS, phase FEWSHOT_PHASE, k criteria (d)'s fewshot k, one draw delta per
+    frozen draw of the protocol's few-shot block (a draw is never dropped), mode one of FEWSHOT_MODES, disclosure None
+    under primary and the protocol's compute-fallback disclosure under fallback, record {path, sha256} with a 64-hex
+    sha256. The values of mean_delta and draws are checked by criterion_d."""
     def bad(text):
         raise SystemExit("%s: %s; %s" % (what, text, FEWSHOT_FIX))
     if not isinstance(block, dict) or set(block) != set(FEWSHOT_KEYS):
@@ -605,6 +613,11 @@ def _check_fewshot(block, protocol, what):
     k = _fewshot_k(protocol)
     if isinstance(block["k"], bool) or not isinstance(block["k"], int) or block["k"] != k:
         bad("k %r is not criteria (d)'s fewshot k %r" % (block["k"], k))
+    n = _fewshot_draws(protocol)
+    if n is None:
+        bad("the protocol's few-shot block lists no draws, so the few-shot path cannot be bound to them")
+    if not isinstance(block["draws"], list) or len(block["draws"]) != n:
+        bad("draws %r, expected one delta per frozen draw (%d); a draw is never dropped" % (block["draws"], n))
     if block["mode"] not in FEWSHOT_MODES:
         bad("mode %r is not one of %s" % (block["mode"], ", ".join(FEWSHOT_MODES)))
     want = None if block["mode"] == "primary" else _fallback_disclosure(protocol)
