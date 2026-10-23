@@ -414,3 +414,139 @@ def test_evaluate_still_refuses_hotels_before_any_load(snap, monkeypatch):
         evaluate.main([split(snap, "hotels_probe"), "--checkpoint", snap.ckpt, "--workers", "0",
                        "--manifest", snap.manifest, "--out-root", str(snap.tmp / "e")])
     assert not (snap.tmp / "e").exists()
+
+
+# ---- Phase 9: few-shot checkpoints through the runs-manifest allow-list (09-05, D-09) ----
+
+@pytest.fixture
+def fsnap(tmp_path, synthetic_raw, monkeypatch):
+    """The few-shot bench: the synthetic frozen protocol with a fewshot block (tests/fewshot_synthetic.bench), a
+    planted set, its runs manifest at a temp pilot.fewshot.RUNS_PATH and a temp DUMP_ROOT."""
+    import torch
+
+    import fewshot as runner
+    from fewshot_synthetic import bench, plant_fewshot_set
+    from pilot import fewshot as fs
+    threads = torch.get_num_threads()
+    ns = bench(tmp_path, synthetic_raw, monkeypatch)
+    ns.ckpts = plant_fewshot_set(ns, str(tmp_path / "ckpt"))
+    ns.runs_path = str(tmp_path / "fewshot" / "runs.json")
+    monkeypatch.setattr(fs, "RUNS_PATH", ns.runs_path)
+    ns.root = str(tmp_path / "dumps")
+    monkeypatch.setattr(dumps, "DUMP_ROOT", ns.root)
+    ns.runs = runner.main(["--runs-manifest"] + sorted(ns.ckpts.values()) + ["--out", ns.runs_path])
+    ns.tmp, ns.fs = tmp_path, fs
+    ns.cont = ns.ckpts["laya-d0-k2"]
+    ns.rid = dumps.run_id("laya", pilot.weights.identity(ns.cont))
+    yield ns
+    torch.set_num_threads(threads)
+
+
+def fs_argv(ns, name, *extra, ckpt=None):
+    return [os.path.join(ns.out_dir, "splits", name + ".jsonl"), "--model", "laya", "--checkpoint", ckpt or ns.cont,
+            "--workers", "0", "--device", "cpu", "--manifest", ns.manifest] + list(extra)
+
+
+def rewrite_runs(ns, edit):
+    """Apply edit(runs dict) to the runs manifest on disk."""
+    with open(ns.runs_path, encoding="utf-8") as f:
+        runs = json.load(f)
+    edit(runs)
+    with open(ns.runs_path, "w", encoding="utf-8") as f:
+        json.dump(runs, f)
+
+
+def test_fewshot_gate_refuses_a_listed_checkpoint_on_hotels(fsnap, monkeypatch):
+    no_laya_load(monkeypatch)
+    text = refused(fs_argv(fsnap, "hotels_probe"), "laya-d0-k2", "test only", "HOTELS is never opened")
+    assert "fewshot.rules.test_admission" in text
+    assert files(fsnap.root) == []
+
+
+def test_fewshot_gate_refuses_an_unlisted_or_edited_checkpoint(fsnap, monkeypatch):
+    """A few-shot checkpoint outside the allow-list (an edited copy of a listed one: its dump run id changes) is
+    refused on test, naming results/fewshot/runs.json."""
+    edited = str(fsnap.tmp / "edited")
+    shutil.copytree(fsnap.cont, edited)
+    path = os.path.join(edited, "rl_agent_config.json")
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    cfg["note"] = "edited"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
+    rid = dumps.run_id("laya", pilot.weights.identity(edited))
+    assert rid != fsnap.rid
+    no_laya_load(monkeypatch)
+    text = refused(fs_argv(fsnap, "test", ckpt=edited), rid, "results/fewshot/runs.json")
+    assert "never scored on test or HOTELS" in text
+    assert files(fsnap.root) == []
+
+
+@pytest.mark.parametrize("case", ["other_protocol", "changed_digest", "other_mode", "not_json"])
+def test_fewshot_gate_refuses_a_runs_manifest_it_cannot_check(fsnap, monkeypatch, case):
+    if case == "other_protocol":
+        rewrite_runs(fsnap, lambda r: r.update(protocol_sha256="f" * 64))
+        needles = ("runs.json is refused", "protocol sha256 " + "f" * 64)
+    elif case == "changed_digest":
+        def edit(r):
+            for e in r["entries"]:
+                if e["stage"] == "continued":
+                    e["digest"] = "0" * 64
+        rewrite_runs(fsnap, edit)
+        needles = ("runs.json is refused", "digest", "frozen draw 0")
+    elif case == "other_mode":
+        rewrite_runs(fsnap, lambda r: r.update(mode="fallback"))
+        needles = ("runs.json is refused", "'fallback' protocol")
+    else:
+        with open(fsnap.runs_path, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        needles = ("runs.json is refused", "not valid JSON")
+    no_laya_load(monkeypatch)
+    refused(fs_argv(fsnap, "test"), *needles)
+    assert files(fsnap.root) == []
+
+
+@pytest.mark.parametrize("flags, needle", [
+    (["--force"], "--force"),
+    (["--n", "3"], "--n"),
+    (["--out-root", "ELSEWHERE"], "--out-root"),
+], ids=["force", "n", "out_root"])
+def test_fewshot_gate_refuses_force_n_and_out_root(fsnap, monkeypatch, flags, needle):
+    flags = [str(fsnap.tmp / "elsewhere") if f == "ELSEWHERE" else f for f in flags]
+    no_identity(monkeypatch)
+    refused(fs_argv(fsnap, "test", *flags), needle)
+    assert files(fsnap.root) == [] and not (fsnap.tmp / "elsewhere").exists()
+
+
+def test_fewshot_gate_refuses_another_device_or_worker_count(fsnap, monkeypatch):
+    no_identity(monkeypatch)
+    argv = fs_argv(fsnap, "test")
+    argv[argv.index("--workers") + 1] = "2"
+    refused(argv, "workers")
+    assert files(fsnap.root) == []
+
+
+def test_fewshot_gate_scores_a_listed_checkpoint_once(fsnap):
+    run_dir, _ = score.main(fs_argv(fsnap, "test"))
+    side = sidecar(run_dir, "test")
+    with open(fsnap.runs_path, "rb") as f:
+        assert side["fewshot_runs_sha256"] == pilot.data.sha256_bytes(f.read())
+    before = files(fsnap.root)
+    text = refused(fs_argv(fsnap, "test"), "already exists", "once per split")
+    assert "listed few-shot checkpoint" in text
+    assert files(fsnap.root) == before
+
+
+def test_fewshot_gate_without_a_runs_manifest_refuses_as_in_phase_8(fsnap, monkeypatch):
+    os.remove(fsnap.runs_path)
+    assert fsnap.fs.admitted(fsnap.protocol, fsnap.pin, "laya", fsnap.rid) is None
+    no_laya_load(monkeypatch)
+    text = refused(fs_argv(fsnap, "test"), fsnap.rid, "final seeds (none)", "results/fewshot/runs.json")
+    assert "never scored on test or HOTELS" in text
+    assert files(fsnap.root) == []
+
+
+def test_fewshot_masked_base_on_val_is_ungated(fsnap):
+    run_dir, _ = score.main(fs_argv(fsnap, "val", ckpt=fsnap.ckpts["laya-base-s0"]))
+    side = sidecar(run_dir, "val")
+    assert "protocol_sha256" not in side and "fewshot_runs_sha256" not in side
