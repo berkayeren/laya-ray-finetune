@@ -37,6 +37,14 @@ Paired bootstrap (EVAL-07), the one interval procedure for every comparison:
   (replicate_metrics), with metrics()' semantics; BOOT_METRICS are micro-F1, macro-F1, exact match and top-1
 - the interval is the 95% percentile interval of the replicate deltas A - B (numpy linear interpolation);
   thresholds are inputs, never selected inside the bootstrap
+- paired_bootstrap_extra (BOOT_EXTRA_RULE): the same interval for Brier, classwise ECE and micro precision at a
+  coverage (80 % by default, criterion (d)'s abstention path), on the SAME bootstrap_weights(n, B, seed) draw as
+  paired_bootstrap, so its deltas pair with the F1 deltas of one comparison. Brier and classwise ECE replicates are
+  count-weighted sums of per-message terms (W @ the per-message Brier term / n; W @ the per-message (tag, bin)
+  contributions y - p, then classwise_ece's |sum| / n per tag and bin); a coverage replicate is selective on the
+  rows idx[b] in draw order, so stable ties follow draw order (replicate_extra). Each replicate equals the direct
+  metric of the resampled rows. Brier gates; the binned ECE is biased under the bootstrap (its observed delta sits
+  near the edge of its own percentile interval), so it is reported, not gated
 
 Calibration (EVAL-03): the 48 tags are 48 binary problems, every function takes gold Y and probabilities P [n, 48]
 (P, never logits, so Phase 8's seed-averaged probabilities go through the same code; D-10 still holds: no system is
@@ -84,6 +92,7 @@ False positives (EVAL-05): one definition (fp_rate, FP_RULE) serves the no-inten
 usage: from pilot import metrics; metrics.metrics(Y, metrics.probabilities(logits, T), 0.5)
        sel = metrics.select_theta(Y_val, P_val); metrics.metrics(Y, P, metrics.theta_vector(sel))
        metrics.paired_bootstrap(Y, metrics.seed_average([PA0, PA1]), thA, PB, thB, B=10000, seed=0)
+       metrics.paired_bootstrap_extra(Y, PA, thA, PB, thB, B=10000, seed=0)   # Brier, ECE, precision at 80 %
        metrics.calibration(Y, metrics.probabilities(logits, T), sel["eligible_tags"])
        metrics.selective(Y, metrics.probabilities(logits, T), metrics.theta_vector(sel))
        metrics.fp_rate(Y, metrics.probabilities(logits, T), metrics.theta_vector(sel))   # no-intent, all 48 tags
@@ -102,6 +111,12 @@ MIN_VAL_POSITIVES = 10                                      # val positives a ta
 TIE_RULE = "closest to 0.5; between two equally close points, the lower θ"
 BOOT_METRICS = ("micro_f1", "macro_f1", "exact_match", "top1_hit")
 BOOT_METHOD = "percentile (numpy linear interpolation)"
+BOOT_EXTRA_METRICS = ("brier", "classwise_ece")             # plus precision_at_<coverage>, named from its argument
+BOOT_EXTRA_RULE = ("the draw is bootstrap_weights(n, B, seed), the same one paired_bootstrap uses, shared by "
+                   "both systems; Brier and classwise ECE replicates are count-weighted sums of per-message terms, "
+                   "so each equals the metric of the resampled rows; a precision-at-coverage replicate is selective "
+                   "on the rows idx[b] in draw order (stable ties follow draw order); the interval is the "
+                   "percentile interval of the replicate deltas A - B (" + BOOT_METHOD + ")")
 ECE_BINS = 15                                               # equal-width calibration bins (Guo et al. 2017, M = 15)
 NLL_EPS = 1e-12                                             # NLL clips p to [NLL_EPS, 1 - NLL_EPS]
 CALIBRATION_RULES = {
@@ -331,6 +346,59 @@ def paired_bootstrap(Y, PA, thA, PB, thB, B=10000, seed=0, level=0.95):
                      "ci": ci, "width": width, "n_undefined": int(undefined.sum())}
     return {"B": int(B), "seed": seed, "level": level, "method": BOOT_METHOD, "n": int(Y.shape[0]),
             "metrics": out}
+
+
+def _coverage(coverage):
+    """The coverage as an int in 1..100 (integer percent, never a bool); SystemExit otherwise."""
+    if isinstance(coverage, bool) or not isinstance(coverage, (int, np.integer)) or not 1 <= coverage <= 100:
+        raise SystemExit("coverage %r is not an integer percent in 1..100" % (coverage,))
+    return int(coverage)
+
+
+def replicate_extra(idx, W, Y, P, theta, coverage=80):
+    """{name: float64 [B]} of brier, classwise_ece and precision_at_<coverage> for every replicate of one draw
+    (idx [B, n] and its count weights W, from bootstrap_weights), BOOT_EXTRA_RULE: replicate b equals brier,
+    classwise_ece and selective of the rows idx[b] in draw order."""
+    coverage = _coverage(coverage)
+    Y, P = _arrays(Y, P, "no messages to bootstrap")
+    W = np.asarray(W, dtype=np.float64)
+    n, k = Y.shape
+    out = {"brier": W @ ((P - Y) ** 2).mean(axis=1) / n}    # per-message mean over 48 tags, count-weighted
+    D = np.zeros((n, k * ECE_BINS))                         # per message: y - p in its (tag, bin) column
+    D[np.arange(n)[:, None], np.arange(k)[None, :] * ECE_BINS + ece_bins(P)] = Y - P
+    out["classwise_ece"] = np.abs((W @ D).reshape(-1, k, ECE_BINS)).sum(axis=2).mean(axis=1) / n
+    key = str(coverage)
+    out["precision_at_%d" % coverage] = np.array(
+        [selective(Y[r], P[r], theta, (coverage,))["coverages"][key]["precision"] for r in idx], dtype=np.float64)
+    return out
+
+
+def paired_bootstrap_extra(Y, PA, thA, PB, thB, B=10000, seed=0, level=0.95, coverage=80):
+    """BOOT_EXTRA_RULE: the paired bootstrap of A - B for Brier, classwise ECE and micro precision at `coverage`
+    percent (criterion (d)'s calibration and abstention statistics) on the one draw paired_bootstrap uses.
+
+    PA / PB, thA / thB as in paired_bootstrap (the thresholds only enter the coverage precision, through
+    message_confidence, which refuses θ outside (0, 1)). Every input is validated before the draw; a, b and delta are
+    the full-data values, unrounded; n_undefined is always 0 (every statistic is defined on a non-empty replicate).
+    """
+    Y, PA = _arrays(Y, PA, "no messages to bootstrap")
+    _, PB = _arrays(Y, PB, "no messages to bootstrap")
+    q = _percentiles(level)
+    coverage = _coverage(coverage)
+    name_cov, key = "precision_at_%d" % coverage, str(coverage)
+    full = [{"brier": brier(Y, P), "classwise_ece": classwise_ece(Y, P)[0],
+             name_cov: selective(Y, P, th, (coverage,))["coverages"][key]["precision"]}     # validates θ
+            for P, th in ((PA, thA), (PB, thB))]
+    idx, W = bootstrap_weights(Y.shape[0], B, seed)          # ONE draw, the same as paired_bootstrap's (pairing)
+    ra = replicate_extra(idx, W, Y, PA, thA, coverage)
+    rb = replicate_extra(idx, W, Y, PB, thB, coverage)
+    out = {}
+    for name in BOOT_EXTRA_METRICS + (name_cov,):
+        a, b = full[0][name], full[1][name]
+        ci = [float(v) for v in np.percentile(ra[name] - rb[name], q)]
+        out[name] = {"a": a, "b": b, "delta": a - b, "ci": ci, "width": ci[1] - ci[0], "n_undefined": 0}
+    return {"B": int(B), "seed": seed, "level": level, "method": BOOT_METHOD, "n": int(Y.shape[0]),
+            "coverage": coverage, "metrics": out}
 
 
 def ece_bins(P, n_bins=ECE_BINS):
