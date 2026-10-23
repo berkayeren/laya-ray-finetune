@@ -9,6 +9,10 @@ fine-tuned test number exists. Nothing is trained here; Phase 9 executes the pro
   repeated uid are refused.
 - pilot.fewshot imports the stdlib only.
 - data-marked: the three draws on the verified committed selection_train.
+- fewshot.py --support-sets (08-08), under a temp protocol pinned by monkeypatch around a block drawn on the
+  synthetic selection_train: prints the protocol sha256 and each draw's digest and counts (no uid list, no text);
+  refuses a missing, unpinned or one-byte-changed protocol before the split is read, a block of another source and a
+  draw with one uid changed; no mode flag is an argparse error.
 Offline except the `data` tests.
 """
 import hashlib
@@ -380,6 +384,7 @@ def frozen_protocol(tmp_path, synthetic_raw, monkeypatch, edit=None):
 
 def test_fewshot_cli_support_sets_prints_the_frozen_draws(tmp_path, synthetic_raw, monkeypatch, capsys):
     block, pin = frozen_protocol(tmp_path, synthetic_raw, monkeypatch)
+    capsys.readouterr()                                         # drop prepare()'s progress lines
     out = runner().main(["--support-sets"])
     printed = capsys.readouterr().out
     assert json.loads(printed) == out
