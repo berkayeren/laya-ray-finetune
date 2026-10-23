@@ -12,6 +12,7 @@
 #   make berturk-postfit   rebuild the Phase 6 BERTurk postfit record from the committed 30-epoch selection dumps (no model)
 #   make confidence-reports  rebuild the Phase 7 val confidence records from the committed dumps and postfit records (no model)
 #   make final-scoring  score the six final seeds once on test and HOTELS behind the protocol gate (model, about 35 min on the M4; never rerun: the gate refuses an existing dump)
+#   make final-reports  rebuild results/final/ (per-seed reports, verdict, confidence records) from the committed dumps (no model)
 PYTHON ?= python
 UV ?= uv
 PY312 ?= python3.12
@@ -27,8 +28,11 @@ LAYA_CHOSEN := laya-047381259d3b-cf0f7846-cc216d59
 BERTURK_CHOSEN := berturk-f24d8fe3c899-50e28523-29446b61
 CONFIDENCE := results/confidence
 FINAL_ROOT ?= .
+LAYA_FINAL := laya-a6a866dd69fc-88cfaa80-cc216d59 laya-f43484c8aab4-b43eaa54-cc216d59 laya-6f66dfd4c331-23b93830-cc216d59
+BERTURK_FINAL := berturk-c500b06ccf34-f37197ee-29446b61 berturk-1f0bb00cd6f7-a14835e4-29446b61 berturk-06685feeb69f-faf017a7-29446b61
+FINAL := results/final
 
-.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring
+.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports
 
 env:
 	$(PY312) -m venv $(VENV)
@@ -106,6 +110,17 @@ final-scoring:
 	$(PYTHON) score.py data/splits/test.jsonl --model berturk --checkpoint $(FINAL_ROOT)/ckpt-berturk-final-s2 --device mps --workers 0
 	$(PYTHON) score.py data/splits/hotels_probe.jsonl --model berturk --checkpoint $(FINAL_ROOT)/ckpt-berturk-final-s2 --device mps --workers 0
 	$(PYTHON) score.py data/splits/hotels_probe.jsonl --model laya --workers $(SCORE_WORKERS) --cpus-per-worker $(SCORE_CPUS)
+
+final-reports:
+	mkdir -p $(FINAL)/reports
+	mkdir -p $(FINAL)/confidence
+	$(PYTHON) report.py results/dumps/laya-a6a866dd69fc-88cfaa80-cc216d59 --split test --postfit results/postfit/laya.json --out $(FINAL)/reports/laya-a6a866dd69fc-88cfaa80-cc216d59-test.json > /dev/null
+	$(PYTHON) report.py results/dumps/laya-f43484c8aab4-b43eaa54-cc216d59 --split test --postfit results/postfit/laya.json --out $(FINAL)/reports/laya-f43484c8aab4-b43eaa54-cc216d59-test.json > /dev/null
+	$(PYTHON) report.py results/dumps/laya-6f66dfd4c331-23b93830-cc216d59 --split test --postfit results/postfit/laya.json --out $(FINAL)/reports/laya-6f66dfd4c331-23b93830-cc216d59-test.json > /dev/null
+	$(PYTHON) report.py results/dumps/berturk-c500b06ccf34-f37197ee-29446b61 --split test --postfit results/postfit/berturk.json --out $(FINAL)/reports/berturk-c500b06ccf34-f37197ee-29446b61-test.json > /dev/null
+	$(PYTHON) report.py results/dumps/berturk-1f0bb00cd6f7-a14835e4-29446b61 --split test --postfit results/postfit/berturk.json --out $(FINAL)/reports/berturk-1f0bb00cd6f7-a14835e4-29446b61-test.json > /dev/null
+	$(PYTHON) report.py results/dumps/berturk-06685feeb69f-faf017a7-29446b61 --split test --postfit results/postfit/berturk.json --out $(FINAL)/reports/berturk-06685feeb69f-faf017a7-29446b61-test.json > /dev/null
+	$(PYTHON) report.py --verdict --out $(FINAL)/verdict.json > /dev/null
 
 clean-data:
 	rm -rf data/splits data/audit

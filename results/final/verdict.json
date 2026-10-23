@@ -1,0 +1,1214 @@
+{
+  "schema": "verdict/1",
+  "protocol": {
+    "path": "protocol.json",
+    "sha256": "0d337d2019f9fcb1874fa0eb23f5f2547312e1675c832f886449d573cef54a8a"
+  },
+  "split": {
+    "name": "test",
+    "path": "data/splits/test.jsonl",
+    "sha256": "3abfb1836033c2d9af94ab17dcb386114bb6bf7a0a002b513514160ca37ed171",
+    "uids_sha256": "f0fc53ccb638cda616177cdb5f0580a6545fa6bf9a6686773437dbfa80d0439f",
+    "n": 413,
+    "n_no_intent": 15
+  },
+  "systems": {
+    "laya": {
+      "kind": "laya",
+      "postfit": {
+        "path": "results/postfit/laya.json",
+        "sha256": "e08e8735b19c0973606622be546617ef851f1bf06e2b2d60b1d920d8676b6da2"
+      },
+      "final_manifest": {
+        "path": "results/postfit/laya-final.json",
+        "sha256": "3d0b1a91e00e8ef4d89d5424fc8afea09189dcbb89936995b43dbecaac9cb15a"
+      },
+      "settings": {
+        "chosen": "laya-047381259d3b-cf0f7846-cc216d59",
+        "train_run_id": "laya-selection_train-neg8-s0-d92447f4",
+        "temperature": 4.7698254528950175,
+        "theta": {
+          "shipped": {
+            "global": 0.95,
+            "n_per_tag": 13
+          },
+          "raw": {
+            "global": 0.33,
+            "n_per_tag": 13
+          }
+        },
+        "epoch": 3,
+        "epochs_schedule": 4,
+        "encoder_lr": 2e-05,
+        "head_lr": 0.0001,
+        "config_sha256_sans_seed": "4fe1e17f770171cafff5e80196f521eb73566e949fc8877b1226d612eff62650"
+      },
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "per_seed": [
+        {
+          "seed": 0,
+          "dump_run_id": "laya-a6a866dd69fc-88cfaa80-cc216d59",
+          "dump_sha256": "a82339ef2275370169a732c9e87ede01b28d0a30d023bbe092e82665e1067c1a",
+          "train_run_id": "laya-final_train-neg8-s0-95cf6955",
+          "temperature": 4.7698254528950175,
+          "micro_f1": 0.7785046728971963,
+          "macro_f1": 0.7837590364621659,
+          "exact_match": 0.3704600484261501,
+          "top1_hit": 0.8869346733668342,
+          "n_top1": 398,
+          "test_counts": {
+            "tp": 832,
+            "fp": 355,
+            "fn": 92
+          },
+          "loss_by_epoch": [
+            0.8191126931436052,
+            0.5362695907735848,
+            0.2825661309922222
+          ]
+        },
+        {
+          "seed": 1,
+          "dump_run_id": "laya-f43484c8aab4-b43eaa54-cc216d59",
+          "dump_sha256": "0ac026cb6e426fce19203fa120c20f5f42d32544530e52a80d945150e276985e",
+          "train_run_id": "laya-final_train-neg8-s1-07a1ee59",
+          "temperature": 4.7698254528950175,
+          "micro_f1": 0.7844423617619494,
+          "macro_f1": 0.780870606833931,
+          "exact_match": 0.36319612590799033,
+          "top1_hit": 0.8919597989949749,
+          "n_top1": 398,
+          "test_counts": {
+            "tp": 835,
+            "fp": 357,
+            "fn": 89
+          },
+          "loss_by_epoch": [
+            0.8122251204161328,
+            0.5530531584231787,
+            0.2935788590662834
+          ]
+        },
+        {
+          "seed": 2,
+          "dump_run_id": "laya-6f66dfd4c331-23b93830-cc216d59",
+          "dump_sha256": "576efa5dcb27045cbfbb49fd2badbd4eb54cab494b081822becb262c36ba9353",
+          "train_run_id": "laya-final_train-neg8-s2-bbb5230e",
+          "temperature": 4.7698254528950175,
+          "micro_f1": 0.8154296875,
+          "macro_f1": 0.8047403076276695,
+          "exact_match": 0.4358353510895884,
+          "top1_hit": 0.8919597989949749,
+          "n_top1": 398,
+          "test_counts": {
+            "tp": 834,
+            "fp": 265,
+            "fn": 90
+          },
+          "loss_by_epoch": [
+            0.7892107195401614,
+            0.530459800010186,
+            0.25906132486359196
+          ]
+        }
+      ],
+      "summary": {
+        "micro_f1": {
+          "mean": 0.7927922407197152,
+          "std": 0.019828124843547935,
+          "values": [
+            0.7785046728971963,
+            0.7844423617619494,
+            0.8154296875
+          ]
+        },
+        "macro_f1": {
+          "mean": 0.7897899836412554,
+          "std": 0.01302765891875344,
+          "values": [
+            0.7837590364621659,
+            0.780870606833931,
+            0.8047403076276695
+          ]
+        },
+        "exact_match": {
+          "mean": 0.3898305084745763,
+          "std": 0.04000656571878524,
+          "values": [
+            0.3704600484261501,
+            0.36319612590799033,
+            0.4358353510895884
+          ]
+        },
+        "top1_hit": {
+          "mean": 0.890284757118928,
+          "std": 0.002901257634118735,
+          "values": [
+            0.8869346733668342,
+            0.8919597989949749,
+            0.8919597989949749
+          ]
+        }
+      }
+    },
+    "berturk": {
+      "kind": "berturk",
+      "postfit": {
+        "path": "results/postfit/berturk.json",
+        "sha256": "83b34dfb524e6e096b94e6b6abbc0ad32aad2175332be2e2daba8af2a15fbf12"
+      },
+      "final_manifest": {
+        "path": "results/postfit/berturk-final.json",
+        "sha256": "0a611f198fcf0d41c7f1ecb27d0da68431193e1a9dc67b09b2a58f78ac8c5207"
+      },
+      "settings": {
+        "chosen": "berturk-f24d8fe3c899-50e28523-29446b61",
+        "train_run_id": "berturk-selection_train-s0-4f36ae05",
+        "temperature": 0.7430447674665697,
+        "theta": {
+          "shipped": {
+            "global": 0.19,
+            "n_per_tag": 13
+          },
+          "raw": {
+            "global": 0.26,
+            "n_per_tag": 13
+          }
+        },
+        "epoch": 29,
+        "epochs_schedule": 30,
+        "encoder_lr": 2e-05,
+        "head_lr": 0.0001,
+        "config_sha256_sans_seed": "16cb358001af83c1b4df53ad40fd0d14cbc991ef38f81ae1084bc0dc71b09adc"
+      },
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "per_seed": [
+        {
+          "seed": 0,
+          "dump_run_id": "berturk-c500b06ccf34-f37197ee-29446b61",
+          "dump_sha256": "48457f4822038804beccb9f031e54fb6c0a0c61857bcb36ec53f29a1de19157f",
+          "train_run_id": "berturk-final_train-s0-8a167355",
+          "temperature": 0.7430447674665697,
+          "micro_f1": 0.8285867813003761,
+          "macro_f1": 0.7576134859081719,
+          "exact_match": 0.5230024213075061,
+          "top1_hit": 0.9271356783919598,
+          "n_top1": 398,
+          "test_counts": {
+            "tp": 778,
+            "fp": 182,
+            "fn": 146
+          },
+          "loss_by_epoch": [
+            0.6813403826493484,
+            0.3150858231461965,
+            0.1806704903451296,
+            0.1717885583639145,
+            0.1658636133831281,
+            0.1553919233668309,
+            0.14179409495913065,
+            0.12796722166240215,
+            0.11579534325462121,
+            0.10553267497855884,
+            0.09637116827070713,
+            0.08886929658743051,
+            0.08221886335657193,
+            0.07642372145962256,
+            0.07110262275315248,
+            0.06689618141032182,
+            0.06274820262422928,
+            0.059610266596651994,
+            0.056417858228087425,
+            0.053629071093522586,
+            0.05129973074564567,
+            0.04912606411828445,
+            0.047439507638605743,
+            0.045993780359052695,
+            0.044736788572313696,
+            0.0439494581749806,
+            0.0429479402776521,
+            0.04206781884512076,
+            0.04161535024356384
+          ]
+        },
+        {
+          "seed": 1,
+          "dump_run_id": "berturk-1f0bb00cd6f7-a14835e4-29446b61",
+          "dump_sha256": "71b6f80b90dcea35c6552d878a4a275a45f9c680fc32b6eaa9427d56bbbad559",
+          "train_run_id": "berturk-final_train-s1-3c44e7ff",
+          "temperature": 0.7430447674665697,
+          "micro_f1": 0.8259712613092071,
+          "macro_f1": 0.7569113576813535,
+          "exact_match": 0.5205811138014528,
+          "top1_hit": 0.9246231155778895,
+          "n_top1": 398,
+          "test_counts": {
+            "tp": 782,
+            "fp": 191,
+            "fn": 142
+          },
+          "loss_by_epoch": [
+            0.671942759018678,
+            0.3174107117721668,
+            0.17981496166724426,
+            0.17056264613683408,
+            0.1625561910466506,
+            0.1495753869127769,
+            0.13473254814743996,
+            0.1209353795991494,
+            0.10969618650583121,
+            0.09954088052304891,
+            0.09178029975065818,
+            0.08413559914781497,
+            0.07814014316178285,
+            0.07249510990312466,
+            0.06736836654062454,
+            0.06337963316876155,
+            0.05921453294845728,
+            0.05602244122956808,
+            0.05308622035842676,
+            0.05055223527149512,
+            0.04850476765288757,
+            0.046533896802709654,
+            0.04473366932227062,
+            0.04330734507395671,
+            0.04206069290208129,
+            0.040893052597171985,
+            0.039940217294945166,
+            0.0394744579322063,
+            0.03912622682177103
+          ]
+        },
+        {
+          "seed": 2,
+          "dump_run_id": "berturk-06685feeb69f-faf017a7-29446b61",
+          "dump_sha256": "e11ec13aec53ef3155a8d691fda5ebcb628d1ec27c11c88c6da35be9e07a7621",
+          "train_run_id": "berturk-final_train-s2-44f81396",
+          "temperature": 0.7430447674665697,
+          "micro_f1": 0.8427876823338736,
+          "macro_f1": 0.7621473562589006,
+          "exact_match": 0.5520581113801453,
+          "top1_hit": 0.9296482412060302,
+          "n_top1": 398,
+          "test_counts": {
+            "tp": 791,
+            "fp": 152,
+            "fn": 133
+          },
+          "loss_by_epoch": [
+            0.6396955137069409,
+            0.30861324358444947,
+            0.18094551104765672,
+            0.16969370756011742,
+            0.1586220608307765,
+            0.14490931352170613,
+            0.13192920515743586,
+            0.1203654776685513,
+            0.1093868871147816,
+            0.10001415042923047,
+            0.09170821652962612,
+            0.08416385834033673,
+            0.07778102159500122,
+            0.07224496002667226,
+            0.06761646636116964,
+            0.06332740667634286,
+            0.059647367908977546,
+            0.05617643642024352,
+            0.05343566598513952,
+            0.05098678981168912,
+            0.04874661794075599,
+            0.0471007853316573,
+            0.04536075230974417,
+            0.04382549720601393,
+            0.0426710806070612,
+            0.04172866318661433,
+            0.04095494725669806,
+            0.04043921362608671,
+            0.0400598611539373
+          ]
+        }
+      ],
+      "summary": {
+        "micro_f1": {
+          "mean": 0.8324485749811522,
+          "std": 0.009048927662677684,
+          "values": [
+            0.8285867813003761,
+            0.8259712613092071,
+            0.8427876823338736
+          ]
+        },
+        "macro_f1": {
+          "mean": 0.7588907332828086,
+          "std": 0.0028420839041152874,
+          "values": [
+            0.7576134859081719,
+            0.7569113576813535,
+            0.7621473562589006
+          ]
+        },
+        "exact_match": {
+          "mean": 0.5318805488297014,
+          "std": 0.01751616982583591,
+          "values": [
+            0.5230024213075061,
+            0.5205811138014528,
+            0.5520581113801453
+          ]
+        },
+        "top1_hit": {
+          "mean": 0.9271356783919598,
+          "std": 0.0025125628140703626,
+          "values": [
+            0.9271356783919598,
+            0.9246231155778895,
+            0.9296482412060302
+          ]
+        }
+      }
+    }
+  },
+  "references": [
+    {
+      "name": "majority",
+      "run_id": "majority",
+      "report": {
+        "path": "results/reports/majority.json",
+        "sha256": "62ff065a1a83f48f6ec71a9e470546130353cfcf26e2262a9594ec9c5c96f474"
+      },
+      "kind": "majority",
+      "checkpoint": null,
+      "baseline_split": "final_train",
+      "temperature": 1.0,
+      "theta": {
+        "global": 0.5,
+        "n_per_tag": 13
+      },
+      "micro_f1": 0.137621540762902,
+      "macro_f1": 0.007590759075907591,
+      "exact_match": 0.004842615012106538,
+      "top1_hit": 0.23115577889447236,
+      "n": 413,
+      "n_top1": 398
+    },
+    {
+      "name": "prior",
+      "run_id": "prior",
+      "report": {
+        "path": "results/reports/prior.json",
+        "sha256": "a000819eb3468624a5064ac42d359b90f1f2c0393ef803db2d2c128a8adf09c6"
+      },
+      "kind": "prior",
+      "checkpoint": null,
+      "baseline_split": "final_train",
+      "temperature": 1.0,
+      "theta": {
+        "global": 0.12,
+        "n_per_tag": 13
+      },
+      "micro_f1": 0.18435374149659864,
+      "macro_f1": 0.04783086918085481,
+      "exact_match": 0.0,
+      "top1_hit": 0.23115577889447236,
+      "n": 413,
+      "n_top1": 398
+    },
+    {
+      "name": "laya-zeroshot-7b928d82",
+      "run_id": "laya-zeroshot-7b928d82",
+      "report": {
+        "path": "results/reports/laya-zeroshot-7b928d82.json",
+        "sha256": "771e4f930dad9ff0be0be06f2225408e0840bc2bc33993c917e770810fcaa176"
+      },
+      "kind": "laya",
+      "checkpoint": "multilingual",
+      "baseline_split": null,
+      "temperature": 1.0,
+      "theta": {
+        "global": 0.32,
+        "n_per_tag": 13
+      },
+      "micro_f1": 0.2054136099165191,
+      "macro_f1": 0.21571227455879274,
+      "exact_match": 0.007263922518159807,
+      "top1_hit": 0.2135678391959799,
+      "n": 413,
+      "n_top1": 398
+    }
+  ],
+  "seed_averaged": {
+    "headline": {
+      "n": 413,
+      "B": 10000,
+      "seed": 0,
+      "level": 0.95,
+      "method": "percentile (numpy linear interpolation)",
+      "coverage": 80,
+      "metrics": {
+        "micro_f1": {
+          "a": 0.826286296484972,
+          "b": 0.8435155412647374,
+          "delta": -0.017229244779765396,
+          "ci": [
+            -0.03632460896158073,
+            0.002189325947181751
+          ],
+          "width": 0.03851393490876248,
+          "n_undefined": 0
+        },
+        "macro_f1": {
+          "a": 0.8153592499536463,
+          "b": 0.7767316825634238,
+          "delta": 0.03862756739022244,
+          "ci": [
+            0.005900332638466708,
+            0.06787046890956928
+          ],
+          "width": 0.06197013627110258,
+          "n_undefined": 0
+        },
+        "exact_match": {
+          "a": 0.4600484261501211,
+          "b": 0.5617433414043583,
+          "delta": -0.10169491525423724,
+          "ci": [
+            -0.15738498789346245,
+            -0.04600484261501214
+          ],
+          "width": 0.1113801452784503,
+          "n_undefined": 0
+        },
+        "top1_hit": {
+          "a": 0.9221105527638191,
+          "b": 0.9396984924623115,
+          "delta": -0.017587939698492372,
+          "ci": [
+            -0.04738154613466328,
+            0.012345679012345734
+          ],
+          "width": 0.05972722514700901,
+          "n_undefined": 0
+        },
+        "brier": {
+          "a": 0.015935326903421324,
+          "b": 0.012491123049899437,
+          "delta": 0.0034442038535218867,
+          "ci": [
+            0.0020814519705929942,
+            0.004793708657986391
+          ],
+          "width": 0.0027122566873933967,
+          "n_undefined": 0
+        },
+        "classwise_ece": {
+          "a": 0.03249591714332653,
+          "b": 0.015900518987496587,
+          "delta": 0.016595398155829943,
+          "ci": [
+            0.013064288776114274,
+            0.016835742413220896
+          ],
+          "width": 0.003771453637106622,
+          "n_undefined": 0
+        },
+        "precision_at_80": {
+          "a": 0.8041362530413625,
+          "b": 0.8946488294314381,
+          "delta": -0.0905125763900756,
+          "ci": [
+            -0.11956249389809008,
+            -0.060764833441329595
+          ],
+          "width": 0.058797660456760485,
+          "n_undefined": 0
+        }
+      },
+      "a": "laya",
+      "b": "berturk",
+      "temperature": {
+        "laya": 4.7698254528950175,
+        "berturk": 0.7430447674665697
+      },
+      "theta": {
+        "laya": "theta.shipped",
+        "berturk": "theta.shipped"
+      }
+    },
+    "raw": {
+      "n": 413,
+      "B": 10000,
+      "seed": 0,
+      "level": 0.95,
+      "method": "percentile (numpy linear interpolation)",
+      "coverage": 80,
+      "metrics": {
+        "micro_f1": {
+          "a": 0.7640052933392149,
+          "b": 0.8497297297297297,
+          "delta": -0.08572443639051486,
+          "ci": [
+            -0.10678605401886325,
+            -0.06449698781757301
+          ],
+          "width": 0.042289066201290235,
+          "n_undefined": 0
+        },
+        "macro_f1": {
+          "a": 0.7529223755404293,
+          "b": 0.780438081260424,
+          "delta": -0.027515705719994732,
+          "ci": [
+            -0.06303428566713738,
+            0.005846893926585594
+          ],
+          "width": 0.06888117959372297,
+          "n_undefined": 0
+        },
+        "exact_match": {
+          "a": 0.3341404358353511,
+          "b": 0.576271186440678,
+          "delta": -0.2421307506053269,
+          "ci": [
+            -0.2978208232445521,
+            -0.1840193704600484
+          ],
+          "width": 0.11380145278450371,
+          "n_undefined": 0
+        },
+        "top1_hit": {
+          "a": 0.9246231155778895,
+          "b": 0.9371859296482412,
+          "delta": -0.012562814070351758,
+          "ci": [
+            -0.04040404040404044,
+            0.015152474108170283
+          ],
+          "width": 0.055556514512210727,
+          "n_undefined": 0
+        },
+        "brier": {
+          "a": 0.01613640150478847,
+          "b": 0.012801315527803057,
+          "delta": 0.0033350859769854125,
+          "ci": [
+            0.0019624761231792753,
+            0.00468981897323234
+          ],
+          "width": 0.002727342850053065,
+          "n_undefined": 0
+        },
+        "classwise_ece": {
+          "a": 0.019362237440958024,
+          "b": 0.025419551419764843,
+          "delta": -0.0060573139788068185,
+          "ci": [
+            -0.010046501908095107,
+            -0.005855231246997672
+          ],
+          "width": 0.004191270661097435,
+          "n_undefined": 0
+        },
+        "precision_at_80": {
+          "a": 0.7170010559662091,
+          "b": 0.9044368600682594,
+          "delta": -0.1874358041020503,
+          "ci": [
+            -0.21799257541486067,
+            -0.15409855130249878
+          ],
+          "width": 0.06389402411236189,
+          "n_undefined": 0
+        }
+      },
+      "a": "laya",
+      "b": "berturk",
+      "temperature": {
+        "laya": 1.0,
+        "berturk": 1.0
+      },
+      "theta": {
+        "laya": "theta.raw",
+        "berturk": "theta.raw"
+      }
+    }
+  },
+  "collapse": {
+    "rule": "a run is collapsed when any component applied to it is collapsed; (b) needs no collapsed run",
+    "prior_val_fraction": "10/41",
+    "prior_test_fraction": "520/2163",
+    "prior_theta_global": 0.12,
+    "rows": [
+      {
+        "run": "selection",
+        "kind": "laya",
+        "seed": 0,
+        "train_run_id": "laya-selection_train-neg8-s0-d92447f4",
+        "dump_run_id": "laya-047381259d3b-cf0f7846-cc216d59",
+        "components": [
+          {
+            "component": "val_floor",
+            "value": "852/1051",
+            "floor": "10/41",
+            "collapsed": false
+          },
+          {
+            "component": "loss",
+            "epochs": 3,
+            "first": 0.8047582538163808,
+            "last": 0.3091834745924135,
+            "non_finite": false,
+            "collapsed": false
+          }
+        ],
+        "collapsed": false
+      },
+      {
+        "run": "selection",
+        "kind": "berturk",
+        "seed": 0,
+        "train_run_id": "berturk-selection_train-s0-4f36ae05",
+        "dump_run_id": "berturk-f24d8fe3c899-50e28523-29446b61",
+        "components": [
+          {
+            "component": "val_floor",
+            "value": "389/478",
+            "floor": "10/41",
+            "collapsed": false
+          },
+          {
+            "component": "loss",
+            "epochs": 29,
+            "first": 0.6921401205270187,
+            "last": 0.048653572068914124,
+            "non_finite": false,
+            "collapsed": false
+          }
+        ],
+        "collapsed": false
+      },
+      {
+        "run": "final",
+        "kind": "laya",
+        "seed": 0,
+        "train_run_id": "laya-final_train-neg8-s0-95cf6955",
+        "dump_run_id": "laya-a6a866dd69fc-88cfaa80-cc216d59",
+        "components": [
+          {
+            "component": "loss",
+            "epochs": 3,
+            "first": 0.8191126931436052,
+            "last": 0.2825661309922222,
+            "non_finite": false,
+            "collapsed": false
+          },
+          {
+            "component": "test_floor",
+            "value": "1664/2111",
+            "floor": "520/2163",
+            "collapsed": false
+          }
+        ],
+        "collapsed": false
+      },
+      {
+        "run": "final",
+        "kind": "laya",
+        "seed": 1,
+        "train_run_id": "laya-final_train-neg8-s1-07a1ee59",
+        "dump_run_id": "laya-f43484c8aab4-b43eaa54-cc216d59",
+        "components": [
+          {
+            "component": "loss",
+            "epochs": 3,
+            "first": 0.8122251204161328,
+            "last": 0.2935788590662834,
+            "non_finite": false,
+            "collapsed": false
+          },
+          {
+            "component": "test_floor",
+            "value": "835/1058",
+            "floor": "520/2163",
+            "collapsed": false
+          }
+        ],
+        "collapsed": false
+      },
+      {
+        "run": "final",
+        "kind": "laya",
+        "seed": 2,
+        "train_run_id": "laya-final_train-neg8-s2-bbb5230e",
+        "dump_run_id": "laya-6f66dfd4c331-23b93830-cc216d59",
+        "components": [
+          {
+            "component": "loss",
+            "epochs": 3,
+            "first": 0.7892107195401614,
+            "last": 0.25906132486359196,
+            "non_finite": false,
+            "collapsed": false
+          },
+          {
+            "component": "test_floor",
+            "value": "1668/2023",
+            "floor": "520/2163",
+            "collapsed": false
+          }
+        ],
+        "collapsed": false
+      },
+      {
+        "run": "final",
+        "kind": "berturk",
+        "seed": 0,
+        "train_run_id": "berturk-final_train-s0-8a167355",
+        "dump_run_id": "berturk-c500b06ccf34-f37197ee-29446b61",
+        "components": [
+          {
+            "component": "loss",
+            "epochs": 29,
+            "first": 0.6813403826493484,
+            "last": 0.04161535024356384,
+            "non_finite": false,
+            "collapsed": false
+          },
+          {
+            "component": "test_floor",
+            "value": "389/471",
+            "floor": "520/2163",
+            "collapsed": false
+          }
+        ],
+        "collapsed": false
+      },
+      {
+        "run": "final",
+        "kind": "berturk",
+        "seed": 1,
+        "train_run_id": "berturk-final_train-s1-3c44e7ff",
+        "dump_run_id": "berturk-1f0bb00cd6f7-a14835e4-29446b61",
+        "components": [
+          {
+            "component": "loss",
+            "epochs": 29,
+            "first": 0.671942759018678,
+            "last": 0.03912622682177103,
+            "non_finite": false,
+            "collapsed": false
+          },
+          {
+            "component": "test_floor",
+            "value": "1564/1897",
+            "floor": "520/2163",
+            "collapsed": false
+          }
+        ],
+        "collapsed": false
+      },
+      {
+        "run": "final",
+        "kind": "berturk",
+        "seed": 2,
+        "train_run_id": "berturk-final_train-s2-44f81396",
+        "dump_run_id": "berturk-06685feeb69f-faf017a7-29446b61",
+        "components": [
+          {
+            "component": "loss",
+            "epochs": 29,
+            "first": 0.6396955137069409,
+            "last": 0.0400598611539373,
+            "non_finite": false,
+            "collapsed": false
+          },
+          {
+            "component": "test_floor",
+            "value": "1582/1867",
+            "floor": "520/2163",
+            "collapsed": false
+          }
+        ],
+        "collapsed": false
+      }
+    ]
+  },
+  "latency": [
+    {
+      "system": "laya",
+      "device": "mps",
+      "n": 624,
+      "p50": 0.33186579099856317,
+      "p95": 0.406301250011893
+    },
+    {
+      "system": "laya",
+      "device": "cpu",
+      "n": 624,
+      "p50": 0.682341291976627,
+      "p95": 0.8144747080223169
+    },
+    {
+      "system": "berturk",
+      "device": "mps",
+      "n": 624,
+      "p50": 0.009441624977625906,
+      "p95": 0.011726791999535635
+    },
+    {
+      "system": "berturk",
+      "device": "cpu",
+      "n": 624,
+      "p50": 0.024542166996980086,
+      "p95": 0.026789041003212333
+    }
+  ],
+  "fewshot": {
+    "status": "PENDING",
+    "phase": 9
+  },
+  "criteria": {
+    "a": {
+      "status": "INCONCLUSIVE",
+      "micro": {
+        "delta": -0.017229244779765396,
+        "ci": [
+          -0.03632460896158073,
+          0.002189325947181751
+        ]
+      },
+      "macro": {
+        "delta": 0.03862756739022244,
+        "ci": [
+          0.005900332638466708,
+          0.06787046890956928
+        ]
+      },
+      "macro_ci_label": "not resolvable at this test size (n = 413)",
+      "rule": "PASS when the micro-F1 delta 95% CI lower bound >= micro_ci_lower_min and the macro-F1 delta point estimate >= macro_point_min; FAIL when the micro-F1 delta CI upper bound < micro_fail_ci_upper_below or the macro-F1 delta point estimate < macro_point_min; INCONCLUSIVE otherwise. The macro-F1 CI is reported with macro_ci_label, not gated; deltas are Laya - BERTurk fractions in [0, 1] (points = fraction x 100), compared unrounded",
+      "name": "non-inferiority"
+    },
+    "b": {
+      "status": "PASS",
+      "rows": [
+        {
+          "run": "selection",
+          "kind": "laya",
+          "seed": 0,
+          "train_run_id": "laya-selection_train-neg8-s0-d92447f4",
+          "dump_run_id": "laya-047381259d3b-cf0f7846-cc216d59",
+          "components": [
+            {
+              "component": "val_floor",
+              "value": "852/1051",
+              "floor": "10/41",
+              "collapsed": false
+            },
+            {
+              "component": "loss",
+              "epochs": 3,
+              "first": 0.8047582538163808,
+              "last": 0.3091834745924135,
+              "non_finite": false,
+              "collapsed": false
+            }
+          ],
+          "collapsed": false
+        },
+        {
+          "run": "selection",
+          "kind": "berturk",
+          "seed": 0,
+          "train_run_id": "berturk-selection_train-s0-4f36ae05",
+          "dump_run_id": "berturk-f24d8fe3c899-50e28523-29446b61",
+          "components": [
+            {
+              "component": "val_floor",
+              "value": "389/478",
+              "floor": "10/41",
+              "collapsed": false
+            },
+            {
+              "component": "loss",
+              "epochs": 29,
+              "first": 0.6921401205270187,
+              "last": 0.048653572068914124,
+              "non_finite": false,
+              "collapsed": false
+            }
+          ],
+          "collapsed": false
+        },
+        {
+          "run": "final",
+          "kind": "laya",
+          "seed": 0,
+          "train_run_id": "laya-final_train-neg8-s0-95cf6955",
+          "dump_run_id": "laya-a6a866dd69fc-88cfaa80-cc216d59",
+          "components": [
+            {
+              "component": "loss",
+              "epochs": 3,
+              "first": 0.8191126931436052,
+              "last": 0.2825661309922222,
+              "non_finite": false,
+              "collapsed": false
+            },
+            {
+              "component": "test_floor",
+              "value": "1664/2111",
+              "floor": "520/2163",
+              "collapsed": false
+            }
+          ],
+          "collapsed": false
+        },
+        {
+          "run": "final",
+          "kind": "laya",
+          "seed": 1,
+          "train_run_id": "laya-final_train-neg8-s1-07a1ee59",
+          "dump_run_id": "laya-f43484c8aab4-b43eaa54-cc216d59",
+          "components": [
+            {
+              "component": "loss",
+              "epochs": 3,
+              "first": 0.8122251204161328,
+              "last": 0.2935788590662834,
+              "non_finite": false,
+              "collapsed": false
+            },
+            {
+              "component": "test_floor",
+              "value": "835/1058",
+              "floor": "520/2163",
+              "collapsed": false
+            }
+          ],
+          "collapsed": false
+        },
+        {
+          "run": "final",
+          "kind": "laya",
+          "seed": 2,
+          "train_run_id": "laya-final_train-neg8-s2-bbb5230e",
+          "dump_run_id": "laya-6f66dfd4c331-23b93830-cc216d59",
+          "components": [
+            {
+              "component": "loss",
+              "epochs": 3,
+              "first": 0.7892107195401614,
+              "last": 0.25906132486359196,
+              "non_finite": false,
+              "collapsed": false
+            },
+            {
+              "component": "test_floor",
+              "value": "1668/2023",
+              "floor": "520/2163",
+              "collapsed": false
+            }
+          ],
+          "collapsed": false
+        },
+        {
+          "run": "final",
+          "kind": "berturk",
+          "seed": 0,
+          "train_run_id": "berturk-final_train-s0-8a167355",
+          "dump_run_id": "berturk-c500b06ccf34-f37197ee-29446b61",
+          "components": [
+            {
+              "component": "loss",
+              "epochs": 29,
+              "first": 0.6813403826493484,
+              "last": 0.04161535024356384,
+              "non_finite": false,
+              "collapsed": false
+            },
+            {
+              "component": "test_floor",
+              "value": "389/471",
+              "floor": "520/2163",
+              "collapsed": false
+            }
+          ],
+          "collapsed": false
+        },
+        {
+          "run": "final",
+          "kind": "berturk",
+          "seed": 1,
+          "train_run_id": "berturk-final_train-s1-3c44e7ff",
+          "dump_run_id": "berturk-1f0bb00cd6f7-a14835e4-29446b61",
+          "components": [
+            {
+              "component": "loss",
+              "epochs": 29,
+              "first": 0.671942759018678,
+              "last": 0.03912622682177103,
+              "non_finite": false,
+              "collapsed": false
+            },
+            {
+              "component": "test_floor",
+              "value": "1564/1897",
+              "floor": "520/2163",
+              "collapsed": false
+            }
+          ],
+          "collapsed": false
+        },
+        {
+          "run": "final",
+          "kind": "berturk",
+          "seed": 2,
+          "train_run_id": "berturk-final_train-s2-44f81396",
+          "dump_run_id": "berturk-06685feeb69f-faf017a7-29446b61",
+          "components": [
+            {
+              "component": "loss",
+              "epochs": 29,
+              "first": 0.6396955137069409,
+              "last": 0.0400598611539373,
+              "non_finite": false,
+              "collapsed": false
+            },
+            {
+              "component": "test_floor",
+              "value": "1582/1867",
+              "floor": "520/2163",
+              "collapsed": false
+            }
+          ],
+          "collapsed": false
+        }
+      ],
+      "seeds": {
+        "laya": [
+          0,
+          1,
+          2
+        ],
+        "berturk": [
+          0,
+          1,
+          2
+        ]
+      },
+      "seed_check": {
+        "laya": true,
+        "berturk": true
+      },
+      "rule": "PASS when no run the collapse rule applies to is collapsed and every model has exactly seeds_per_model distinct scored final seeds; FAIL otherwise",
+      "name": "seeds and no collapsed run"
+    },
+    "c": {
+      "status": "REPORTED (not gated)",
+      "label": "reported, not gated",
+      "rows": [
+        {
+          "system": "laya",
+          "device": "mps",
+          "n": 624,
+          "p50": 0.33186579099856317,
+          "p95": 0.406301250011893
+        },
+        {
+          "system": "laya",
+          "device": "cpu",
+          "n": 624,
+          "p50": 0.682341291976627,
+          "p95": 0.8144747080223169
+        },
+        {
+          "system": "berturk",
+          "device": "mps",
+          "n": 624,
+          "p50": 0.009441624977625906,
+          "p95": 0.011726791999535635
+        },
+        {
+          "system": "berturk",
+          "device": "cpu",
+          "n": 624,
+          "p50": 0.024542166996980086,
+          "p95": 0.026789041003212333
+        }
+      ],
+      "rule": "per-message latency of every final seed is reported, not gated, in v1 (a budget is DEC-01, v2)",
+      "name": "latency"
+    },
+    "d": {
+      "status": "PENDING",
+      "paths": [
+        {
+          "path": "calibration",
+          "metric": "brier",
+          "status": "NOT MET",
+          "delta": 0.0034442038535218867,
+          "ci": [
+            0.0020814519705929942,
+            0.004793708657986391
+          ]
+        },
+        {
+          "path": "abstention",
+          "metric": "precision_at_80",
+          "status": "NOT MET",
+          "delta": -0.0905125763900756,
+          "ci": [
+            -0.11956249389809008,
+            -0.060764833441329595
+          ]
+        },
+        {
+          "path": "fewshot",
+          "metric": "new_tag_macro_ap",
+          "status": "PENDING",
+          "mean_delta": null,
+          "draws": null
+        }
+      ],
+      "reported_only": {
+        "classwise_ece": "reported, not gated (A1): its percentile bootstrap is biased (binned ECE replicates are inflated, so the observed delta sat at the 93.8th percentile of its own replicates on val; Roelofs et al., AISTATS 2022) and its direction flips between T = 1 and the fitted T; Brier names the calibration path"
+      },
+      "rule": "PASS when any one path is MET; PENDING when none is MET and the few-shot path is pending; FAIL otherwise. calibration: the Brier delta < delta_below and its CI upper bound < ci_upper_below; abstention: the precision at coverage % delta >= delta_at_least and its CI lower bound > ci_lower_above; fewshot: the mean over draws of the new-tag macro-AP delta at k >= mean_delta_at_least (PENDING until Phase 9); deltas are Laya - BERTurk fractions in [0, 1] (points = fraction x 100), compared unrounded",
+      "name": "a clear edge on calibration, abstention or few-shot learning"
+    },
+    "alternative_go": {
+      "status": "NOT MET",
+      "micro": {
+        "delta": -0.017229244779765396,
+        "ci": [
+          -0.03632460896158073,
+          0.002189325947181751
+        ]
+      },
+      "requires": "b PASS",
+      "rule": "MET when the micro-F1 delta > delta_above and its 95% CI lower bound > ci_lower_above; it gives GO only with (b) PASS; deltas are Laya - BERTurk fractions in [0, 1] (points = fraction x 100), compared unrounded",
+      "name": "alternative GO"
+    }
+  },
+  "verdict": {
+    "verdict": "INCONCLUSIVE",
+    "provisional": false,
+    "if_fewshot_met": "INCONCLUSIVE",
+    "if_fewshot_not_met": "INCONCLUSIVE",
+    "rule": 4,
+    "means": "counts as NO-GO; collect bank data",
+    "statuses": {
+      "a": "INCONCLUSIVE",
+      "b": "PASS",
+      "d": "PENDING",
+      "alternative_go": "NOT MET"
+    }
+  }
+}

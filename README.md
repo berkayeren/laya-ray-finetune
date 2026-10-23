@@ -824,7 +824,7 @@ Laya's own fp16 autocast default on MPS (laya_default_amp) is not what is timed:
 
 ## Frozen protocol and head-to-head verdict (Phase 8)
 
-`protocol.json` at the repo root holds the decision rule, with a numeric threshold behind every criterion, and the full few-shot protocol. It was written once, and its hash pinned in `pilot/protocol.py`, by one commit made before any fine-tuned model was scored on test or HOTELS; `score.py`, `fewshot.py` and `report.py --verdict` refuse a missing or changed protocol, and a test fails if the file is ever modified. The head-to-head results and the GO block follow once the six final seeds are scored, each once. The block below is generated from the frozen file by `python -m pilot.protocol --render` (a test fails if it differs).
+`protocol.json` at the repo root holds the decision rule, with a numeric threshold behind every criterion, and the full few-shot protocol. It was written once, and its hash pinned in `pilot/protocol.py`, by one commit made before any fine-tuned model was scored on test or HOTELS; `score.py`, `fewshot.py` and `report.py --verdict` refuse a missing or changed protocol, and a test fails if the file is ever modified. The six final seeds were each scored once on test and HOTELS (`make final-scoring`); `make final-reports` rebuilds everything under `results/final/` from those committed dumps without a model. The block below is generated from the frozen file by `python -m pilot.protocol --render` (a test fails if it differs).
 
 <!-- protocol:start -->
 ### Frozen decision protocol (protocol.json)
@@ -1220,6 +1220,34 @@ Delegation:
   - decision: one encoder LR 2e-05 for both models, fixed, not tuned (head LR 1e-4)
 - bank_name: the bank-name check is deferred to the end-of-milestone review
 <!-- protocol:end -->
+
+The GO block below is computed mechanically from the frozen thresholds and the committed final-seed test dumps; regenerate it with `python report.py --go-block results/final/verdict.json` (a test fails if it differs).
+
+<!-- go-block:start -->
+### GO block (mechanical)
+
+- Protocol: protocol.json sha256 `0d337d2019f9`.
+- Split test: n = 413 (15 no-intent).
+- Deltas: laya - berturk, seed-averaged, headline (T: laya 4.7698; berturk 0.7430; θ: laya theta.shipped; berturk theta.shipped); B = 10000, seed 0, 95% interval, percentile (numpy linear interpolation).
+- Units: deltas are Laya - BERTurk fractions in [0, 1] (points = fraction x 100), compared unrounded.
+
+| criterion | status | numbers |
+|---|---|---|
+| (a) non-inferiority | INCONCLUSIVE | micro-F1 delta -1.72 points, CI [-3.63, +0.22]; macro-F1 delta +3.86 points, CI [+0.59, +6.79] (not resolvable at this test size (n = 413)) |
+| (b) seeds and no collapsed run | PASS | 8 runs, 0 collapsed; seeds laya 0, 1, 2; berturk 0, 1, 2 |
+| (c) latency | REPORTED (not gated) | reported, not gated; laya mps p50 0.332 s, p95 0.406 s (n = 624); laya cpu p50 0.682 s, p95 0.814 s (n = 624); berturk mps p50 0.009 s, p95 0.012 s (n = 624); berturk cpu p50 0.025 s, p95 0.027 s (n = 624) |
+| (d) a clear edge on calibration, abstention or few-shot learning | PENDING | calibration (brier): NOT MET, delta +0.34 points, CI [+0.21, +0.48]; abstention (precision_at_80): NOT MET, delta -9.05 points, CI [-11.96, -6.08]; fewshot (new_tag_macro_ap): PENDING (Phase 9) |
+| alternative GO | NOT MET | micro-F1 delta -1.72 points, CI [-3.63, +0.22] |
+
+Statuses: (a) INCONCLUSIVE; (b) PASS; (c) REPORTED (not gated); (d) PENDING; alternative GO NOT MET.
+
+**Verdict: INCONCLUSIVE**
+
+- Rule 4: (a) INCONCLUSIVE -> INCONCLUSIVE (counts as NO-GO; collect bank data)
+- INCONCLUSIVE counts as NO-GO; collect bank data.
+
+Descriptive, not gating: classwise_ece delta +1.66 points, CI [+1.31, +1.68]; exact_match delta -10.17 points, CI [-15.74, -4.60]; top1_hit delta -1.76 points, CI [-4.74, +1.23]; raw (T: laya 1.0000; berturk 1.0000; θ: laya theta.raw; berturk theta.raw) micro_f1 delta -8.57 points, CI [-10.68, -6.45].
+<!-- go-block:end -->
 
 ## Results (Phase 3: baselines and zero-shot, full test split)
 
