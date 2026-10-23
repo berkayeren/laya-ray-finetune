@@ -693,3 +693,164 @@ def test_mean_std_is_the_sample_std_and_exact_for_equal_values():
     for bad in ([0.5], [], [0.5, None], [0.5, float("nan")]):
         with pytest.raises(SystemExit):
             verdict.mean_std(bad)
+
+
+# --- the renders (REP-02 table, REP-03 GO block) and the CLI modes ---------------------------------------------------
+
+def _cell(values):
+    mean, std = verdict.mean_std(values)
+    return "%.3f ± %.3f (%s)" % (mean, std, " / ".join("%.3f" % x for x in values))
+
+
+def _table_rows(text):
+    return [line for line in text.split("\n") if line.startswith("| ") and not line.startswith("| system")]
+
+
+def test_render_final_table_rows_in_the_fixed_order(synthetic_verdict):
+    """REP-02: references (majority, prior, zero-shot Laya), then each fine-tuned model as mean ± sample std with its
+    per-seed values in seed order, then its seed-averaged EVAL-07 system; the order does not follow the record's list
+    order; a settings table with T, θ, epoch, LRs, seeds and train run ids."""
+    v = synthetic_verdict
+    text = verdict.render_final_table(v)
+    assert text.startswith("### Results on test (Phase 8)\n")
+    rows = _table_rows(text.split("Settings")[0])
+    labels = [r.split(" | ")[0][2:] for r in rows]
+    assert labels == ["majority (train: final_train)", "prior (train: final_train)",
+                      "laya fine-tuned (final seeds 0, 1, 2)", "laya fine-tuned, seed-averaged (EVAL-07 system)",
+                      "berturk fine-tuned (final seeds 0, 1, 2)", "berturk fine-tuned, seed-averaged (EVAL-07 system)"]
+    for kind, row in (("laya", rows[2]), ("berturk", rows[4])):
+        cells = row.strip("| ").split(" | ")
+        per = v["systems"][kind]["per_seed"]
+        assert cells[2:] == [_cell([r[m] for r in per]) for m in verdict.TABLE_METRICS]
+    side = {"laya": "a", "berturk": "b"}
+    for kind, row in (("laya", rows[3]), ("berturk", rows[5])):
+        cells = row.strip("| ").split(" | ")
+        h = v["seed_averaged"]["headline"]["metrics"]
+        assert cells[2:] == ["%.3f" % h[m][side[kind]] for m in verdict.TABLE_METRICS]
+    for kind in KINDS:
+        st = v["systems"][kind]["settings"]
+        assert "%.4f" % st["temperature"] in text
+        for r in v["systems"][kind]["per_seed"]:
+            assert r["train_run_id"] in text
+        assert "%d / %d" % (st["epoch"], st["epochs_schedule"]) in text
+    shuffled = dict(v, references=list(reversed(v["references"])))
+    assert verdict.render_final_table(shuffled) == text           # the fixed order, not the list order
+    assert verdict.render_final_table(v) == text                  # deterministic
+
+
+def test_render_final_table_keeps_equal_seed_values_and_a_zero_std():
+    """REP-02 adjacency edge: two equal seed values stay two values; equal values give std exactly 0.000."""
+    per = {"laya": [_hand_seed("laya", s, {"micro_f1": x}) for s, x in zip(SEEDS, (0.81, 0.81, 0.83))],
+           "berturk": [_hand_seed("berturk", s, {"micro_f1": 0.8}) for s in SEEDS]}
+    v = verdict.build_verdict(_hand_protocol(), "a" * 64, _hand_inputs(per_seed=per))
+    assert v["systems"]["berturk"]["summary"]["micro_f1"] == {"mean": 0.8, "std": 0.0, "values": [0.8, 0.8, 0.8]}
+    rows = _table_rows(verdict.render_final_table(v).split("Settings")[0])
+    laya = [r for r in rows if r.startswith("| laya fine-tuned (")][0].strip("| ").split(" | ")
+    berturk = [r for r in rows if r.startswith("| berturk fine-tuned (")][0].strip("| ").split(" | ")
+    assert laya[2] == _cell([0.81, 0.81, 0.83]) and "(0.810 / 0.810 / 0.830)" in laya[2]
+    assert berturk[2] == "0.800 ± 0.000 (0.800 / 0.800 / 0.800)"
+
+
+def test_render_final_table_refuses_a_dropped_seed_or_missing_references(synthetic_verdict):
+    """REP-02 empty edge: fewer per-seed rows than the listed seeds, no reference row, or another schema is refused."""
+    dropped = copy_module.deepcopy(synthetic_verdict)
+    dropped["systems"]["laya"]["per_seed"].pop()
+    with pytest.raises(SystemExit, match="laya"):
+        verdict.render_final_table(dropped)
+    with pytest.raises(SystemExit, match="reference"):
+        verdict.render_final_table(dict(synthetic_verdict, references=[]))
+    for render in (verdict.render_final_table, verdict.render_go):
+        with pytest.raises(SystemExit, match="verdict/1"):
+            render(dict(synthetic_verdict, schema="confidence/1"))
+
+
+def test_render_go_shows_every_criterion_and_the_verdict(synthetic_verdict):
+    """REP-03: one row per criterion and the alternative GO with its status and numbers, (c) REPORTED (not gated), the
+    macro-F1 CI label, the verdict line, the protocol sha256's first 12 hex characters, and a closing descriptive line;
+    deterministic."""
+    v = synthetic_verdict
+    text = verdict.render_go(v)
+    assert text.startswith("### GO block (mechanical)\n") and text == verdict.render_go(v)
+    rows = _table_rows(text)
+    assert [r.split(" | ")[0][2:] for r in rows] == ["(a) non-inferiority", "(b) seeds and no collapsed run",
+                                                     "(c) latency",
+                                                     "(d) a clear edge on calibration, abstention or few-shot learning",
+                                                     "alternative GO"]
+    for key, row in zip(("a", "b", "c", "d", "alternative_go"), rows):
+        assert row.split(" | ")[1] == v["criteria"][key]["status"]
+    assert "(c) REPORTED (not gated)" in text
+    assert v["criteria"]["a"]["macro_ci_label"] in text
+    micro = v["criteria"]["a"]["micro"]
+    assert "%+.2f points" % (micro["delta"] * 100) in rows[0]
+    assert "[%+.2f, %+.2f]" % (micro["ci"][0] * 100, micro["ci"][1] * 100) in rows[0]
+    assert "**Verdict: %s**" % v["verdict"]["verdict"] in text
+    assert v["protocol"]["sha256"][:12] in text and v["protocol"]["sha256"] not in text
+    last = text.rstrip("\n").split("\n")[-1]
+    assert last.startswith("Descriptive, not gating:")
+    raw = v["seed_averaged"]["raw"]["metrics"]["micro_f1"]["delta"]
+    for name in ("classwise_ece", "exact_match", "top1_hit"):
+        assert name in last
+    assert "%+.2f points" % (raw * 100) in last
+
+
+def test_render_go_inconclusive_counts_as_no_go():
+    """(a) INCONCLUSIVE, the alternative GO not met: the verdict is INCONCLUSIVE and the block says what it means."""
+    v = verdict.build_verdict(_hand_protocol(), "a" * 64, _hand_inputs(micro=(-0.005, -0.03, 0.02)))
+    assert v["criteria"]["a"]["status"] == verdict.INCONCLUSIVE and v["verdict"]["verdict"] == verdict.INCONCLUSIVE
+    text = verdict.render_go(v)
+    assert "counts as NO-GO; collect bank data" in text
+    assert "PROVISIONAL" not in text
+
+
+def test_render_go_provisional_names_both_outcomes():
+    """(a) PASS, (d) PENDING (neither Brier nor abstention met), (b) PASS: the verdict depends on the few-shot path
+    and the block shows the PROVISIONAL sentence; with the Brier path met it is a plain GO."""
+    v = verdict.build_verdict(_hand_protocol(), "a" * 64, _hand_inputs())
+    assert v["verdict"]["provisional"] is True
+    text = verdict.render_go(v)
+    assert "PROVISIONAL: GO if the few-shot path of (d) is met, else NO-GO" in text
+    assert verdict.INCONCLUSIVE_MEANS not in text
+    go = verdict.build_verdict(_hand_protocol(), "a" * 64, _hand_inputs(brier=(-0.001, -0.002, -0.0005)))
+    assert go["verdict"]["verdict"] == verdict.GO and go["verdict"]["provisional"] is False
+    text = verdict.render_go(go)
+    assert "**Verdict: GO**" in text and "PROVISIONAL" not in text
+
+
+def _frozen(monkeypatch, sf):
+    monkeypatch.setattr(pilot_protocol, "PROTOCOL_PATH", sf.path)
+    monkeypatch.setattr(pilot_protocol, "PROTOCOL_SHA256", sf.sha)
+    monkeypatch.setattr(report, "REPO_ROOT", sf.root)
+
+
+def test_cli_verdict_final_table_and_go_block(synthetic_final, synthetic_verdict, tmp_path, monkeypatch, capsys):
+    """`report.py --verdict --out X.json` writes the verdict of the frozen protocol (JSON plus a newline);
+    `--final-table X.json` and `--go-block X.json` print the renders of the saved record."""
+    sf = synthetic_final
+    _frozen(monkeypatch, sf)
+    out = tmp_path / "final" / "verdict.json"
+    got = report.main(["--verdict", "--manifest", sf.manifest, "--out", str(out)])
+    capsys.readouterr()
+    text = out.read_text(encoding="utf-8")
+    assert text == json.dumps(synthetic_verdict, ensure_ascii=False, indent=2) + "\n"
+    assert got == synthetic_verdict
+    assert report.main(["--final-table", str(out)]) == verdict.render_final_table(synthetic_verdict)
+    assert capsys.readouterr().out == verdict.render_final_table(synthetic_verdict)
+    assert report.main(["--go-block", str(out)]) == verdict.render_go(synthetic_verdict)
+    assert capsys.readouterr().out == verdict.render_go(synthetic_verdict)
+
+
+def test_cli_verdict_modes_are_exclusive(synthetic_final, tmp_path, capsys):
+    path = str(tmp_path / "v.json")
+    for argv in (["--verdict", "--final-table", path], ["--final-table", path, "--go-block", path],
+                 ["--go-block", path, "--table", path], ["--verdict", "--confidence-table", path]):
+        with pytest.raises(SystemExit) as e:
+            report.main(argv)
+        assert e.value.code == 2 and "give exactly one of" in capsys.readouterr().err
+
+
+def test_cli_verdict_refuses_while_the_protocol_is_not_frozen(monkeypatch):
+    """With the pin unset (the repo before the freeze commit), --verdict is refused naming the protocol, before any
+    dump is read."""
+    monkeypatch.setattr(pilot_protocol, "PROTOCOL_SHA256", None)
+    with pytest.raises(SystemExit, match="protocol"):
+        report.main(["--verdict"])
