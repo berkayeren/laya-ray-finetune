@@ -26,6 +26,12 @@ Laya scoring rate is the committed CPU zero-shot dump's wall clock per message (
 "measured" otherwise. Every MATRIX value is provisional whatever the basis; assumptions() lists each one, with its
 source, for the user to confirm or trim at plan 04-08.
 
+Phase 9 (09-04, D-08): fewshot_projection(measured, counts, block, n_scored) projects the frozen few-shot protocol
+(protocol.json's fewshot block, fewshot.py --counts) on the committed compute record's measured rates through the same
+part builders, basis measured (the protocol is frozen), calib_s None (LAYA-05); fewshot_decision applies the frozen
+compute_fallback trigger exactly (fallback when the projection exceeds pilot.fewshot.FALLBACK_HOURS, or on a recorded
+LAYA-03 ladder failure) and carries the frozen disclosure on a fallback; fewshot.py --projection writes the record.
+
 usage: from pilot import compute; start = compute.spike_start("results/spike/mps_spike.json")
        measured = compute.measured_from_checkpoint(ckpt_dir); counts = compute.split_counts(manifest)
        projection = compute.project(measured, counts, compute.MATRIX)
@@ -39,7 +45,7 @@ import json
 import math
 import os
 
-from pilot import runs, spike
+from pilot import fewshot, runs, spike
 from pilot.data import REPO_ROOT, SPLITS, parse_jsonl, repo_relpath, verify_split_file, write_atomic
 
 SCHEMA = "compute_checkpoint/1"
@@ -467,6 +473,167 @@ def project(measured, counts, matrix):
                      "" if s_over is None else "; Laya%s" % plus_over(m["eval_seeds"] * len(SCORED)))))
     total = sum(l["seconds"] for l in lines)
     return {"lines": lines, "total_s": total, "total_h": total / 3600}
+
+
+# ---- Phase 9 (09-04, D-08): the few-shot projection on the frozen protocol and the compute-fallback decision ----
+
+def _fewshot_rates(measured, rules):
+    """(Laya terms, BERTurk rates) of the few-shot projection: the measured Laya terms with calib_s None (LAYA-05:
+    Phase 9 runs never calibrate on training messages); SystemExit when the measured micro-batch and grad-accum (or
+    the BERTurk probe's batch) are not the frozen recipe's, since s/step was measured at those."""
+    laya = dict(measured["laya"], calib_s=None)
+    want = rules["base_runs"]["laya"]
+    for key in ("micro_batch", "grad_accum"):
+        if laya[key] != want[key]:
+            raise SystemExit("the committed compute record measured Laya at %s %r, the frozen protocol trains at %r; "
+                             "the projection needs a rate measured at the frozen recipe" % (key, laya[key], want[key]))
+    b = measured.get("berturk") or {}
+    if b.get("status") == "ok" and b.get("batch") not in (None, rules["base_runs"]["berturk"]["batch"]):
+        raise SystemExit("the committed compute record timed BERTurk at batch %r, the frozen protocol trains at %r"
+                         % (b.get("batch"), rules["base_runs"]["berturk"]["batch"]))
+    return laya, berturk_rates(measured)
+
+
+def _check_steps(what, have, want):
+    if have != want:
+        raise SystemExit("%s: %d optimizer steps per epoch here, %d in the frozen counts; the counts and the "
+                         "projection must use one step rule" % (what, have, want))
+
+
+def _fewshot_lines(measured, counts, block, n_scored, n_bases):
+    rules = block["rules"]
+    laya, bert = _fewshot_rates(measured, rules)
+    b_step, b_msg, b_basis, b_source = bert
+    s_msg, s_basis, s_source = laya_scoring_rate(measured)
+    s_over = laya_scoring_overhead(measured)
+    lb, bb = rules["base_runs"]["laya"], rules["base_runs"]["berturk"]
+    e_laya, e_bert, e_cont, batch = lb["stop_after_epoch"], bb["stop_after_epoch"], \
+        rules["continued_training"]["epochs"], bb["batch"]
+    base, cont = counts["base"], counts["continued"]
+    n_val, n_test = n_scored["val"], n_scored["test"]
+    l_src = _laya_source(laya)
+    over = laya.get("run_overhead_s")
+    run_terms = "%.1f s load + %.1f s final save%s" % (laya["load_s"], laya["final_save_s"],
+                                                       "" if over is None else " + %.1f s run overhead" % over)
+
+    lp = _laya_part(n_bases, e_laya, base["laya_items"], laya)
+    _check_steps("Laya masked base", lp["units_per_epoch"], base["laya_steps_per_epoch"])
+    bp = _berturk_part(n_bases, e_bert, base["messages"], batch, b_step, b_basis)
+    _check_steps("BERTurk masked base", bp["units_per_epoch"], base["berturk_steps_per_epoch"])
+    lc, bc = [], []
+    for c in cont:
+        part = _laya_part(1, e_cont, c["laya_items"], laya, draw=c["draw"], k=c["k"])
+        _check_steps("Laya continued draw %d k %d" % (c["draw"], c["k"]), part["units_per_epoch"],
+                     c["laya_steps_per_epoch"])
+        lc.append(part)
+        part = _berturk_part(1, e_cont, c["berturk_messages"], batch, b_step, b_basis, draw=c["draw"], k=c["k"])
+        _check_steps("BERTurk continued draw %d k %d" % (c["draw"], c["k"]), part["units_per_epoch"],
+                     c["berturk_steps_per_epoch"])
+        bc.append(part)
+    n_test_models = n_bases + len(cont)
+    sc = [dict(_scoring_part("laya", n_bases, n_val, s_msg, s_basis, n_bases, s_over), split="val"),
+          dict(_scoring_part("laya", n_test_models, n_test, s_msg, s_basis, n_test_models, s_over), split="test"),
+          dict(_scoring_part("berturk", n_bases, n_val, b_msg, b_basis), split="val"),
+          dict(_scoring_part("berturk", n_test_models, n_test, b_msg, b_basis), split="test")]
+
+    def plus_over(n_runs):
+        return "" if s_over is None else " + %d score.py runs x %.1f s run overhead" % (n_runs, s_over)
+    return [
+        _parts_line("fewshot_laya_bases", 9, "Laya label-masked base runs on selection_train", [lp], l_src,
+                    "base runs (%d) x [stop_after_epoch (%d) x (%d optimizer steps (%d masked selection_train neg%d "
+                    "items, micro-batch %d, grad-accum %d) x %.4f s + %.1f s save) + %s]"
+                    % (n_bases, e_laya, lp["units_per_epoch"], base["laya_items"], lb["neg"], laya["micro_batch"],
+                       laya["grad_accum"], laya["s_per_step"], laya["save_s_per_epoch"], run_terms)),
+        _parts_line("fewshot_berturk_bases", 9, "BERTurk label-masked base runs on selection_train", [bp], b_source,
+                    "base runs (%d) x stop_after_epoch (%d) x %d optimizer steps (ceil(%d selection_train messages / "
+                    "batch %d)) x %.4f s" % (n_bases, e_bert, bp["units_per_epoch"], base["messages"], batch,
+                                             b_step)),
+        _parts_line("fewshot_laya_continued", 9, "Laya continued runs, one per (draw, k), on support plus replay",
+                    lc, l_src,
+                    "per (draw, k): 1 run x [continued epochs (%d) x (optimizer steps (%s) x %.4f s + %.1f s save) "
+                    "+ %s]; Laya items by the frozen laya_item_rule"
+                    % (e_cont, "; ".join("draw %d k %d: %d items, %d steps" % (q["draw"], q["k"], q["items"],
+                                                                              q["units_per_epoch"]) for q in lc),
+                       laya["s_per_step"], laya["save_s_per_epoch"], run_terms)),
+        _parts_line("fewshot_berturk_continued", 9, "BERTurk continued runs, one per (draw, k), on support plus "
+                    "replay", bc, b_source,
+                    "per (draw, k): 1 run x continued epochs (%d) x optimizer steps (%s) x %.4f s"
+                    % (e_cont, "; ".join("draw %d k %d: ceil(%d messages / batch %d) = %d" % (
+                        q["draw"], q["k"], c["berturk_messages"], batch, q["units_per_epoch"])
+                        for q, c in zip(bc, cont)), b_step)),
+        _parts_line("fewshot_scoring", 9, "Scoring every masked base on val and test and every continued model on "
+                    "test (both models)", sc, "Laya: %s; BERTurk: %s" % (s_source, b_source),
+                    "per model: base runs (%d) x %d val messages + (base runs %d + continued runs %d) x %d test "
+                    "messages, x s/msg (Laya %.4f, BERTurk %.4f)%s"
+                    % (n_bases, n_val, n_bases, len(cont), n_test, s_msg, b_msg,
+                       "" if s_over is None else "; Laya%s" % plus_over(n_bases + n_test_models))),
+    ]
+
+
+def fewshot_projection(measured, counts, block, n_scored):
+    """The Phase 9 projection (D-08) on the frozen few-shot protocol: {"lines", "total_s", "total_h",
+    "fallback_total_s", "fallback_total_h", "base_runs_per_model", "fallback_base_runs_per_model", "n_scored"}.
+
+    Five lines through the Phase 4 part builders, every rate from the committed compute record `measured` (basis
+    measured: the protocol is frozen, so nothing is provisional): Laya masked bases (one per primary base seed,
+    rules.base_runs.laya.stop_after_epoch epochs on the counts' masked items), BERTurk masked bases (the same runs,
+    rules.base_runs.berturk.stop_after_epoch epochs on every selection_train message at the frozen batch), Laya and
+    BERTurk continued runs (one per (draw, k) of `counts`, rules.continued_training.epochs epochs each), and scoring
+    (every base on val and test, every continued model on test; `n_scored` = {"val": n, "test": n} from the
+    protocol's splits). The Laya terms carry calib_s None (LAYA-05). fallback_total_s is the same with the compute
+    fallback's one base per model. SystemExit when a step count differs from the frozen counts'."""
+    primary, fallback = len(fewshot.allowed_base_seeds(block, "primary")), \
+        len(fewshot.allowed_base_seeds(block, "fallback"))
+    lines = _fewshot_lines(measured, counts, block, n_scored, primary)
+    total = sum(line["seconds"] for line in lines)
+    fb_total = sum(line["seconds"] for line in _fewshot_lines(measured, counts, block, n_scored, fallback))
+    return {"lines": lines, "total_s": total, "total_h": total / 3600, "fallback_total_s": fb_total,
+            "fallback_total_h": fb_total / 3600, "base_runs_per_model": primary,
+            "fallback_base_runs_per_model": fallback, "n_scored": {"val": n_scored["val"], "test": n_scored["test"]}}
+
+
+def fewshot_decision(projection, block, ladder_failure=None):
+    """{"trigger", "decision"} of the frozen compute_fallback rule (D-08), applied exactly: the projection fires when
+    its total_s exceeds pilot.fewshot.FALLBACK_HOURS hours (strictly: exactly 10 h does not), and a recorded LAYA-03
+    ladder failure (`ladder_failure`, a non-empty text) fires the second trigger; mode fallback when either fires,
+    else primary. A fallback decision carries the frozen disclosure. trigger.ladder_failure is the boolean
+    pilot.fewshot.read_mode checks, trigger.ladder_failure_text the recorded failure (None without one)."""
+    fb = block["rules"]["compute_fallback"]
+    if ladder_failure is not None and (not isinstance(ladder_failure, str) or not ladder_failure.strip()):
+        raise SystemExit("a ladder failure needs a non-empty text naming the failed base run and its last rung")
+    threshold_s = fewshot.FALLBACK_HOURS * 3600
+    fired = projection["total_s"] > threshold_s
+    failed = ladder_failure is not None
+    mode = "fallback" if fired or failed else "primary"
+    return {"trigger": {"rule": fb["trigger"], "threshold_hours": fewshot.FALLBACK_HOURS, "threshold_s": threshold_s,
+                        "projection_s": projection["total_s"], "projection_fired": fired, "ladder_failure": failed,
+                        "ladder_failure_text": ladder_failure},
+            "decision": {"mode": mode, "rule": fb["rule"], "base_seeds": fewshot.allowed_base_seeds(block, mode),
+                         "disclosure": fb["disclosure"] if mode == "fallback" else None}}
+
+
+def fewshot_notes(measured, projection):
+    """The disclosures of the few-shot projection record: the calibration term left out (LAYA-05), the overheads the
+    committed probe did not measure, and where each rate comes from."""
+    laya, n_laya = measured["laya"], sum(line["runs"] for line in projection["lines"]
+                                         if line["id"] in ("fewshot_laya_bases", "fewshot_laya_continued"))
+    out = []
+    if laya.get("calib_s") is not None:
+        out.append("The committed Phase 4 probe calibrated on training messages (calib_s %.1f s per run); LAYA-05 "
+                   "removed training-time calibration, so the Laya lines use calib_s None; keeping that term would "
+                   "add %d Laya runs x %.1f s = %.0f s (%.2f h in total)"
+                   % (laya["calib_s"], n_laya, laya["calib_s"], n_laya * laya["calib_s"],
+                      (projection["total_s"] + n_laya * laya["calib_s"]) / 3600))
+    if laya.get("run_overhead_s") is None:
+        out.append("The committed probe predates the per-run overhead measurement (process and Ray start, the "
+                   "driver's checks, item building, the --out copy), so the Laya training lines leave it out")
+    if laya_scoring_overhead(measured) is None:
+        out.append("The committed scoring probe predates the per-score.py-run overhead measurement (process start, "
+                   "the weights' sha256 check, the load), so the scoring lines charge inference seconds only")
+    out.append("Rates: Laya s/step = the largest train_s / optimizer_steps of the committed probe (%s, micro-batch "
+               "%d, grad-accum %d); BERTurk s/step and s/message and the Laya scoring s/message from the same "
+               "record's timing probes" % (laya["device"], laya["micro_batch"], laya["grad_accum"]))
+    return out
 
 
 def what_if(measured, counts, matrix):

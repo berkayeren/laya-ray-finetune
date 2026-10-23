@@ -24,10 +24,23 @@ check_source (the frozen source and every frozen draw re-checked over those byte
 printed as JSON: the masked-base and per-(draw, k) row, item and optimizer-step counts of both trainers, computed from
 the frozen uid lists only (the D-08 projection consumes them). Counts only, never a uid list or message text.
 
+--projection --out PATH (09-04, D-08), in this order: require_frozen() first; a fresh run refuses an existing PATH
+(the decision is recorded once); the verified source and its counts as --counts; results/compute/
+compute_checkpoint.json read once (its sha256 binds the record); pilot.compute.fewshot_projection on the committed
+rates, the counts and the protocol's val and test sizes; pilot.compute.fewshot_decision applies the frozen
+compute_fallback trigger exactly (fallback when the projection exceeds pilot.fewshot.FALLBACK_HOURS); the record
+(schema fewshot-projection/1: protocol_sha256, compute, counts, projection, trigger, decision, notes; no timestamp) is
+written atomically as key-sorted JSON (indent 2, one trailing newline) and printed. With --ladder-failure TEXT it
+rewrites an existing primary record of this protocol into the fallback record naming the failure (the second frozen
+trigger, a primary base run that still fails after the LAYA-03 ladder); it refuses a missing PATH, a fallback record
+and a record of another protocol. Both trainers read the mode through pilot.fewshot.read_mode.
+
 usage:
     python fewshot.py --support-sets                     # refused until protocol.json is frozen (plan 08-10)
     python fewshot.py --support-sets --manifest OTHER_DIR/splits.json
     python fewshot.py --counts                           # rows, items and steps of every Phase 9 training run
+    python fewshot.py --projection --out results/fewshot/projection.json          # the D-08 record, written once
+    python fewshot.py --projection --ladder-failure TEXT --out results/fewshot/projection.json   # primary -> fallback
 """
 import argparse
 import json
@@ -35,10 +48,12 @@ import math
 import os
 
 import pilot.data
-from pilot import fewshot, protocol, runs, spike
-from pilot.data import parse_jsonl, verify_split_file
+from pilot import compute, fewshot, protocol, runs, spike
+from pilot.data import REPO_ROOT, parse_jsonl, repo_relpath, sha256_bytes, verify_split_file, write_atomic
 
 SOURCE_SPLIT = fewshot.SOURCE_SPLIT
+# the committed Phase 4 compute record whose measured rates the D-08 projection uses (bound by its sha256)
+COMPUTE_PATH = os.path.join(REPO_ROOT, "results", "compute", "compute_checkpoint.json")
 
 
 def read_source(block, manifest_path):
@@ -76,13 +91,19 @@ def read_source_entry(block, manifest_path):
     return entry, parse_jsonl(raw)
 
 
-def frozen_block():
-    """(fewshot block, pin) of require_frozen(), the first call of every mode: nothing is read without it."""
+def frozen_protocol():
+    """(protocol, fewshot block, pin) of require_frozen(), the first call of every mode: nothing is read without it."""
     proto, pin = protocol.require_frozen()
     block = proto["fewshot"]
     if not isinstance(block, dict):
         raise SystemExit("protocol.json's fewshot block is not an object; restore it with `git checkout -- "
                          "protocol.json`")
+    return proto, block, pin
+
+
+def frozen_block():
+    """(fewshot block, pin) of require_frozen(), the first call of every mode: nothing is read without it."""
+    _, block, pin = frozen_protocol()
     return block, pin
 
 
@@ -139,6 +160,85 @@ def counts_mode(manifest_path):
     return out
 
 
+def record_bytes(record):
+    """The decision record's bytes: key-sorted JSON, indent 2, UTF-8, one trailing newline (no timestamp, so a rebuild
+    is byte-identical)."""
+    return (json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def read_compute(path=COMPUTE_PATH):
+    """(measured block, {"path", "sha256"}) of the committed compute record, from one read of its bytes; SystemExit on
+    a missing file or another schema."""
+    if not os.path.isfile(path):
+        raise SystemExit("%s not found; the D-08 projection uses the committed Phase 4 rates (`git checkout -- "
+                         "results/compute/`)" % path)
+    with open(path, "rb") as f:
+        raw = f.read()
+    report = json.loads(raw.decode("utf-8"))
+    if report.get("schema") != compute.SCHEMA or not isinstance(report.get("measured"), dict):
+        raise SystemExit("%s: schema %r with no measured block, expected %s" % (path, report.get("schema"),
+                                                                              compute.SCHEMA))
+    return report["measured"], {"path": repo_relpath(path), "sha256": sha256_bytes(raw)}
+
+
+def scored_sizes(proto):
+    """{"val": n, "test": n} of the frozen protocol's splits (the messages every base and continued model is scored
+    on); SystemExit when the protocol does not record them."""
+    splits = proto.get("splits") or {}
+    out = {}
+    for name in ("val", "test"):
+        n = (splits.get(name) or {}).get("n_messages")
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            raise SystemExit("the frozen protocol records no %s n_messages; restore protocol.json with `git checkout "
+                             "-- protocol.json`" % name)
+        out[name] = n
+    return out
+
+
+def write_record(out, record):
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    write_atomic(out, record_bytes(record))
+
+
+def projection_mode(manifest_path, out, ladder_failure=None):
+    """--projection: the D-08 record, written once (see the module docstring); with `ladder_failure` the rewrite of an
+    existing primary record of this protocol into the fallback record."""
+    proto, block, pin = frozen_protocol()                       # first: nothing is read without the frozen protocol
+    if ladder_failure is not None:
+        if not os.path.isfile(out):
+            raise SystemExit("%s not found; a ladder failure turns the recorded primary decision into the fallback, "
+                             "so record it first with `python fewshot.py --projection --out %s`" % (out, out))
+        mode = fewshot.read_mode(pin, out)          # schema, this protocol's sha256, a mode that agrees with its trigger
+        if mode != "primary":
+            raise SystemExit("%s already records the fallback; the decision is recorded once and a ladder failure "
+                             "only turns a primary record into the fallback" % out)
+        with open(out, encoding="utf-8") as f:
+            record = json.load(f)
+        record.update(compute.fewshot_decision(record["projection"], block, ladder_failure))
+    else:
+        if os.path.lexists(out):
+            raise SystemExit("%s exists; the D-08 decision is recorded once, before any base run (a primary base run "
+                             "that still fails after the LAYA-03 ladder turns it into the fallback: pass "
+                             "--ladder-failure TEXT)" % out)
+        entry, rows = read_source_entry(block, manifest_path)
+        fewshot.check_source(block, entry, rows)
+        c = counts(block, rows)
+        c["protocol_sha256"] = pin
+        measured, ref = read_compute()
+        projection = compute.fewshot_projection(measured, c, block, scored_sizes(proto))
+        record = dict({"schema": fewshot.DECISION_SCHEMA, "protocol_sha256": pin, "compute": ref, "counts": c,
+                       "projection": projection}, **compute.fewshot_decision(projection, block))
+        record["notes"] = compute.fewshot_notes(measured, projection) + [
+            "Counts: the masked-base Laya items are pilot.runs.neg_items of selection_train with the held-out keys "
+            "deleted; each continued run's Laya items are pilot.fewshot.laya_item_count of its frozen draw (the "
+            "frozen laya_item_rule) and its BERTurk messages the support plus replay rows (fewshot.py --counts)",
+            "Scored messages: the frozen protocol's val and test splits (%d and %d messages)"
+            % (projection["n_scored"]["val"], projection["n_scored"]["test"])]
+    write_record(out, record)
+    print(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True))
+    return record
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     mode = ap.add_mutually_exclusive_group()
@@ -146,13 +246,25 @@ def main(argv=None):
                       help="re-check the frozen support-set draws against the verified source and print their digests")
     mode.add_argument("--counts", action="store_true",
                       help="print the rows, items and optimizer steps of every Phase 9 training run")
+    mode.add_argument("--projection", action="store_true",
+                      help="compute the D-08 projection and compute-fallback decision and write it to --out (once)")
+    ap.add_argument("--out", default=None, help="--projection: the decision record (results/fewshot/projection.json)")
+    ap.add_argument("--ladder-failure", default=None, metavar="TEXT",
+                    help="--projection: turn the recorded primary decision at --out into the fallback, naming the "
+                         "primary base run that still failed after the LAYA-03 ladder")
     ap.add_argument("--manifest", default=None, help="the splits manifest (default data/splits.json)")
     a = ap.parse_args(argv)
     manifest = a.manifest or pilot.data.DEFAULT_MANIFEST
+    if not a.projection and (a.out is not None or a.ladder_failure is not None):
+        ap.error("--out and --ladder-failure belong to --projection")
+    if a.projection:
+        if not a.out:
+            ap.error("--projection needs --out PATH (results/fewshot/projection.json)")
+        return projection_mode(manifest, a.out, a.ladder_failure)
     if a.counts:
         return counts_mode(manifest)
     if not a.support_sets:
-        ap.error("pass a mode: --support-sets or --counts (Phase 9 adds the training and scoring modes)")
+        ap.error("pass a mode: --support-sets, --counts or --projection (Phase 9 adds the training and scoring modes)")
     return support_sets(manifest)
 
 
