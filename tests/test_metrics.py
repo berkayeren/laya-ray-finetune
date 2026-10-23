@@ -6,7 +6,7 @@ unrounded values, INTENTS ordering and tie rules, and the overflow-free temperat
 """
 import numpy as np
 import pytest
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, average_precision_score, f1_score
 
 from intents import INTENTS
 from pilot import metrics
@@ -251,3 +251,69 @@ def test_theta_selected_after_temperature():
 def test_select_theta_refuses_empty_val():
     with pytest.raises(SystemExit, match="no val messages"):
         metrics.select_theta(np.zeros((0, 48), dtype=bool), np.zeros((0, 48)))
+
+
+# --- new-tag average precision (AP_RULE; Phase 9's primary metric, frozen in Phase 8), sklearn as the oracle ---------
+
+def test_average_precision_tied_scores_form_one_threshold():
+    y = np.array([1, 0, 1, 0], dtype=bool)
+    s = np.array([0.5, 0.5, 0.5, 0.1])
+    assert abs(metrics.average_precision(y, s) - 2 / 3) <= 1e-12   # one threshold at 0.5: P 2/3, R 1
+    assert abs(metrics.average_precision(y, s) - average_precision_score(y, s)) <= 1e-12
+
+
+def test_average_precision_matches_sklearn():
+    rng = np.random.default_rng(0)
+    for i in range(20):
+        y = rng.random(413) < rng.uniform(0.01, 0.3)
+        y[rng.integers(413)] = True                         # at least one positive
+        s = rng.random(413) + 0.8 * y
+        if i % 2:
+            s = np.round(s, 1)                              # heavy ties on every other pair
+        got = metrics.average_precision(y, s)
+        assert type(got) is float and abs(got - average_precision_score(y, s)) < 1e-12, i
+    y = np.zeros(10, dtype=bool)
+    y[[2, 7]] = True
+    assert metrics.average_precision(y, y.astype(float)) == 1.0     # a perfect ranking
+
+
+@pytest.mark.parametrize("y, s", [(np.zeros(5, dtype=bool), np.arange(5.0)),          # no positive
+                                  (np.zeros(0, dtype=bool), np.zeros(0)),             # empty
+                                  (np.ones(4, dtype=bool), np.zeros(5)),              # length mismatch
+                                  (np.ones(3, dtype=bool), np.array([0.1, np.nan, 0.2])),
+                                  (np.ones(3, dtype=bool), np.array([0.1, np.inf, 0.2])),
+                                  (np.ones((2, 2), dtype=bool), np.zeros((2, 2)))])   # not one column
+def test_average_precision_refuses(y, s):
+    with pytest.raises(SystemExit):
+        metrics.average_precision(y, s)
+
+
+def test_new_tag_ap_per_tag_and_macro():
+    rng = np.random.default_rng(1)
+    Y = rng.random((60, 48)) < 0.2
+    P = rng.random((60, 48))
+    out = metrics.new_tag_ap(Y, P, ["savings", "loan"])
+    assert out["tags"] == ["savings", "loan"] and list(out["per_tag"]) == ["savings", "loan"]
+    for t in ("savings", "loan"):
+        j = TAGS.index(t)
+        assert abs(out["per_tag"][t] - average_precision_score(Y[:, j], P[:, j])) < 1e-12
+    assert out["macro"] == (out["per_tag"]["savings"] + out["per_tag"]["loan"]) / 2
+
+
+def test_new_tag_ap_refuses():
+    rng = np.random.default_rng(2)
+    Y = rng.random((30, 48)) < 0.3
+    P = rng.random((30, 48))
+    for tags in (["savings", "savings"], ["savings", "not_a_tag"], []):
+        with pytest.raises(SystemExit):
+            metrics.new_tag_ap(Y, P, tags)
+    Y[:, TAGS.index("loan")] = False
+    with pytest.raises(SystemExit, match="no positive"):
+        metrics.new_tag_ap(Y, P, ["savings", "loan"])
+
+
+def test_ap_rule_states_the_definition():
+    rule = metrics.AP_RULE
+    for word in ("tied scores form one threshold", "not interpolated", "average_precision_score", "refused",
+                 "T-invariant"):
+        assert word in rule, word
