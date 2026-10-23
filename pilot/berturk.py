@@ -69,7 +69,15 @@ so checkpoints that differ in any file the scorer reads never share a dump dir.
 Optimizer (the BASE-03 fix): optimizer_groups splits the parameter names into four AdamW groups, the encoder at the
 encoder LR and the head at the head LR, each with the HF Trainer's own weight-decay split; it refuses unless the head
 (the HEAD_PREFIX names) is exactly the set of parameters from_pretrained newly initialised. berturk_train.py hands the
-optimizer to the Trainer, which still builds the linear schedule and its warm-up over it (both LRs scale alike).
+optimizer to the Trainer, which still builds the linear schedule and its warm-up over it (both LRs scale alike). Its
+continued mode (continued=True, Phase 9 FEW-02, D-06) is the one exception: a few-shot run continues from a masked
+base's own fine-tuned head, so the head is the HEAD_PREFIX names and nothing may be newly initialised (a base of
+another architecture or label set is refused); the same four groups otherwise (no weight imprinting, no fresh head:
+XCMP-04 is v2).
+
+Few-shot (Phase 9, FEW-01, FEW-02): fewshot is an IDENTITY key left out when None (the pilot.fewshot.binding of a
+masked base or a continued run), so every committed BERTurk run id is unchanged; the --fewshot-base, --fewshot-draw
+and --fewshot-k flags are NOT_IDENTITY (represented by fewshot and mask_tags).
 
 README block (BASE-03 disclosure, plan 06-12): load_superseded() reads every SUPERSEDED entry's history record and
 reference check, refused unless both are bound to its postfit_sha256; render_markdown(record, reference, final,
@@ -85,7 +93,8 @@ usage: from pilot import berturk; rid = berturk.run_id(berturk.canonical(values)
        berturk.check_reference_for_final(reference_path, record_sha256, record)
        berturk.final_command(record, seed, record_path, reference_path, storage, out_prefix)
        berturk.final_manifest(record_path, ckpt_dirs)
-       berturk.optimizer_groups(param_names, decay_names, new_names, encoder_lr, head_lr, weight_decay)
+       berturk.optimizer_groups(param_names, decay_names, new_names, encoder_lr, head_lr, weight_decay,
+                                continued=False)
        for s in berturk.SUPERSEDED: s["record"], s["postfit_sha256"], s["protocol"], s["delta"]
        berturk.render_markdown(record, reference, final_manifest, berturk.load_superseded())
 """
@@ -202,21 +211,23 @@ LOGIT_NOTE = "classifier logit per tag; P(tag) = sigmoid(logit / T)"
 IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_config_sha256", "base_files_sha256",
             "transformers_version", "accelerate_version", "device", "epochs", "batch", "encoder_lr", "head_lr",
             "weight_decay", "warmup_ratio", "lr_scheduler", "max_grad_norm", "optim", "loss", "max_len",
-            "max_messages", "mask_tags", "seed", "stop_after_epoch", "postfit_sha256")
+            "max_messages", "mask_tags", "seed", "stop_after_epoch", "postfit_sha256", "fewshot")
 # berturk_train.py flags that never change training, so never the run id:
 #   data, base, manifest: paths, represented in IDENTITY by the verified sha256s (data_sha256, base_*_sha256)
 #   storage: where the run dir goes; print_run_id: prints the run id and exits
 #   export_epochs: whether per-epoch exports are written (outputs, not training); cpus: torch threads (a resource)
 #   out: where the final checkpoint goes; postfit: a path, represented by postfit_sha256 (the record's bytes);
 #   reference: the BASE-03 gate, a refusal only (check_reference_for_final binds it to the record's sha256)
+#   fewshot_base, fewshot_draw, fewshot_k: the Phase 9 modes, represented by the fewshot binding (pilot.fewshot.binding:
+#   stage, draw, k, the draw digest and the base's run id) and mask_tags
 NOT_IDENTITY = ("data", "base", "storage", "manifest", "print_run_id", "export_epochs", "cpus", "out", "postfit",
-                "reference")
+                "reference", "fewshot_base", "fewshot_draw", "fewshot_k")
 # flags that enter IDENTITY through resolved keys: --lr is the encoder LR (A1); --head-lr is its own IDENTITY key
 RESOLVED = {"lr": ("encoder_lr",)}
 # left out when None: base_files_sha256 (None for the pinned base, whose files the pin fixes), max_messages (a smoke
-# subsample), mask_tags (Phase 6 trains unmasked), stop_after_epoch and postfit_sha256 (a final seed, plan 06-08), so
-# every selection run id is fixed now
-DROPPED_WHEN_NONE = ("base_files_sha256", "max_messages", "mask_tags", "stop_after_epoch", "postfit_sha256")
+# subsample), mask_tags (Phase 6 trains unmasked), stop_after_epoch and postfit_sha256 (a final seed, plan 06-08), and
+# fewshot (a Phase 9 run, 09-03), so every selection and final-seed run id is fixed now
+DROPPED_WHEN_NONE = ("base_files_sha256", "max_messages", "mask_tags", "stop_after_epoch", "postfit_sha256", "fewshot")
 
 
 def canonical(values):
@@ -239,16 +250,25 @@ def run_id(canon):
 
 # ---- the optimizer groups (the BASE-03 fix) ----
 
-def optimizer_groups(param_names, decay_names, new_names, encoder_lr, head_lr, weight_decay):
+def optimizer_groups(param_names, decay_names, new_names, encoder_lr, head_lr, weight_decay, continued=False):
     """Four AdamW param groups over the parameter names, in the fixed order encoder + decay, encoder + no decay,
     head + decay, head + no decay: {"group": "encoder" | "head", "decay": bool, "lr", "weight_decay" (weight_decay
     for a decay group, else 0.0), "params": [names in param_names order]}. The head is the names starting with
     HEAD_PREFIX, decay follows decay_names (the HF Trainer's own rule). SystemExit unless the head is non-empty and
     exactly new_names, the parameters from_pretrained newly initialised (a pretrained parameter at the head LR, or a
-    fresh one left at the encoder LR, would be another recipe). Every name lands in exactly one group."""
+    fresh one left at the encoder LR, would be another recipe). Every name lands in exactly one group.
+
+    continued=True (a Phase 9 continued run, FEW-02, D-06): the head is the loaded, fine-tuned head of a masked base,
+    so new_names must be empty (SystemExit naming them otherwise: a base that newly initialised anything is of another
+    architecture or label set, and its head would not be the base's); the same four groups."""
     names, decay, new = list(param_names), set(decay_names), set(new_names)
     head = {n for n in names if n.startswith(HEAD_PREFIX)}
-    if not head or head != new:
+    if continued:
+        if not head or new:
+            raise SystemExit("a continued few-shot run trains the masked base's own classifier head, loaded, never "
+                             "newly initialised (head %s, newly initialised %s); pass a berturk_train.py "
+                             "--fewshot-base checkpoint as --base" % (sorted(head) or "none", sorted(new) or "none"))
+    elif not head or head != new:
         raise SystemExit("the classifier head must be exactly the newly initialised parameters (head %s, newly "
                          "initialised %s); check the base and the transformers version"
                          % (sorted(head) or "none", sorted(new) or "none"))

@@ -24,8 +24,9 @@ cuda. The recipe is the one the user confirmed at plan 06-02 (pilot.berturk hold
 - A7: the loss is a masked BCE given to the Trainer as compute_loss_func: a masked (message, tag) label is -100, and
   the loss is the BCE summed over the unmasked entries divided by the Trainer's num_items_in_batch (its count of labels
   != -100 over the accumulation window, clamped at 1). Unmasked, it equals the mean BCE over all 48 tags; a masked tag
-  gets exactly zero gradient; an all-masked batch gives 0, never NaN. --mask-tags masks tags for every message (the
-  few-shot path); Phase 6 trains unmasked. A row that does not label a tag is refused, never read as a negative.
+  gets exactly zero gradient; an all-masked batch gives 0, never NaN. Phase 6 trains unmasked; the few-shot modes
+  below mask the held-out tags (--mask-tags is accepted only with --fewshot-base). A row that does not label a tag is
+  refused, never read as a negative.
 
 Labels: pilot.berturk.label_vector builds every row's 48 labels in INTENTS order and id2label/label2id come from the
 same order, so config.json records the column order and score.py refuses any other (check_label_order). Text is
@@ -61,6 +62,33 @@ T bit for bit (a JSON float round trip), postfit = pilot.postfit.final_block. st
 the run identity and are left out when None, so every selection run id is unchanged. postfit.py
 --print-final-commands prints the three commands.
 
+Few-shot (Phase 9, FEW-01, FEW-02; D-01, D-03, D-04, D-06, D-07): two modes run the frozen protocol.json few-shot
+block unchanged, each bound to it by refusal before any fetch, load or run dir, also with --print-run-id.
+pilot.protocol.require_frozen() and the D-08 decision record (pilot.fewshot.read_mode) come first, before the split is
+read; the protocol's rules.base_runs.berturk must name mask_label pilot.berturk.MASK_LABEL and dtype float32;
+pilot.fewshot.check_source then proves --data is the frozen source (selection_train) and that every frozen draw
+regenerates from its verified bytes. Neither mode takes --postfit, --reference or --max-messages.
+- --fewshot-base trains a label-masked base: every selection_train message is kept and the protocol's held-out tags
+  (--mask-tags is optional and refused unless it names exactly them) are MASK_LABEL in every label vector, so the
+  masked BCE gives them zero gradient; the run refuses to train when any label of those columns is not MASK_LABEL.
+  pilot.fewshot.check_base binds the command to rules.base_runs.berturk and to the chosen selection run's canonical
+  config, read through the protocol-pinned postfit record.
+- --fewshot-draw D --fewshot-k K --base <masked base> continues a masked base (a local berturk_train.py checkpoint,
+  never the pinned base) on the frozen support set of (D, K) plus the draw's replay set, in selection_train file
+  order (pilot.fewshot.berturk_rows): a support row keeps all 48 labels, a replay row masks the held-out tags. The
+  base's run id and canonical config come from its berturk_train.json, read from bytes bound to its identity
+  (pilot.berturk.read_record); pilot.fewshot.check_continued binds the epochs, LRs, seed (the draw seed), draw digest
+  and base pairing (the recorded mode); --stop-after-epoch is refused. The model continues from the base's own
+  fine-tuned classifier head: from_pretrained must report no missing, unexpected or mismatched key (nothing is newly
+  initialised), and the head (the classifier.* names) gets its own AdamW groups at --head-lr
+  (pilot.berturk.optimizer_groups, continued mode), the encoder at --lr, under the Trainer's linear schedule and its
+  10% warm-up over the continued epochs; transformers.set_seed, the Trainer's seed and data_seed are the draw seed.
+fewshot (pilot.fewshot.binding) is a run-identity key left out when None (mask_tags already was), so every committed
+run id is unchanged. The run record's fewshot entry is the masking proof (D-04), counts, tags and digests only, never
+a uid: a base {protocol_sha256, stage base, tags, unmasked_held_out_labels (all 0)}; a continued run {protocol_sha256,
+stage continued, draw, k, digest, tags, support_rows, replay_rows, new_tag_labels (one label per support row),
+replay_unmasked_held_out_labels (0), base {run_id, canonical}}; None for every other run.
+
 Run identity: the run id is pilot.berturk.run_id of the canonical config (pilot.berturk.IDENTITY: split, data and base
 digests, transformers and accelerate versions, device, every hyperparameter and the seed; never a path or a resource),
 e.g. berturk-selection_train-s0-1a2b3c4d. --print-run-id prints it after the split and base checks and exits without
@@ -81,6 +109,11 @@ usage:
   python berturk_train.py --data data/splits/final_train.jsonl --device mps --stop-after-epoch K --seed S \
       --postfit results/postfit/berturk.json --reference results/postfit/berturk-reference.json --no-export-epochs \
       --out ckpt/berturk-final-sS                   # a final seed (postfit.py --print-final-commands prints it)
+  python berturk_train.py --data data/splits/selection_train.jsonl --device mps --epochs 30 --stop-after-epoch 29 \
+      --seed 0 --fewshot-base --no-export-epochs --out ckpt-berturk-fewshot-base-s0     # a Phase 9 masked base
+  python berturk_train.py --data data/splits/selection_train.jsonl --base ckpt-berturk-fewshot-base-s0 --device mps \
+      --epochs 10 --seed 0 --fewshot-draw 0 --fewshot-k 10 --no-export-epochs --out ckpt-berturk-fewshot-d0-k10
+                                                    # a Phase 9 continued run from it
 """
 import argparse
 import importlib.metadata
@@ -89,7 +122,7 @@ import os
 import shutil
 import time
 
-from pilot import berturk, pins, postfit, runs, spike
+from pilot import berturk, fewshot, pins, postfit, protocol, runs, spike
 from pilot.data import (DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, refuse_held_out, repo_relpath,
                         sha256_file, write_atomic, verify_split_file)
 from pilot import dumps
@@ -113,13 +146,14 @@ def masked_bce(outputs, labels, num_items_in_batch=None):
     return total / max(int(n), 1)
 
 
-def build_optimizer(model, args, head_lr, new_names):
+def build_optimizer(model, args, head_lr, new_names, continued=False):
     """(optimizer, groups): the HF Trainer's own AdamW (transformers.Trainer.get_optimizer_cls_and_kwargs of args,
     optim adamw_torch) over four param groups from pilot.berturk.optimizer_groups: the encoder at args.learning_rate,
     the head (exactly new_names, the parameters from_pretrained newly initialised; SystemExit otherwise) at head_lr,
     each split by the Trainer's own weight-decay rule (transformers.Trainer.get_decay_parameter_names, which reads no
     Trainer state in the pinned transformers) at args.weight_decay or 0.0. With head_lr equal to the encoder LR it
-    trains exactly as the Trainer's own optimizer (tests/test_berturk_train.py)."""
+    trains exactly as the Trainer's own optimizer (tests/test_berturk_train.py). continued=True (a Phase 9 continued
+    run): the head is the masked base's loaded classifier.* parameters and new_names must be empty."""
     import torch
     import transformers
     named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
@@ -129,7 +163,7 @@ def build_optimizer(model, args, head_lr, new_names):
         raise SystemExit("the Trainer's optimizer for optim %s is %s with %s, expected torch.optim.AdamW with lr, "
                          "betas and eps; check the transformers version" % (args.optim, cls, sorted(kwargs)))
     groups = berturk.optimizer_groups([n for n, _ in named], decay, new_names, args.learning_rate, head_lr,
-                                      args.weight_decay)
+                                      args.weight_decay, continued=continued)
     params = dict(named)
     optimizer = cls([{"params": [params[n] for n in g["params"]], "lr": g["lr"], "weight_decay": g["weight_decay"]}
                      for g in groups], **kwargs)
@@ -152,7 +186,8 @@ def parser():
                     help="WordPiece tokens per message with [CLS] and [SEP]; longer ones are truncated and counted")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--mask-tags", default=None,
-                    help="comma-separated INTENTS tags whose labels are masked for every message (default none)")
+                    help="with --fewshot-base: the held-out tags, comma-separated; refused unless they are the frozen "
+                         "protocol's (the default)")
     ap.add_argument("--max-messages", type=int, default=None,
                     help="train on the first N rows in split-file order (smoke tests)")
     ap.add_argument("--cpus", type=int, default=None, help="torch threads (default 4 on mps, else 1)")
@@ -175,6 +210,14 @@ def parser():
     ap.add_argument("--reference", default=None,
                     help="the record's BASE-03 reference check (postfit.py --reference-check --out REF); a final seed "
                          "is refused unless it is of that record and reads ok or carries a resolution")
+    ap.add_argument("--fewshot-base", action="store_true",
+                    help="Phase 9: train a label-masked base of the frozen few-shot protocol (protocol.json); refused "
+                         "unless every setting is the frozen one")
+    ap.add_argument("--fewshot-draw", type=int, default=None,
+                    help="Phase 9: continue the masked --base from its own head on the frozen support set of this "
+                         "draw plus its replay set")
+    ap.add_argument("--fewshot-k", type=int, default=None,
+                    help="Phase 9: the frozen k of the --fewshot-draw support set")
     return ap
 
 
@@ -191,6 +234,26 @@ def _read_json(path, what):
             return json.load(f)
     except ValueError as e:
         raise SystemExit("%s is not valid JSON (%s)" % (what, e))
+
+
+def held_out_labels(labels, tags):
+    """{tag: the number of label vectors (INTENTS order) whose tag column is not pilot.berturk.MASK_LABEL}, in `tags`
+    order: the masking proof's count (D-04)."""
+    return {t: sum(1 for lab in labels if lab[berturk.TAGS.index(t)] != berturk.MASK_LABEL) for t in tags}
+
+
+def fewshot_base_of(base_dir):
+    """{"run_id", "canonical"} of a continued run's base, from its berturk_train.json read from bytes bound to its
+    identity (pilot.berturk.read_record); SystemExit naming the fix for a config.json that does not score the 48
+    INTENTS tags in order, or a run id that is not the one its canonical config names."""
+    berturk.check_label_order(_read_json(os.path.join(base_dir, "config.json"), "--base config.json"), "--base")
+    rec = berturk.read_record(base_dir, berturk.identity(base_dir))
+    rid, canon = rec["run_id"], rec["canonical"]
+    if berturk.run_id(canon) != rid:
+        raise SystemExit("--base %s names run %s, but its canonical config is run %s; a continued run starts from an "
+                         "unedited berturk_train.py --fewshot-base checkpoint" % (repo_relpath(base_dir), rid,
+                                                                                  berturk.run_id(canon)))
+    return {"run_id": rid, "canonical": canon}
 
 
 def check_float32(model):
@@ -273,11 +336,55 @@ def main(argv=None):
     if a.stop_after_epoch is not None and not 1 <= a.stop_after_epoch < a.epochs:
         ap.error("--stop-after-epoch must be at least 1 and below --epochs (%d); omit it to train every epoch"
                  % a.epochs)
+    # Phase 9 (D-01): a few-shot mode is one frozen-protocol command; every other combination is an argument error
+    continued = a.fewshot_draw is not None or a.fewshot_k is not None
+    fs_flags = [f for f, on in (("--fewshot-base", a.fewshot_base), ("--fewshot-draw", a.fewshot_draw is not None),
+                                ("--fewshot-k", a.fewshot_k is not None), ("--mask-tags", a.mask_tags is not None))
+                if on]
+    if (a.fewshot_draw is None) != (a.fewshot_k is None):
+        ap.error("--fewshot-draw and --fewshot-k go together: a continued run names its frozen draw and k")
+    if a.fewshot_base and continued:
+        ap.error("--fewshot-base trains a masked base and --fewshot-draw continues one; pass one of them")
+    if continued and a.stop_after_epoch is not None:
+        ap.error("--fewshot-draw takes no --stop-after-epoch: a continued run trains every frozen epoch on the support "
+                 "and replay rows")
+    if a.mask_tags is not None and not a.fewshot_base:
+        ap.error("--mask-tags masks a Phase 9 base only: pass it with --fewshot-base (the frozen protocol's tags)")
+    if fs_flags and (a.postfit is not None or a.reference is not None):
+        ap.error("%s takes no --postfit or --reference: a few-shot run is bound to the frozen protocol, not to a "
+                 "postfit record" % fs_flags[0])
+    if fs_flags and a.max_messages is not None:
+        ap.error("%s takes no --max-messages: a few-shot run trains every message the frozen protocol selects"
+                 % fs_flags[0])
     if (a.postfit is None) != (a.reference is None):
         ap.error("--postfit and --reference go together: a final seed needs the record and its BASE-03 reference check")
     if a.postfit is not None and a.out is None:
         ap.error("--postfit needs --out DIR (the final checkpoint)")
     cpus = a.cpus or (4 if a.device == "mps" else 1)
+    proto = pin = block = mode = None
+    mask = ()
+    if a.fewshot_base or continued:                         # D-01: the frozen protocol first, before the split is read
+        proto, pin = protocol.require_frozen()
+        block = proto.get("fewshot")
+        if not isinstance(block, dict) or not isinstance(block.get("rules"), dict):
+            raise SystemExit("the frozen protocol holds no few-shot block; restore protocol.json with `git checkout -- "
+                             "protocol.json`")
+        mode = fewshot.read_mode(pin)                       # the D-08 decision record names primary or fallback
+        rule = (block["rules"].get("base_runs") or {}).get("berturk") or {}
+        if rule.get("mask_label") != berturk.MASK_LABEL or rule.get("dtype") != "float32":
+            raise SystemExit("the frozen rules.base_runs.berturk name mask_label %r and dtype %r; berturk_train.py "
+                             "masks with %r in float32, so it cannot run this protocol unchanged"
+                             % (rule.get("mask_label"), rule.get("dtype"), berturk.MASK_LABEL))
+        if continued and a.base == "berturk":
+            raise SystemExit("--fewshot-draw continues a masked base from its own head: pass a berturk_train.py "
+                             "--fewshot-base checkpoint as --base, not berturk")
+        if a.fewshot_base:
+            mask = berturk.check_mask_tags(block.get("tags") or [])   # sorted; label_vector masks these columns
+            given = None if a.mask_tags is None else [t.strip() for t in a.mask_tags.split(",")]
+            if given is not None and (sorted(given) != list(mask) or len(set(given)) != len(given)):
+                raise SystemExit("--mask-tags %s is not the frozen protocol's held-out tags %s; pass them (or omit "
+                                 "--mask-tags): Phase 9 runs the frozen protocol unchanged"
+                                 % (a.mask_tags, ",".join(mask)))
     if not os.path.isfile(a.data):
         raise SystemExit("%s not found; check the path, or run `make data`" % a.data)
     with open(a.data, "rb") as f:
@@ -289,8 +396,38 @@ def main(argv=None):
         rows = rows[:a.max_messages]
     if not rows:
         raise SystemExit("%s: no messages to train on" % a.data)
-    mask = berturk.check_mask_tags(a.mask_tags.split(",")) if a.mask_tags else ()
-    labels = [berturk.label_vector(r, mask) for r in rows]
+    fs_proof = sel = None
+    if block is None:
+        labels = [berturk.label_vector(r, mask) for r in rows]
+    else:
+        fewshot.check_source(block, entry, rows)            # --data is the frozen source; every draw regenerates (D-02)
+        tags = sorted(block["tags"])
+        if a.fewshot_base:                                  # every message kept, the held-out columns MASK_LABEL
+            labels = [berturk.label_vector(r, mask) for r in rows]
+            unmasked = held_out_labels(labels, tags)
+            leaked = ["%s %d" % (t, n) for t, n in unmasked.items() if n]
+            if leaked:
+                raise SystemExit("the masked base holds unmasked labels of held-out tag(s) (%s); refusing to train: "
+                                 "every label of a held-out tag is %r (FEW-01)"
+                                 % (", ".join(leaked), berturk.MASK_LABEL))
+            fs_proof = {"protocol_sha256": pin, "stage": "base", "tags": tags, "unmasked_held_out_labels": unmasked}
+        else:                                               # support rows: all 48 labels; replay rows: held-out masked
+            sel = fewshot.selection(block, a.fewshot_draw, a.fewshot_k)
+            pairs = fewshot.berturk_rows(rows, sel, block["tags"])   # refuses a selected uid missing from the rows
+            rows = [r for r, _ in pairs]
+            labels = [berturk.label_vector(r, m) for r, m in pairs]
+            sup = [lab for r, lab in zip(rows, labels) if r["uid"] in sel["support"]]
+            rest = [lab for r, lab in zip(rows, labels) if r["uid"] not in sel["support"]]
+            new, replay = held_out_labels(sup, tags), sum(held_out_labels(rest, tags).values())
+            off = ["%s %d" % (t, n) for t, n in new.items() if n != len(sup)]
+            if off or replay:
+                raise SystemExit("the continued run labels held-out tag(s) %s for %d support rows and %d held-out "
+                                 "label(s) on replay rows; refusing to train: one label per support row, none on a "
+                                 "replay row (FEW-02)" % (", ".join(off) or "as expected", len(sup), replay))
+            d = block["draws"][a.fewshot_draw]
+            fs_proof = {"protocol_sha256": pin, "stage": "continued", "draw": a.fewshot_draw, "k": a.fewshot_k,
+                        "digest": d.get("digest"), "tags": tags, "support_rows": len(sup), "replay_rows": len(rest),
+                        "new_tag_labels": new, "replay_unmasked_held_out_labels": replay}
     # the postfit record and its BASE-03 gate (torch-free reads) before any fetch, load or run dir
     pf_record, record_sha = postfit.read_record(a.postfit) if a.postfit else (None, None)
     if pf_record is not None:
@@ -310,11 +447,21 @@ def main(argv=None):
         digests = dict(pins.BERTURK["sha256"])
     else:
         base_dir = os.path.abspath(a.base)
+        if continued:                                       # a berturk_train.py checkpoint, its record included
+            berturk.require_files(base_dir, "--base")
         missing = [f for f in berturk.BASE_FILES if not os.path.isfile(os.path.join(base_dir, f))]
         if missing:
             raise SystemExit("--base must be 'berturk' (pinned) or a local base dir holding %s; %s lacks %s"
                              % (", ".join(berturk.BASE_FILES), a.base, ", ".join(missing)))
         digests = {f: sha256_file(os.path.join(base_dir, f)) for f in berturk.BASE_FILES}
+    fs_binding = base_info = None
+    if a.fewshot_base:
+        fs_binding = fewshot.binding(pin, "base")
+    elif continued:                                         # the base names itself by its own record bytes
+        base_info = fewshot_base_of(base_dir)
+        fs_binding = fewshot.binding(pin, "continued", a.fewshot_draw, a.fewshot_k,
+                                     block["draws"][a.fewshot_draw].get("digest"), base_info["run_id"])
+        fs_proof["base"] = base_info
     canon = berturk.canonical({
         "split": os.path.splitext(os.path.basename(entry["path"]))[0], "data_sha256": entry["sha256"],
         "data_role": entry["role"], "base_model_sha256": digests["model.safetensors"],
@@ -327,11 +474,16 @@ def main(argv=None):
         "lr_scheduler": berturk.LR_SCHEDULER, "max_grad_norm": berturk.MAX_GRAD_NORM, "optim": berturk.OPTIM,
         "loss": berturk.LOSS, "max_len": a.max_len, "max_messages": a.max_messages,
         "mask_tags": list(mask) or None, "seed": a.seed, "stop_after_epoch": a.stop_after_epoch,
-        "postfit_sha256": record_sha})
+        "postfit_sha256": record_sha, "fewshot": fs_binding})
     pf_block = None
     if pf_record is not None:                               # bound by refusal, never by transcription (BASE-01)
         postfit.check_final(pf_record, canon)
         pf_block = postfit.final_block(pf_record, record_sha, a.postfit)   # refuses a T outside laya's band here
+    if a.fewshot_base:                                      # bound by refusal to the frozen protocol (D-01, D-03)
+        fewshot.check_base(proto, pin, "berturk", canon, fewshot.chosen_canonical(proto, "berturk"), mode)
+    elif continued:                                         # D-06, D-07: the frozen draw, k, epochs, LRs and base
+        fewshot.check_continued(proto, pin, "berturk", canon, base_info["canonical"], base_info["run_id"],
+                                a.fewshot_draw, a.fewshot_k, mode)
     if a.base == "berturk":                                 # pinned + verified before any load (ENV-02)
         from pilot.weights import fetch
         base_dir = fetch(pins.BERTURK)
@@ -382,6 +534,14 @@ def main(argv=None):
         base_dir, num_labels=len(berturk.TAGS), problem_type=berturk.PROBLEM_TYPE, id2label=berturk.id2label(),
         label2id=berturk.label2id(), dtype=torch.float32, local_files_only=True, output_loading_info=True)
     new_names = info["missing_keys"]                         # the newly initialised parameters: the fresh head
+    if continued:                                           # D-06: the masked base's whole model, its head included
+        off = {k: sorted(str(x) for x in info.get(k) or ()) for k in ("missing_keys", "unexpected_keys",
+                                                                        "mismatched_keys")}
+        if any(off.values()):
+            raise SystemExit("--base %s: from_pretrained reports %s; a continued run loads the masked base's whole "
+                             "model, its fine-tuned classifier head included (no fresh head, no weight imprinting): "
+                             "pass an unedited berturk_train.py --fewshot-base checkpoint"
+                             % (repo_relpath(base_dir), "; ".join("%s %s" % (k, v) for k, v in off.items() if v)))
     load_s = time.time() - t0
     args = transformers.TrainingArguments(
         output_dir=os.path.join(run_dir, "trainer"), per_device_train_batch_size=a.batch,
@@ -396,7 +556,10 @@ def main(argv=None):
                          % (args.device.type, a.device))
     device = args.device
     model = model.to(device)                                 # before the optimizer holds its parameters
-    optimizer, groups = build_optimizer(model, args, a.head_lr, new_names)   # refuses a head that is not fresh
+    if continued:                                           # the loaded head of the masked base, nothing new (D-06)
+        optimizer, groups = build_optimizer(model, args, a.head_lr, new_names, continued=True)
+    else:
+        optimizer, groups = build_optimizer(model, args, a.head_lr, new_names)   # refuses a head that is not fresh
     reset, sync, sample, _, peak = memory_sampler(device)
     record = {"device": a.device, "param_device": None, "dtype": "torch.float32", "amp": False,
               "torch_version": torch.__version__, "transformers_version": transformers.__version__,
@@ -405,7 +568,8 @@ def main(argv=None):
                                     "weight_decay": g["weight_decay"], "n_tensors": len(g["params"])} for g in groups],
               "n_messages": len(rows),
               "n_truncated": n_truncated, "max_len": a.max_len, "bit_reproducible": a.device == "cpu",
-              "torch_threads": torch.get_num_threads(), "load_s": load_s, "epochs": [], "code": code_state()}
+              "torch_threads": torch.get_num_threads(), "load_s": load_s, "epochs": [], "code": code_state(),
+              "fewshot": fs_proof}
     provenance = {"split": {"name": canon["split"], "path": entry["path"], "sha256": entry["sha256"],
                             "role": entry["role"]},
                   "manifest": {"path": repo_relpath(a.manifest), "sha256": sha256_file(a.manifest),

@@ -240,11 +240,14 @@ def test_refuses_an_empty_selection(inputs, tmp_path, monkeypatch, no_load):
     refused(train_argv(data, manifest, base, tmp_path / "runs"), tmp_path / "runs", "no messages")
 
 
-@pytest.mark.parametrize("tags,match", [("no_such_tag", "unknown tag"),
-                                        ("%s,%s" % (berturk.TAGS[0], berturk.TAGS[0]), "more than once")])
-def test_refuses_bad_mask_tags(inputs, tmp_path, no_load, tags, match):
+@pytest.mark.parametrize("tags", ["no_such_tag", "%s,%s" % (berturk.TAGS[0], berturk.TAGS[0]), "card"])
+def test_refuses_bad_mask_tags(inputs, tmp_path, no_load, capsys, tags):
+    """--mask-tags masks a Phase 9 base only (09-03): alone it is an argument error naming --fewshot-base, before the
+    split is read (pilot.berturk.check_mask_tags still refuses an unknown or repeated tag: test_berturk_unit)."""
     data, manifest, base = inputs
-    refused(train_argv(data, manifest, base, tmp_path / "runs", "--mask-tags", tags), tmp_path / "runs", match)
+    code, err = exit_code(train_argv(data, manifest, base, tmp_path / "runs", "--mask-tags", tags), capsys)
+    assert code == 2 and "--mask-tags masks a Phase 9 base only" in err and "--fewshot-base" in err, err
+    assert not os.path.exists(str(tmp_path / "runs"))
 
 
 @pytest.mark.parametrize("fault", list(berturk.BASE_FILES) + ["lowercasing"])

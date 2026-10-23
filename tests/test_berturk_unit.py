@@ -206,7 +206,7 @@ def _values(**over):
          "accelerate_version": "1.15.0", "device": "mps", "epochs": 10, "batch": 32, "encoder_lr": 2e-05,
          "head_lr": 0.0001, "weight_decay": 0.01, "warmup_ratio": 0.1, "lr_scheduler": "linear", "max_grad_norm": 1.0,
          "optim": "adamw_torch", "loss": "masked_bce", "max_len": 128, "max_messages": None, "mask_tags": None,
-         "seed": 0, "stop_after_epoch": None, "postfit_sha256": None}
+         "seed": 0, "stop_after_epoch": None, "postfit_sha256": None, "fewshot": None}
     v.update(over)
     return v
 
