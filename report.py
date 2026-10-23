@@ -130,8 +130,18 @@ the settings) and pilot.verdict.render_go (REP-03's mechanical GO block) of a sa
 README), only after pilot.protocol.require_frozen passes and pilot.verdict.check_record binds the record to it: the
 protocol sha256 is the pin, the verdict rules are the code's, and every criterion, collapse flag and the verdict
 recompute from the record's own numbers and the frozen criteria, so a hand-edited status or verdict is refused, never
-rendered (08-REVIEW WR-03). The Phase 3 results table (--table) and COMPARE_THETA_RULE stay as they are: the committed comparison reports
-embed them and rebuild byte for byte; the frozen seed-averaged θ rule lives in protocol.json.
+rendered (08-REVIEW WR-03).
+--verdict --fewshot RECORD (09-08, D-13): the few-shot results record (results/fewshot/fewshot.json, `make
+fewshot-reports`) decides criterion (d)'s few-shot path. fewshot_input reads it (schema fewshot-results/1), refuses it
+unless its protocol_sha256 is the pin, its primary k is criteria (d)'s fewshot k, the runs manifest it names (under the
+repo, sha256-checked, pilot.fewshot.read_runs) is its own and its primary block equals pilot.fewshot_report.primary
+recomputed from that manifest and the committed dumps, then hands {mean_delta, draws} to criterion (d) at the frozen
+mean_delta_at_least: the path is MET or NOT MET, (d) PASS or FAIL, the provisional mark resolves, and the verdict's
+fewshot block holds the path's status, k, mean delta, draws, the record's path and sha256, the mode and the fallback
+disclosure. Without --fewshot the verdict is the Phase 8 one byte for byte (the few-shot path PENDING). --fewshot is
+refused with any other mode.
+The Phase 3 results table (--table) and COMPARE_THETA_RULE stay as they are: the committed comparison reports embed
+them and rebuild byte for byte; the frozen seed-averaged θ rule lives in protocol.json.
 
 usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.json] [--manifest splits.json]
        python report.py results/dumps/FINAL_SEED_RUN_ID --split test --postfit results/postfit/laya.json [--out X.json]
@@ -141,7 +151,7 @@ usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.js
                         [--out results/confidence/RUN_ID-val.json]
        python report.py --confidence results/dumps/RUN_ID --split hotels_probe [--postfit RECORD] [--out X.json]
        python report.py --confidence-table results/confidence [--out confidence.md]
-       python report.py --verdict [--out results/final/verdict.json]
+       python report.py --verdict [--fewshot results/fewshot/fewshot.json] [--out results/final/verdict.json]
        python report.py --final-table results/final/verdict.json [--out table.md]
        python report.py --go-block results/final/verdict.json [--out go.md]
 """
@@ -149,6 +159,8 @@ import argparse
 import json
 import os
 
+import pilot.fewshot                                        # numpy-free: read_runs (the few-shot runs manifest)
+import pilot.fewshot_report                                 # numpy only: read_record, primary (09-08)
 import pilot.protocol                                       # stdlib only at import: require_frozen, prior_floors
 import pilot.verdict
 from pilot import data, dumps, metrics                     # data.DEFAULT_MANIFEST: the committed one, at call time
@@ -850,7 +862,62 @@ def frozen_code(protocol):
                              "frozen code only (restore the code the protocol froze)" % (key, ", ".join(diff)))
 
 
-def verdict_from(protocol, sha, manifest_path=DEFAULT_MANIFEST, root=None, dump_root=None):
+def _root_relpath(path, root):
+    """`path` relative to root with forward slashes ("<outside-repo>/NAME" outside it: never a local path)."""
+    rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
+    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+        return "<outside-repo>/" + os.path.basename(os.path.normpath(path))
+    return rel.replace(os.sep, "/")
+
+
+FEWSHOT_FIX = "rebuild it with `make fewshot-reports`"
+
+
+def fewshot_input(protocol, sha, path, root, dump_root, manifest_path):
+    """Criterion (d)'s few-shot input {"mean_delta", "draws", "k", "record": {path, sha256}, "mode", "disclosure"} of
+    the few-shot results record at `path` (09-08, D-13), refused (one line) unless: its schema is
+    pilot.fewshot_report.RESULTS_SCHEMA (read_record); its protocol_sha256 is the pin `sha`; its primary k is the frozen
+    criteria (d)'s fewshot k; the runs manifest it names exists under root, passes pilot.fewshot.read_runs (check_runs
+    under the D-08 decision record, whose bytes it names) and hashes to the record's runs sha256; the record's decision
+    is that manifest's (sha256, mode) with the frozen disclosure; and its primary block equals
+    pilot.fewshot_report.primary recomputed from that manifest and the dumps under dump_root (a JSON round trip, no
+    tolerance). The numbers criterion (d) reads are thus the dumps', never a hand edit of the record."""
+    record, rec_sha = pilot.fewshot_report.read_record(path)
+    what = "few-shot record %s" % _root_relpath(path, root)
+    if record.get("protocol_sha256") != sha:
+        raise SystemExit("%s was built under protocol sha256 %s, not the frozen %s; %s"
+                         % (what, record.get("protocol_sha256"), sha, FEWSHOT_FIX))
+    k = pilot.verdict._fewshot_k(protocol)
+    p = record.get("primary") if isinstance(record.get("primary"), dict) else {}
+    if p.get("k") != k:
+        raise SystemExit("%s: primary k %r is not criteria (d)'s fewshot k %r; criterion (d) reads the frozen k only"
+                         % (what, p.get("k"), k))
+    ref = record.get("runs") if isinstance(record.get("runs"), dict) else {}
+    if not isinstance(ref.get("path"), str) or not isinstance(ref.get("sha256"), str):
+        raise SystemExit("%s names no runs manifest {path, sha256}; %s" % (what, FEWSHOT_FIX))
+    runs, runs_sha = pilot.fewshot.read_runs(protocol, sha, os.path.join(root, ref["path"]))
+    if runs is None:
+        raise SystemExit("%s: its runs manifest %s is not found under %s; restore it with git" % (what, ref["path"],
+                                                                                                root))
+    if runs_sha != ref["sha256"]:
+        raise SystemExit("%s names runs manifest sha256 %s, but %s hashes to %s; %s"
+                         % (what, ref["sha256"], ref["path"], runs_sha, FEWSHOT_FIX))
+    disclosure = pilot.verdict._fallback_disclosure(protocol) if runs["mode"] == "fallback" else None
+    dec = record.get("decision") if isinstance(record.get("decision"), dict) else {}
+    if (dec.get("sha256"), dec.get("mode"), dec.get("disclosure")) != (runs["decision"]["sha256"], runs["mode"],
+                                                                        disclosure):
+        raise SystemExit("%s: decision %r is not the runs manifest's (sha256 %s, mode %s, disclosure %r); %s"
+                         % (what, dec, runs["decision"]["sha256"], runs["mode"], disclosure, FEWSHOT_FIX))
+    want = pilot.fewshot_report.primary(protocol, sha, runs, runs_sha, dump_root, manifest_path)
+    if json.loads(json.dumps(want)) != record.get("primary"):
+        raise SystemExit("%s: its primary block does not recompute from the dumps its runs manifest lists; the record "
+                         "was edited, %s" % (what, FEWSHOT_FIX))
+    return {"mean_delta": want["mean_delta"], "draws": want["draws"], "k": k,
+            "record": {"path": _root_relpath(path, root), "sha256": rec_sha}, "mode": runs["mode"],
+            "disclosure": disclosure}
+
+
+def verdict_from(protocol, sha, manifest_path=DEFAULT_MANIFEST, root=None, dump_root=None, fewshot=None):
     """The verdict/1 record (REP-02, REP-03) of a frozen protocol (the dict and its sha256), computed mechanically by
     pilot.verdict.build_verdict from protocol-bound inputs only (08-RESEARCH A3, A5, A6, A16, A18):
     - every protocol input exists under root (default the repo) and hashes to its frozen sha256, and the manifest is
@@ -872,6 +939,9 @@ def verdict_from(protocol, sha, manifest_path=DEFAULT_MANIFEST, root=None, dump_
       (pilot.protocol.definitions_block, bootstrap_block), so a metric or bootstrap text changed after the freeze is
       refused rather than computing a verdict that names the frozen sha256 (08-REVIEW WR-04; verdict/1 holds no code
       state, so a drift in the code under unchanged texts is caught by the data-marked byte rebuild only).
+    - fewshot (09-08, D-13): None leaves criterion (d)'s few-shot path PENDING (the Phase 8 verdict, byte for byte); a
+      few-shot results record path gives it fewshot_input's numbers, recomputed from the dumps under dump_root, so the
+      path is MET or NOT MET at the frozen mean_delta_at_least and the provisional mark resolves.
     numpy only; SystemExit naming the first failure."""
     frozen_code(protocol)
     root = REPO_ROOT if root is None else root
@@ -880,6 +950,7 @@ def verdict_from(protocol, sha, manifest_path=DEFAULT_MANIFEST, root=None, dump_
         raise SystemExit("%s is not the protocol's data/splits.json (sha256 %s); drop --manifest"
                          % (manifest_path, inputs["data/splits.json"]))
     dump_root = os.path.join(root, protocol["scoring"]["dump_root"]) if dump_root is None else dump_root
+    few = None if fewshot is None else fewshot_input(protocol, sha, fewshot, root, dump_root, manifest_path)
     test = protocol["splits"]["test"]
     systems, runs, recs = {}, [], {}
     for kind in pilot.verdict.KINDS:
@@ -961,14 +1032,17 @@ def verdict_from(protocol, sha, manifest_path=DEFAULT_MANIFEST, root=None, dump_
                           "n_no_intent": int((~Y.any(axis=1)).sum())},
                 "systems": out_systems, "references": _reference_rows(protocol, inputs, root, test),
                 "seed_averaged": seeded, "collapse": {"selection": selection}, "latency": _latency_rows(inputs, root)}
+    if few is not None:
+        inputs_v["fewshot"] = few
     return pilot.verdict.build_verdict(protocol, sha, inputs_v)
 
 
-def verdict_report(manifest_path=DEFAULT_MANIFEST, root=None, dump_root=None):
+def verdict_report(manifest_path=DEFAULT_MANIFEST, root=None, dump_root=None, fewshot=None):
     """verdict_from of the frozen protocol: pilot.protocol.require_frozen() (refused while protocol.json is missing
-    or PROTOCOL_SHA256 is unset or differs), so the verdict is never computed under an unfrozen rule."""
+    or PROTOCOL_SHA256 is unset or differs), so the verdict is never computed under an unfrozen rule; `fewshot` is the
+    few-shot results record (None: the few-shot path stays PENDING)."""
     protocol, sha = pilot.protocol.require_frozen()
-    return verdict_from(protocol, sha, manifest_path, root, dump_root)
+    return verdict_from(protocol, sha, manifest_path, root, dump_root, fewshot)
 
 
 SINGLE_HEADER = ("system", "run_id", "temperature", "θ global (val)", "per-tag θ", "micro-F1 @0.5", "micro-F1 @val-θ",
@@ -1403,6 +1477,9 @@ def main(argv=None):
                     help="markdown of saved confidence/1 records (a directory expands to its sorted *.json)")
     ap.add_argument("--verdict", action="store_true",
                     help="the verdict/1 record of the frozen protocol (pilot.protocol.require_frozen); --out writes it")
+    ap.add_argument("--fewshot", metavar="RECORD", default=None,
+                    help="with --verdict: the few-shot results record (results/fewshot/fewshot.json) that decides "
+                         "criterion (d)'s few-shot path; without it the path stays PENDING")
     ap.add_argument("--final-table", metavar="VERDICT_JSON", default=None,
                     help="markdown of REP-02's final results table of a saved verdict/1 record")
     ap.add_argument("--go-block", metavar="VERDICT_JSON", default=None,
@@ -1416,6 +1493,8 @@ def main(argv=None):
                  "or --go-block VERDICT_JSON")
     if a.postfit is not None and a.confidence is None and a.run_dir is None:
         ap.error("--postfit applies only to RUN_DIR or --confidence")
+    if a.fewshot is not None and not a.verdict:
+        ap.error("--fewshot applies only to --verdict")
     if a.confidence is not None and a.split is None:
         ap.error("--confidence needs an explicit --split val|test|hotels_probe")
     if a.confidence is not None and a.out is not None and not a.out.endswith(".json"):
@@ -1444,7 +1523,7 @@ def main(argv=None):
         return text
     split = "test" if a.split is None else a.split
     if a.verdict:
-        report = verdict_report(a.manifest)
+        report = verdict_report(a.manifest, fewshot=a.fewshot)
     elif a.confidence is not None:
         report = confidence_report(a.confidence, split, a.manifest, a.postfit)
     elif a.compare is not None:

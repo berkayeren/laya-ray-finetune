@@ -33,8 +33,17 @@ The verdict record (08-09): build_verdict(protocol, sha, inputs) turns report.ve
 verdict/1 (VERDICT_KEYS): the per-seed rows, settings and summary of each fine-tuned system (mean_std: the mean and the
 sample std, ddof 1, A16, exact for equal values), the reference rows, the seed-averaged deltas (headline gates, raw is
 reported, A18), the collapse rows (A6: selection laya, selection berturk, then each model's final seeds), the latency
-rows, the few-shot path PENDING (Phase 9), every criterion from the protocol's criteria block and the overall verdict
-by decide. It refuses a protocol whose verdict rules are not this module's, holds no timestamp and rounds nothing.
+rows, the few-shot path, every criterion from the protocol's criteria block and the overall verdict by decide. It
+refuses a protocol whose verdict rules are not this module's, holds no timestamp and rounds nothing.
+The few-shot path (09-08, D-13): without a few-shot result the fewshot block is {status PENDING, phase 9} (the Phase 8
+verdict, byte for byte); with inputs["fewshot"] (report.fewshot_input: the few-shot results record's primary numbers,
+recomputed from the dumps) criterion_d reads its {mean_delta, draws} at the frozen mean_delta_at_least (_fewshot,
+unchanged), so the path is MET or NOT MET, (d) PASS or FAIL and decide names no few-shot branch; the fewshot block is
+then FEWSHOT_KEYS: the path's status, phase 9, k (criteria (d)'s fewshot k), mean_delta, draws, the record {path,
+sha256}, the mode (primary or fallback) and the frozen compute-fallback disclosure under the fallback (None under
+primary). check_record accepts either form and recomputes (d) from the block's own numbers, so an edited few-shot status,
+mean, draw, k, phase or key is refused; render_go adds the few-shot line (and the disclosure line) for the record's form
+only, so the PENDING render is unchanged.
 render_final_table(v) is REP-02's one results table (references in REFERENCE_ORDER, each fine-tuned model as
 mean ± sample std with its per-seed values in seed order, then its seed-averaged EVAL-07 system, and the settings)
 and render_go(v) REP-03's GO block (every criterion's status and numbers, the verdict and the frozen rule lines that
@@ -482,6 +491,12 @@ PRIOR_KEYS = ("prior_val_fraction", "prior_test_fraction", "prior_theta_global")
 # the seed-averaged deltas: system_deltas plus which system is A and B and each one's T and θ
 SEEDED_KEYS = ("metrics", "B", "seed", "level", "method", "a", "b", "temperature", "theta")
 FEWSHOT_PHASE = 9                                           # the phase that runs the few-shot path of (d)
+# the fewshot block of a verdict built with the few-shot record (09-08, D-13); without it the block is PENDING_FEWSHOT
+FEWSHOT_KEYS = ("status", "phase", "k", "mean_delta", "draws", "record", "mode", "disclosure")
+FEWSHOT_INPUT_KEYS = ("mean_delta", "draws", "k", "record", "mode", "disclosure")
+FEWSHOT_MODES = ("primary", "fallback")                     # pilot.fewshot.MODES (a test keeps the two equal)
+FEWSHOT_FIX = "rebuild it with report.py --verdict --fewshot results/fewshot/fewshot.json"
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def mean_std(values):
@@ -558,6 +573,57 @@ def _systems(inputs):
     return out
 
 
+def _pending_fewshot():
+    return {"status": PENDING, "phase": FEWSHOT_PHASE}
+
+
+def _fewshot_k(protocol):
+    return _path_rule(protocol["criteria"]["d"], "fewshot").get("k")
+
+
+def _fallback_disclosure(protocol):
+    """The frozen compute-fallback disclosure of the protocol's few-shot block (None when it names none)."""
+    block = protocol.get("fewshot") if isinstance(protocol, dict) else None
+    rules = block.get("rules") if isinstance(block, dict) else None
+    fallback = rules.get("compute_fallback") if isinstance(rules, dict) else None
+    text = fallback.get("disclosure") if isinstance(fallback, dict) else None
+    return text if isinstance(text, str) and text else None
+
+
+def _check_fewshot(block, protocol, what):
+    """SystemExit (one line naming `what` and the fix) unless `block` is the few-shot record's form of the fewshot block
+    but for its status: exactly FEWSHOT_KEYS, phase FEWSHOT_PHASE, k criteria (d)'s fewshot k, mode one of
+    FEWSHOT_MODES, disclosure None under primary and the protocol's compute-fallback disclosure under fallback, record
+    {path, sha256} with a 64-hex sha256. mean_delta and draws are checked by criterion_d."""
+    def bad(text):
+        raise SystemExit("%s: %s; %s" % (what, text, FEWSHOT_FIX))
+    if not isinstance(block, dict) or set(block) != set(FEWSHOT_KEYS):
+        bad("keys %s, expected exactly %s (or the PENDING form {status, phase})"
+            % (sorted(block) if isinstance(block, dict) else type(block).__name__, ", ".join(FEWSHOT_KEYS)))
+    if isinstance(block["phase"], bool) or block["phase"] != FEWSHOT_PHASE:
+        bad("phase %r, expected %d" % (block["phase"], FEWSHOT_PHASE))
+    k = _fewshot_k(protocol)
+    if isinstance(block["k"], bool) or not isinstance(block["k"], int) or block["k"] != k:
+        bad("k %r is not criteria (d)'s fewshot k %r" % (block["k"], k))
+    if block["mode"] not in FEWSHOT_MODES:
+        bad("mode %r is not one of %s" % (block["mode"], ", ".join(FEWSHOT_MODES)))
+    want = None if block["mode"] == "primary" else _fallback_disclosure(protocol)
+    if block["mode"] == "fallback" and want is None:
+        bad("the fallback mode needs the protocol's compute-fallback disclosure, and the protocol names none")
+    if block["disclosure"] != want:
+        bad("disclosure %r under the %s mode, expected %r" % (block["disclosure"], block["mode"], want))
+    rec = block["record"]
+    if not isinstance(rec, dict) or set(rec) != {"path", "sha256"} or not isinstance(rec["path"], str) \
+            or not rec["path"] or not isinstance(rec["sha256"], str) or not SHA256_RE.fullmatch(rec["sha256"]):
+        bad("record %r is not {path, sha256} of the few-shot results record" % (rec,))
+    return block
+
+
+def _fewshot_result(block):
+    """criterion_d's few-shot input of a fewshot block: None (PENDING) or {"mean_delta", "draws"}."""
+    return None if block is None else {"mean_delta": block["mean_delta"], "draws": block["draws"]}
+
+
 def _metric(deltas, name):
     m = (deltas.get("metrics") or {}).get(name) if isinstance(deltas, dict) else None
     if not isinstance(m, dict):
@@ -572,7 +638,10 @@ def build_verdict(protocol, sha, inputs):
     on the headline micro-F1 and macro-F1 deltas, (b) on the collapse rows and the scored seeds, (c) on the latency
     rows, (d) on the headline Brier and precision-at-coverage deltas with the few-shot path PENDING until Phase 9, the
     alternative GO on the headline micro-F1 delta, and the overall verdict by decide (A3). No timestamp and no
-    rounding: the same inputs give the same bytes. The protocol's verdict rules must be this module's."""
+    rounding: the same inputs give the same bytes. The protocol's verdict rules must be this module's.
+    inputs["fewshot"] (09-08), when present, is {FEWSHOT_INPUT_KEYS} from the few-shot record (report.fewshot_input):
+    (d)'s few-shot path reads its mean_delta and draws, and the fewshot block is FEWSHOT_KEYS with the path's status;
+    absent (or None) the path is PENDING and the block {status PENDING, phase 9}, exactly as in Phase 8."""
     _check_rules(protocol)
     crit = protocol["criteria"]
     systems = _systems(inputs)
@@ -583,22 +652,36 @@ def build_verdict(protocol, sha, inputs):
                              % (variant, ", ".join(SEEDED_KEYS)))
     h = seeded["headline"]
     collapse = _collapse_rows(protocol, inputs, systems)
+    few = inputs.get("fewshot")
+    if few is not None:
+        if not isinstance(few, dict) or set(few) != set(FEWSHOT_INPUT_KEYS):
+            raise SystemExit("the verdict inputs' fewshot is %r, expected None (PENDING) or {%s} from the few-shot "
+                             "record (report.verdict_from)" % (few, ", ".join(FEWSHOT_INPUT_KEYS)))
+        few = _check_fewshot(dict({"status": None, "phase": FEWSHOT_PHASE}, **few), protocol,
+                             "the verdict inputs' few-shot result")
     cal, abst = _path_rule(crit["d"], "calibration"), _path_rule(crit["d"], "abstention")
     criteria = {
         "a": criterion_a(_metric(h, "micro_f1"), _metric(h, "macro_f1"), crit["a"]),
         "b": criterion_b(collapse["rows"], {k: [r["seed"] for r in systems[k]["per_seed"]] for k in KINDS},
                          crit["b"]),
         "c": criterion_c(inputs.get("latency"), crit["c"]),
-        "d": criterion_d(_metric(h, cal.get("metric")), _metric(h, abst.get("metric")), None, crit["d"]),
+        "d": criterion_d(_metric(h, cal.get("metric")), _metric(h, abst.get("metric")), _fewshot_result(few),
+                         crit["d"]),
         "alternative_go": alternative_go(_metric(h, "micro_f1"), crit["alternative_go"]),
     }
     for k in criteria:
         criteria[k]["name"] = crit[k].get("name")
     s = {k: criteria[k]["status"] for k in ("a", "b", "d", "alternative_go")}
+    if few is None:
+        fewshot = _pending_fewshot()
+    else:
+        path = criteria["d"]["paths"][-1]
+        fewshot = dict(few, status=path["status"], mean_delta=path["mean_delta"], draws=path["draws"])
+        fewshot = {k: fewshot[k] for k in FEWSHOT_KEYS}
     out = {"schema": VERDICT_SCHEMA, "protocol": {"path": "protocol.json", "sha256": sha},
            "split": inputs.get("split"), "systems": systems, "references": inputs.get("references") or [],
            "seed_averaged": seeded, "collapse": collapse, "latency": inputs.get("latency"),
-           "fewshot": {"status": PENDING, "phase": FEWSHOT_PHASE}, "criteria": criteria,
+           "fewshot": fewshot, "criteria": criteria,
            "verdict": decide(s["a"], s["b"], s["d"], s["alternative_go"])}
     try:
         return json.loads(json.dumps(out, allow_nan=False))     # plain JSON values only, strict (no NaN)
@@ -634,7 +717,11 @@ def check_record(v, protocol, sha):
     counts, the scored seeds the protocol's; then every criterion ((a), (b), (c), (d), the alternative GO) from the
     headline seed-averaged deltas, the collapse rows and the latency rows, and the verdict by decide. A hand-edited
     status, verdict, criterion number or protocol sha256 is refused, never rendered. The headline numbers themselves
-    are bound to the dumps only by the byte rebuild (report.py --verdict)."""
+    are bound to the dumps only by the byte rebuild (report.py --verdict). The fewshot block (09-08) is either the
+    PENDING form {status PENDING, phase 9} ((d)'s few-shot path PENDING) or the few-shot record's form (_check_fewshot:
+    exactly FEWSHOT_KEYS, phase 9, criteria (d)'s fewshot k, a mode, the disclosure of that mode, a record {path,
+    sha256}), whose mean_delta and draws (d) is recomputed from and whose status must be the recomputed path's; the
+    few-shot numbers are bound to the dumps by report.fewshot_input when the verdict is built."""
     v = _verdict_record(v)
     if v.get("protocol") != {"path": "protocol.json", "sha256": sha}:
         raise SystemExit("the verdict names protocol %r, not the frozen protocol.json (sha256 %s); rebuild it with "
@@ -679,11 +766,18 @@ def check_record(v, protocol, sha):
         raise SystemExit("the verdict's scored seeds %s are not the protocol's %s; rebuild it with report.py --verdict"
                          % (seeds, want_seeds))
     cal, abst = _path_rule(crit["d"], "calibration"), _path_rule(crit["d"], "abstention")
+    block = v.get("fewshot")
+    few = None if block == _pending_fewshot() else _check_fewshot(block, protocol, "the verdict's few-shot block")
+    try:
+        d = criterion_d(_metric(h, cal.get("metric")), _metric(h, abst.get("metric")), _fewshot_result(few),
+                        crit["d"])
+    except SystemExit as e:
+        raise SystemExit("the verdict's few-shot block does not recompute (%s); %s" % (e.code, FEWSHOT_FIX))
     want = {
         "a": criterion_a(_metric(h, "micro_f1"), _metric(h, "macro_f1"), crit["a"]),
         "b": criterion_b(c_rows, seeds, crit["b"]),
         "c": criterion_c(v.get("latency"), crit["c"]),
-        "d": criterion_d(_metric(h, cal.get("metric")), _metric(h, abst.get("metric")), None, crit["d"]),
+        "d": d,
         "alternative_go": alternative_go(_metric(h, "micro_f1"), crit["alternative_go"]),
     }
     for k in want:
@@ -701,9 +795,9 @@ def check_record(v, protocol, sha):
         raise SystemExit("the verdict %r is not decide() of its recomputed statuses (%r); the record was edited, "
                          "rebuild it with report.py --verdict" % ((v.get("verdict") or {}).get("verdict"),
                                                                   dec["verdict"]))
-    if v.get("fewshot") != {"status": PENDING, "phase": FEWSHOT_PHASE}:
-        raise SystemExit("the verdict's few-shot block %r is not PENDING (Phase %d); rebuild it with report.py "
-                         "--verdict" % (v.get("fewshot"), FEWSHOT_PHASE))
+    if few is not None and few["status"] != want["d"]["paths"][-1]["status"]:
+        raise SystemExit("the verdict's few-shot block has status %r, its own numbers give %r; the record was edited, "
+                         "%s" % (few["status"], want["d"]["paths"][-1]["status"], FEWSHOT_FIX))
     return v
 
 
@@ -867,7 +961,15 @@ def render_go(v):
            "- Deltas: %s - %s, seed-averaged, headline (T: %s; θ: %s); B = %d, seed %d, %g%% interval, %s." % (
                h["a"], h["b"], "; ".join("%s %.4f" % kv for kv in h["temperature"].items()),
                "; ".join("%s %s" % kv for kv in h["theta"].items()), h["B"], h["seed"], h["level"] * 100, h["method"]),
-           "- Units: %s." % UNITS, ""]
+           "- Units: %s." % UNITS]
+    few = v["fewshot"]
+    if few != _pending_fewshot():                           # the few-shot record's form only: PENDING renders as before
+        out.append("- Few-shot path (Phase %d): k = %d, mean over %d draws, mode %s; record %s sha256 `%s`." % (
+            few["phase"], few["k"], len(few["draws"]), few["mode"], few["record"]["path"],
+            few["record"]["sha256"][:12]))
+        if few["disclosure"]:
+            out.append("- Few-shot compute fallback: %s." % few["disclosure"].rstrip("."))
+    out.append("")
     out += _md(("criterion", "status", "numbers"), [_criterion_row(k, crit[k], v) for k in keys])
     out += ["", "Statuses: %s." % "; ".join("%s %s" % ("(%s)" % k if len(k) == 1 else crit[k]["name"],
                                                        crit[k]["status"]) for k in keys), "",
