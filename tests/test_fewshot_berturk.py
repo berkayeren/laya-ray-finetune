@@ -1,0 +1,157 @@
+"""The BERTurk few-shot tracer (FEW-01, FEW-02; 09-03): a label-masked base, then a continued run from its own
+fine-tuned head, end to end through berturk_train.py and the HF Trainer on CPU, under a synthetic frozen protocol.
+
+tests/fewshot_synthetic.synthetic_protocol installs a protocol whose fewshot block holds the tag card, k 1 and 2, one
+draw (seed 0) and tiny recipes (base: --epochs 2 --stop-after-epoch 1, batch 4, max_len 32, cpu, fp32, mask label
+-100; continued: 1 epoch at the base LRs). The chosen selection run is stood in for by a 2-epoch unmasked tiny run on
+the same synthetic selection_train: its berturk_train.json canonical config is the synthetic postfit record's
+chosen.canonical, so check_base binds the masked base to it. berturk_train.main runs in this process (--manifest
+passed explicitly), like a user's command:
+
+- `--fewshot-base` keeps every message, sets the card column of every label vector to pilot.berturk.MASK_LABEL and
+  records the proof (fewshot.stage base, unmasked_held_out_labels {card: 0});
+- `--fewshot-draw 0 --fewshot-k 2 --base <masked base>` loads the masked base's own classifier head (no missing,
+  unexpected or mismatched key: the head is loaded, never re-initialised), trains the frozen support rows (all 48
+  labels) and replay rows (card masked) with the head in its own AdamW groups at the head LR, and records the proof
+  (new_tag_labels {card: support rows}, replay_unmasked_held_out_labels 0, the base's run id and canonical config);
+- `--print-run-id` of each command prints the run id the run then uses and creates nothing.
+In `make test` (unit: no Ray, no weights, no data download; seconds).
+"""
+import json
+import os
+
+import pytest
+
+from conftest import prepared
+from fewshot_synthetic import postfit_systems, synthetic_protocol
+from pilot import berturk
+from pilot import fewshot as fs
+from pilot.data import sha256_file
+from tiny_berturk import tiny_base
+
+pytestmark = pytest.mark.unit
+
+TIMEOUT = 600
+# the frozen rules of the synthetic protocol: the BERTurk base recipe and the continued training, at tiny sizes
+BERTURK_RULE = {"trainer": "berturk_train.py", "epochs": 2, "stop_after_epoch": 1, "encoder_lr": 2e-05,
+                "head_lr": 0.0001, "batch": 4, "max_len": 32, "device": "cpu", "dtype": "float32",
+                "mask_label": -100.0}
+CONTINUED = {"epochs": 1, "encoder_lr": 2e-05, "head_lr": 0.0001, "rule": "the synthetic continued training"}
+COMMON = ["--device", "cpu", "--batch", "4", "--max-len", "32", "--lr", "2e-05", "--head-lr", "0.0001",
+          "--seed", "0"]
+GROUPS = [("encoder", True, 2e-05), ("encoder", False, 2e-05), ("head", True, 0.0001), ("head", False, 0.0001)]
+
+
+def rules():
+    base_runs = json.loads(json.dumps(fs.RULES["base_runs"]))
+    base_runs.update(seeds=[0], berturk=dict(BERTURK_RULE))
+    return {"base_runs": base_runs, "continued_training": dict(CONTINUED)}
+
+
+@pytest.fixture
+def keep_threads():
+    import torch
+    n = torch.get_num_threads()
+    yield
+    torch.set_num_threads(n)
+
+
+def train(argv):
+    import berturk_train
+    return berturk_train.main([str(x) for x in argv])
+
+
+def print_run_id(argv, capsys):
+    capsys.readouterr()
+    assert train(argv + ["--print-run-id"]) is None
+    return capsys.readouterr().out.strip().splitlines()[-1]
+
+
+def read(ckpt):
+    with open(os.path.join(str(ckpt), berturk.RECORD), encoding="utf-8") as f:
+        raw = f.read()
+    return raw, json.loads(raw)
+
+
+def groups(rec):
+    return [(g["group"], g["decay"], g["lr"]) for g in rec["record"]["optimizer_groups"]]
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_berturk_masked_base_then_continued_run(tmp_path, synthetic_raw, monkeypatch, capsys, keep_threads):
+    import torch
+    import transformers
+    from safetensors.torch import load_file
+
+    tiny = tiny_base(tmp_path / "tiny")
+    # ---- the chosen selection run's stand-in: unmasked, the base recipe's full schedule ----
+    pre_dir, pre_manifest = prepared(tmp_path, synthetic_raw, name="pre")
+    chosen_out = tmp_path / "ckpt-chosen"
+    train(["--data", os.path.join(pre_dir, "splits", "selection_train.jsonl"), "--manifest", pre_manifest,
+           "--base", tiny, "--out", chosen_out, "--storage", tmp_path / "runs-chosen", "--epochs", "2"] + COMMON)
+    chosen = read(chosen_out)[1]["canonical"]
+    assert "fewshot" not in chosen and "mask_tags" not in chosen       # dropped when None
+    ns = synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, rules=rules(),
+                            systems=postfit_systems(tmp_path, {"berturk": chosen}))
+    assert fs.chosen_canonical(ns.protocol, "berturk") == chosen
+    sel = os.path.join(ns.out_dir, "splits", "selection_train.jsonl")
+    tags = ns.block["tags"]
+    assert tags == ["card"]
+
+    # ---- FEW-01: the label-masked base ----
+    storage, base_out = tmp_path / "runs-base", tmp_path / "ckpt-base"
+    base_argv = ["--data", sel, "--manifest", ns.manifest, "--base", tiny, "--out", base_out, "--storage", storage,
+                 "--epochs", "2", "--stop-after-epoch", "1", "--fewshot-base"] + COMMON
+    base_rid = print_run_id(base_argv, capsys)
+    assert not storage.exists() and not base_out.exists()           # --print-run-id creates nothing
+    train(base_argv)
+    raw, rec = read(base_out)
+    assert rec["run_id"] == base_rid == berturk.run_id(rec["canonical"]) and rec["epoch"] == 1
+    canon = rec["canonical"]
+    assert canon["mask_tags"] == ["card"] and canon["fewshot"] == {"protocol_sha256": ns.pin, "stage": "base"}
+    assert {k for k in set(canon) | set(chosen) if canon.get(k) != chosen.get(k)} <= set(fs.BASE_FREE)
+    assert rec["record"]["n_messages"] == len(ns.rows)              # every message is kept
+    assert rec["record"]["fewshot"] == {"protocol_sha256": ns.pin, "stage": "base", "tags": ["card"],
+                                        "unmasked_held_out_labels": {"card": 0}}
+    assert groups(rec) == GROUPS                                     # the fresh head at the head LR
+    assert "bank_" not in raw                                        # counts and digests only, never a uid
+
+    # ---- FEW-02: the continued run from that base's own head, on support plus replay ----
+    seen = {}
+    load = transformers.BertForSequenceClassification.from_pretrained
+
+    def spy(*args, **kwargs):                                       # the head as loaded, before any training step
+        model, info = load(*args, **kwargs)
+        seen.update(info=info, weight=model.classifier.weight.detach().clone(),
+                    bias=model.classifier.bias.detach().clone())
+        return model, info
+    monkeypatch.setattr(transformers.BertForSequenceClassification, "from_pretrained", spy)
+    storage, cont_out = tmp_path / "runs-cont", tmp_path / "ckpt-cont"
+    cont_argv = ["--data", sel, "--manifest", ns.manifest, "--base", base_out, "--out", cont_out, "--storage", storage,
+                 "--epochs", "1", "--fewshot-draw", "0", "--fewshot-k", "2"] + COMMON
+    cont_rid = print_run_id(cont_argv, capsys)
+    assert not storage.exists() and not seen                        # nothing created, nothing loaded
+    train(cont_argv)
+    head = load_file(os.path.join(str(base_out), "model.safetensors"))
+    assert all(not seen["info"][k] for k in ("missing_keys", "unexpected_keys", "mismatched_keys"))
+    assert torch.equal(seen["weight"], head["classifier.weight"]) and torch.equal(seen["bias"], head["classifier.bias"])
+    raw, rec = read(cont_out)
+    assert rec["run_id"] == cont_rid == berturk.run_id(rec["canonical"]) != base_rid
+    canon = rec["canonical"]
+    d = ns.block["draws"][0]
+    assert canon["fewshot"] == {"protocol_sha256": ns.pin, "stage": "continued", "draw": 0, "k": 2,
+                                "digest": d["digest"], "base_run_id": base_rid}
+    assert "mask_tags" not in canon and canon["epochs"] == 1 and canon["seed"] == d["seed"] == 0
+    assert canon["base_model_sha256"] == sha256_file(os.path.join(str(base_out), "model.safetensors"))
+    assert canon["base_config_sha256"] == sha256_file(os.path.join(str(base_out), "config.json"))
+    sel_k = fs.selection(ns.block, 0, 2)
+    n_sup, n_rep = len(sel_k["support"]), len(sel_k["replay"])
+    assert rec["record"]["n_messages"] == n_sup + n_rep
+    assert rec["record"]["fewshot"] == {
+        "protocol_sha256": ns.pin, "stage": "continued", "draw": 0, "k": 2, "digest": d["digest"], "tags": ["card"],
+        "support_rows": n_sup, "replay_rows": n_rep, "new_tag_labels": {"card": n_sup},
+        "replay_unmasked_held_out_labels": 0, "base": {"run_id": base_rid, "canonical": read(base_out)[1]["canonical"]}}
+    assert groups(rec) == GROUPS                                     # the loaded head, in its own groups
+    trained = load_file(os.path.join(str(cont_out), "model.safetensors"))
+    assert not torch.equal(trained["classifier.weight"], head["classifier.weight"])   # the head trained on
+    assert "bank_" not in raw
