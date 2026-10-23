@@ -116,6 +116,8 @@ TAGS = list(INTENTS)
 N_RANKED = 5                                                # tags listed in best_tags / worst_tags
 GRID_CENTI = np.arange(5, 96)                               # θ grid in integer hundredths 5..95, exact
 GRID = GRID_CENTI / 100.0                                   # 0.05..0.95, 91 points, each equal to its decimal literal
+GRID_CENTI.flags.writeable = False                          # read-only: pick reads both, so neither may drift
+GRID.flags.writeable = False                                # (03-REVIEW-gap-09 IN-02)
 MIN_VAL_POSITIVES = 10                                      # val positives a tag needs for its own θ
 TIE_RULE = "closest to 0.5; between two equally close points, the lower θ"
 BOOT_METRICS = ("micro_f1", "macro_f1", "exact_match", "top1_hit")
@@ -228,6 +230,8 @@ def pick(scores):
     scores = np.asarray(scores, dtype=np.float64)
     if scores.shape != GRID.shape:
         raise SystemExit("%d scores for a %d-point θ grid" % (scores.size, GRID.size))
+    if not np.isfinite(scores).all():                       # NaN would empty cand below (03-REVIEW-gap-09 IN-01)
+        raise SystemExit("θ-grid scores hold a non-finite value (NaN or inf); every score must be finite")
     cand = np.flatnonzero(scores == scores.max())           # ascending, so the lower θ comes first
     # the distance to 0.5 is exact in integer hundredths: equally close points tie exactly and argmin keeps the lower
     return float(GRID[cand[np.argmin(np.abs(GRID_CENTI[cand] - 50))]])

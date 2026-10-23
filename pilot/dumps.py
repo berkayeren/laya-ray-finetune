@@ -32,6 +32,7 @@ import hashlib
 import io
 import json
 import os
+import zipfile
 
 import numpy as np
 
@@ -182,8 +183,11 @@ def load_dump(run_dir, split_name, manifest_path=DEFAULT_MANIFEST):
         if keys != set(DUMP_KEYS):
             refuse("npz keys %s, expected exactly %s" % (sorted(keys), list(DUMP_KEYS)))
         logits, uids = z["logits"], z["uids"]
-    except ValueError:
-        refuse("the npz holds a pickled array (object dtype); refusing")
+    except (ValueError, OSError, EOFError, zipfile.BadZipFile) as e:   # 03-REVIEW IN-03: one line, never a traceback
+        text = " ".join(str(e).split())
+        if isinstance(e, ValueError) and "allow_pickle" in text:
+            refuse("the npz holds a pickled array (object dtype); refusing (%s)" % text)
+        refuse("the npz cannot be read (%s: %s)" % (type(e).__name__, text))
     if logits.dtype != np.float32 or logits.ndim != 2 or logits.shape[1] != len(TAGS):
         refuse("logits are %s %s, expected float32 [n, %d]" % (logits.dtype, logits.shape, len(TAGS)))
     if not np.isfinite(logits).all():
