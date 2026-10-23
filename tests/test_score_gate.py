@@ -267,6 +267,28 @@ def test_gate_trigger_texts(snap):
         "holds committed hotels_probe content"
 
 
+def test_gate_keys_on_the_identity_not_the_checkpoint_claim(snap, monkeypatch):
+    """08-REVIEW WR-02: a local Laya checkpoint whose rl_agent_config.json claims nothing (no fine_tuned, no
+    training.ray_train: the keys an edit could strip) is gated on test and HOTELS like any fine-tuned one, and refused
+    before any load unless it is a protocol final seed; on val it stays ungated."""
+    plain = tiny_checkpoint(snap.tmp / "plain", temperature=TINY_T)
+    with open(os.path.join(plain, "rl_agent_config.json"), encoding="utf-8") as f:
+        cfg = json.load(f)
+    tr = cfg.get("training")
+    assert cfg.get("fine_tuned") is not True and not (isinstance(tr, dict) and tr.get("ray_train")), cfg
+    for name, role in (("test", "test"), ("hotels_probe", "ood_probe")):
+        entry, cases = _entry_cases(snap, name)
+        assert score.gate_trigger("laya", plain, entry, snap.manifest, cases) == \
+            "is a %s split under the committed manifest" % role
+    v_entry, v_cases = _entry_cases(snap, "val")
+    assert score.gate_trigger("laya", plain, v_entry, snap.manifest, v_cases) is None
+    rid = dumps.run_id("laya", pilot.weights.identity(plain))
+    no_laya_load(monkeypatch)
+    for name in ("test", "hotels_probe"):
+        refused(laya_argv(snap, name, ckpt=plain), rid, "never scored on test or HOTELS")
+    assert files(snap.root) == []
+
+
 def test_gate_trigger_fails_closed_without_the_committed_files(snap):
     """08-REVIEW WR-01: under a non-committed manifest of the pinned dataset (the same dataset.raw_sha256), a split
     whose hashes differ from the committed entry's (prepare_data.py --no-include-no-intent --out OTHER drops rows)

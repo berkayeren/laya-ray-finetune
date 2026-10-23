@@ -126,8 +126,9 @@ def test_ray_train_refuses_non_empty_out_before_ray(tmp_repo):
 @pytest.mark.timeout(900)
 def test_score_refuses_a_finetuned_checkpoint_on_test_before_any_load(tmp_repo):
     """ROADMAP Phase 5 criterion 4 (RESEARCH A6): under the committed manifest (tmp_repo's own data/splits.json) a
-    fine-tuned checkpoint is refused on test by score.py and evaluate.py before any load; val, and a checkpoint that is
-    not fine-tuned on test, are unaffected."""
+    fine-tuned checkpoint is refused on test by score.py and evaluate.py before any load; val is unaffected. Since
+    08-REVIEW WR-02 the gate keys on the identity, so a local checkpoint that does not claim to be fine-tuned is
+    refused on test too."""
     import json
     from tiny_laya import tiny_checkpoint
     plain = tiny_checkpoint(tmp_repo / "plain")
@@ -147,7 +148,9 @@ def test_score_refuses_a_finetuned_checkpoint_on_test_before_any_load(tmp_repo):
     assert r.returncode == 0, r.stderr
     r = _run(tmp_repo, "score.py", "data/splits/test.jsonl", "--checkpoint", "plain", "--workers", "0",
              "--out-root", "ok")
-    assert r.returncode == 0, r.stderr
+    assert r.returncode != 0, (r.stdout, r.stderr)
+    assert "fine-tuned" in r.stderr and "Phase 8" in r.stderr and "Traceback" not in r.stderr, r.stderr
+    assert not (tmp_repo / "ok" / "test.npz").exists() and not any((tmp_repo / "ok").glob("*/test.npz"))
 
 
 @pytest.mark.timeout(900)

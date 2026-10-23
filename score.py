@@ -72,12 +72,14 @@ training.ray_train and the baselines record seed None and training None.
 
 The protocol gate (Phase 8; REP-01, ROADMAP Phase 8 criteria 1 and 4) replaced the Phase 5 Laya and Phase 6 BERTurk
 test interlocks (refuse_finetuned_test, refuse_berturk_test). It triggers (gate_trigger) on the content they keyed on,
-extended to HOTELS, computed on every parsed row before --n: a fine-tuned Laya checkpoint (rl_agent_config.json
-fine_tuned true or a training.ray_train block) on a split with role test or ood_probe under the committed manifest, any
-BERTurk checkpoint on a split with role test or ood_probe under any manifest, and either on a split of any role and
-manifest whose sha256 or uids_sha256 is the committed test or hotels_probe entry's, or that holds any (uid, message)
-pair of the committed test.jsonl or hotels_probe.jsonl (pilot.data.holds_committed; 05-REVIEW CR-02, 06-REVIEW
-CR-01), so a byte-different manifest copy cannot turn it off. A uid alone is not the key: the synthetic splits of the
+extended to HOTELS, computed on every parsed row before --n: a local Laya checkpoint (any but the pinned
+'multilingual'; keyed on the identity, never on the checkpoint's own fine_tuned claim, 08-REVIEW WR-02) on a split
+with role test or ood_probe under the committed manifest, any BERTurk checkpoint on a split with role test or
+ood_probe under any manifest, and either on a split of any role and manifest whose sha256 or uids_sha256 is the
+committed test or hotels_probe entry's, or that holds any (uid, message) pair of the committed test.jsonl or
+hotels_probe.jsonl (pilot.data.holds_committed; 05-REVIEW CR-02, 06-REVIEW CR-01), so a byte-different manifest copy
+cannot turn it off (and it fails closed while those files are missing, pilot.data.require_committed_files, 08-REVIEW
+WR-01). A uid alone is not the key: the synthetic splits of the
 tests reuse the uid scheme with other messages, so the CPU smoke test stays outside it. A triggered run is refused,
 before any checkpoint hashing, fetch, model load or Ray start (protocol_gate), unless every one of these holds:
 pilot.protocol.require_frozen passes (protocol.json exists and its bytes hash to the pin, so a missing, unpinned or
@@ -88,8 +90,8 @@ must be one of the protocol's final seeds of that system (require_final_seed, pi
 selection export, a retrained or an edited checkpoint never reaches test or HOTELS. Once means once: an existing
 gated dump is refused (and --force with it), and an npz an interrupted gated run left without its sidecar is refused
 naming the recovery (load_dump never read it: delete it and rerun the one command). An admitted dump's sidecar carries
-protocol_sha256, the pin; every other dump (val, zero-shot Laya, a not fine-tuned checkpoint, the baselines) has no
-such key and is scored exactly as before. Every gate refusal is one line starting GATE that names the checkpoint, the
+protocol_sha256, the pin; every other dump (val, zero-shot Laya, the baselines) has no such key and is scored
+exactly as before. Every gate refusal is one line starting GATE that names the checkpoint, the
 split, the trigger and the fix.
 
 Module-level imports stay torch-, Ray- and laya-free.
@@ -180,46 +182,39 @@ def sidecar_base(entry, split_name, manifest_path, n_subset):
 
 
 def check_checkpoint_arg(checkpoint):
-    """SystemExit unless --checkpoint is 'multilingual' or a dir holding rl_agent_config.json; no hashing or fetch."""
-    if checkpoint != "multilingual" and not os.path.isfile(os.path.join(checkpoint, "rl_agent_config.json")):
-        raise SystemExit("--checkpoint must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % checkpoint)
-
-
-def is_finetuned(checkpoint):
-    """True for a local checkpoint whose rl_agent_config.json says fine_tuned or holds a training.ray_train block;
-    False for 'multilingual' (the pinned zero-shot weights). No hashing, fetch or model load. SystemExit on a config
-    that is not valid JSON (05-REVIEW IN-06)."""
+    """SystemExit unless --checkpoint is 'multilingual' or a dir holding an rl_agent_config.json that is valid JSON
+    (05-REVIEW IN-06: a corrupt config is a refusal naming the file, not a traceback); no hashing or fetch."""
     if checkpoint == "multilingual":
-        return False
+        return
     path = os.path.join(checkpoint, "rl_agent_config.json")
+    if not os.path.isfile(path):
+        raise SystemExit("--checkpoint must be 'multilingual' (pinned) or a local Laya checkpoint dir: %s" % checkpoint)
     try:
         with open(path, encoding="utf-8") as f:
-            cfg = json.load(f)
+            json.load(f)
     except ValueError as e:
         raise SystemExit("%s is not valid JSON (%s); use a checkpoint dir laya.train.save_checkpoint or ray_train.py "
                          "wrote" % (_shown(path), e))
-    if not isinstance(cfg, dict):
-        return False
-    tr = cfg.get("training")
-    return cfg.get("fine_tuned") is True or bool(isinstance(tr, dict) and tr.get("ray_train"))
 
 
 def gate_trigger(model, checkpoint, entry, manifest_path, cases=()):
     """Why the protocol gate applies to this run (the text of the refusal), or None for an ungated run.
 
     The trigger is the content the Phase 5 and Phase 6 test interlocks keyed on, extended to HOTELS (05-REVIEW CR-02,
-    06-REVIEW CR-01): a fine-tuned Laya checkpoint (is_finetuned) on a split with role test or ood_probe under the
-    committed manifest; any BERTurk checkpoint (every one is fine-tuned) on a split with role test or ood_probe under
-    any manifest; and for both, a split of any role and manifest holding committed test or hotels_probe content
-    (pilot.data.holds_committed: the committed entry's sha256 or uids_sha256, or any (uid, message) pair of `cases`,
-    every parsed row). Majority, prior, the pinned zero-shot Laya and a Laya checkpoint that is not fine-tuned are
-    never gated. The content check fails closed (pilot.data.require_committed_files, 08-REVIEW WR-01): under a
-    non-committed manifest of the pinned dataset it refuses while the committed test.jsonl or hotels_probe.jsonl is
-    missing, since the pair key would then be empty and a relabelled or row-dropped copy of their content would pass
-    ungated. No hashing, fetch or model load."""
+    06-REVIEW CR-01): a local Laya checkpoint on a split with role test or ood_probe under the committed manifest; any
+    BERTurk checkpoint (every one is fine-tuned) on a split with role test or ood_probe under any manifest; and for
+    both, a split of any role and manifest holding committed test or hotels_probe content (pilot.data.holds_committed:
+    the committed entry's sha256 or uids_sha256, or any (uid, message) pair of `cases`, every parsed row). Every local
+    Laya checkpoint counts as fine-tuned, keyed on the identity (not 'multilingual'), never on what its
+    rl_agent_config.json says about itself (fine_tuned, training.ray_train), which an edit could remove (08-REVIEW
+    WR-02); this is the repository rule of tests/test_results.py (_finetuned: a Laya identity without the pinned
+    revision). Majority, prior and the pinned zero-shot Laya are never gated. The content check fails closed
+    (pilot.data.require_committed_files, 08-REVIEW WR-01): under a non-committed manifest of the pinned dataset it
+    refuses while the committed test.jsonl or hotels_probe.jsonl is missing, since the pair key would then be empty
+    and a relabelled or row-dropped copy of their content would pass ungated. No hashing, fetch or model load."""
     if model == "laya":
-        if not is_finetuned(checkpoint):
-            return None
+        if checkpoint == "multilingual":
+            return None                                      # the pinned zero-shot reference, never gated
         if entry["role"] in GATED_ROLES and manifest_is_committed(manifest_path):
             return "is a %s split under the committed manifest" % entry["role"]
     elif model == "berturk":
