@@ -15,10 +15,20 @@
   - majority and prior hold val and test only;
   - the zero-shot dir (ZERO_SHOT) holds val and test and may add one ungated hotels_probe dump, the reference row
     (08-RESEARCH A15: no protocol_sha256);
-  - no dump outside a final seed's dir carries protocol_sha256.
-  Both predicates are proven on planted cases: final_dir_problems on planted sidecars, and dir_problems on a planted
-  post-scoring tree of synthetic dumps (a final seed's dir with the four gated files, a selection candidate's dir with
-  a HOTELS dump, the zero-shot dir with an ungated one)
+  - Phase 9 (D-09, D-10): once results/fewshot/runs.json is tracked, every dump run id it lists is a few-shot dir,
+    checked against its entry (fewshot_dirs: pilot.fewshot.read_runs of the tracked manifest under the frozen pin,
+    i.e. check_runs under read_mode; {} while it is untracked, before 09-11). A masked base's dir holds at most its
+    ungated val dump (no protocol_sha256, no fewshot_runs_sha256) and its gated test dump; a continued run's dir at
+    most its gated test dump; a gated dump carries protocol_sha256 == the pin and fewshot_runs_sha256 == the
+    committed manifest's sha256; never a HOTELS dump; each present split complete (npz and sidecar) and full; system
+    kind, training run id and seed equal the entry's (fewshot_dir_problems). A fine-tuned dump whose training
+    canonical carries a fewshot binding in a dir the manifest does not list is a problem;
+  - no dump outside a final seed's or a listed few-shot dir carries protocol_sha256 or fewshot_runs_sha256.
+  Every predicate is proven on planted cases: final_dir_problems and fewshot_dir_problems on planted sidecars, and
+  dir_problems on a planted post-scoring tree of synthetic dumps (a final seed's dir with the four gated files, a
+  selection candidate's dir with a HOTELS dump, the zero-shot dir with an ungated one, the listed few-shot base and
+  continued dirs of a planted runs manifest, an unlisted few-shot dump). The rule is state-agnostic: the same code
+  passes on today's tree (no runs.json, no few-shot dump) and on the tree after 09-11's scoring
 - the zero-shot run id in the Makefile (LAYA_ZS) is the one score.py derives from the pinned Laya identity
 - the three single-system reports (majority, prior, zero-shot Laya) are full-test, not subset, with both temperature
   variants and a disclosed θ source
@@ -38,7 +48,6 @@ import pytest
 import pilot.data
 import report
 import score
-from conftest import prepared
 from fewshot_synthetic import plant_fewshot_dumps, plant_rules, plant_runs, synthetic_protocol
 from pilot import dumps, fewshot, protocol
 from pilot.data import DEFAULT_MANIFEST, sha256_file
@@ -53,6 +62,11 @@ START, END = "<!-- results-table:start -->", "<!-- results-table:end -->"
 SYSTEMS = ("majority", "prior", "laya-zeroshot-7b928d82")
 ZERO_SHOT = "laya-zeroshot-7b928d82"
 GATED_FILES = ("test.npz", "test.json", "hotels_probe.npz", "hotels_probe.json")
+FEWSHOT_RUNS = "results/fewshot/runs.json"           # pilot.fewshot.RUNS_PATH, repo-relative
+# the files a listed few-shot dir may hold, per stage (D-09): a masked base its ungated val and gated test dump, a
+# continued run its gated test dump; never HOTELS (fewshot.rules.test_admission)
+FEWSHOT_FILES = {"base": ("val.npz", "val.json", "test.npz", "test.json"), "continued": ("test.npz", "test.json")}
+GATE_KEYS = ("protocol_sha256", "fewshot_runs_sha256")
 
 
 def _final_dirs():
@@ -119,6 +133,91 @@ def test_finetuned_rule_covers_berturk():
     assert _finetuned({}) is False
 
 
+def fewshot_runs(path=None):
+    """({dump_run_id: entry}, runs sha256) of the tracked few-shot runs manifest (pilot.fewshot.RUNS_PATH, or `path`),
+    read through pilot.fewshot.read_runs under pilot.protocol.require_frozen()'s pin (check_runs under read_mode, and
+    the D-08 record's bytes); ({}, None) while it is untracked (git ls-files, never the working tree: before 09-11
+    commits it). A tracked manifest that read_runs refuses, or that is missing on disk, raises SystemExit."""
+    path = fewshot.RUNS_PATH if path is None else path
+    if not tracked(os.path.relpath(path, REPO_ROOT)):
+        return {}, None
+    proto, pin = protocol.require_frozen()
+    runs, sha = fewshot.read_runs(proto, pin, path)
+    if runs is None:
+        raise SystemExit("%s is tracked but missing in the working tree (`git checkout -- %s`)" % (path, FEWSHOT_RUNS))
+    return {e["dump_run_id"]: e for e in runs["entries"]}, sha
+
+
+def fewshot_dirs(path=None):
+    """{dump_run_id: runs-manifest entry} of the tracked few-shot runs manifest; {} while it is untracked."""
+    return fewshot_runs(path)[0]
+
+
+def _fewshot_bound(side):
+    """True when a dump sidecar's training canonical config carries a fewshot binding (a Phase 9 run)."""
+    tr = side.get("training") if isinstance(side, dict) else None
+    canon = tr.get("canonical") if isinstance(tr, dict) else None
+    return isinstance(canon, dict) and "fewshot" in canon
+
+
+def fewshot_dir_problems(rid, names, sidecars, entry, pin, runs_sha256):
+    """Problems of the listed few-shot dump dir `rid` holding the tracked file names `names`, with `sidecars` {split:
+    parsed sidecar} of its present dumps, against its runs-manifest `entry`, the protocol pin `pin` and the runs
+    manifest's sha256 `runs_sha256` (module docstring): a base holds at most its ungated val and gated test dump, a
+    continued run at most its gated test dump, never HOTELS; each present split complete and full, of the entry's
+    system kind, training run id and seed. One problem per violation; [] for an empty dir (before scoring)."""
+    names, stage, out = set(names), entry["stage"], []
+    allowed = set(FEWSHOT_FILES[stage])
+    what = ("a masked base's dir holds at most its ungated val dump and its gated test dump" if stage == "base" else
+            "a continued run's dir holds at most its gated test dump")
+    for split in sorted({n.split(".", 1)[0] for n in names - allowed}):
+        hotels = "; a few-shot checkpoint never reaches HOTELS (fewshot.rules.test_admission)" \
+            if split == "hotels_probe" else ""
+        out.append("%s/%s: %s (%s)%s" % (rid, split, what, ", ".join(sorted(n for n in names - allowed
+                                                                            if n.split(".", 1)[0] == split)), hotels))
+    if names and pin is None:
+        out.append("%s holds few-shot dumps while pilot.protocol.PROTOCOL_SHA256 is unset: a few-shot checkpoint is "
+                   "scored only behind the frozen protocol" % rid)
+    for split in ("val", "test"):
+        pair = {split + ".npz", split + ".json"} & names & allowed
+        if not pair:
+            continue
+        if len(pair) == 1:
+            out.append("%s/%s: an npz without its sidecar or a sidecar without its npz" % (rid, split))
+            continue
+        side = sidecars.get(split) or {}
+        if side.get("n_subset") is not None:
+            out.append("%s/%s.json is a subset dump (n_subset %r)" % (rid, split, side.get("n_subset")))
+        kind = (side.get("system") or {}).get("kind")
+        if kind != entry["kind"]:
+            out.append("%s/%s.json: system kind %r, the runs manifest's entry is %r" % (rid, split, kind,
+                                                                                       entry["kind"]))
+        train = (side.get("training") or {}).get("run_id")
+        if train != entry["train_run_id"]:
+            out.append("%s/%s.json: train run id %r, the runs manifest's entry is %r" % (rid, split, train,
+                                                                                        entry["train_run_id"]))
+        if side.get("seed") != entry["seed"]:
+            out.append("%s/%s.json: seed %r, the runs manifest's entry is %r" % (rid, split, side.get("seed"),
+                                                                                entry["seed"]))
+        if split == "val":
+            gated = [k for k in GATE_KEYS if k in side]
+            if gated:
+                out.append("%s/val.json carries %s: a masked base's val dump is ungated (score.py admits a few-shot "
+                           "checkpoint on test only)" % (rid, " and ".join(gated)))
+            continue
+        if all(side.get(k) is None for k in GATE_KEYS):
+            out.append("%s/test.json has no protocol_sha256 and no fewshot_runs_sha256: an ungated few-shot test dump "
+                       "(a few-shot checkpoint reaches test only through score.py's protocol gate)" % rid)
+            continue
+        for key, want in (("protocol_sha256", pin), ("fewshot_runs_sha256", runs_sha256)):
+            got = side.get(key)
+            if got is None:
+                out.append("%s/test.json has no %s: an ungated few-shot test dump" % (rid, key))
+            elif got != want:
+                out.append("%s/test.json has %s %s, the committed one is %s" % (rid, key, got, want))
+    return out
+
+
 def final_dir_problems(rid, names, sidecars, pin):
     """Problems of a final seed's dump dir `rid` holding the tracked file names `names`, with `sidecars` {split:
     parsed sidecar} of its present test and hotels_probe dumps, under the protocol pin `pin` (None while unfrozen):
@@ -149,10 +248,14 @@ def final_dir_problems(rid, names, sidecars, pin):
     return out
 
 
-def dir_problems(root, rid, names, manifest=DEFAULT_MANIFEST, pin=None, final_dirs=None):
-    """Problems of the dump dir root/rid holding the file names `names` under the Phase 8 results rule (module
-    docstring); every present dump is verified with pilot.dumps.load_dump against `manifest`."""
+def dir_problems(root, rid, names, manifest=DEFAULT_MANIFEST, pin=None, final_dirs=None, fewshot_dirs=None,
+                 runs_sha256=None):
+    """Problems of the dump dir root/rid holding the file names `names` under the Phase 8 and Phase 9 results rule
+    (module docstring); every present dump is verified with pilot.dumps.load_dump against `manifest`. `fewshot_dirs`
+    ({dump_run_id: entry}) and `runs_sha256` default to fewshot_runs() of the tracked manifest."""
     final_dirs = FINAL_DIRS if final_dirs is None else final_dirs
+    if fewshot_dirs is None:
+        fewshot_dirs, runs_sha256 = fewshot_runs()
     names, d, out = set(names), os.path.join(root, rid), []
 
     def load(split):
@@ -179,6 +282,17 @@ def dir_problems(root, rid, names, manifest=DEFAULT_MANIFEST, pin=None, final_di
             if side is not None and kind != final_dirs[rid][0]:
                 out.append("%s/%s: system kind %r, the final manifest's is %r" % (rid, split, kind, final_dirs[rid][0]))
         return out
+    if rid in fewshot_dirs:
+        entry, sidecars = fewshot_dirs[rid], {}
+        for split in ("val", "test", "hotels_probe"):
+            if split + ".json" in names:
+                with open(os.path.join(d, split + ".json"), encoding="utf-8") as f:
+                    sidecars[split] = json.load(f)
+        out += fewshot_dir_problems(rid, names, sidecars, entry, pin, runs_sha256)
+        for split in ("val", "test"):
+            if {split + ".npz", split + ".json"} <= names & set(FEWSHOT_FILES[entry["stage"]]):
+                load(split)
+        return out
     side = load("val")
     if side is None:
         return out
@@ -198,8 +312,16 @@ def dir_problems(root, rid, names, manifest=DEFAULT_MANIFEST, pin=None, final_di
         if pairs[split] <= names & allowed:
             loaded.append(load(split))
     for s in loaded:
-        if s is not None and "protocol_sha256" in s:
-            out.append("%s/%s carries protocol_sha256: only a final seed's dump is gated" % (rid, s["split"]["name"]))
+        if s is None:
+            continue
+        if _finetuned(s) and _fewshot_bound(s):
+            out.append("%s/%s: a few-shot dump (its training canonical carries a fewshot binding) whose dump run id is "
+                       "not listed in %s; only a listed few-shot checkpoint is committed" % (rid, s["split"]["name"],
+                                                                                            FEWSHOT_RUNS))
+        for key in GATE_KEYS:
+            if key in s:
+                out.append("%s/%s carries %s: only a final seed's or a listed few-shot dump is gated"
+                           % (rid, s["split"]["name"], key))
     return out
 
 
@@ -207,10 +329,11 @@ def test_committed_dumps_follow_the_protocol():
     ids = run_dirs()
     assert set(SYSTEMS) <= set(ids), "missing committed dumps for %s" % sorted(set(SYSTEMS) - set(ids))
     assert len(FINAL_DIRS) == 6 and {k for k, _ in FINAL_DIRS.values()} == {"laya", "berturk"}
+    fdirs, runs_sha = fewshot_runs()
     problems = []
     for rid in ids:
         names = [f.split("/")[3] for f in tracked("results/dumps/%s/" % rid)]
-        problems += dir_problems(DUMPS, rid, names, DEFAULT_MANIFEST, protocol.PROTOCOL_SHA256)
+        problems += dir_problems(DUMPS, rid, names, DEFAULT_MANIFEST, protocol.PROTOCOL_SHA256, None, fdirs, runs_sha)
     assert problems == [], "\n".join(problems)
 
 
@@ -433,7 +556,6 @@ def test_dir_rule_on_a_planted_post_scoring_tree(tmp_path, synthetic_raw, monkey
         want = ["test.json", "test.npz"] + (["val.json", "val.npz"] if e["stage"] == "base" else [])
         assert sorted(os.listdir(os.path.join(str(root), rid))) == sorted(want), rid
         assert problems(rid) == [], (rid, problems(rid))
-    assert problems("laya-sel", pin) == []                          # unchanged by the listed dirs
     canon = {"fewshot": {"protocol_sha256": pin, "stage": "base"}, "split": "selection_train", "seed": 0}
     _plant(snap, root, "laya-fewshot-unlisted", "val", "laya",
            training={"run_id": "laya-train-x", "split": "selection_train", "canonical": canon})
