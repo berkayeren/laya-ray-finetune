@@ -96,7 +96,8 @@ same_source, or a bound final seed's record; a selection candidate is refused of
 variant holds only its T, θ and ood_fp (pilot.metrics.fp_rate at θ 0.5 and at its θ: k of the n hotels messages with
 no gold among those columns predicting at least one of them, the rate, its Wilson 95% interval and per-tag counts);
 the record has in_sample false and no calibration, coverage or no-intent block, and --out writes its JSON only (no
-reliability diagram). score.py scores nothing on HOTELS before Phase 8.
+reliability diagram). Phase 8: score.py scores hotels_probe for laya and berturk, a fine-tuned checkpoint only
+through its protocol gate (one of the frozen protocol's final seeds, once, protocol_sha256 in the sidecar; 08-07).
 A --n subset dump is refused. A val record carries in_sample true and IN_SAMPLE_CAVEAT; the record holds the dump,
 manifest and record hashes, the binding, the rule texts (pilot.metrics.CALIBRATION_RULES), no timestamps or timings and
 no rounded value, so it rebuilds byte for byte (make confidence-reports). With --out X.json the record's reliability
@@ -114,6 +115,21 @@ follow the inputs' one common directory under the repo (confidence_svg_dir; reco
 the repo link to CONFIDENCE_SVG_DIR, results/confidence), so results/final/confidence renders with its own links. The
 README confidence block is this output (plan 07-08).
 
+--verdict [--out results/final/verdict.json] (REP-02, REP-03; 08-RESEARCH A3, A5, A6, A16, A18): the verdict/1 record
+of the frozen protocol, verdict_report = verdict_from(*pilot.protocol.require_frozen()), so it is refused while
+protocol.json is missing or PROTOCOL_SHA256 is unset or differs. verdict_from checks every protocol input's sha256,
+loads exactly the protocol's final-seed test dumps (protocol_sha256 == the pin, the seed and training.postfit_sha256
+bound, every dump on the protocol's test uids in one order), seed-averages each model's probabilities at its record T
+and applies the record's theta.shipped (raw: T 1, theta.raw), runs pilot.verdict.system_deltas with the protocol's
+bootstrap block, recomputes the label prior's frozen fractions (pilot.protocol.prior_floors, refused unless equal),
+takes the per-seed rows from run_report(..., postfit=RECORD), and pilot.verdict.build_verdict computes the criteria
+and the verdict from the protocol's criteria block. --out writes the JSON plus a newline atomically.
+--final-table VERDICT_JSON and --go-block VERDICT_JSON print pilot.verdict.render_final_table (REP-02's one results
+table: references, each fine-tuned model as mean ± sample std with its per-seed values and its seed-averaged system,
+the settings) and pilot.verdict.render_go (REP-03's mechanical GO block) of a saved record (08-12 writes them into the
+README). The Phase 3 results table (--table) and COMPARE_THETA_RULE stay as they are: the committed comparison reports
+embed them and rebuild byte for byte; the frozen seed-averaged θ rule lives in protocol.json.
+
 usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.json] [--manifest splits.json]
        python report.py results/dumps/FINAL_SEED_RUN_ID --split test --postfit results/postfit/laya.json [--out X.json]
        python report.py --compare A_RUN[,A_RUN2...] B_RUN[,B_RUN2...] [--split test] [--B 10000] [--seed 0] [--out x.json]
@@ -122,6 +138,9 @@ usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.js
                         [--out results/confidence/RUN_ID-val.json]
        python report.py --confidence results/dumps/RUN_ID --split hotels_probe [--postfit RECORD] [--out X.json]
        python report.py --confidence-table results/confidence [--out confidence.md]
+       python report.py --verdict [--out results/final/verdict.json]
+       python report.py --final-table results/final/verdict.json [--out table.md]
+       python report.py --go-block results/final/verdict.json [--out go.md]
 """
 import argparse
 import json
@@ -1376,16 +1395,26 @@ def main(argv=None):
                          "θ; with RUN_DIR: a final seed's record (its θ)")
     ap.add_argument("--confidence-table", nargs="+", metavar="PATH", default=None,
                     help="markdown of saved confidence/1 records (a directory expands to its sorted *.json)")
+    ap.add_argument("--verdict", action="store_true",
+                    help="the verdict/1 record of the frozen protocol (pilot.protocol.require_frozen); --out writes it")
+    ap.add_argument("--final-table", metavar="VERDICT_JSON", default=None,
+                    help="markdown of REP-02's final results table of a saved verdict/1 record")
+    ap.add_argument("--go-block", metavar="VERDICT_JSON", default=None,
+                    help="markdown of REP-03's mechanical GO block of a saved verdict/1 record")
     a = ap.parse_args(argv)
-    if sum(x is not None for x in (a.run_dir, a.compare, a.table, a.confidence, a.confidence_table)) != 1:
+    modes = (a.run_dir, a.compare, a.table, a.confidence, a.confidence_table, a.verdict or None, a.final_table,
+             a.go_block)
+    if sum(x is not None for x in modes) != 1:
         ap.error("give exactly one of RUN_DIR, --compare A_DIRS B_DIRS, --table PATH [PATH ...], "
-                 "--confidence RUN_DIR or --confidence-table PATH [PATH ...]")
+                 "--confidence RUN_DIR, --confidence-table PATH [PATH ...], --verdict, --final-table VERDICT_JSON "
+                 "or --go-block VERDICT_JSON")
     if a.postfit is not None and a.confidence is None and a.run_dir is None:
         ap.error("--postfit applies only to RUN_DIR or --confidence")
     if a.confidence is not None and a.split is None:
         ap.error("--confidence needs an explicit --split val|test|hotels_probe")
     if a.confidence is not None and a.out is not None and not a.out.endswith(".json"):
         ap.error("--confidence --out must name a .json file (the reliability diagram is written next to it as .svg)")
+    text = None                                             # the markdown modes
     if a.table is not None or a.confidence_table is not None:
         reports, paths = [], table_inputs(a.table if a.table is not None else a.confidence_table)
         for p in paths:
@@ -1393,13 +1422,22 @@ def main(argv=None):
                 reports.append(json.load(f))
         text = (render_table(reports) if a.table is not None
                 else render_confidence(reports, svg_dir=confidence_svg_dir(paths)))
+    elif a.final_table is not None or a.go_block is not None:
+        path = a.final_table if a.final_table is not None else a.go_block
+        if not os.path.isfile(path):
+            raise SystemExit("%s not found; write the verdict with report.py --verdict --out PATH" % path)
+        v = _read_json_input(path, "verdict record")
+        text = pilot.verdict.render_final_table(v) if a.final_table is not None else pilot.verdict.render_go(v)
+    if text is not None:
         print(text, end="")
         if a.out:
             os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
             write_atomic(a.out, text.encode("utf-8"))
         return text
     split = "test" if a.split is None else a.split
-    if a.confidence is not None:
+    if a.verdict:
+        report = verdict_report(a.manifest)
+    elif a.confidence is not None:
         report = confidence_report(a.confidence, split, a.manifest, a.postfit)
     elif a.compare is not None:
         report = compare(_run_dirs(ap, a.compare[0]), _run_dirs(ap, a.compare[1]), split, a.manifest, a.B, a.seed)

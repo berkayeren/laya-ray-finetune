@@ -35,6 +35,11 @@ sample std, ddof 1, A16, exact for equal values), the reference rows, the seed-a
 reported, A18), the collapse rows (A6: selection laya, selection berturk, then each model's final seeds), the latency
 rows, the few-shot path PENDING (Phase 9), every criterion from the protocol's criteria block and the overall verdict
 by decide. It refuses a protocol whose verdict rules are not this module's, holds no timestamp and rounds nothing.
+render_final_table(v) is REP-02's one results table (references in REFERENCE_ORDER, each fine-tuned model as
+mean ± sample std with its per-seed values in seed order, then its seed-averaged EVAL-07 system, and the settings)
+and render_go(v) REP-03's GO block (every criterion's status and numbers, the verdict and the frozen rule lines that
+fired, INCONCLUSIVE_MEANS whenever INCONCLUSIVE appears); both read only the record and the frozen texts, refuse
+another schema or a dropped seed, and round for display only.
 
 numpy and stdlib only: no torch, scipy, Ray, laya or sklearn (report.py imports this module).
 
@@ -50,6 +55,7 @@ usage: from pilot import verdict
        deltas = verdict.system_deltas(Y, P_laya, th_laya, P_berturk, th_berturk, protocol["bootstrap"])
        mean, std = verdict.mean_std([x0, x1, x2])                            # sample std, ddof 1
        v = verdict.build_verdict(protocol, sha, inputs)                      # verdict/1 (report.verdict_from)
+       verdict.render_final_table(v), verdict.render_go(v)                   # markdown (report.py --final-table, --go-block)
 """
 import json
 import math
@@ -473,6 +479,8 @@ TABLE_METRICS = ("micro_f1", "macro_f1", "exact_match", "top1_hit")
 VERDICT_KEYS = ("schema", "protocol", "split", "systems", "references", "seed_averaged", "collapse", "latency",
                 "fewshot", "criteria", "verdict")
 PRIOR_KEYS = ("prior_val_fraction", "prior_test_fraction", "prior_theta_global")
+# the seed-averaged deltas: system_deltas plus which system is A and B and each one's T and θ
+SEEDED_KEYS = ("metrics", "B", "seed", "level", "method", "a", "b", "temperature", "theta")
 FEWSHOT_PHASE = 9                                           # the phase that runs the few-shot path of (d)
 
 
@@ -570,8 +578,9 @@ def build_verdict(protocol, sha, inputs):
     systems = _systems(inputs)
     seeded = inputs.get("seed_averaged") or {}
     for variant in ("headline", "raw"):
-        if not isinstance(seeded.get(variant), dict) or "metrics" not in seeded[variant]:
-            raise SystemExit("the verdict inputs lack the %s seed-averaged deltas" % variant)
+        if not isinstance(seeded.get(variant), dict) or any(k not in seeded[variant] for k in SEEDED_KEYS):
+            raise SystemExit("the verdict inputs lack the %s seed-averaged deltas (keys %s)"
+                             % (variant, ", ".join(SEEDED_KEYS)))
     h = seeded["headline"]
     collapse = _collapse_rows(protocol, inputs, systems)
     cal, abst = _path_rule(crit["d"], "calibration"), _path_rule(crit["d"], "abstention")
@@ -595,3 +604,204 @@ def build_verdict(protocol, sha, inputs):
         return json.loads(json.dumps(out, allow_nan=False))     # plain JSON values only, strict (no NaN)
     except ValueError as e:
         raise SystemExit("the verdict holds a value that is not strict JSON (%s); it is refused" % e)
+
+
+# ---- the renders: REP-02's final table and REP-03's GO block (markdown; 08-12 writes them into the README) ----
+
+REFERENCE_ORDER = ("majority", "prior", "laya")             # REP-02's fixed order: majority, label prior, zero-shot Laya
+FINAL_HEADING = "### Results on test (Phase 8)"
+GO_HEADING = "### GO block (mechanical)"
+TABLE_HEADER = ("system", "run", "micro-F1", "macro-F1", "exact match", "top-1")
+SETTINGS_HEADER = ("system", "T", "θ shipped global (per-tag)", "θ raw global (per-tag)", "epoch / schedule",
+                   "encoder / head LR", "seeds", "train run ids", "selection run (chosen dump)")
+DESCRIPTIVE = ("classwise_ece", "exact_match", "top1_hit")  # GO block's closing line, with the raw micro-F1 delta
+SIDE = {"laya": "a", "berturk": "b"}                        # the seed-averaged deltas are Laya (a) - BERTurk (b)
+
+
+def _verdict_record(v):
+    if not isinstance(v, dict) or v.get("schema") != VERDICT_SCHEMA:
+        raise SystemExit("not a %s record (schema %r); write it with report.py --verdict --out PATH"
+                         % (VERDICT_SCHEMA, v.get("schema") if isinstance(v, dict) else type(v).__name__))
+    return v
+
+
+def _md(header, rows):
+    return ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"] + \
+        ["| " + " | ".join(r) + " |" for r in rows]
+
+
+def _f(x, fmt="%.3f"):
+    return "n/a" if x is None else fmt % x
+
+
+def _points(x):
+    return "n/a" if x is None else "%+.2f points" % (x * 100)
+
+
+def _ci(ci):
+    return "n/a" if ci is None else "[%+.2f, %+.2f]" % (ci[0] * 100, ci[1] * 100)
+
+
+def _seed_text(seeds):
+    return ", ".join("%d" % s for s in seeds)
+
+
+def _references(v):
+    """The verdict's reference rows in REFERENCE_ORDER (by system kind, then name); none, an unknown kind or a row
+    without a table metric is refused (REP-02 empty edge)."""
+    refs = v.get("references") or []
+    if not refs:
+        raise SystemExit("the verdict holds no reference row; REP-02's table needs the protocol's reference reports "
+                         "(rebuild it with report.py --verdict)")
+    for r in refs:
+        if r.get("kind") not in REFERENCE_ORDER or any(m not in r for m in TABLE_METRICS):
+            raise SystemExit("reference row %r is not a %s row with %s" % (r.get("name"), "/".join(REFERENCE_ORDER),
+                                                                       ", ".join(TABLE_METRICS)))
+    return sorted(refs, key=lambda r: (REFERENCE_ORDER.index(r["kind"]), str(r.get("name"))))
+
+
+def _ref_label(r):
+    if r.get("checkpoint"):
+        return "%s (%s)" % (r["kind"], r["checkpoint"])
+    return "%s (train: %s)" % (r["kind"], r.get("baseline_split"))
+
+
+def _fine_tuned(v, kind):
+    """(system, seeds) of a fine-tuned system, refused unless its per-seed rows are exactly its listed seeds (at least
+    two; a seed is never dropped) and its summary is mean_std of those rows (else the record was edited)."""
+    s = (v.get("systems") or {}).get(kind) or {}
+    seeds = [r.get("seed") for r in s.get("per_seed") or []]
+    if seeds != list(s.get("seeds") or []) or len(seeds) < 2:
+        raise SystemExit("%s: per-seed rows for seeds %s, the protocol lists seeds %s; every final seed is shown, none "
+                         "dropped" % (kind, seeds, s.get("seeds")))
+    for m in TABLE_METRICS:
+        values = [r[m] for r in s["per_seed"]]
+        mean, std = mean_std(values)
+        if (s.get("summary") or {}).get(m) != {"mean": mean, "std": std, "values": values}:
+            raise SystemExit("%s: the %s summary is not mean_std of its per-seed values; rebuild the record with "
+                             "report.py --verdict" % (kind, m))
+    return s, seeds
+
+
+def render_final_table(v):
+    """REP-02's one results table (markdown, level-3 heading) of a verdict/1 record: the reference rows in
+    REFERENCE_ORDER (majority, prior, zero-shot Laya), then per fine-tuned model (Laya, BERTurk) a row of mean ± sample
+    std (ddof 1, A16) with the per-seed values in seed order and a row of its seed-averaged EVAL-07 system (the one
+    the GO block compares), at the val-selected θ and headline T; then the settings table (T, θ shipped and raw with
+    the per-tag count, epoch and schedule, encoder and head LR, seeds, train run ids, the selection run) and the bound
+    records. Values are rounded for display only (3 decimals); identical input gives identical text."""
+    v = _verdict_record(v)
+    sp, refs = v["split"], _references(v)
+    h = v["seed_averaged"]["headline"]
+    rows, settings, records = [], [], []
+    for r in refs:
+        rows.append((_ref_label(r), r["run_id"]) + tuple(_f(r[m]) for m in TABLE_METRICS))
+        settings.append((_ref_label(r), "%.4f" % r["temperature"], "%.2f (%d)" % (r["theta"]["global"],
+                                                                                r["theta"]["n_per_tag"]))
+                        + ("n/a",) * 6)
+    for kind in KINDS:
+        s, seeds = _fine_tuned(v, kind)
+        st = s["settings"]
+        rows.append(("%s fine-tuned (final seeds %s)" % (kind, _seed_text(seeds)),
+                     "mean ± std (seed %s)" % " / ".join("%d" % x for x in seeds))
+                    + tuple("%.3f ± %.3f (%s)" % (s["summary"][m]["mean"], s["summary"][m]["std"],
+                                                  " / ".join(_f(x) for x in s["summary"][m]["values"]))
+                            for m in TABLE_METRICS))
+        rows.append(("%s fine-tuned, seed-averaged (EVAL-07 system)" % kind, "seeds %s averaged" % _seed_text(seeds))
+                    + tuple(_f(h["metrics"][m][SIDE[kind]]) for m in TABLE_METRICS))
+        th = st["theta"]
+        settings.append(("%s fine-tuned" % kind, "%.4f" % st["temperature"],
+                         "%.2f (%d)" % (th["shipped"]["global"], th["shipped"]["n_per_tag"]),
+                         "%.2f (%d)" % (th["raw"]["global"], th["raw"]["n_per_tag"]),
+                         "%d / %d" % (st["epoch"], st["epochs_schedule"]),
+                         "%g / %g" % (st["encoder_lr"], st["head_lr"]), _seed_text(seeds),
+                         ", ".join(r["train_run_id"] for r in s["per_seed"]),
+                         "%s (%s)" % (st["train_run_id"], st["chosen"])))
+        records.append("- %s: postfit record %s `%s`, final manifest %s `%s`, config sha256 without the seed `%s`."
+                       % (kind, s["postfit"]["path"], s["postfit"]["sha256"][:12], s["final_manifest"]["path"],
+                          s["final_manifest"]["sha256"][:12], str(st.get("config_sha256_sans_seed"))[:12]))
+    out = [FINAL_HEADING, "",
+           "Split %s: n = %d (%d no-intent), sha256 `%s`, uids sha256 `%s`; protocol sha256 `%s`."
+           % (sp["name"], sp["n"], sp["n_no_intent"], sp["sha256"][:12], sp["uids_sha256"][:12],
+              v["protocol"]["sha256"][:12]),
+           "Every value is at the val-selected θ and headline T: a reference row at its own val θ, a fine-tuned row "
+           "as the mean ± sample std (ddof 1) over its final seeds with the per-seed values in seed order, the "
+           "seed-averaged row the system the GO block compares (each seed at its record T, averaged, then the "
+           "record's theta.shipped).", ""]
+    out += _md(TABLE_HEADER, rows)
+    out += ["", "Settings (T and θ are each postfit record's, chosen on val, never re-selected on test):", ""]
+    out += _md(SETTINGS_HEADER, settings) + [""] + records
+    return "\n".join(out) + "\n"
+
+
+def _criterion_row(key, c, v):
+    """(label, status, numbers) of one GO block row; every number and label read from the verdict record."""
+    label = "(%s) %s" % (key, c["name"]) if len(key) == 1 else c["name"]
+    if key == "a":
+        nums = "micro-F1 delta %s, CI %s; macro-F1 delta %s, CI %s (%s)" % (
+            _points(c["micro"]["delta"]), _ci(c["micro"]["ci"]), _points(c["macro"]["delta"]), _ci(c["macro"]["ci"]),
+            c["macro_ci_label"])
+    elif key == "b":
+        bad = ["%s %s s%s" % (r["run"], r["kind"], r["seed"]) for r in c["rows"] if r["collapsed"]]
+        nums = "%d runs, %d collapsed%s; seeds %s" % (
+            len(c["rows"]), len(bad), (": " + ", ".join(bad)) if bad else "",
+            "; ".join("%s %s%s" % (m, _seed_text(s), "" if c["seed_check"].get(m) else " (seed check failed)")
+                      for m, s in c["seeds"].items()))
+    elif key == "c":
+        nums = "%s; %s" % (c["label"], "; ".join("%s %s p50 %s s, p95 %s s (n = %s)" % (
+            r["system"], r["device"], _f(r["p50"]), _f(r["p95"]), r["n"]) for r in c["rows"]))
+    elif key == "d":
+        parts = []
+        for p in c["paths"]:
+            if p["status"] == PENDING:
+                parts.append("%s (%s): %s (Phase %s)" % (p["path"], p["metric"], p["status"], v["fewshot"]["phase"]))
+            elif "delta" in p:
+                parts.append("%s (%s): %s, delta %s, CI %s" % (p["path"], p["metric"], p["status"], _points(p["delta"]),
+                                                               _ci(p["ci"])))
+            else:
+                parts.append("%s (%s): %s, mean delta %s" % (p["path"], p["metric"], p["status"],
+                                                             _points(p["mean_delta"])))
+        nums = "; ".join(parts)
+    else:
+        nums = "micro-F1 delta %s, CI %s" % (_points(c["micro"]["delta"]), _ci(c["micro"]["ci"]))
+    return label, c["status"], nums
+
+
+def render_go(v):
+    """REP-03's GO block (markdown, level-3 heading) of a verdict/1 record: the protocol sha256 (first 12 hex
+    characters), the split and the bootstrap of the seed-averaged deltas, one row per criterion ((a), (b), (c), (d))
+    and the alternative GO with its status and numbers (points, 95% CI), the statuses line ((c) REPORTED (not
+    gated)), the verdict and the frozen rule line(s) that fired, INCONCLUSIVE_MEANS whenever INCONCLUSIVE appears, and
+    a closing descriptive line (classwise ECE, exact match and top-1 deltas, the raw variant's micro-F1 delta). Every
+    label and number is a field of the record or a frozen text (VERDICT_RULES, INCONCLUSIVE_MEANS, UNITS); rounding is
+    for display only (2 decimals for points, 3 for metrics)."""
+    v = _verdict_record(v)
+    crit, dec, sp = v["criteria"], v["verdict"], v["split"]
+    h, raw = v["seed_averaged"]["headline"], v["seed_averaged"]["raw"]
+    keys = ("a", "b", "c", "d", "alternative_go")
+    out = [GO_HEADING, "",
+           "- Protocol: protocol.json sha256 `%s`." % v["protocol"]["sha256"][:12],
+           "- Split %s: n = %d (%d no-intent)." % (sp["name"], sp["n"], sp["n_no_intent"]),
+           "- Deltas: %s - %s, seed-averaged, headline (T: %s; θ: %s); B = %d, seed %d, %g%% interval, %s." % (
+               h["a"], h["b"], "; ".join("%s %.4f" % kv for kv in h["temperature"].items()),
+               "; ".join("%s %s" % kv for kv in h["theta"].items()), h["B"], h["seed"], h["level"] * 100, h["method"]),
+           "- Units: %s." % UNITS, ""]
+    out += _md(("criterion", "status", "numbers"), [_criterion_row(k, crit[k], v) for k in keys])
+    out += ["", "Statuses: %s." % "; ".join("%s %s" % ("(%s)" % k if len(k) == 1 else crit[k]["name"],
+                                                       crit[k]["status"]) for k in keys), "",
+            "**Verdict: %s**" % dec["verdict"], ""]
+    fired = dec["rule"] if isinstance(dec["rule"], list) else [dec["rule"]]
+    if dec["provisional"]:
+        out.append("- Rule %d: %s" % (len(VERDICT_RULES), VERDICT_RULES[-1]))
+    out += ["- Rule %d: %s" % (i, VERDICT_RULES[i - 1]) for i in fired if i is not None]
+    statuses = [crit[k]["status"] for k in keys] + [dec["verdict"], dec.get("if_fewshot_met"),
+                                                    dec.get("if_fewshot_not_met")]
+    if INCONCLUSIVE in statuses:
+        out.append("- %s %s." % (INCONCLUSIVE, INCONCLUSIVE_MEANS))
+    m = h["metrics"]
+    out += ["", "Descriptive, not gating: %s; raw (T: %s; θ: %s) micro_f1 delta %s, CI %s." % (
+        "; ".join("%s delta %s, CI %s" % (k, _points(m[k]["delta"]), _ci(m[k]["ci"])) for k in DESCRIPTIVE),
+        "; ".join("%s %.4f" % kv for kv in raw["temperature"].items()),
+        "; ".join("%s %s" % kv for kv in raw["theta"].items()),
+        _points(raw["metrics"]["micro_f1"]["delta"]), _ci(raw["metrics"]["micro_f1"]["ci"]))]
+    return "\n".join(out) + "\n"

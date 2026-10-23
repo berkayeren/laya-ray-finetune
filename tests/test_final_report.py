@@ -32,7 +32,9 @@ lists every input with its sha256. report.verdict_from checks every input's sha2
 final-seed test dumps (pin, seed, postfit binding, pairing, the protocol's test uids), seed-averages each model at its
 record T and θ (A5), recomputes the prior's frozen fractions and hands the inputs to pilot.verdict.build_verdict, whose
 criteria and verdict the tests recompute from the record's own numbers. Every refusal is exercised on a copy of the
-dumps or of the protocol dict, so the module fixture is never changed.
+dumps or of the protocol dict, so the module fixture is never changed. The renders (render_final_table, render_go)
+and the CLI modes (--verdict, --final-table, --go-block) are tested on the synthetic verdict and on build_verdict of
+hand-made inputs (INCONCLUSIVE, PROVISIONAL, GO, equal seed values).
 """
 import copy as copy_module
 import json
@@ -608,7 +610,8 @@ def _hand_deltas(micro=(0.0, -0.01, 0.01), macro=(0.0, -0.02, 0.02), brier=(0.00
          "top1_hit": _delta(-0.01, -0.03, 0.01), "brier": _delta(*brier, a=0.02),
          "classwise_ece": _delta(0.002, 0.001, 0.004, a=0.03), "precision_at_80": _delta(*p80, a=0.8)}
     return {"n": 413, "B": 10000, "seed": 0, "level": 0.95, "method": metrics.BOOT_METHOD, "coverage": 80,
-            "metrics": m, "a": "laya", "b": "berturk"}
+            "metrics": m, "a": "laya", "b": "berturk", "temperature": {"laya": 4.77, "berturk": 0.743},
+            "theta": {"laya": "theta.shipped", "berturk": "theta.shipped"}}
 
 
 def _hand_seed(kind, seed, values=None):
@@ -642,7 +645,8 @@ def _hand_inputs(per_seed=None, **deltas):
                             "kind": "majority", "checkpoint": None, "baseline_split": "final_train",
                             "temperature": 1.0, "theta": {"global": 0.5, "n_per_tag": 13}, "micro_f1": 0.14,
                             "macro_f1": 0.05, "exact_match": 0.0, "top1_hit": 0.2, "n": 413, "n_top1": 398}],
-            "seed_averaged": {"headline": h, "raw": copy_module.deepcopy(h)},
+            "seed_averaged": {"headline": h, "raw": dict(copy_module.deepcopy(h), temperature={k: 1.0 for k in KINDS},
+                                                         theta={k: "theta.raw" for k in KINDS})},
             "collapse": {"selection": [{"kind": k, "seed": 0, "train_run_id": "%s-selection_train-s0" % k,
                                         "dump_run_id": "%s-chosen" % k, "objective": {"tp": 426, "fp": 142, "fn": 57},
                                         "loss_by_epoch": [0.8, 0.5, 0.3]} for k in KINDS]},
@@ -703,7 +707,10 @@ def _cell(values):
 
 
 def _table_rows(text):
-    return [line for line in text.split("\n") if line.startswith("| ") and not line.startswith("| system")]
+    """The body rows of the markdown tables in text (a header row is the one followed by the |---| line)."""
+    lines = text.split("\n")
+    return [x for i, x in enumerate(lines) if x.startswith("| ")
+            and not (i + 1 < len(lines) and lines[i + 1].startswith("|---"))]
 
 
 def test_render_final_table_rows_in_the_fixed_order(synthetic_verdict):
