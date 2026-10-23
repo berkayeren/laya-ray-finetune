@@ -1,0 +1,117 @@
+{
+  "dump_sha256": "9206f584734725b491c8ad0b5b53374cdf1216706022077f43a230a1cbce1107",
+  "intents_order_sha256": "43c13c0bf2037c49b9d875bf979d46fc67bb672c762b383caf318d2b2e409d4b",
+  "logit": "margin z_true - z_false per tag; P(tag) = sigmoid(logit / T)",
+  "manifest": {
+    "is_committed": true,
+    "path": "data/splits.json",
+    "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103"
+  },
+  "n_subset": null,
+  "protocol_sha256": "0d337d2019f9fcb1874fa0eb23f5f2547312e1675c832f886449d573cef54a8a",
+  "questions_sha256": "2e7255501fdeacd1b25ab62bd07f0e3b0cadec2e4ee0df813ea763c8ff68288d",
+  "run_id": "laya-f43484c8aab4-b43eaa54-cc216d59",
+  "schema_version": 1,
+  "scorer": {
+    "amp_enabled": false,
+    "batching": "one message per forward (laya.calibrate.records_from_labeled via pilot.laya_adapter)",
+    "device": "mps",
+    "dtype": "torch.float32",
+    "laya_default_amp": true,
+    "laya_default_dtype": "torch.float16",
+    "laya_version": "0.4.6",
+    "numpy_version": "2.5.4",
+    "torch_threads": 2,
+    "torch_version": "2.14.1",
+    "workers": 0
+  },
+  "seed": 1,
+  "split": {
+    "n_messages": 1009,
+    "name": "hotels_probe",
+    "path": "splits/hotels_probe.jsonl",
+    "role": "ood_probe",
+    "sha256": "6120dadef8443e5a3ea5688cc470b816e840fbc0f0a1b28c3931c2e18a09eea7",
+    "uids_sha256": "78172fd5dbd5666c2d722ab8174f7d8fe625412e1a2e662a9c47682af0c8e647"
+  },
+  "subset_seed": 0,
+  "system": {
+    "baseline_source": null,
+    "checkpoint": "ckpt-final-s1",
+    "checkpoint_identity": {
+      "config_sha256": "b43eaa5460b6e1770e081247f38527931954e7e0332ef5928b275b18cf1aa6c9",
+      "files_sha256": {
+        "encoder/config.json": "81d6856137aeb1d9cfbc1c1776d5b8196eed2e6ff879e894f517a21a580cc9d3",
+        "tokenizer/tokenizer.json": "dbba919c6e5e492bc22beb80abb64e6fcc7e8744dc696e8388b8c977767afa4b",
+        "tokenizer/tokenizer_config.json#normalized": "56f416183cdd31134a297020bbe9a6f602c129e51ff2d3dce9f99c5279e89928"
+      },
+      "local": true,
+      "model_sha256": "f43484c8aab4af7f54ab97b271b5ee0a05c2d8c39bd4d80d313d5b4153b9924a"
+    },
+    "clip_eps": null,
+    "kind": "laya"
+  },
+  "temperature": {
+    "shipped": 4.7698254528950175,
+    "source": "laya.load (clamped noul:2 temperature, what the public API serves)"
+  },
+  "timing": {
+    "inference_seconds": 341.27908870900865,
+    "sec_per_msg": 0.338234973943517,
+    "seconds": 344.76059770584106
+  },
+  "training": {
+    "calibrated": true,
+    "canonical": {
+      "adamw_foreach": false,
+      "adamw_fused": false,
+      "amp": false,
+      "base_config_sha256": "25061739243b617ad88d1219ba6f8a9c86c5881ca28df024fa2d9b3b2fcc30c6",
+      "base_model_sha256": "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204",
+      "clip_grad_norm": 1.0,
+      "data_role": "train",
+      "data_sha256": "01c7274d7c9b0368191e7b2f42972b4025e08ef43e1fae14625777f09873024c",
+      "device": "mps",
+      "encoder_lr": 2e-05,
+      "epochs": 4,
+      "freeze_embeddings": false,
+      "freeze_encoder": false,
+      "grad_accum": 4,
+      "grad_checkpointing": true,
+      "head_lr": 0.0001,
+      "head_max_len": null,
+      "laya_version": "0.4.6",
+      "loss": "rlcd",
+      "max_len": 128,
+      "max_messages": null,
+      "micro_batch": 8,
+      "neg": 8,
+      "neg_seed": 1,
+      "postfit_sha256": "e08e8735b19c0973606622be546617ef851f1bf06e2b2d60b1d920d8676b6da2",
+      "seed": 1,
+      "shuffle_options": false,
+      "split": "final_train",
+      "stop_after_epoch": 3,
+      "weight_decay": 0.01,
+      "workers": 1
+    },
+    "config_sha256_sans_seed": "4fe1e17f770171cafff5e80196f521eb73566e949fc8877b1226d612eff62650",
+    "encoder_lr": 2e-05,
+    "epoch": 3,
+    "epochs_schedule": 4,
+    "fallback": false,
+    "head_lr": 0.0001,
+    "loss_by_epoch": [
+      0.8122251204161328,
+      0.5530531584231787,
+      0.2935788590662834
+    ],
+    "neg_seed": 1,
+    "postfit_sha256": "e08e8735b19c0973606622be546617ef851f1bf06e2b2d60b1d920d8676b6da2",
+    "run_id": "laya-final_train-neg8-s1-07a1ee59",
+    "rung": "none",
+    "split": "final_train",
+    "stop_after_epoch": 3,
+    "weaker": false
+  }
+}

@@ -1,0 +1,133 @@
+{
+  "dump_sha256": "1020cc9ba5c2615198183f5007bedb53fe701eaedfc71eff7e1736757dc86652",
+  "intents_order_sha256": "43c13c0bf2037c49b9d875bf979d46fc67bb672c762b383caf318d2b2e409d4b",
+  "logit": "classifier logit per tag; P(tag) = sigmoid(logit / T)",
+  "manifest": {
+    "is_committed": true,
+    "path": "data/splits.json",
+    "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103"
+  },
+  "n_subset": null,
+  "protocol_sha256": "0d337d2019f9fcb1874fa0eb23f5f2547312e1675c832f886449d573cef54a8a",
+  "questions_sha256": "2e7255501fdeacd1b25ab62bd07f0e3b0cadec2e4ee0df813ea763c8ff68288d",
+  "run_id": "berturk-06685feeb69f-faf017a7-29446b61",
+  "schema_version": 1,
+  "scorer": {
+    "amp_enabled": false,
+    "batching": "16 messages per forward, padded to the longest, truncated at max_len 128",
+    "device": "mps",
+    "dtype": "torch.float32",
+    "numpy_version": "2.5.4",
+    "torch_threads": 2,
+    "torch_version": "2.14.1",
+    "transformers_version": "5.19.0",
+    "workers": 0
+  },
+  "seed": 2,
+  "split": {
+    "n_messages": 1009,
+    "name": "hotels_probe",
+    "path": "splits/hotels_probe.jsonl",
+    "role": "ood_probe",
+    "sha256": "6120dadef8443e5a3ea5688cc470b816e840fbc0f0a1b28c3931c2e18a09eea7",
+    "uids_sha256": "78172fd5dbd5666c2d722ab8174f7d8fe625412e1a2e662a9c47682af0c8e647"
+  },
+  "subset_seed": 0,
+  "system": {
+    "baseline_source": null,
+    "checkpoint": "ckpt-berturk-final-s2",
+    "checkpoint_identity": {
+      "config_sha256": "0f2ddf6a11a3cb9371b08ec87ec088afb61217cc9e92e19585e61b91957554df",
+      "files_sha256": {
+        "tokenizer_config.json": "abb7cc8c813870875157e0dff63bc21bb521d4b5d3c35c2eb9facaee4fd9532f",
+        "vocab.txt": "ca72d2012b1e46ed42f5df2dc9675f9da0b37a481601785cb4dff91f67fcca65"
+      },
+      "kind": "berturk",
+      "local": true,
+      "model_sha256": "06685feeb69f6e6c2849efff00b773d741958d1e8fc9e6fabc4ff8c0cc2e0b58",
+      "record_sha256": "faf017a7c8ae9592e4d3fca554614b924466c6998bc3ca3e62aa2bb308280760"
+    },
+    "clip_eps": null,
+    "kind": "berturk"
+  },
+  "temperature": {
+    "shipped": 0.7430447674665697,
+    "source": "berturk_train.json temperature"
+  },
+  "timing": {
+    "inference_seconds": 1.8938920009532012,
+    "sec_per_msg": 0.0018769990098644214,
+    "seconds": 1.9463632106781006
+  },
+  "training": {
+    "calibrated": true,
+    "canonical": {
+      "accelerate_version": "1.15.0",
+      "base_config_sha256": "3be8dbe74813f59a252773db34bd67640166d36c507ded3b06b55f91f05ce78a",
+      "base_model_sha256": "18e29c6c61a046ab18fa48aeec3dce1285b09c5648d9ba68da1474940b9a9fcd",
+      "batch": 32,
+      "data_role": "train",
+      "data_sha256": "01c7274d7c9b0368191e7b2f42972b4025e08ef43e1fae14625777f09873024c",
+      "device": "mps",
+      "encoder_lr": 2e-05,
+      "epochs": 30,
+      "head_lr": 0.0001,
+      "loss": "masked_bce",
+      "lr_scheduler": "linear",
+      "max_grad_norm": 1.0,
+      "max_len": 128,
+      "optim": "adamw_torch",
+      "postfit_sha256": "83b34dfb524e6e096b94e6b6abbc0ad32aad2175332be2e2daba8af2a15fbf12",
+      "seed": 2,
+      "split": "final_train",
+      "stop_after_epoch": 29,
+      "transformers_version": "5.19.0",
+      "warmup_ratio": 0.1,
+      "weight_decay": 0.01
+    },
+    "config_sha256_sans_seed": "16cb358001af83c1b4df53ad40fd0d14cbc991ef38f81ae1084bc0dc71b09adc",
+    "encoder_lr": 2e-05,
+    "epoch": 29,
+    "epochs_schedule": 30,
+    "fallback": null,
+    "head_lr": 0.0001,
+    "loss_by_epoch": [
+      0.6396955137069409,
+      0.30861324358444947,
+      0.18094551104765672,
+      0.16969370756011742,
+      0.1586220608307765,
+      0.14490931352170613,
+      0.13192920515743586,
+      0.1203654776685513,
+      0.1093868871147816,
+      0.10001415042923047,
+      0.09170821652962612,
+      0.08416385834033673,
+      0.07778102159500122,
+      0.07224496002667226,
+      0.06761646636116964,
+      0.06332740667634286,
+      0.059647367908977546,
+      0.05617643642024352,
+      0.05343566598513952,
+      0.05098678981168912,
+      0.04874661794075599,
+      0.0471007853316573,
+      0.04536075230974417,
+      0.04382549720601393,
+      0.0426710806070612,
+      0.04172866318661433,
+      0.04095494725669806,
+      0.04043921362608671,
+      0.0400598611539373
+    ],
+    "neg_seed": null,
+    "postfit_sha256": "83b34dfb524e6e096b94e6b6abbc0ad32aad2175332be2e2daba8af2a15fbf12",
+    "run_id": "berturk-final_train-s2-44f81396",
+    "rung": null,
+    "split": "final_train",
+    "stop_after_epoch": 29,
+    "weaker": null
+  }
+}
