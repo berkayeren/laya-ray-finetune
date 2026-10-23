@@ -714,6 +714,90 @@ def test_verdict_with_the_fewshot_record(synthetic_final, synthetic_fewshot, syn
     assert verdict.render_go(synthetic_verdict).count("Few-shot path") == 0
 
 
+def _record_copy(fw, tmp_path, edit):
+    """A copy of the planted few-shot record (the module fixture's file is never changed) with one edit applied to
+    its parsed JSON, written as fewshot_report.record_bytes would; returns its path."""
+    rec = copy_module.deepcopy(fw.record)
+    edit(rec)
+    path = str(tmp_path / "fewshot.json")
+    with open(path, "wb") as f:
+        f.write(fewshot_report.record_bytes(rec))
+    return path
+
+
+def _bump_primary(rec):
+    rec["primary"]["draws"] = [x + 0.01 for x in rec["primary"]["draws"]]
+    rec["primary"]["mean_delta"] = fewshot_report.mean_delta(rec["primary"]["draws"])
+
+
+@pytest.mark.parametrize("edit, want", [
+    (lambda r: r.update(protocol_sha256="0" * 64), "built under protocol sha256 " + "0" * 64),
+    (lambda r: r["primary"].update(k=1), "primary k 1 is not criteria \\(d\\)'s fewshot k 2"),
+    (lambda r: r["runs"].update(sha256="0" * 64), "names runs manifest sha256 " + "0" * 64),
+    (lambda r: r["runs"].update(path="../outside/runs.json"), "outside the repo"),
+    (lambda r: r["runs"].update(path="/tmp/runs.json"), "outside the repo"),
+    (lambda r: r["decision"].update(mode="fallback"), "decision .* is not the runs manifest's"),
+    (_bump_primary, "primary block does not recompute"),
+    (lambda r: r.update(schema="fewshot-results/0"), "schema"),
+])
+def test_verdict_refuses_an_edited_fewshot_record(synthetic_final, synthetic_fewshot, tmp_path, monkeypatch, edit,
+                                                  want):
+    """T-09-26: a few-shot record is read into criterion (d) only when it is of the pin, its primary k is criteria
+    (d)'s, the runs manifest it names is under the repo and is its own (sha256), its decision is that manifest's and
+    its primary block recomputes from the dumps; an edited copy is refused with one line, before any verdict."""
+    sf, fw = synthetic_final, synthetic_fewshot
+    path = _record_copy(fw, tmp_path, edit)
+    with pytest.raises(SystemExit, match=want) as e:
+        _fewshot_verdict(sf, fw, monkeypatch, path=path)
+    assert "\n" not in str(e.value.code)
+
+
+def test_verdict_refuses_a_fewshot_k_off_criteria_d(synthetic_final, synthetic_fewshot, monkeypatch):
+    """The few-shot path is applied at criteria (d)'s k only: a protocol (copy) whose criteria (d) fewshot k is not the
+    record's primary k is refused naming both."""
+    protocol = copy_module.deepcopy(synthetic_final.protocol)
+    for p in protocol["criteria"]["d"]["paths"]:
+        if p["path"] == "fewshot":
+            p["k"] = 10
+    with pytest.raises(SystemExit, match="primary k 2 is not criteria \\(d\\)'s fewshot k 10"):
+        _fewshot_verdict(synthetic_final, synthetic_fewshot, monkeypatch, protocol=protocol)
+
+
+def test_verdict_refuses_a_fewshot_record_whose_dumps_changed(synthetic_final, synthetic_fewshot, tmp_path,
+                                                              monkeypatch):
+    """The record is recomputed from the dumps at verdict time: a listed test dump rewritten with other logits (same
+    sidecar, a copy of the dump root) makes the unchanged record refused."""
+    sf, fw = synthetic_final, synthetic_fewshot
+    root = _dump_copy(sf, tmp_path)
+    runs = json.loads(open(fw.runs_path, encoding="utf-8").read())
+    e = [x for x in runs["entries"] if (x["kind"], x["stage"], x["k"]) == ("laya", "continued", FEWSHOT_K)][0]
+    d = os.path.join(root, e["dump_run_id"])
+    logits, uids, side, _ = dumps.load_dump(d, "test", sf.manifest)
+    side = {k: x for k, x in side.items() if k not in ("dump_sha256", "schema_version")}
+    dumps.write_dump(d, "test", -logits, uids, side)
+    with pytest.raises(SystemExit, match="primary block does not recompute"):
+        _fewshot_verdict(sf, fw, monkeypatch, dump_root=root)
+
+
+def test_cli_verdict_with_fewshot(synthetic_final, synthetic_fewshot, tmp_path, monkeypatch, capsys):
+    """`report.py --verdict --fewshot RECORD --out X.json` writes verdict_from(..., fewshot=RECORD) (JSON plus a
+    newline), and --go-block renders it after check_record; --fewshot with any other mode is an argparse error."""
+    sf, fw = synthetic_final, synthetic_fewshot
+    _frozen(monkeypatch, sf)
+    want = _fewshot_verdict(sf, fw, monkeypatch)
+    out = tmp_path / "final" / "verdict.json"
+    got = report.main(["--verdict", "--fewshot", fw.path, "--manifest", sf.manifest, "--out", str(out)])
+    capsys.readouterr()
+    assert got == want and out.read_text(encoding="utf-8") == json.dumps(want, ensure_ascii=False, indent=2) + "\n"
+    assert report.main(["--go-block", str(out)]) == verdict.render_go(want)
+    capsys.readouterr()
+    for argv in (["--go-block", str(out), "--fewshot", fw.path], ["--final-table", str(out), "--fewshot", fw.path],
+                 ["--table", str(out.parent), "--fewshot", fw.path], [str(tmp_path), "--fewshot", fw.path]):
+        with pytest.raises(SystemExit) as e:
+            report.main(argv)
+        assert e.value.code == 2 and "--fewshot applies only to --verdict" in capsys.readouterr().err
+
+
 # --- build_verdict on hand-made inputs ------------------------------------------------------------------------------
 
 def _delta(d, lo, hi, a=0.5):

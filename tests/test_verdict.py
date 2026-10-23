@@ -524,3 +524,165 @@ def test_system_deltas_refuses_an_incomplete_bootstrap_block(missing):
     Y, PA, PB = _systems()
     with pytest.raises(SystemExit, match=missing):
         v.system_deltas(Y, PA, 0.5, PB, 0.5, {k: x for k, x in BOOT.items() if k != missing})
+
+
+# ---- the few-shot path from the few-shot record (09-08, D-13; FEW-02) ----
+
+DISCLOSURE = "the results state that base-model variance is not captured"
+
+
+def _few_protocol(n_draws=3):
+    """The hand protocol of tests/test_final_report.py plus the listed final seeds (check_record reads them) and the
+    few-shot block's draws and compute-fallback disclosure (the frozen protocol carries all three)."""
+    from test_final_report import _hand_protocol
+    p = _hand_protocol()
+    p["systems"] = {kind: {"seeds": [0, 1, 2]} for kind in v.KINDS}
+    p["fewshot"] = {"draws": [{"draw": i} for i in range(n_draws)],
+                    "rules": {"compute_fallback": {"seed": 0, "disclosure": DISCLOSURE}}}
+    return p
+
+
+def _few_input(draws, mode="primary", mean=None):
+    return {"mean_delta": float(np.mean(np.asarray(draws, dtype=np.float64))) if mean is None else mean,
+            "draws": [float(x) for x in draws], "k": 10,
+            "record": {"path": "results/fewshot/fewshot.json", "sha256": "e" * 64}, "mode": mode,
+            "disclosure": DISCLOSURE if mode == "fallback" else None}
+
+
+def _few_verdict(draws, mode="primary", mean=None, n_draws=None, **deltas):
+    """build_verdict of the hand inputs ((a) PASS, (b) PASS, Brier and abstention NOT MET, alternative GO NOT MET
+    unless `deltas` say otherwise) with the few-shot record's numbers."""
+    from test_final_report import _hand_inputs
+    inputs = _hand_inputs(**deltas)
+    inputs["fewshot"] = _few_input(draws, mode, mean)
+    return v.build_verdict(_few_protocol(len(draws) if n_draws is None else n_draws), "a" * 64, inputs)
+
+
+def test_fewshot_modes_are_pilot_fewshots():
+    from pilot import fewshot
+    assert v.FEWSHOT_MODES == fewshot.MODES
+    assert v.FEWSHOT_KEYS == ("status", "phase", "k", "mean_delta", "draws", "record", "mode", "disclosure")
+
+
+def test_fewshot_path_met_exactly_at_the_frozen_threshold():
+    """FEW-02 boundary: a mean over draws of exactly mean_delta_at_least (0.05) is MET, (d) PASS and the verdict GO by
+    rule 5, not provisional, no few-shot branch named; one ulp below (numpy.nextafter(0.05, 0)) is NOT MET, (d) FAIL,
+    NO-GO by rule 6. Two draws: no float mean of three draws is exactly 0.05 (np.mean([0.05] * 3) is one ulp above)."""
+    at = v.build_verdict(_few_protocol(2), "a" * 64, dict(_few_inputs_of([0.05, 0.05])))
+    assert at["criteria"]["d"]["paths"][2]["mean_delta"] == 0.05
+    assert at["fewshot"]["status"] == v.MET and at["criteria"]["d"]["status"] == v.PASS
+    assert {k: at["verdict"][k] for k in ("verdict", "provisional", "if_fewshot_met", "if_fewshot_not_met", "rule")} \
+        == {"verdict": v.GO, "provisional": False, "if_fewshot_met": None, "if_fewshot_not_met": None, "rule": 5}
+    below = float(np.nextafter(0.05, 0))
+    nm = _few_verdict([below, below])
+    assert nm["criteria"]["d"]["paths"][2]["mean_delta"] == below < 0.05
+    assert nm["fewshot"]["status"] == v.NOT_MET and nm["criteria"]["d"]["status"] == v.FAIL
+    assert (nm["verdict"]["verdict"], nm["verdict"]["provisional"], nm["verdict"]["rule"]) == (v.NO_GO, False, 6)
+    three = _few_verdict([0.05, 0.05, 0.05])                  # the mean is computed, never typed: one ulp above 0.05
+    assert three["fewshot"]["mean_delta"] == float(np.mean([0.05] * 3)) > 0.05 and three["fewshot"]["status"] == v.MET
+
+
+def _few_inputs_of(draws):
+    from test_final_report import _hand_inputs
+    inputs = _hand_inputs()
+    inputs["fewshot"] = _few_input(draws)
+    return inputs
+
+
+def test_fewshot_mean_delta_must_be_the_mean_of_its_draws():
+    """FEW-02 precision: mean_delta must equal float(np.mean(draws)) exactly; 0.05 typed for draws [0.05] * 3 (whose
+    mean is 0.05000000000000001) is refused, so no ulp can move the path across its threshold."""
+    with pytest.raises(SystemExit, match="not the mean of its draws"):
+        _few_verdict([0.05, 0.05, 0.05], mean=0.05)
+
+
+@pytest.mark.parametrize("draws", [[0.05, 0.05], [float(np.nextafter(0.05, 0))] * 2])
+def test_fewshot_path_never_overrides_rule_4(draws):
+    """With (a) INCONCLUSIVE the verdict is INCONCLUSIVE by rule 4 whatever the few-shot path shows, never
+    provisional, and the block says it counts as NO-GO."""
+    r = _few_verdict(draws, micro=(-0.005, -0.03, 0.02))
+    assert r["criteria"]["a"]["status"] == v.INCONCLUSIVE
+    assert (r["verdict"]["verdict"], r["verdict"]["rule"], r["verdict"]["provisional"]) == (v.INCONCLUSIVE, 4, False)
+    assert r["verdict"]["means"] == v.INCONCLUSIVE_MEANS and v.INCONCLUSIVE_MEANS in v.render_go(r)
+
+
+def test_fewshot_block_and_check_record_accept_both_forms():
+    """The PENDING form (no few-shot record) and the record's form (primary and fallback) both pass check_record; the
+    fallback renders its disclosure line, primary does not."""
+    from test_final_report import _hand_inputs
+    protocol = _few_protocol()
+    pending = v.build_verdict(protocol, "a" * 64, _hand_inputs())
+    assert pending["fewshot"] == {"status": v.PENDING, "phase": 9}
+    assert v.check_record(pending, protocol, "a" * 64) is pending
+    for mode in ("primary", "fallback"):
+        r = _few_verdict([0.1, 0.0, 0.08], mode=mode)
+        assert list(r["fewshot"]) == list(v.FEWSHOT_KEYS) and r["fewshot"]["mode"] == mode
+        assert r["fewshot"]["disclosure"] == (DISCLOSURE if mode == "fallback" else None)
+        assert v.check_record(r, protocol, "a" * 64) is r
+        text = v.render_go(r)
+        assert "- Few-shot path (Phase 9): k = 10, mean over 3 draws, mode %s; record results/fewshot/fewshot.json " \
+               "sha256 `eeeeeeeeeeee`." % mode in text
+        assert ("- Few-shot compute fallback: %s." % DISCLOSURE in text) == (mode == "fallback")
+    assert "Few-shot" not in v.render_go(pending)
+
+
+def _edit_block(r, how):
+    r = copy.deepcopy(r)
+    f = r["fewshot"]
+    if how == "status":
+        f["status"] = v.NOT_MET if f["status"] == v.MET else v.MET
+    elif how == "mean_delta":
+        f["mean_delta"] += 0.01
+    elif how == "draws":
+        f["draws"][0] += 0.01
+    elif how == "mean_and_draws":                           # consistent with each other, not with (d)'s numbers
+        f["draws"] = [x - 0.2 for x in f["draws"]]
+        f["mean_delta"] = float(np.mean(np.asarray(f["draws"], dtype=np.float64)))
+    elif how == "k":
+        f["k"] = 5
+    elif how == "k_bool":
+        f["k"] = True
+    elif how == "missing_key":
+        del f["record"]
+    elif how == "extra_key":
+        f["note"] = "edited"
+    elif how == "phase":
+        f["phase"] = 8
+    elif how == "mode":
+        f["mode"] = "partial"
+    elif how == "fallback_without_disclosure":
+        f["mode"] = "fallback"
+    elif how == "primary_with_disclosure":
+        f["disclosure"] = DISCLOSURE
+    elif how == "record_sha256":
+        f["record"]["sha256"] = "E" * 64
+    elif how == "pending_status":
+        r["fewshot"] = {"status": v.MET, "phase": 9}
+    return r
+
+
+@pytest.mark.parametrize("how", ["status", "mean_delta", "draws", "mean_and_draws", "k", "k_bool", "missing_key",
+                                 "extra_key", "phase", "mode", "fallback_without_disclosure",
+                                 "primary_with_disclosure", "record_sha256", "pending_status"])
+def test_check_record_refuses_an_edited_fewshot_block(how):
+    """An edited fewshot block is refused with one line naming the rebuild: a status other than the recomputed one, a
+    mean or draw that is not (d)'s, a k other than criteria (d)'s, a missing or extra key, phase other than 9, a mode
+    outside primary/fallback, a disclosure that does not match its mode, a malformed record sha256, a PENDING form
+    with a status."""
+    r = _few_verdict([0.1, 0.0, 0.08])
+    protocol = _few_protocol()
+    v.check_record(r, protocol, "a" * 64)
+    with pytest.raises(SystemExit) as e:
+        v.check_record(_edit_block(r, how), protocol, "a" * 64)
+    text = str(e.value.code)
+    assert "\n" not in text and "rebuild" in text, (how, text)
+
+
+def test_fewshot_block_refuses_a_dropped_draw():
+    """Every frozen draw is in the mean: a few-shot result (or a verdict block) over fewer draws than the protocol's
+    few-shot block lists is refused, even when its mean and (d) agree with it (a draw is never dropped)."""
+    with pytest.raises(SystemExit, match="draws"):
+        _few_verdict([0.1, 0.08], n_draws=3)
+    r = _few_verdict([0.1, 0.08], n_draws=2)
+    with pytest.raises(SystemExit, match="draws"):
+        v.check_record(r, _few_protocol(3), "a" * 64)
