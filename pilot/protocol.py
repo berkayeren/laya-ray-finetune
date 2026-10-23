@@ -35,6 +35,13 @@ pilot.verdict) inside the function, so score.py's gate never pays for them.
 usage:
     python -m pilot.protocol --build --out protocol.json    # write the protocol's bytes (refuses an existing --out)
     python -m pilot.protocol --check                         # require_frozen(): print the pinned sha256
+    python -m pilot.protocol --render [PATH]                 # the README protocol block (markdown) of PATH with
+                                                             # PATH's own sha256 (a preview, no pin check); without
+                                                             # PATH, of require_frozen()'s protocol
+
+render_markdown(protocol, sha256) is the README protocol block (plan 08-10 writes it between the README markers at the
+freeze and test-enforces it): every displayed value is read from the dict passed in, never from a code constant, every
+rule and definition text is shown verbatim, and rounding is for display only (2 decimals for points, 4 for metrics).
 """
 import argparse
 import copy
@@ -245,20 +252,24 @@ def require_frozen(path=None, pin=None):
     if have != pin:
         raise SystemExit("%s has sha256 %s, the frozen protocol is %s; the protocol may not change after the freeze "
                          "(restore it with `git checkout -- protocol.json`)" % (path, have, pin))
+    return parse_protocol(raw, path, "restore it with `git checkout -- protocol.json`"), have
+
+
+def parse_protocol(raw, path, fix):
+    """The protocol/1 dict of `raw` (the bytes of `path`); SystemExit ending in `fix` unless they are UTF-8 JSON of an
+    object with schema protocol/1 and every REQUIRED_KEYS key."""
     try:
         protocol = json.loads(raw.decode("utf-8"))
     except ValueError as e:
-        raise SystemExit("%s is not valid JSON (%s); restore it with `git checkout -- protocol.json`" % (path, e))
+        raise SystemExit("%s is not valid JSON (%s); %s" % (path, e, fix))
     if not isinstance(protocol, dict):
-        raise SystemExit("%s is not a JSON object; restore it with `git checkout -- protocol.json`" % path)
+        raise SystemExit("%s is not a JSON object; %s" % (path, fix))
     if protocol.get("schema") != SCHEMA:
-        raise SystemExit("%s: schema %r, expected %s; restore it with `git checkout -- protocol.json`"
-                         % (path, protocol.get("schema"), SCHEMA))
+        raise SystemExit("%s: schema %r, expected %s; %s" % (path, protocol.get("schema"), SCHEMA, fix))
     missing = [k for k in REQUIRED_KEYS if k not in protocol]
     if missing:
-        raise SystemExit("%s lacks the protocol/1 key(s) %s; restore it with `git checkout -- protocol.json`"
-                         % (path, ", ".join(missing)))
-    return protocol, have
+        raise SystemExit("%s lacks the protocol/1 key(s) %s; %s" % (path, ", ".join(missing), fix))
+    return protocol
 
 
 # ---- the gate helpers (score.py, fewshot.py, report.py) ----
@@ -532,6 +543,110 @@ def build_protocol(manifest_path=DEFAULT_MANIFEST, root=REPO_ROOT, code=None):
     return json.loads(json.dumps(p))                        # plain JSON values only (no numpy scalar survives)
 
 
+# ---- the README protocol block ----
+
+def _num(x):
+    """A frozen number as stored (its JSON form: -0.02, 0.0, 2e-05, 80)."""
+    return json.dumps(x)
+
+
+def _value(x, points=False):
+    """Display form of a frozen value: a float fraction with its points when `points` (e.g. "-0.02 (-2.00 points)"),
+    other numbers and null/booleans in JSON form, lists joined by ", ", dicts as "key: value" joined by "; ", strings
+    verbatim."""
+    if x is None or isinstance(x, bool):
+        return json.dumps(x)
+    if isinstance(x, float) and points:
+        return "%s (%+.2f points)" % (_num(x), x * 100)
+    if isinstance(x, (int, float)):
+        return _num(x)
+    if isinstance(x, list):
+        return ", ".join(_value(v, points) for v in x)
+    if isinstance(x, dict):
+        return "; ".join("%s: %s" % (k, _value(v, points)) for k, v in x.items())
+    return str(x)
+
+
+def _table(header, rows):
+    """A markdown table (the pilot.postfit layout); cells hold names, numbers and hashes only, never rule texts."""
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
+    return lines + ["| " + " | ".join(r) + " |" for r in rows]
+
+
+def _label(key, name=None):
+    """A criterion or status key as shown: "a" -> "(a)" (with its name: "(a) non-inferiority"); a longer key is its
+    name when given ("alternative GO"), else the key."""
+    if len(key) == 1:
+        return "(%s)" % key if name is None else "(%s) %s" % (key, name)
+    return key if name is None else name
+
+
+def _criteria_lines(criteria, units):
+    rows, rules, extra = [], [], []
+    for key, c in criteria.items():
+        label, head = _label(key), _label(key, c["name"])
+        rules.append("- %s: %s" % (head, c["rule"]))
+        rest = [(k, v) for k, v in c.items() if k not in ("name", "rule", "paths", "reported_only")]
+        if rest or not c.get("paths"):
+            rows.append((label, c["name"], _value(dict(rest), points=True) or "none"))
+        for p in c.get("paths") or []:
+            rows.append(("%s %s path" % (label, p["path"]), c["name"],
+                         _value({k: v for k, v in p.items() if k != "path"}, points=True)))
+        for k, v in (c.get("reported_only") or {}).items():
+            extra.append("- %s reported only, %s: %s" % (label, k, v))
+    return (["#### Criteria", "", "Thresholds as frozen (units: %s)." % units, ""]
+            + _table(("criterion", "name", "frozen values"), rows)
+            + ["", "Rules, as frozen:", ""] + rules + extra)
+
+
+def _collapse_lines(c):
+    out = ["#### Collapse rule (b)", "", "- Rule: %s" % c["rule"], "- Applies to:"]
+    for a in c["applies_to"]:
+        out.append("  - %s (%s): %s" % (a["runs"], a["source"], ", ".join(a["components"])))
+    out.append("- Components:")
+    for name, comp in c["components"].items():
+        out.append("  - %s: %s" % (name, comp["rule"]))
+        for k, v in comp.items():
+            if k != "rule":
+                out.append("    - %s: %s" % ("**marked addition**" if k == "addition" else k, v))
+    out += ["- Not applied: %s" % c["not_applied"],
+            "- Label prior floors (%s), at the prior's global val θ %s:" % (c["prior_source"],
+                                                                          _num(c["prior_theta_global"]))]
+    for split, n in c["prior_counts"].items():
+        out.append("  - %s: micro-F1 %s = %.4f (TP %d, FP %d, FN %d)"
+                   % (split, c["prior_%s_fraction" % split], c["prior_%s_micro_f1" % split], n["tp"], n["fp"], n["fn"]))
+    return out
+
+
+def _verdict_lines(v):
+    out = ["#### Verdict", "", "Units: %s." % v["units"], ""]
+    out += ["%d. %s" % (i, r) for i, r in enumerate(v["rules"], 1)]
+    out += ["", "- INCONCLUSIVE means: %s." % v["inconclusive_means"],
+            "- Provisional form: `%s` (each %%s is the overall verdict computed with that few-shot outcome)."
+            % v["provisional"],
+            "- Statuses: %s." % "; ".join("%s %s" % (_label(k), ", ".join(s)) for k, s in v["statuses"].items())]
+    return out
+
+
+def render_markdown(protocol, sha256):
+    """The README protocol block (markdown, level-3 and level-4 headings; 08-10 writes the section heading): the
+    protocol's sha256 and frozen-before sentence, the criteria with their thresholds in points, the collapse rule
+    with the label prior's floors, the verdict rules. Every value is read from `protocol`, never from a code constant;
+    rule texts are verbatim; rounding is display only. Deterministic: the same dict and sha256 give the same text."""
+    p = protocol
+    fz, code = p["frozen"], p["code"]
+    out = ["### Frozen decision protocol (protocol.json)", "", p["title"], "",
+           "- sha256: `%s`" % sha256,
+           "- Frozen %s: %s." % (fz["when"], fz["why"]),
+           "- Identity: %s." % fz["identity"],
+           "- Units: %s." % p["units"],
+           "- Built at git HEAD `%s` (dirty: %s)." % (code["git_head"], _value(code["dirty"]))]
+    for block in (_criteria_lines(p["criteria"], p["units"]), _collapse_lines(p["collapse"]),
+                  _verdict_lines(p["verdict"])):
+        out += [""] + block
+    return "\n".join(out) + "\n"
+
+
 # ---- CLI ----
 
 def main(argv=None):
@@ -539,9 +654,28 @@ def main(argv=None):
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--build", action="store_true", help="build the protocol from the committed inputs to --out")
     mode.add_argument("--check", action="store_true", help="require_frozen(): print the pinned sha256")
+    mode.add_argument("--render", nargs="?", const="", metavar="PATH",
+                      help="print the README protocol block of PATH with PATH's own sha256 (a preview, no pin check); "
+                           "without PATH, of require_frozen()'s protocol")
     ap.add_argument("--out", help="--build: the path to write (refused when it exists)")
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST, help="--build: must be the committed data/splits.json")
     a = ap.parse_args(argv)
+    if a.render is not None:
+        if a.out:
+            ap.error("--out is a --build option")
+        if a.render:
+            try:
+                with open(a.render, "rb") as f:
+                    raw = f.read()                          # hash and parse the same bytes
+            except OSError as e:
+                raise SystemExit("%s cannot be read (%s); --render PATH needs a protocol file" % (a.render, e))
+            sha = sha256_bytes(raw)
+            protocol = parse_protocol(raw, a.render, "--render PATH needs a protocol/1 file (pilot.protocol --build)")
+        else:
+            protocol, sha = require_frozen()
+        md = render_markdown(protocol, sha)
+        print(md, end="")
+        return md
     if a.build:
         if not a.out:
             ap.error("--build needs --out PATH")
