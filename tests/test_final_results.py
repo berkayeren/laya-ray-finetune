@@ -30,6 +30,10 @@ The published verdict (plan 08-12, REP-02, REP-03, ROADMAP Phase 8 criteria 4 an
   (with its SVG == report.render_svg) and hotels_probe, bound final_seed to its system's postfit record by sha256,
   zero-shot Laya on test and hotels_probe and the label prior on test, bound val_selected; never in-sample, a HOTELS
   record holds ood_fp on the 22 banking-only columns and no calibration block; `make final-reports` lists them
+- README.md's Phase 8 prose (plan 08-13: from the section heading to its first generated block) states what was
+  frozen, how the final seeds were scored once and how to read the GO block (INCONCLUSIVE counts as NO-GO and means
+  collect bank data, provisional until Phase 9, the macro-F1 CI not resolvable, the in-sample val deltas, the θ never
+  re-selected, latency reported, not gated, the recommendation in Phase 10), and holds no metric value of its own
 - data marker: verdict.json is report.verdict_report() serialised as report.py writes it, byte for byte, every
   per-seed report is report.run_report(..., postfit=RECORD) and every confidence record (and SVG) is
   report.confidence_report of its dump and binding, byte for byte (needs `make data`)
@@ -372,6 +376,42 @@ def test_readme_go_block_matches_render():
         "`python report.py --go-block results/final/verdict.json`")
     assert text.index(PROTOCOL_END) < i, "the GO block must follow the frozen protocol block"
     assert "**Verdict: %s**" % v["verdict"]["verdict"] in block
+
+
+# ---- 08-13: the README Phase 8 prose (statements only; every number lives in a generated block) ----
+
+PHASE8_PROSE = ("protocol.json", "frozen", "once", "mechanically", "INCONCLUSIVE", "collect bank data", "provisional",
+                "Phase 9", "not resolvable", "in-sample", "never re-selected", "reported, not gated", "Phase 10")
+PROSE_NUMBER_RE = re.compile(r"\b0\.\d+|\d+(\.\d+)? points")
+
+
+def phase8_prose():
+    """The README's Phase 8 prose: from the section heading to the first generated block's marker after it."""
+    with open(README, encoding="utf-8") as f:
+        text = f.read()
+    lo, hi = phase8_section(text)
+    j = text.find("<!--", lo)
+    assert lo < j < hi, "the Phase 8 section holds no generated block"
+    return text[lo:j]
+
+
+def test_readme_phase8_prose():
+    """The prose before the first generated block states what was frozen, how the final seeds were scored and how to
+    read the GO block (INCONCLUSIVE counts as NO-GO, provisional until the Phase 9 few-shot path, the macro-F1 CI not
+    resolvable, the in-sample val deltas, the θ transfer, latency reported, not gated, the recommendation in Phase 10),
+    and holds no digit-bearing metric value of its own: a number there could go stale, a generated block cannot."""
+    prose = " ".join(phase8_prose().split())
+    for want in PHASE8_PROSE:
+        assert want in prose, "the README Phase 8 prose must state %r before its first generated block" % want
+    hits = [m.group(0) for m in PROSE_NUMBER_RE.finditer(prose)]
+    assert hits == [], "the README Phase 8 prose holds metric values %r; numbers belong in a generated block" % hits
+
+
+def test_prose_number_check_flags_planted_values():
+    for planted in ("micro-F1 0.83", "a margin of 2 points", "within 2.5 points"):
+        assert PROSE_NUMBER_RE.search(planted), planted
+    for clean in ("Phase 9", "Phase 10", "the sha256 of its exact bytes", "criterion (a)", "fp32"):
+        assert not PROSE_NUMBER_RE.search(clean), clean
 
 
 def _need_data():

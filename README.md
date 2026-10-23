@@ -100,8 +100,8 @@ are hash-registered too, so later phases can trust the flag list.
 | `pilot/runs.py` | torch-free run-record schema of `ray_train.py`, the run id, the neg-K item count, the MPS fallback ladder |
 | `pilot/compute.py` | torch-free compute-checkpoint logic: projection, what-if table, disk budget, report and markdown |
 | `ray_train.py` | Ray Train `TorchTrainer` (DDP) fine-tune using Laya's own loss and checkpoint format, uncalibrated (T = 1) checkpoints; cpu, cuda or one MPS worker; resumes by rerunning |
-| `score.py` | the only place a model runs: one system on one val/test split → a logit dump (in-process or Ray Data actors) |
-| `report.py` | dumps → metrics (numpy only, no model); `--compare` paired bootstrap; `--table` results table; `--confidence` the Phase 7 confidence record (calibration, abstention, no-intent and, on `--split hotels_probe`, out-of-domain false positives) with its reliability diagram; `--confidence-table` its markdown |
+| `score.py` | the only place a model runs: one system on one val, test or hotels_probe split → a logit dump (in-process or Ray Data actors); Phase 8: a fine-tuned checkpoint reaches test or HOTELS only through the protocol gate (one of the frozen protocol's final seeds, once) |
+| `report.py` | dumps → metrics (numpy only, no model); `--compare` paired bootstrap; `--table` results table; `--confidence` the Phase 7 confidence record (calibration, abstention, no-intent and, on `--split hotels_probe`, out-of-domain false positives) with its reliability diagram; `--confidence-table` its markdown; Phase 8: `RUN_DIR --split test --postfit RECORD` reports a final seed at its postfit record's θ, `--verdict` writes the verdict record of the frozen protocol, `--final-table` and `--go-block` print the results table and the GO block |
 | `evaluate.py` | one-step wrapper: `score.py --model laya`, then `report.py`'s report of that dump |
 | `mps_spike.py` | Phase 2 MPS feasibility spike (`results/spike/`) |
 | `compute_checkpoint.py` | Phase 4 compute checkpoint: a measured MPS fine-tune probe and the projected experiment-matrix runtime (`results/compute/`) |
@@ -111,7 +111,12 @@ are hash-registered too, so later phases can trust the flag list.
 | `pilot/berturk.py` | torch-free BERTurk bookkeeping: the recipe and run id, labels in `INTENTS` order, the checkpoint identity, the postfit protocol, the BASE-03 reference check, the final commands and manifest, the superseded chain (`SUPERSEDED`, `load_superseded`) and the README Phase 6 block |
 | `latency.py` | Phase 7 latency harness: times every final seed of one system per message on one device, in-process at batch 1, fp32, through the load path that scored the dumps; `--render` the markdown; reported, not gated |
 | `pilot/latency.py` | torch-free latency logic: the timing contract and loop, nearest-rank percentiles, the final-manifest reader, the `latency/1` report and its markdown |
-| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`), postfit records (`postfit/`: `laya*.json`, and `berturk.json`, `berturk-reference.json`, `berturk-final.json`), the two discarded BERTurk selection runs kept as disclosed history (`superseded/berturk-tied-head-lr/`, `superseded/berturk-10-epoch-grid/`, never current), the Phase 7 val confidence records and reliability diagrams (`confidence/`) and latency reports (`latency/`) |
+| `protocol.json` | Phase 8: the frozen decision protocol (criteria and thresholds, verdict rules, seed averaging and bootstrap, collapse rule, systems, splits and inputs, the few-shot protocol); frozen once, its sha256 pinned in `pilot/protocol.py`, never rewritten |
+| `pilot/protocol.py` | builds, pins and reads the frozen protocol: `require_frozen` (every consumer's first call), the gated-split and final-seed checks of `score.py`'s gate, the README protocol block (`--render`) and `--check` |
+| `pilot/verdict.py` | the mechanical GO block: criteria (a) to (d) and the alternative GO from the frozen thresholds, the collapse rule, the overall verdict, the `verdict/1` record, the results table and the GO block markdown |
+| `pilot/fewshot.py` | the frozen few-shot protocol as code: held-out tags, k values, draw seeds, replay, the support-set sampler and its digests, the eligibility check |
+| `fewshot.py` | the few-shot runner behind `require_frozen`: `--support-sets` re-checks the frozen draws against the verified `selection_train`; Phase 9 adds the training and scoring modes |
+| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`), postfit records (`postfit/`: `laya*.json`, and `berturk.json`, `berturk-reference.json`, `berturk-final.json`), the two discarded BERTurk selection runs kept as disclosed history (`superseded/berturk-tied-head-lr/`, `superseded/berturk-10-epoch-grid/`, never current), the Phase 7 val confidence records and reliability diagrams (`confidence/`) and latency reports (`latency/`); Phase 8: the final seeds' gated test and HOTELS dumps and the zero-shot HOTELS reference (`dumps/`), and the verdict, per-seed test reports and test/HOTELS confidence records with their diagrams (`final/`) |
 | `tests/` | pytest suite (markers `unit`, `data`, `weights`, `ray`, `mps`) |
 
 ## Run
@@ -132,7 +137,7 @@ python ray_train.py --data data/splits/final_train.jsonl ... --epochs 4 --stop-a
 # Phase 6 BERTurk baseline: the 30-epoch selection run, val scoring of each export, postfit and the BASE-03 check
 python berturk_train.py --data data/splits/selection_train.jsonl --device mps --epochs 30 --lr 2e-05 --head-lr 0.0001
 python score.py data/splits/val.jsonl --model berturk --checkpoint berturk_runs/RUN_ID/exports/epoch-001 \
-    --device mps --workers 0                     # BERTurk is refused on test until Phase 8
+    --device mps --workers 0                     # on test only a final seed, through the Phase 8 protocol gate
 make berturk-postfit                             # results/postfit/berturk.json from the 30 committed val dumps
 python postfit.py --reference-check results/postfit/berturk.json --out results/postfit/berturk-reference.json
 python postfit.py --print-final-commands results/postfit/berturk.json \
@@ -161,19 +166,31 @@ python evaluate.py data/splits/test.jsonl --checkpoint ./ckpt --workers 0 --n 20
 make baselines              # needs make data and the pinned weights; about 5 minutes on the M4
 make baseline-reports       # rebuild the reports and print the results table from the committed dumps, no model
 
-# Phase 7 confidence and latency (val only; nothing fine-tuned is scored on test or HOTELS before Phase 8)
+# Phase 7 confidence and latency (val only, in-sample)
 make confidence-reports     # the val confidence records and reliability diagrams from the committed dumps, no model
 python report.py --confidence results/dumps/RUN_ID --split val --postfit results/postfit/laya.json \
     --out results/confidence/RUN_ID-val.json
 python report.py --confidence-table results/confidence
 python latency.py --system laya --device mps --out results/latency/laya-mps.json   # also laya cpu, berturk mps|cpu
 python latency.py --render results/latency --out results/latency/latency.md
+
+# Phase 8: the frozen protocol, the once-only scoring of the final seeds, then the verdict from the committed dumps
+python -m pilot.protocol --check           # require_frozen(): refuses a missing or changed protocol, prints its sha256
+python -m pilot.protocol --render          # the README protocol block
+make final-scoring          # ran once in Phase 8; never rerun: the gate refuses an existing gated dump
+make final-reports          # rebuild results/final/ from the committed dumps, no model
+python report.py results/dumps/RUN_ID --split test --postfit results/postfit/laya.json   # a final seed at its record θ
+python report.py --verdict --out results/final/verdict.json
+python report.py --final-table results/final/verdict.json    # the README results table
+python report.py --go-block results/final/verdict.json       # the README GO block
+python fewshot.py --support-sets           # re-check the frozen few-shot draws (Phase 9 adds the training modes)
 ```
 
 `--checkpoint` (score, evaluate) and `--base` (train) accept `multilingual`, which loads the pinned,
 sha256-verified Laya weights, or a local Laya checkpoint dir. Nothing downloads an unpinned
 revision. `ray_train.py --data` only accepts a registered split with role `train`; `score.py` only
-a registered `val` or `test` split.
+a registered `val`, `test` or `hotels_probe` split (`hotels_probe` for `--model laya` and `berturk` only), and a
+fine-tuned checkpoint on test or HOTELS only through the Phase 8 protocol gate.
 
 Useful flags: `--neg K` (negatives kept per training message, default 8; 0 = all 48 labels),
 `--freeze-embeddings` / `--freeze-encoder` (the MPS out-of-memory fallback rungs; `--freeze-encoder`
@@ -314,7 +331,8 @@ final Laya seeds were trained with those settings fixed (LAYA-05, LAYA-08).
   Phase 8; `results/postfit/laya-final.json` binds them to the record's sha256.
 - **Audit record.** MPS runs are not bit-reproducible, so the committed val dumps under `results/dumps/` are the audit
   record: `make laya-postfit` rebuilds `results/postfit/laya.json` from them byte for byte, without a model.
-- **Nothing fine-tuned is scored on test before Phase 8.** `score.py` refuses a fine-tuned checkpoint on test, and
+- **Nothing fine-tuned was scored on test before Phase 8.** Until then `score.py` refused a fine-tuned checkpoint on
+  test; Phase 8's protocol gate replaced that interlock and admits only the frozen protocol's final seeds, once.
   `postfit.py` reads val dumps only.
 
 The θ-edge numbers in the Bounds bullet, recomputed from the committed val dumps (needs `make data`, no model):
@@ -442,10 +460,10 @@ the well-known baseline that fine-tuned Laya is compared against in Phase 8.
   outside git for Phase 8; `results/postfit/berturk-final.json` binds them to the record's sha256.
 - **Audit record.** MPS runs are not bit-reproducible, so the committed val dumps under `results/dumps/` are the audit
   record: `make berturk-postfit` rebuilds `results/postfit/berturk.json` from them byte for byte, without a model.
-- **Nothing fine-tuned is scored on test before Phase 8.** `score.py --model berturk` refuses any split with role
-  test and, under any manifest, any split that holds committed test content (the committed test sha256 or uid list,
-  or any of its (uid, message) pairs), as for Laya. `postfit.py` reads val dumps only. No BERTurk test number exists
-  yet.
+- **Nothing fine-tuned was scored on test before Phase 8.** Until then `score.py --model berturk` refused any split
+  with role test and, under any manifest, any split that holds committed test content (the committed test sha256 or
+  uid list, or any of its (uid, message) pairs), as for Laya. Phase 8's protocol gate replaced that interlock and
+  admits only the frozen protocol's final seeds, once. `postfit.py` reads val dumps only.
 
 ```bash
 # the selection run: 30 epochs, encoder LR 2e-05, head LR 1e-4, an export per epoch under berturk_runs/<run_id>/exports/
@@ -610,8 +628,9 @@ definitions in its protocol; nothing here is a test or held-out result.
   rate.
 - **Out-of-domain (HOTELS).** The out-of-domain false-positive rate on the 22 banking-only tags is implemented
   (`report.py --confidence RUN_DIR --split hotels_probe`, with θ and T from banking val only) and tested on synthetic
-  HOTELS dumps. Nothing is scored on HOTELS until Phase 8: `score.py` still refuses `hotels_probe`, and a hygiene test
-  keeps any HOTELS dump out of git.
+  HOTELS dumps. Phase 7 scored nothing on HOTELS: Phase 8 opened `hotels_probe` to the final seeds behind `score.py`'s
+  protocol gate and to the zero-shot Laya reference the protocol names, and a hygiene test keeps every other HOTELS
+  dump out of git.
 - **Latency, reported, not gated.** `latency.py` times each of the three final seeds of each model per message, at
   batch 1, in-process (no Ray), fp32 with autocast off, through the load path that scored the dumps. After each seed's
   load, one untimed warm-up pass runs every one of the 208 val messages, and then all 208 are timed between device
@@ -824,7 +843,40 @@ Laya's own fp16 autocast default on MPS (laya_default_amp) is not what is timed:
 
 ## Frozen protocol and head-to-head verdict (Phase 8)
 
-`protocol.json` at the repo root holds the decision rule, with a numeric threshold behind every criterion, and the full few-shot protocol. It was written once, and its hash pinned in `pilot/protocol.py`, by one commit made before any fine-tuned model was scored on test or HOTELS; `score.py`, `fewshot.py` and `report.py --verdict` refuse a missing or changed protocol, and a test fails if the file is ever modified. The six final seeds were each scored once on test and HOTELS (`make final-scoring`); `make final-reports` rebuilds everything under `results/final/` from those committed dumps without a model. The block below is generated from the frozen file by `python -m pilot.protocol --render` (a test fails if it differs).
+`protocol.json` at the repo root holds the decision rule, with a numeric threshold behind every criterion, and the
+full few-shot protocol (REP-01). This prose holds no number of its own: every number in this section comes from a
+generated block below, and a test fails if any block is edited by hand or goes stale.
+
+- **Frozen first.** The protocol was frozen and hash-pinned before any fine-tuned model was scored on test or HOTELS.
+  One commit wrote `protocol.json`, pinned the sha256 of its exact bytes in `pilot/protocol.py` (`PROTOCOL_SHA256`)
+  and added the protocol block below. Every gated dump was added by a later commit, and a test checks that git order.
+  Nothing in the protocol could be tuned to a test or HOTELS number, and a test fails if the file is ever modified.
+- **Refused without it.** `score.py`, `fewshot.py` and `report.py --verdict` call `pilot.protocol.require_frozen`
+  first, and they refuse a missing or changed protocol. In `score.py` this is the protocol gate, which replaced the
+  Phase 5 and Phase 6 test interlocks. A fine-tuned checkpoint reaches test or HOTELS only when it is one of the
+  protocol's final seeds, under the committed manifest, on the protocol's device and worker count, and without `--n`,
+  `--force` or another `--out-root`.
+- **Scored once.** Each of the six final seeds (three per model) was scored once on test and once on HOTELS
+  (`make final-scoring`). They ran in-process on MPS in fp32, the device each seed's temperature was fitted on. The
+  gate refuses a rerun, so the committed dumps are the audit record and are never rescored. Zero-shot Laya was scored
+  once on HOTELS as an ungated reference row, on the scorer of its committed val dump. `make final-reports` rebuilds
+  everything under `results/final/` from the committed dumps, without a model.
+- **How to read the GO block.** `report.py --verdict` computes the GO block mechanically from the frozen thresholds
+  and the committed test dumps, and nobody chooses its outcome. INCONCLUSIVE counts as NO-GO and means collect bank
+  data. A verdict that depends on the few-shot path of criterion (d) stays provisional until Phase 9 runs that path
+  under this same protocol. The macro-F1 interval of criterion (a) is shown, but it is labelled not resolvable at this
+  test size and never gates.
+- **Disclosures.** Criterion (a)'s non-inferiority margin was locked before any result and is kept. At this test size
+  it has limited power: the power estimates in the protocol block put a pass near a coin flip even when the two models
+  are truly equal. The val deltas known at freeze, also in the protocol block, are in-sample: the epoch, T and θ were
+  chosen on those same val messages, by one selection seed per model. Each postfit record's θ was chosen on that one
+  selection seed and is applied unchanged to the three-seed average, a θ transfer. It is never re-selected on the final
+  seeds or on test. Classwise ECE is reported but does not gate, because its percentile bootstrap is biased; Brier
+  carries the calibration path.
+- **Not decided here.** Latency is reported, not gated (see Phase 7 above). The GO block is the output of the frozen
+  rule, not the recommendation: the recommendation, the decision memo and the caveats are Phase 10.
+
+The block below is generated from the frozen file by `python -m pilot.protocol --render` (a test fails if it differs).
 
 <!-- protocol:start -->
 ### Frozen decision protocol (protocol.json)
