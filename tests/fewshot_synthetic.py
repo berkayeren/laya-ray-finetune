@@ -11,10 +11,21 @@ and pilot.fewshot.DECISION_PATH. It returns a namespace (manifest, out_dir, prot
 rows, protocol).
 
 `splits` (optional) replaces the protocol's splits block, e.g. {"val": {"n_messages": 5}, "test": {"n_messages": 7}}
-for fewshot.py --projection (09-04).
+for fewshot.py --projection (09-04); by default the block is pilot.protocol.splits_block of the synthetic manifest
+(pilot.data.DEFAULT_MANIFEST is pinned to it first), so score.py's protocol gate can name the synthetic test split.
 
 postfit_systems(tmp_path, canonicals) writes one minimal postfit record per system kind ({"chosen": {"canonical":
-...}}) and returns the protocol "systems" block that binds each by absolute path and sha256.
+...}}) and returns the protocol "systems" block that binds each by absolute path and sha256, with an empty final_seeds
+list (pilot.protocol.final_seed_allowed reads it).
+
+Planted few-shot checkpoints (09-05; no training): bench(tmp_path, synthetic_raw, monkeypatch, ...) installs the
+synthetic protocol with PLANT_RULES (base seed 0 only, tiny recipes), postfit records binding the chosen canonical
+configs of both kinds (chosen_laya, chosen_berturk over the synthetic selection_train sha256) and a scoring block on
+cpu with workers 0. plant_laya(path, canonical, record) is tests/tiny_laya.tiny_checkpoint plus rl_agent_config.json
+training.ray_train {run_id, canonical, record} and final.json; plant_berturk(path, canonical, record) the
+tests/tiny_berturk.tiny_base files plus berturk_train.json. plant_fewshot_set(ns, root) plants one consistent set per
+kind under root: the masked base of each allowed base seed and one continued run per frozen (draw, k), each with a
+valid masking proof, and returns {name: dir} (names laya-base-s0, laya-d0-k1, berturk-d0-k2, ...).
 """
 import copy
 import json
@@ -46,7 +57,179 @@ def postfit_systems(tmp_path, canonicals):
                + "\n").encode("utf-8")
         with open(path, "wb") as f:
             f.write(raw)
-        out[kind] = {"kind": kind, "postfit": {"path": path, "sha256": pilot.data.sha256_bytes(raw)}}
+        out[kind] = {"kind": kind, "postfit": {"path": path, "sha256": pilot.data.sha256_bytes(raw)},
+                     "final_seeds": []}
+    return out
+
+
+PLANT_LAYA = {"trainer": "ray_train.py", "epochs": 2, "stop_after_epoch": 1, "neg": 2, "encoder_lr": 2e-05,
+              "head_lr": 0.0001, "device": "cpu", "workers": 1, "micro_batch": 2, "grad_accum": 1, "max_len": 32}
+PLANT_BERTURK = {"trainer": "berturk_train.py", "epochs": 2, "stop_after_epoch": 1, "encoder_lr": 2e-05,
+                 "head_lr": 0.0001, "batch": 4, "max_len": 32, "device": "cpu", "dtype": "float32",
+                 "mask_label": -100.0}
+PLANT_CONTINUED = {"epochs": 1, "encoder_lr": 2e-05, "head_lr": 0.0001, "rule": "the synthetic continued training"}
+PLANT_SCORING = {"splits": ["test", "hotels_probe"], "device": "cpu", "workers": 0}
+
+
+def plant_rules(seeds=(0,)):
+    """The synthetic frozen rules of the planted sets: base seeds `seeds`, tiny recipes, one continued epoch."""
+    base_runs = json.loads(json.dumps(fs.RULES["base_runs"]))
+    base_runs.update(seeds=list(seeds), laya=dict(PLANT_LAYA), berturk=dict(PLANT_BERTURK))
+    return {"base_runs": base_runs, "continued_training": dict(PLANT_CONTINUED)}
+
+
+def chosen_laya(data_sha256):
+    """A chosen Laya selection run's canonical config (pilot.runs IDENTITY, the PLANT_LAYA recipe, seed 0)."""
+    from pilot import runs
+    r = PLANT_LAYA
+    return runs.canonical({
+        "split": "selection_train", "data_sha256": data_sha256, "data_role": "train", "base_model_sha256": "a" * 64,
+        "base_config_sha256": "b" * 64, "base_files_sha256": None, "laya_version": "0.4.6", "device": r["device"],
+        "workers": r["workers"], "epochs": r["epochs"], "micro_batch": r["micro_batch"], "grad_accum": r["grad_accum"],
+        "encoder_lr": r["encoder_lr"], "head_lr": r["head_lr"], "weight_decay": 0.01, "clip_grad_norm": 1.0,
+        "loss": "rlcd", "neg": r["neg"], "neg_seed": 0, "freeze_encoder": False, "freeze_embeddings": False,
+        "grad_checkpointing": True, "amp": False, "max_len": r["max_len"], "head_max_len": 32, "max_messages": None,
+        "shuffle_options": True, "seed": 0, "adamw_foreach": None, "adamw_fused": None, "stop_after_epoch": None,
+        "postfit_sha256": None, "mask_tags": None, "fewshot": None})
+
+
+def chosen_berturk(data_sha256):
+    """A chosen BERTurk selection run's canonical config (pilot.berturk IDENTITY, the PLANT_BERTURK recipe, seed 0)."""
+    from pilot import berturk
+    r = PLANT_BERTURK
+    return berturk.canonical({
+        "split": "selection_train", "data_sha256": data_sha256, "data_role": "train", "base_model_sha256": "c" * 64,
+        "base_config_sha256": "d" * 64, "base_files_sha256": None, "transformers_version": "5.19.0",
+        "accelerate_version": "1.15.0", "device": r["device"], "epochs": r["epochs"], "batch": r["batch"],
+        "encoder_lr": r["encoder_lr"], "head_lr": r["head_lr"], "weight_decay": 0.01, "warmup_ratio": 0.1,
+        "lr_scheduler": "linear", "max_grad_norm": 1.0, "optim": "adamw_torch", "loss": "masked_bce",
+        "max_len": r["max_len"], "max_messages": None, "mask_tags": None, "seed": 0, "stop_after_epoch": None,
+        "postfit_sha256": None, "fewshot": None})
+
+
+def bench(tmp_path, synthetic_raw, monkeypatch, mode="primary", seeds=(0,), scoring=None):
+    """synthetic_protocol with PLANT_RULES, both kinds' chosen canonicals bound and the scoring block (cpu, 0)."""
+    _, pre_manifest = prepared(tmp_path, synthetic_raw, name="pre")
+    data_sha = _rows(pre_manifest)[0]["sha256"]              # prepare() is deterministic: the source's sha256
+    systems = postfit_systems(tmp_path, {"laya": chosen_laya(data_sha), "berturk": chosen_berturk(data_sha)})
+    return synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, rules=plant_rules(seeds), systems=systems,
+                              scoring=dict(PLANT_SCORING if scoring is None else scoring), mode=mode)
+
+
+def _epoch_rows(kind, n):
+    from pilot import berturk, runs
+    rows = []
+    for e in range(1, n + 1):
+        if kind == "laya":
+            rows.append(dict(zip(runs.EPOCH_FIELDS, (e, 1.0 / e, 2.0, 0.5, 3, 10, 1, None, 1, None, 0, 0, False))))
+        else:
+            rows.append(dict(zip(berturk.EPOCH_FIELDS, (e, 1.0 / e, 2.0, 3, 10, 1, None, 1, 0))))
+    return rows
+
+
+def plant_laya(path, canonical, record, seed=0):
+    """A tiny Laya checkpoint holding a finished ray_train.py run: rl_agent_config.json training.ray_train {run_id,
+    canonical, record (run_id and canonical filled in)}, training.epoch the run's last epoch, and final.json."""
+    from pilot import runs
+    from tiny_laya import tiny_checkpoint
+    ckpt = tiny_checkpoint(path, seed=seed)
+    rid = runs.run_id(canonical)
+    cfg_path = os.path.join(ckpt, "rl_agent_config.json")
+    with open(cfg_path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    cfg["fine_tuned"] = True
+    cfg["training"] = dict(cfg.get("training") or {}, epoch=canonical.get("stop_after_epoch") or canonical["epochs"],
+                           calibrated=False, ray_train={"run_id": rid, "canonical": canonical,
+                                                        "record": dict(record, run_id=rid, canonical=canonical)})
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False)
+    with open(os.path.join(ckpt, "final.json"), "w", encoding="utf-8") as f:
+        json.dump({"kind": "final", "run_id": rid}, f)
+    return ckpt
+
+
+def plant_berturk(path, canonical, record, seed=0):
+    """The tiny BERTurk base files plus a finished run's berturk_train.json (schema berturk-train/1)."""
+    from pilot import berturk
+    from tiny_berturk import tiny_base
+    ckpt = tiny_base(path, seed=seed)
+    stop = canonical.get("stop_after_epoch") or canonical["epochs"]
+    doc = {"schema": berturk.RECORD_SCHEMA, "run_id": berturk.run_id(canonical), "canonical": canonical,
+           "epoch": stop, "epochs_schedule": canonical["epochs"], "stop_after_epoch": canonical.get("stop_after_epoch"),
+           "calibrated": False, "temperature": 1.0, "postfit": None, "record": record, "provenance": {}}
+    with open(os.path.join(ckpt, berturk.RECORD), "wb") as f:
+        f.write(berturk.record_bytes(doc))
+    return ckpt
+
+
+def _base_canonical(ns, kind):
+    canon = dict(fs.chosen_canonical(ns.protocol, kind), mask_tags=sorted(ns.block["tags"]),
+                 fewshot=fs.binding(ns.pin, "base"))
+    canon["stop_after_epoch"] = ns.block["rules"]["base_runs"][kind]["stop_after_epoch"]
+    return canon
+
+
+def _continued_canonical(ns, kind, base_dir, base_canon, base_rid, draw, k):
+    from pilot import berturk, dumps
+    from pilot.weights import identity
+    ident = berturk.identity(base_dir) if kind == "berturk" else identity(base_dir)
+    d = ns.block["draws"][draw]
+    canon = {key: v for key, v in base_canon.items() if key not in ("stop_after_epoch", "mask_tags")}
+    canon.update(base_model_sha256=ident["model_sha256"], base_config_sha256=ident["config_sha256"],
+                 base_files_sha256=dumps.files_digest(ident["files_sha256"]),
+                 epochs=ns.block["rules"]["continued_training"]["epochs"], seed=d["seed"],
+                 fewshot=fs.binding(ns.pin, "continued", draw, k, d["digest"], base_rid))
+    if kind == "laya":
+        canon["neg_seed"] = d["seed"]
+    return canon
+
+
+def plant_fewshot_set(ns, root, kinds=("laya", "berturk")):
+    """One consistent planted set per kind under `root` for the synthetic protocol `ns` (see the module docstring);
+    returns {name: checkpoint dir}."""
+    from pilot import berturk, runs
+    tags, out = sorted(ns.block["tags"]), {}
+    mode = fs.read_mode(ns.pin)
+    seeds = fs.allowed_base_seeds(ns.block, mode)
+    for kind in kinds:
+        bases = {}
+        for s in seeds:
+            canon = dict(_base_canonical(ns, kind), seed=s)
+            if kind == "laya":
+                canon["neg_seed"] = s
+                rec = {"rung": "none", "fallback": False, "weaker": False, "load_s": 1.0, "final_save_s": 0.5,
+                       "calib_s": None, "epochs": _epoch_rows(kind, canon["stop_after_epoch"]),
+                       "fewshot": {"protocol_sha256": ns.pin, "stage": "base", "tags": tags,
+                                   "held_out_items": {t: 0 for t in tags}, "items_per_question": {}}}
+                path, rid = plant_laya(os.path.join(root, "laya-base-s%d" % s), canon, rec, seed=s), runs.run_id(canon)
+            else:
+                rec = {"load_s": 1.0, "epochs": _epoch_rows(kind, canon["stop_after_epoch"]),
+                       "fewshot": {"protocol_sha256": ns.pin, "stage": "base", "tags": tags,
+                                   "unmasked_held_out_labels": {t: 0 for t in tags}}}
+                path = plant_berturk(os.path.join(root, "berturk-base-s%d" % s), canon, rec, seed=s)
+                rid = berturk.run_id(canon)
+            out["%s-base-s%d" % (kind, s)] = path
+            bases[s] = (path, canon, rid)
+        for draw in range(len(ns.block["draws"])):
+            for k in ns.block["k_values"]:
+                base_dir, base_canon, base_rid = bases[fs.base_seed_of(ns.block, draw, mode)]
+                canon = _continued_canonical(ns, kind, base_dir, base_canon, base_rid, draw, k)
+                sel = fs.selection(ns.block, draw, k)
+                n_sup, n_rep = len(sel["support"]), len(sel["replay"])
+                proof = {"protocol_sha256": ns.pin, "stage": "continued", "draw": draw, "k": k,
+                         "digest": ns.block["draws"][draw]["digest"], "tags": tags, "support_rows": n_sup,
+                         "replay_rows": n_rep, "base": {"run_id": base_rid, "canonical": base_canon}}
+                name = "%s-d%d-k%d" % (kind, draw, k)
+                epochs = _epoch_rows(kind, canon["epochs"])
+                if kind == "laya":
+                    proof.update(new_tag_items={t: n_sup for t in tags}, items_per_question={})
+                    rec = {"rung": "none", "fallback": False, "weaker": False, "load_s": 1.0, "final_save_s": 0.5,
+                           "calib_s": None, "epochs": epochs, "fewshot": proof}
+                    out[name] = plant_laya(os.path.join(root, name), canon, rec, seed=10 + 10 * draw + k)
+                else:
+                    proof.update(new_tag_labels={t: n_sup for t in tags}, replay_unmasked_held_out_labels=0)
+                    rec = {"load_s": 1.0, "epochs": epochs, "fewshot": proof}
+                    out[name] = plant_berturk(os.path.join(root, name), canon, rec, seed=10 + 10 * draw + k)
     return out
 
 
@@ -68,6 +251,7 @@ def write_decision(path, record):
 def synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, tags=("card",), k_values=(1, 2), draw_seeds=(0,),
                        neg_per_pos=1, replay=2, rules=None, systems=None, scoring=None, mode="primary", splits=None):
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", manifest)   # first: splits_block reads the committed one
     entry, rows = _rows(manifest)
     draws = []
     for i, s in enumerate(draw_seeds):
@@ -87,14 +271,12 @@ def synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, tags=("card",), k_v
         protocol["systems"] = systems
     if scoring is not None:
         protocol["scoring"] = scoring
-    if splits is not None:
-        protocol["splits"] = splits
+    protocol["splits"] = pr.splits_block(manifest) if splits is None else splits
     path = str(tmp_path / "protocol.json")
     pin = pr.write_protocol(protocol, path)
     decision_path = write_decision(str(tmp_path / "fewshot" / "projection.json"), decision_record(pin, mode))
     monkeypatch.setattr(pr, "PROTOCOL_PATH", path)
     monkeypatch.setattr(pr, "PROTOCOL_SHA256", pin)
-    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", manifest)
     monkeypatch.setattr(fs, "DECISION_PATH", decision_path, raising=False)
     return types.SimpleNamespace(manifest=manifest, out_dir=out_dir, protocol_path=path, pin=pin,
                                  decision_path=decision_path, block=json.loads(json.dumps(block)), rows=rows,
