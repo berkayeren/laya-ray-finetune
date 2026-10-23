@@ -136,6 +136,7 @@ EXIT_DETAIL = "Worker exit detail: "                        # ray 2.59: precedes
 GATE = "protocol gate (Phase 8): "                          # the prefix of every protocol gate refusal
 SCORE_ROLES = ("test", "val", "ood_probe")                  # the roles score.py scores (main's default `roles`)
 GATED_ROLES = ("test", "ood_probe")                         # a fine-tuned model on these goes through the gate
+GATED_WHAT = {"final": "final seed", "fewshot": "listed few-shot checkpoint (results/fewshot/runs.json)"}
 
 
 def train_counts(manifest_path, role):
@@ -782,8 +783,8 @@ def main(argv=None, roles=None):
                                     "never read it (it needs the sidecar); delete it and rerun this one command"
                              % _shown(dst))
         if gate and os.path.exists(dst):
-            raise SystemExit(head + "%s already exists; a final seed is scored once per split (the protocol's "
-                                    "scoring.once) and never rescored" % _shown(dst))
+            raise SystemExit(head + "%s already exists; a %s is scored once per split (the protocol's "
+                                    "scoring.once) and never rescored" % (_shown(dst), GATED_WHAT[admission[0]]))
         if os.path.exists(dst) and not a.force:
             raise SystemExit("%s already exists; pass --force to rescore it (results/dumps is the committed audit "
                              "record), or --out-root DIR to write elsewhere" % _shown(dst))
