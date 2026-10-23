@@ -128,6 +128,25 @@ def read_jsonl(path):
     return _lt().read_jsonl(path)
 
 
+def items_per_question(items):
+    """{tag: number of items} over all 48 INTENTS tags (0 included, INTENTS order) of laya training items (FEW-01, the
+    masking proof of a Phase 9 run): each item is mapped to its tag by its question's instruction text
+    (item["q"]["ins"], laya 0.4.6's item layout from items_from_rows), which is exactly one INTENTS text (all 48 are
+    distinct). The only reader of laya's item layout outside laya. SystemExit on an item whose instruction is not
+    exactly one of the 48."""
+    from intents import INTENTS
+    by_text = {text: tag for tag, text in INTENTS.items()}
+    out = {tag: 0 for tag in INTENTS}
+    for i, item in enumerate(items):
+        q = item.get("q") if isinstance(item, dict) else None
+        ins = q.get("ins") if isinstance(q, dict) else None
+        if not isinstance(ins, str) or ins not in by_text:
+            raise SystemExit("training item %d asks %r, not one of the 48 intents.py instructions; the item builder "
+                             "changed (run `make env`, or fix pilot/laya_adapter.py for the new laya)" % (i, ins))
+        out[by_text[ins]] += 1
+    return out
+
+
 # ---- laya.common ----
 
 def collate_items(batch, pad_id):

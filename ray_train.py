@@ -90,6 +90,26 @@ with the record's sha256, chosen settings, T and θ) and the run record carries 
 stop_after_epoch and postfit_sha256 are run-identity keys left out when None (every selection run id is unchanged);
 postfit.py --print-final-commands prints the commands.
 
+Few-shot (Phase 9, FEW-01, FEW-02): two modes run the frozen protocol.json few-shot block unchanged, each bound to it
+by refusal before --print-run-id and ray.init. pilot.protocol.require_frozen() and the D-08 decision record
+(pilot.fewshot.read_mode) come first, before the split is read; pilot.fewshot.check_source then proves --data is the
+frozen source (selection_train) and that every frozen draw regenerates from its verified bytes.
+- --fewshot-base trains a label-masked base: the protocol's held-out tags (--mask-tags is optional and refused unless
+  it names exactly them) are deleted from every row's expected before neg sampling (pilot.fewshot.masked_rows; every
+  message is kept); pilot.fewshot.check_base binds the command to rules.base_runs.laya and to the chosen selection run's
+  canonical config, read through the protocol-pinned postfit record. The worker counts the items per question
+  (pilot.laya_adapter.items_per_question) and refuses to train when any held-out question got an item.
+- --fewshot-draw D --fewshot-k K --base <masked base> continues a masked base on the frozen support set of (D, K) plus
+  the draw's replay set, by the frozen Laya item rule (pilot.fewshot.laya_rows; laya_item_count gives the count). The
+  base's run id and canonical config are read from its rl_agent_config.json bytes, bound to its identity digest;
+  pilot.fewshot.check_continued binds the epochs, LRs, seed (the draw seed), draw digest and base pairing (the recorded
+  mode). The worker refuses unless every held-out question has exactly one item per support row (none from replay
+  rows) and the item count equals laya_item_count.
+mask_tags and fewshot (pilot.fewshot.binding) are run-identity keys left out when None, so every committed run id is
+unchanged. The frozen uid lists reach the worker in the config key fewshot_rows, which the run record and every
+checkpoint config leave out; the record's fewshot entry holds only counts, tags, the protocol sha256, the draw digest
+and the base's run id and canonical config (the masking proof, D-04).
+
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
 (tampered, unregistered, val/test/probe) is refused before Ray starts, and so is a train split under any manifest that
 holds committed held-out content (pilot.data.refuse_held_out: committed test content, or committed val content in
@@ -111,6 +131,12 @@ usage:
   python ray_train.py ... --print-run-id            # the run id (storage/<run_id>/); rerun a killed command to resume
   python ray_train.py --data data/splits/final_train.jsonl ... --epochs 4 --stop-after-epoch 2 --seed 1 \
                       --postfit results/postfit/laya.json --no-export-epochs   # a final seed (postfit.py prints it)
+  python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt-fewshot-base-s0 \
+                      --device mps --workers 1 --epochs 4 --stop-after-epoch 3 --encoder-lr 2e-05 --seed 0 \
+                      --fewshot-base                        # a Phase 9 masked base (the frozen recipe)
+  python ray_train.py --data data/splits/selection_train.jsonl --base ckpt-fewshot-base-s0 --out ckpt-fewshot-d0-k10 \
+                      --device mps --workers 1 --epochs 10 --encoder-lr 2e-05 --seed 0 \
+                      --fewshot-draw 0 --fewshot-k 10       # a Phase 9 continued run from it
 """
 import argparse
 import gc
@@ -132,9 +158,9 @@ from ray.train import Checkpoint, CheckpointConfig, FailureConfig, RunConfig, Sc
 from ray.train.torch import TorchTrainer
 
 from pilot import laya_adapter as la
-from pilot import dumps, pins, postfit, runs, spike
+from pilot import dumps, fewshot, pins, postfit, protocol, runs, spike
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, refuse_held_out,
-                        repo_relpath, sha256_file, verify_split_file)
+                        repo_relpath, sha256_bytes, sha256_file, verify_split_file)
 from pilot.weights import (check_tokenizer_config_rewritable, check_tokenizer_config_rewritten, checkpoint_digests,
                            fetch, identity, verify_files)
 
@@ -348,13 +374,14 @@ def epoch_config(cfg, max_len, head_max_len, ray_cfg, epoch):
                 training=dict(cfg.get("training") or {}, ray_train=ray_cfg, epoch=epoch, calibrated=False))
 
 
-def identity_values(a, r, entry, base_name, base_ident, postfit_sha256=None):
+def identity_values(a, r, entry, base_name, base_ident, postfit_sha256=None, mask_tags=None, fewshot=None):
     """The pilot.runs.IDENTITY values of a command: parsed args `a`, resolve(a) `r`, the verified split `entry` and the
     base identity. Paths enter only as their verified digests, aliases (--gpu) only as their resolved value. A local
     base also enters by the digest of its tokenizer/ and encoder/ files (the tokenizer builds every training item;
     04-REVIEW WR-01); the pinned base's are fixed by the pin, so base_files_sha256 is None there and
     pilot.runs.canonical leaves it out, which keeps every pinned run id unchanged. stop_after_epoch and postfit_sha256
-    (the sha256 of the --postfit record) are None and left out the same way unless a final seed sets them."""
+    (the sha256 of the --postfit record) are None and left out the same way unless a final seed sets them; mask_tags
+    (a masked base's sorted held-out tags) and fewshot (the pilot.fewshot.binding of a Phase 9 run) likewise."""
     return {"split": os.path.splitext(os.path.basename(entry["path"]))[0],
             "data_sha256": entry["sha256"], "data_role": entry["role"],
             "base_model_sha256": base_ident["model_sha256"],
@@ -371,7 +398,70 @@ def identity_values(a, r, entry, base_name, base_ident, postfit_sha256=None):
             "freeze_encoder": a.freeze_encoder, "freeze_embeddings": a.freeze_embeddings, "max_len": a.max_len,
             "head_max_len": a.head_max_len, "max_messages": a.max_messages,
             "shuffle_options": a.shuffle_options, "seed": a.seed,
-            "stop_after_epoch": a.stop_after_epoch, "postfit_sha256": postfit_sha256}
+            "stop_after_epoch": a.stop_after_epoch, "postfit_sha256": postfit_sha256,
+            "mask_tags": mask_tags, "fewshot": fewshot}
+
+
+def fewshot_base_of(base_dir, base_ident):
+    """{"run_id", "canonical"} of a continued run's base, read from its rl_agent_config.json bytes, which must hash to
+    the base identity's config_sha256 (the digest the run identity and the workers bind); SystemExit naming the fix for
+    other bytes, a checkpoint without a ray_train.py run id and canonical config, or a run id that is not the one its
+    canonical config names."""
+    with open(os.path.join(base_dir, "rl_agent_config.json"), "rb") as f:
+        raw = f.read()
+    if sha256_bytes(raw) != base_ident.get("config_sha256"):
+        raise SystemExit("--base rl_agent_config.json changed while it was read (sha256 %s, identity %s); rerun the "
+                         "command" % (sha256_bytes(raw), base_ident.get("config_sha256")))
+    try:
+        rt = (json.loads(raw.decode("utf-8")).get("training") or {}).get("ray_train") or {}
+    except (ValueError, AttributeError):
+        rt = {}
+    rid, canon = rt.get("run_id"), rt.get("canonical")
+    if not isinstance(rid, str) or not isinstance(canon, dict):
+        raise SystemExit("--base %s holds no ray_train.py run id and canonical config; a continued run starts from a "
+                         "--fewshot-base checkpoint" % repo_relpath(base_dir))
+    if runs.run_id(canon) != rid:
+        raise SystemExit("--base %s names run %s, but its canonical config is run %s; a continued run starts from an "
+                         "unedited --fewshot-base checkpoint" % (repo_relpath(base_dir), rid, runs.run_id(canon)))
+    return {"run_id": rid, "canonical": canon}
+
+
+def fewshot_proof(c, per_q, n_items, counted):
+    """The run record's fewshot entry of a Phase 9 run (None otherwise), from the items laya built (per_q =
+    la.items_per_question of them, n_items their number, counted the torch-free count); SystemExit, on every rank
+    before training, when the masking proof fails (D-04, FEW-01, FEW-02).
+
+    A masked base must hold no item of a held-out question: {protocol_sha256, stage base, tags, held_out_items (all
+    0), items_per_question}. A continued run must hold exactly one item of each held-out question per support row (so
+    replay rows contributed none) and the item count of pilot.fewshot.laya_item_count: {protocol_sha256, stage
+    continued, draw, k, digest, tags, support_rows, replay_rows, new_tag_items, items_per_question, base {run_id,
+    canonical}}. Counts, tags and digests only, never a uid."""
+    b = c.get("fewshot")
+    if not b:
+        return None
+    if b["stage"] == "base":
+        tags = list(c["mask_tags"])
+        held = {t: per_q.get(t, 0) for t in tags}
+        leaked = ["%s %d" % (t, n) for t, n in held.items() if n]
+        if leaked:
+            raise SystemExit("the masked base built items of held-out question(s) (%s); refusing to train: masking "
+                             "deletes the held-out keys before negative sampling (FEW-01)" % ", ".join(leaked))
+        return {"protocol_sha256": b["protocol_sha256"], "stage": "base", "tags": tags, "held_out_items": held,
+                "items_per_question": per_q}
+    rows = c["fewshot_rows"]
+    tags, n_sup = list(rows["tags"]), len(rows["support"])
+    new = {t: per_q.get(t, 0) for t in tags}
+    off = ["%s %d" % (t, n) for t, n in new.items() if n != n_sup]
+    if off:
+        raise SystemExit("the continued run built items of held-out question(s) (%s) for %d support rows; refusing to "
+                         "train: exactly one per support row, none from a replay row (the frozen Laya item rule)"
+                         % (", ".join(off), n_sup))
+    if n_items != counted:
+        raise SystemExit("the continued run built %d items, the frozen Laya item rule gives %d "
+                         "(pilot.fewshot.laya_item_count); refusing to train" % (n_items, counted))
+    return {"protocol_sha256": b["protocol_sha256"], "stage": "continued", "draw": b["draw"], "k": b["k"],
+            "digest": b["digest"], "tags": tags, "support_rows": n_sup, "replay_rows": len(rows["replay"]),
+            "new_tag_items": new, "items_per_question": per_q, "base": c["fewshot_base"]}
 
 
 def worker_device(c):
@@ -584,14 +674,26 @@ def train_loop_per_worker(c):
     if c["max_messages"]:
         random.Random(c["seed"]).shuffle(rows)
         rows = rows[:c["max_messages"]]
-    train_rows = rows
-    counted = runs.neg_items(train_rows, c["neg"])
-    if c["neg"]:
-        train_rows = spike.neg8_rows(train_rows, c["neg_seed"], c["neg"])
+    fs_rows = c.get("fewshot_rows")
+    if fs_rows:                                             # Phase 9 continued: the frozen support and replay rows
+        sel = {"support": set(fs_rows["support"]), "replay": set(fs_rows["replay"])}
+        train_rows = fewshot.laya_rows(rows, sel, fs_rows["tags"], c["neg_seed"], c["neg"])
+        counted = fewshot.laya_item_count(rows, sel, fs_rows["tags"], c["neg"])
+    else:
+        # a Phase 9 masked base deletes the held-out keys BEFORE negative sampling (laya builds a negative item for a
+        # False value, and sampling after the deletion can never keep a held-out label)
+        train_rows = fewshot.masked_rows(rows, c["mask_tags"]) if c.get("mask_tags") else rows
+        counted = runs.neg_items(train_rows, c["neg"])
+        if c["neg"]:
+            train_rows = spike.neg8_rows(train_rows, c["neg_seed"], c["neg"])
     train_items, skipped = la.items_from_rows(tok, train_rows, max_len, head_max_len)
-    # driver-local absolute paths (data, base_dir, storage), the run's node id and the raw env dict stay out of every
-    # checkpoint (the env is recorded only as KEY=VALUE strings in the run record)
-    ray_cfg = {k: v for k, v in c.items() if k not in ("data", "base_dir", "storage", "driver_node_id", "expect_env")}
+    # the masking proof (D-04): counted from the items laya built, refused on every rank before training
+    fs_proof = fewshot_proof(c, la.items_per_question(train_items), len(train_items), counted) \
+        if c.get("fewshot") else None
+    # driver-local absolute paths (data, base_dir, storage), the run's node id, the raw env dict and the frozen uid
+    # lists (fewshot_rows) stay out of every checkpoint (the env is recorded only as KEY=VALUE strings in the run record)
+    ray_cfg = {k: v for k, v in c.items()
+               if k not in ("data", "base_dir", "storage", "driver_node_id", "expect_env", "fewshot_rows")}
     per_rank = len(train_items) // world                    # equal shards keep DDP collectives in step
     if per_rank == 0:                                       # same on every rank: never publish an untrained "fine-tune"
         raise SystemExit("no training items per rank (%d items, %d workers); use more messages or fewer workers"
@@ -600,6 +702,10 @@ def train_loop_per_worker(c):
     if rank == 0:
         print("messages %d | neg %s: items train %d (counted %d, skipped %r, %d per rank x %d)"
               % (len(train_rows), c["neg"] or "all", len(train_items), counted, skipped, per_rank, world), flush=True)
+        if fs_proof is not None:
+            print("few-shot %s: held-out tags %s, their items %s" % (
+                fs_proof["stage"], ",".join(fs_proof["tags"]),
+                fs_proof["held_out_items"] if fs_proof["stage"] == "base" else fs_proof["new_tag_items"]), flush=True)
 
     if c["freeze_encoder"]:
         la.freeze_encoder(model)
@@ -696,6 +802,8 @@ def train_loop_per_worker(c):
               # a final seed's binding to the val selection (LAYA-08): the record's sha256, chosen settings and T
               "postfit": ({k: c["postfit"][k] for k in ("sha256", "chosen", "temperature")} if c["postfit"]
                           else None),
+              # a Phase 9 run's masking proof and binding (counts, tags and digests only, never a uid), else None
+              "fewshot": fs_proof,
               "epochs": rows_out}
 
     def note_exports():
@@ -879,6 +987,17 @@ def parser():
                     help="the committed postfit record (results/postfit/laya.json): trains a final seed with the "
                          "val-chosen settings, refused unless every hyperparameter matches, and writes the val-fitted T "
                          "into the final config")
+    ap.add_argument("--fewshot-base", action="store_true",
+                    help="Phase 9: train a label-masked base of the frozen few-shot protocol (protocol.json); refused "
+                         "unless every setting is the frozen one")
+    ap.add_argument("--mask-tags", default=None,
+                    help="with --fewshot-base: the held-out tags, comma-separated; refused unless they are the frozen "
+                         "protocol's (the default)")
+    ap.add_argument("--fewshot-draw", type=int, default=None,
+                    help="Phase 9: continue the masked --base on the frozen support set of this draw plus its "
+                         "replay set")
+    ap.add_argument("--fewshot-k", type=int, default=None,
+                    help="Phase 9: the frozen k of the --fewshot-draw support set")
     ap.add_argument("--fail-after-epoch", type=int, default=None, help=argparse.SUPPRESS)   # test hook, never an env var
     return ap
 
@@ -903,6 +1022,26 @@ def main(argv=None):
     if a.stop_after_epoch is not None and not 1 <= a.stop_after_epoch < a.epochs:
         ap.error("--stop-after-epoch must be at least 1 and below --epochs (%d); omit it to train every epoch"
                  % a.epochs)
+    # Phase 9 (D-01): a few-shot mode is one frozen-protocol command; every other combination is an argument error
+    continued = a.fewshot_draw is not None or a.fewshot_k is not None
+    fs_flags = [f for f, on in (("--fewshot-base", a.fewshot_base), ("--fewshot-draw", a.fewshot_draw is not None),
+                                ("--fewshot-k", a.fewshot_k is not None), ("--mask-tags", a.mask_tags is not None))
+                if on]
+    if (a.fewshot_draw is None) != (a.fewshot_k is None):
+        ap.error("--fewshot-draw and --fewshot-k go together: a continued run names its frozen draw and k")
+    if a.fewshot_base and continued:
+        ap.error("--fewshot-base trains a masked base and --fewshot-draw continues one; pass one of them")
+    if continued and (a.stop_after_epoch is not None or a.mask_tags is not None):
+        ap.error("--fewshot-draw takes no --stop-after-epoch or --mask-tags: a continued run trains every frozen epoch "
+                 "on the support and replay rows, the held-out tags labelled on support rows only")
+    if a.mask_tags is not None and not a.fewshot_base:
+        ap.error("--mask-tags masks a Phase 9 base only: pass it with --fewshot-base (the frozen protocol's tags)")
+    if fs_flags and a.postfit:
+        ap.error("%s takes no --postfit: a few-shot run is bound to the frozen protocol, not to a postfit record"
+                 % fs_flags[0])
+    if fs_flags and a.max_messages is not None:
+        ap.error("%s takes no --max-messages: a few-shot run trains every message the frozen protocol selects"
+                 % fs_flags[0])
     try:
         r = resolve(a)
     except ValueError as e:
@@ -911,8 +1050,33 @@ def main(argv=None):
         ap.error("--device mps trains on one Ray worker (one GPU, no MPS collective backend); use --workers 1")
     if a.amp and r["device"] in ("mps", "cpu"):
         ap.error("--amp is CUDA-only (the MPS fine-tune is measured with AMP off); drop --amp")
+    proto = pin = block = mode = None
+    if a.fewshot_base or continued:                         # D-01: the frozen protocol first, before the split is read
+        proto, pin = protocol.require_frozen()
+        block = proto.get("fewshot")
+        if not isinstance(block, dict):
+            raise SystemExit("the frozen protocol holds no few-shot block; restore protocol.json with `git checkout -- "
+                             "protocol.json`")
+        mode = fewshot.read_mode(pin)                       # the D-08 decision record names primary or fallback
+        if continued and a.base == "multilingual":
+            raise SystemExit("--fewshot-draw continues a masked base: pass a ray_train.py --fewshot-base checkpoint as "
+                             "--base, not multilingual")
     entry = verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))   # before ray.init (D-03)
-    refuse_held_out(a.data, entry, read_verified_rows(a.data, entry["sha256"]))   # keyed on the content (WR-02)
+    rows = read_verified_rows(a.data, entry["sha256"])
+    refuse_held_out(a.data, entry, rows)                    # keyed on the content (WR-02)
+    mask = sel = None
+    if block is not None:
+        fewshot.check_source(block, entry, rows)            # --data is the frozen source; every draw regenerates (D-02)
+        if a.fewshot_base:
+            mask = sorted(block["tags"])
+            given = None if a.mask_tags is None else [t.strip() for t in a.mask_tags.split(",")]
+            if given is not None and (sorted(given) != mask or len(set(given)) != len(given)):
+                raise SystemExit("--mask-tags %s is not the frozen protocol's held-out tags %s; pass them (or omit "
+                                 "--mask-tags): Phase 9 runs the frozen protocol unchanged"
+                                 % (a.mask_tags, ",".join(mask)))
+        else:
+            sel = fewshot.selection(block, a.fewshot_draw, a.fewshot_k)
+            fewshot.laya_item_count(rows, sel, block["tags"], a.neg)   # a selected uid missing from the rows: refused
     # the postfit record (torch-free read: schema and sha256 of the parsed bytes) before any fetch or ray.init
     record, record_sha = postfit.read_record(a.postfit) if a.postfit else (None, None)
     if not a.print_run_id and os.path.exists(a.out) and (not os.path.isdir(a.out) or os.listdir(a.out)):
@@ -935,11 +1099,24 @@ def main(argv=None):
     base_ident = identity(base_name)
     base_sha256 = checkpoint_digests(base_name, base_ident)   # workers verify these bytes before loading
     check_tokenizer_config_rewritable(base_dir, "base checkpoint")   # before ray.init, not after a worker load (CR-01)
-    canon = runs.canonical(identity_values(a, r, entry, base_name, base_ident, record_sha))
+    fs_binding = base_info = None
+    if a.fewshot_base:
+        fs_binding = fewshot.binding(pin, "base")
+    elif continued:                                         # the base names itself by its own config bytes
+        base_info = fewshot_base_of(base_dir, base_ident)
+        fs_binding = fewshot.binding(pin, "continued", a.fewshot_draw, a.fewshot_k,
+                                     block["draws"][a.fewshot_draw].get("digest"), base_info["run_id"])
+    canon = runs.canonical(identity_values(a, r, entry, base_name, base_ident, record_sha, mask_tags=mask,
+                                           fewshot=fs_binding))
     pf_block = None
     if record is not None:                                  # bound by refusal, never by transcription (LAYA-08)
         postfit.check_final(record, canon)
         pf_block = postfit.final_block(record, record_sha, a.postfit)   # refuses a T outside laya's band here
+    if a.fewshot_base:                                      # bound by refusal to the frozen protocol (D-01, D-03)
+        fewshot.check_base(proto, pin, "laya", canon, fewshot.chosen_canonical(proto, "laya"), mode)
+    elif continued:                                         # D-06, D-07: the frozen draw, k, epochs, LRs and base
+        fewshot.check_continued(proto, pin, "laya", canon, base_info["canonical"], base_info["run_id"],
+                                a.fewshot_draw, a.fewshot_k, mode)
     rid = runs.run_id(canon)                                # the Ray experiment name: storage/<rid> is the resume dir
     if a.print_run_id:
         print(rid)
@@ -975,6 +1152,12 @@ def main(argv=None):
                 "storage": os.path.abspath(a.storage), "export_epochs": a.export_epochs,
                 "fail_after_epoch": a.fail_after_epoch, "stop_after_epoch": a.stop_after_epoch,
                 "postfit": pf_block,
+                # Phase 9: the binding and mask (recorded), the frozen uid lists (never recorded: the worker leaves
+                # fewshot_rows out of ray_cfg) and a continued run's base (run id and canonical config)
+                "mask_tags": mask, "fewshot": fs_binding,
+                "fewshot_rows": ({"support": sorted(sel["support"]), "replay": sorted(sel["replay"]),
+                                  "tags": list(block["tags"])} if sel is not None else None),
+                "fewshot_base": base_info,
                 "provenance": provenance(entry, a.manifest, a.base, base_dir, base_ident)}, **r)
     cfg["rung"] = runs.rung_label(cfg)                      # derived from the flags, into the record and the config
     trainer = TorchTrainer(
