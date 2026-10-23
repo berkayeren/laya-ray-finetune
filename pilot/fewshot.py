@@ -257,6 +257,160 @@ def check_draws(block, rows):
                                                          block["source"].get("uids_sha256")))
 
 
+# ---- Phase 9: the rows every few-shot run trains on (FEW-01, FEW-02; 09-01) ----
+
+SOURCE_SPLIT = "selection_train"
+# A2 (09-RESEARCH): the frozen laya_item_rule names no RNG; this is the reading Phase 9 takes, disclosed in its
+# records. A module text, never part of RULES, so protocol.json's fewshot block is unchanged.
+LAYA_ROWS_RULE = ("a continued run's Laya rows: one random.Random(neg seed) pass over the support and replay rows in "
+                  "selection_train file order (neg seed = training seed = draw seed); per row the old-tag positives, "
+                  "then rng.sample(sorted old-tag negatives, min(neg, n)) (pilot.spike.neg8_rows's shape), then, for "
+                  "a support row only, every label of the held-out tags (positive or negative); a replay row keeps no "
+                  "held-out key")
+
+
+def _held(tags):
+    """The held-out tags as a list after _check_tags; SystemExit on an empty list (never a no-op mask)."""
+    if isinstance(tags, str):
+        raise SystemExit("few-shot tags must be a list of intents.py tags, got the string %r" % (tags,))
+    tags = list(tags or ())
+    if not tags:
+        raise SystemExit("the few-shot held-out tag list is empty; pass the frozen protocol's tags")
+    _check_tags(tags)
+    return tags
+
+
+def masked_rows(rows, tags):
+    """New rows with every held-out tag's key deleted from expected (FEW-01): laya builds a negative item for a False
+    value, so a key is deleted, never set to False. Every row is kept, in order; the input rows are not mutated. Apply
+    before any negative sampling."""
+    held = set(_held(tags))
+    return [dict(r, expected={t: v for t, v in r["expected"].items() if t not in held}) for r in rows]
+
+
+def selection(block, draw, k):
+    """{"support": frozenset of uids, "replay": frozenset of uids} of the frozen draw `draw` at `k` (D-02: the frozen
+    lists, never regenerated); SystemExit on a draw index outside the block's draws, a k outside its k_values, a
+    repeated uid, or a support set that intersects the replay set."""
+    draws = block.get("draws") or []
+    if isinstance(draw, bool) or not isinstance(draw, int) or not 0 <= draw < len(draws):
+        raise SystemExit("few-shot draw %r is not one of the frozen draws 0..%d; Phase 9 runs the frozen protocol "
+                         "unchanged" % (draw, len(draws) - 1))
+    ks = block.get("k_values") or []
+    if isinstance(k, bool) or not isinstance(k, int) or k not in ks:
+        raise SystemExit("few-shot k %r is not one of the frozen k values %s; Phase 9 runs the frozen protocol "
+                         "unchanged" % (k, ks))
+    d = draws[draw]
+    if d.get("draw") != draw:
+        raise SystemExit("the frozen draw at index %d is numbered %r" % (draw, d.get("draw")))
+    sup, rep = (d.get("support") or {}).get(str(k)), d.get("replay")
+    if not isinstance(sup, list) or not isinstance(rep, list):
+        raise SystemExit("frozen draw %d holds no support list for k %d or no replay list" % (draw, k))
+    support, replay = frozenset(sup), frozenset(rep)
+    if len(support) != len(sup) or len(replay) != len(rep):
+        raise SystemExit("frozen draw %d repeats a uid in its k = %d support or replay list" % (draw, k))
+    _check_disjoint({"support": support, "replay": replay}, "frozen draw %d at k = %d" % (draw, k))
+    return {"support": support, "replay": replay}
+
+
+def _check_disjoint(sel, name):
+    both = sel["support"] & sel["replay"]
+    if both:
+        raise SystemExit("%s: %d uids are in both the support and the replay set (first %s); the replay set lies "
+                         "outside the support set" % (name, len(both), sorted(both)[0]))
+
+
+def _selected(rows, sel):
+    """[(row, is_support)] of the selected rows in file order; SystemExit on an overlapping selection, or a selected
+    uid that is missing from the rows or appears twice (never a shortened row set). uids compare as exact strings."""
+    _check_disjoint(sel, "the few-shot selection")
+    want = sel["support"] | sel["replay"]
+    seen, out = set(), []
+    for r in rows:
+        u = r["uid"]
+        if u not in want:
+            continue
+        if u in seen:
+            raise SystemExit("selected uid %s appears twice in the rows; build from one verified selection_train"
+                             % u)
+        seen.add(u)
+        out.append((r, u in sel["support"]))
+    missing = want - seen
+    if missing:
+        raise SystemExit("%d selected uids are not in the rows (first %s); the frozen lists come from the verified "
+                         "selection_train bytes" % (len(missing), sorted(missing)[0]))
+    return out
+
+
+def _check_neg(neg):
+    if isinstance(neg, bool) or not isinstance(neg, int) or neg < 1:
+        raise SystemExit("few-shot neg must be a positive count (the frozen neg 8), got %r" % (neg,))
+
+
+def laya_rows(rows, sel, tags, seed, neg):
+    """The rows of a continued Laya run by the frozen laya_item_rule, read as LAYA_ROWS_RULE (A2): support rows keep
+    every positive, every label of `tags` and min(neg, n) random old-tag negatives; replay rows keep no held-out key,
+    their old-tag positives and min(neg, n) random old-tag negatives; one random.Random(seed) pass in file order; rows
+    outside `sel` are skipped. SystemExit on a bad tag list, a selected uid missing or repeated, or a support row
+    without a held-out label."""
+    tags = _held(tags)
+    _check_neg(neg)
+    held, rng, out = set(tags), random.Random(seed), []
+    for r, support in _selected(rows, sel):
+        e = r["expected"]
+        keep = [t for t, v in e.items() if v and t not in held]
+        old_neg = sorted(t for t, v in e.items() if not v and t not in held)
+        keep += rng.sample(old_neg, min(neg, len(old_neg)))
+        if support:
+            lack = [t for t in tags if t not in e]
+            if lack:
+                raise SystemExit("support row %s has no label for held-out tag %s; every support message carries its "
+                                 "full gold labels" % (r["uid"], lack[0]))
+            keep += tags
+        out.append(dict(r, expected={t: e[t] for t in keep}))
+    return out
+
+
+def laya_item_count(rows, sel, tags, neg):
+    """The item count laya_rows implies, without an RNG: per support row old_pos + len(tags) + min(neg, old_labels -
+    old_pos), per replay row old_pos + min(neg, old_labels - old_pos). Same refusals as laya_rows."""
+    tags = _held(tags)
+    _check_neg(neg)
+    held, n = set(tags), 0
+    for r, support in _selected(rows, sel):
+        e = r["expected"]
+        old = [t for t in e if t not in held]
+        pos = sum(1 for t in old if e[t])
+        n += pos + min(neg, len(old) - pos) + (len(tags) if support else 0)
+    return n
+
+
+def berturk_rows(rows, sel, tags):
+    """[(row, mask tags)] of a continued BERTurk run in file order: a support row with no mask (its full 48 labels),
+    a replay row with the sorted held-out tags masked (pilot.berturk.label_vector sets them to MASK_LABEL). Same
+    refusals as laya_rows."""
+    mask = tuple(sorted(_held(tags)))
+    return [(r, () if support else mask) for r, support in _selected(rows, sel)]
+
+
+def check_source(block, entry, rows):
+    """None when the manifest entry `entry` is the block's frozen source (role train, sha256 and uids_sha256 equal to
+    block source's, source split selection_train) and every frozen draw regenerates from `rows` (check_draws, D-02);
+    SystemExit naming what differs otherwise."""
+    src = block.get("source") or {}
+    if src.get("split") != SOURCE_SPLIT:
+        raise SystemExit("the frozen few-shot source is %r, not %s; the protocol draws from %s only"
+                         % (src.get("split"), SOURCE_SPLIT, SOURCE_SPLIT))
+    if entry.get("role") != "train":
+        raise SystemExit("the few-shot source entry has role %r, not train; pass the manifest's %s entry"
+                         % (entry.get("role"), SOURCE_SPLIT))
+    for key in ("sha256", "uids_sha256"):
+        if entry.get(key) != src.get(key):
+            raise SystemExit("the source entry has %s %s, the frozen few-shot source %s; the draws are bound to the "
+                             "split the protocol froze (run `make data`)" % (key, entry.get(key), src.get(key)))
+    check_draws(block, rows)
+
+
 def _read_split(manifest_path, m, name, roles):
     entry = m["splits"][name]
     path = os.path.join(os.path.dirname(os.path.realpath(manifest_path)), entry["path"])

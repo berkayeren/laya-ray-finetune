@@ -41,7 +41,7 @@ def full_rows(n=40, seed=3):
     uids u<i> in a shuffled file order."""
     rng, rows = random.Random(seed), []
     for i in range(n):
-        pos = set(rng.sample(INTENTS, 1 + i % 4))
+        pos = set(rng.sample(list(INTENTS), 1 + i % 4))
         if i % 5 == 0:
             pos.add(HELD[i % len(HELD)])
         rows.append({"state": "mesaj %d" % i, "uid": "u%02d" % i, "questions": {},
