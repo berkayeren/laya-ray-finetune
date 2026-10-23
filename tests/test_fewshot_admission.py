@@ -464,7 +464,7 @@ def test_drop_storage_refuses_a_berturk_or_non_phase_9_checkpoint(planted):
     storage, run_dir, _ = ray_storage(planted, "laya-d0-k1")
     cli_refused(["--drop-storage", planted.ckpts["berturk-d0-k1"], "--storage", storage], "ray_train.py")
     plain = tiny_checkpoint(planted.tmp / "plain")
-    cli_refused(["--drop-storage", plain, "--storage", storage], "ray_train.py run record")
+    cli_refused(["--drop-storage", plain, "--storage", storage], "holds no ray_train run record")
     assert os.path.isdir(run_dir)
 
 

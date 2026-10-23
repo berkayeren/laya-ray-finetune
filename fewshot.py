@@ -55,6 +55,22 @@ record's path and sha256, the sorted tags, WALL_RULE, the entries sorted by (kin
 atomically as key-sorted JSON with one trailing newline. score.py's protocol gate admits exactly its dump run ids, on
 test only, once (pilot.fewshot.admitted).
 
+--prune CKPT... (09-05, D-14): require_frozen() first; results/fewshot/runs.json must exist and pass
+pilot.fewshot.read_runs; every path is checked before anything is deleted. A symlink (or a path in a symlinked dir),
+a dir that is not a checkpoint, and a checkpoint whose hashed dump run id the manifest does not list for its kind
+(under its listed checkpoint_name) are refused, so a Phase 8 final seed or any other dir is never deleted. A listed
+continued checkpoint goes once its full test dump under results/dumps verifies (pilot.dumps.load_dump) with its own
+identity, protocol_sha256 the pin and fewshot_runs_sha256 the manifest's; a listed base once its ungated full val dump
+(its θ source) and its gated test dump verify the same way and the gated test dump of every listed continued run from
+it exists. Then each checkpoint's realpath is deleted (shutil.rmtree of that one dir) and its name and dump run id
+printed.
+
+--drop-storage CKPT --storage DIR (09-05, D-14): require_frozen() first; CKPT must be a finished ray_train.py few-shot
+checkpoint of this protocol (not a symlink; pilot.runs.read_record; a run id that is its canonical's; final.json of
+that run; a canonical few-shot binding of this pin); then DIR/<run id>, the run's Ray storage, is deleted, and nothing
+else. A missing or symlinked DIR/<run id>, or one that holds CKPT itself, is refused. The runs manifest is not needed:
+storage is freed after each training run, before the allow-list is written.
+
 usage:
     python fewshot.py --support-sets                     # refused until protocol.json is frozen (plan 08-10)
     python fewshot.py --support-sets --manifest OTHER_DIR/splits.json
@@ -63,11 +79,14 @@ usage:
     python fewshot.py --projection --ladder-failure TEXT --out results/fewshot/projection.json   # primary -> fallback
     python fewshot.py --inspect ckpt-fewshot-base-s0 ckpt-fewshot-d0-k10   # one allow-list entry per checkpoint
     python fewshot.py --runs-manifest ckpt-fewshot-* ckpt-berturk-fewshot-* --out results/fewshot/runs.json   # once
+    python fewshot.py --prune ckpt-fewshot-d0-k10          # after its verified gated test dump exists
+    python fewshot.py --drop-storage ckpt-fewshot-d0-k10 --storage ray_results   # that run's Ray storage only
 """
 import argparse
 import json
 import math
 import os
+import shutil
 
 import pilot.data
 from pilot import berturk, compute, dumps, fewshot, protocol, runs, spike
@@ -470,6 +489,134 @@ def runs_manifest_mode(ckpts, out):
     return record
 
 
+# ---- 09-05: guarded deletion (D-14) ----
+
+def _hashed(kind, ckpt):
+    """(identity, dump run id) of a checkpoint dir from hashes alone, as score.py computes them."""
+    if kind == "laya":
+        from pilot.weights import identity
+        ident = identity(ckpt)
+        return ident, dumps.run_id("laya", ident)
+    berturk.require_files(ckpt, "--prune")
+    ident = berturk.identity(ckpt)
+    return ident, berturk.dump_run_id(ident)
+
+
+def dump_problem(rid, split, manifest, pin, runs_sha, gated, kind, ident=None):
+    """None when results/dumps/<rid>/<split> (pilot.dumps.DUMP_ROOT, read at call time) is a verified full dump of
+    system `kind` (and of identity `ident` when given), scored through the protocol gate under this runs manifest
+    (gated: protocol_sha256 the pin, fewshot_runs_sha256 `runs_sha`) or ungated (neither key); else what is wrong."""
+    try:
+        _, _, side, _ = dumps.load_dump(os.path.join(dumps.DUMP_ROOT, rid), split, manifest)
+    except SystemExit as e:
+        return "no verified %s dump %s/%s (%s)" % (split, rid, split, " ".join(str(e.code).split()))
+    system = side.get("system") or {}
+    if side.get("n_subset") is not None:
+        return "the %s dump %s/%s is a subset dump" % (split, rid, split)
+    if system.get("kind") != kind or (ident is not None and system.get("checkpoint_identity") != ident):
+        return "the %s dump %s/%s is another checkpoint's" % (split, rid, split)
+    keys = (side.get("protocol_sha256"), side.get("fewshot_runs_sha256"))
+    if gated and keys != (pin, runs_sha):
+        return ("the test dump %s/%s was not scored through the protocol gate under this runs manifest "
+                "(protocol_sha256 %s, fewshot_runs_sha256 %s)" % (rid, split, keys[0], keys[1]))
+    if not gated and ("protocol_sha256" in side or "fewshot_runs_sha256" in side):
+        return "the %s dump %s/%s is gated, not the base's own ungated val dump (its θ source, D-05)" % (split, rid,
+                                                                                                       split)
+    return None
+
+
+def prune_mode(paths, manifest):
+    """--prune: delete listed few-shot checkpoints whose verified dumps exist (see the module docstring); returns the
+    dump run ids of the deleted checkpoints, in argument order."""
+    proto, _, pin = frozen_protocol()                           # first: nothing is read without the frozen protocol
+    runs_doc, runs_sha = fewshot.read_runs(proto, pin)
+    if runs_doc is None:
+        raise SystemExit("no results/fewshot/runs.json; --prune deletes only a checkpoint the committed runs manifest "
+                         "lists (write it with `python fewshot.py --runs-manifest` first)")
+    entries, todo = runs_doc["entries"], []
+    for p in paths:
+        path = os.path.abspath(p)
+        if os.path.islink(path) or os.path.islink(os.path.dirname(path)):
+            raise SystemExit("%s is a symlink (or sits in a symlinked dir); refusing to delete it" % p)
+        real = os.path.realpath(path)
+        kind = checkpoint_kind(real)
+        ident, rid = _hashed(kind, real)
+        e = next((x for x in entries if x["kind"] == kind and x["dump_run_id"] == rid), None)
+        name = os.path.basename(real)
+        if e is None:
+            raise SystemExit("%s (dump run id %s) is not listed in results/fewshot/runs.json; --prune deletes only a "
+                             "listed few-shot checkpoint, never a Phase 8 final seed or any other dir" % (p, rid))
+        if e["checkpoint_name"] != name:
+            raise SystemExit("%s is listed as %s, not %s; pass the listed checkpoint dir" % (p, e["checkpoint_name"],
+                                                                                       name))
+        problems = []
+        if e["stage"] == "base":
+            problems.append(dump_problem(rid, "val", manifest, pin, runs_sha, False, kind, ident))
+        problems.append(dump_problem(rid, "test", manifest, pin, runs_sha, True, kind, ident))
+        if e["stage"] == "base":
+            for c in entries:
+                if c["kind"] == kind and c["stage"] == "continued" and c["base_run_id"] == e["train_run_id"]:
+                    why = dump_problem(c["dump_run_id"], "test", manifest, pin, runs_sha, True, kind)
+                    problems.append(None if why is None else "%s: %s" % (c["checkpoint_name"], why))
+        problems = [x for x in problems if x]
+        if problems:
+            raise SystemExit("%s (%s %s) is not pruned: %s; score them first (a base is kept until its val, its test "
+                             "and every continued test dump from it exist), then prune"
+                             % (name, kind, e["stage"], "; ".join(problems)))
+        todo.append((real, name, rid))
+    for real, name, rid in todo:
+        shutil.rmtree(real)
+        print("pruned %s (dump run id %s)" % (name, rid))
+    return [rid for _, _, rid in todo]
+
+
+def drop_storage_mode(ckpt, storage):
+    """--drop-storage: delete the Ray storage dir of one finished ray_train.py few-shot run (see the module
+    docstring); returns the deleted run id."""
+    _, _, pin = frozen_protocol()                               # first: nothing is read without the frozen protocol
+    path = os.path.abspath(ckpt)
+    if os.path.islink(path):
+        raise SystemExit("%s is a symlink; pass the checkpoint dir itself" % ckpt)
+    if not os.path.isfile(os.path.join(path, "rl_agent_config.json")):
+        raise SystemExit("%s is not a ray_train.py checkpoint (no rl_agent_config.json); --drop-storage frees a Laya "
+                         "run's Ray storage only (berturk_train.py runs keep no Ray storage)" % ckpt)
+    rec = runs.read_record(path)
+    run, canon = rec.get("run_id"), rec.get("canonical")
+    if not isinstance(canon, dict) or run != runs.run_id(canon):
+        raise SystemExit("%s: its ray_train.py run record names run %r, not its canonical config's; pass an unedited "
+                         "checkpoint" % (ckpt, run))
+    try:
+        with open(os.path.join(path, "final.json"), encoding="utf-8") as f:
+            mark = json.load(f)
+    except (OSError, ValueError):
+        mark = None
+    if not isinstance(mark, dict) or mark.get("run_id") != run:
+        raise SystemExit("%s is not a finished run of %s (no final.json of that run); its Ray storage is what a rerun "
+                         "resumes from, so it is kept" % (ckpt, run))
+    bind = canon.get("fewshot")
+    if not isinstance(bind, dict) or bind.get("protocol_sha256") != pin:
+        raise SystemExit("%s (run %s) is not a few-shot run of the frozen protocol %s; --drop-storage frees Phase 9 "
+                         "storage only" % (ckpt, run, pin))
+    target = os.path.join(os.path.abspath(storage), run)
+    if not os.path.lexists(target):
+        raise SystemExit("%s not found; the run's Ray storage is <--storage>/<run id> (pass the --storage it trained "
+                         "with)" % target)
+    if os.path.islink(target) or not os.path.isdir(target):
+        raise SystemExit("%s is a symlink or not a dir; refusing to delete it" % target)
+    real, inside = os.path.realpath(target), os.path.realpath(path)
+    if inside == real or inside.startswith(real + os.sep):
+        raise SystemExit("%s holds the checkpoint %s itself; refusing to delete it (copy the checkpoint out of the "
+                         "storage first)" % (target, ckpt))
+    shutil.rmtree(real)
+    print("dropped Ray storage %s of %s" % (run, os.path.basename(path)))
+    return run
+
+
+# which mode each optional flag belongs to (each mode refuses the others' flags, the postfit.py convention)
+FLAG_MODES = {"out": ("projection", "runs_manifest"), "ladder_failure": ("projection",),
+              "storage": ("drop_storage",), "manifest": ("support_sets", "counts", "projection", "prune")}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     mode = ap.add_mutually_exclusive_group()
@@ -483,21 +630,36 @@ def main(argv=None):
                       help="re-validate few-shot checkpoints and print one runs-manifest entry each")
     mode.add_argument("--runs-manifest", nargs="+", metavar="CKPT",
                       help="write the allow-list of every few-shot checkpoint to --out (once)")
+    mode.add_argument("--prune", nargs="+", metavar="CKPT",
+                      help="delete listed few-shot checkpoints once their verified dumps exist")
+    mode.add_argument("--drop-storage", metavar="CKPT",
+                      help="delete the Ray storage dir (--storage/<run id>) of a finished ray_train.py few-shot run")
     ap.add_argument("--out", default=None, help="--projection: the decision record (results/fewshot/projection.json); "
                                                 "--runs-manifest: the allow-list (results/fewshot/runs.json)")
     ap.add_argument("--ladder-failure", default=None, metavar="TEXT",
                     help="--projection: turn the recorded primary decision at --out into the fallback, naming the "
                          "primary base run that still failed after the LAYA-03 ladder")
+    ap.add_argument("--storage", default=None, help="--drop-storage: the Ray storage dir the run trained under")
     ap.add_argument("--manifest", default=None, help="the splits manifest (default data/splits.json)")
     a = ap.parse_args(argv)
     manifest = a.manifest or pilot.data.DEFAULT_MANIFEST
-    if a.ladder_failure is not None and not a.projection:
+    chosen = next((m for m in ("support_sets", "counts", "projection", "inspect", "runs_manifest", "prune",
+                               "drop_storage") if getattr(a, m)), None)
+    if a.ladder_failure is not None and chosen != "projection":
         ap.error("--out and --ladder-failure belong to --projection (--out also to --runs-manifest)")
-    if a.out is not None and not (a.projection or a.runs_manifest):
+    if a.out is not None and chosen not in FLAG_MODES["out"]:
         ap.error("--out and --ladder-failure belong to --projection (--out also to --runs-manifest)")
-    if a.manifest is not None and (a.inspect or a.runs_manifest):
-        ap.error("--manifest belongs to --support-sets, --counts and --projection; --inspect and --runs-manifest read "
-                 "the checkpoints' own records")
+    if a.storage is not None and chosen != "drop_storage":
+        ap.error("--storage belongs to --drop-storage")
+    if a.manifest is not None and chosen not in FLAG_MODES["manifest"]:
+        ap.error("--manifest belongs to --support-sets, --counts, --projection and --prune; --inspect, "
+                 "--runs-manifest and --drop-storage read the checkpoints' own records")
+    if a.drop_storage:
+        if not a.storage:
+            ap.error("--drop-storage needs --storage DIR (the Ray storage the run trained under)")
+        return drop_storage_mode(a.drop_storage, a.storage)
+    if a.prune:
+        return prune_mode(a.prune, manifest)
     if a.inspect:
         return inspect_mode(a.inspect)
     if a.runs_manifest:
@@ -511,7 +673,8 @@ def main(argv=None):
     if a.counts:
         return counts_mode(manifest)
     if not a.support_sets:
-        ap.error("pass a mode: --support-sets, --counts, --projection, --inspect or --runs-manifest")
+        ap.error("pass a mode: --support-sets, --counts, --projection, --inspect, --runs-manifest, --prune or "
+                 "--drop-storage")
     return support_sets(manifest)
 
 
