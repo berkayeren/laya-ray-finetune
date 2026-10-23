@@ -339,3 +339,101 @@ def test_protocol_block_on_the_committed_data():
     assert "pilot.metrics.AP_RULE" in b["rules"]["primary_metric"]["rule"]
     assert b["rules"]["compute_fallback"]["base_runs_per_model"] == 1
     assert fs.check_draws(b, rows) is None
+
+
+# ---- fewshot.py --support-sets: the few-shot runner's Phase 8 entry point (08-08, Open Question 3) ----
+
+def runner():
+    """The root-level few-shot runner (fewshot.py), imported here so a missing runner fails inside the test."""
+    import fewshot
+    return fewshot
+
+
+def frozen_protocol(tmp_path, synthetic_raw, monkeypatch, edit=None):
+    """A REQUIRED_KEYS-complete protocol around a few-shot block drawn on the synthetic selection_train (tags card,
+    k 1 and 2, draw seed 0, 1 negative per positive, replay 2), written to tmp_path and pinned: PROTOCOL_PATH,
+    PROTOCOL_SHA256 and DEFAULT_MANIFEST are monkeypatched. edit(block) changes the block before it is written.
+    Returns (block, pin)."""
+    from pilot import protocol as pr
+    _, manifest = prepared(tmp_path, synthetic_raw)
+    with open(manifest, encoding="utf-8") as f:
+        entry = json.load(f)["splits"]["selection_train"]
+    with open(os.path.join(os.path.dirname(manifest), entry["path"]), "rb") as f:
+        rows = pilot.data.parse_jsonl(f.read())
+    tags, ks, neg, rep = ["card"], [1, 2], 1, 2
+    d = fs.draw(rows, 0, tags, ks, neg, rep)
+    block = {"tags": tags, "k_values": ks, "draw_seeds": [0], "neg_per_pos": neg, "replay": rep,
+             "source": {"split": "selection_train", "sha256": entry["sha256"], "uids_sha256": entry["uids_sha256"]},
+             "draws": [{"draw": 0, "seed": 0, "base_seed": 0, "support": d["support"], "replay": d["replay"],
+                        "positives": d["positives"], "digest": fs.draw_digest(d)}]}
+    if edit is not None:
+        edit(block)
+    protocol = {k: {} for k in pr.REQUIRED_KEYS}
+    protocol.update(schema=pr.SCHEMA, fewshot=block)
+    path = str(tmp_path / "protocol.json")
+    pin = pr.write_protocol(protocol, path)
+    monkeypatch.setattr(pr, "PROTOCOL_PATH", path)
+    monkeypatch.setattr(pr, "PROTOCOL_SHA256", pin)
+    monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", manifest)
+    return block, pin
+
+
+def test_fewshot_cli_support_sets_prints_the_frozen_draws(tmp_path, synthetic_raw, monkeypatch, capsys):
+    block, pin = frozen_protocol(tmp_path, synthetic_raw, monkeypatch)
+    out = runner().main(["--support-sets"])
+    printed = capsys.readouterr().out
+    assert json.loads(printed) == out
+    assert out["protocol_sha256"] == pin and out["source"] == block["source"]
+    (d,) = out["draws"]
+    want = block["draws"][0]
+    assert (d["draw"], d["seed"], d["base_seed"], d["digest"]) == (0, 0, 0, want["digest"])
+    assert d["n_support"] == {k: len(v) for k, v in want["support"].items()} and set(d["n_support"]) == {"1", "2"}
+    assert d["n_replay"] == 2 and d["positives"] == want["positives"]
+    assert "Kartım" not in printed and "bank_" not in printed          # digests and counts only: no text, no uid list
+
+
+@pytest.mark.parametrize("case", ["missing", "unpinned", "changed"])
+def test_fewshot_cli_support_sets_refuses_without_the_frozen_protocol(tmp_path, synthetic_raw, monkeypatch, case):
+    from pilot import protocol as pr
+    frozen_protocol(tmp_path, synthetic_raw, monkeypatch)
+    if case == "missing":
+        os.remove(pr.PROTOCOL_PATH)
+    elif case == "unpinned":
+        monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)
+    else:
+        with open(pr.PROTOCOL_PATH, "rb") as f:
+            raw = f.read()
+        with open(pr.PROTOCOL_PATH, "wb") as f:
+            f.write(raw.replace(b"protocol/1", b"protocol/2", 1))   # one byte changed
+    cli = runner()
+
+    def never(*args, **kwargs):
+        raise AssertionError("the split was read before the protocol was checked")
+    monkeypatch.setattr(cli, "parse_jsonl", never)
+    monkeypatch.setattr(cli, "verify_split_file", never)
+    with pytest.raises(SystemExit, match="protocol"):
+        cli.main(["--support-sets"])
+
+
+def test_fewshot_cli_support_sets_refuses_another_source(tmp_path, synthetic_raw, monkeypatch):
+    def edit(block):
+        block["source"]["sha256"] = "0" * 64
+    frozen_protocol(tmp_path, synthetic_raw, monkeypatch, edit)
+    with pytest.raises(SystemExit, match="source"):
+        runner().main(["--support-sets"])
+
+
+def test_fewshot_cli_support_sets_refuses_a_changed_draw(tmp_path, synthetic_raw, monkeypatch):
+    def edit(block):
+        lst = block["draws"][0]["support"]["2"]
+        lst[0] = "bank_99_99"                                   # one uid changed
+        lst.sort()
+    frozen_protocol(tmp_path, synthetic_raw, monkeypatch, edit)
+    with pytest.raises(SystemExit, match="draw 0"):
+        runner().main(["--support-sets"])
+
+
+def test_fewshot_cli_needs_a_mode(capsys):
+    with pytest.raises(SystemExit) as e:
+        runner().main([])
+    assert e.value.code == 2 and "--support-sets" in capsys.readouterr().err
