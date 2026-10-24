@@ -1,11 +1,12 @@
-"""The Phase 6 tracer on CPU, offline: tiny BERT base -> berturk_train.py (HF Trainer, masked BCE, 2 epochs) -> two
+"""The BERTurk tracer on CPU, offline: tiny BERT base -> berturk_train.py (HF Trainer, masked BCE, 2 epochs) -> two
 per-epoch exports -> score.py --model berturk val dumps that pilot.dumps.load_dump verifies -> pilot.postfit.candidate
-and fit accept them -> report.py run_report reports them; score.py refuses the synthetic test split for an export.
+and fit accept them -> report.py run_report reports them; score.py's protocol gate refuses an export on the synthetic
+test split.
 
-test_berturk_final_seed_chain (plan 06-08, BASE-01/02/03) continues the same chain to the final manifest: postfit
-record -> BASE-03 reference check (with a resolution: the tiny model is far below 0.707) -> the printed final commands
--> 3 bound final seeds serving the val-fitted T -> a final seed's own val dump serves T and is refused as in-sample by
-postfit and by report.py (run_report and either side of --compare; 06-REVIEW IN-01) -> postfit.py --final-manifest.
+test_berturk_final_seed_chain continues the same chain to the final manifest: postfit record -> the BERTurk reference
+check (with a resolution: the tiny model is far below 0.707) -> the printed final commands -> 3 bound final seeds
+serving the val-fitted T -> a final seed's own val dump serves T and is refused as in-sample by postfit and by report.py
+(run_report and either side of --compare) -> postfit.py --final-manifest.
 
 No marker: it runs in `make test` (no Ray, no weights, no data download; seconds).
 """
@@ -14,6 +15,8 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any, Callable
 
 import pytest
 
@@ -28,9 +31,10 @@ from tiny_berturk import tiny_base
 
 REPO = pilot.data.REPO_ROOT
 TIMEOUT = 600
+SyntheticRaw = Callable[..., tuple[str, dict[str, str]]]   # conftest's synthetic_raw fixture
 
 
-def _run(*args):
+def _run(*args: Any) -> subprocess.CompletedProcess[str]:
     """Run a repo script with the test interpreter (no PYTHONPATH, so it imports like a user's command)."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable] + [str(x) for x in args], cwd=REPO, env=env, capture_output=True, text=True,
@@ -39,13 +43,14 @@ def _run(*args):
     return r
 
 
-def _bytes(path):
+def _bytes(path: str) -> bytes:
+    """The bytes of a file."""
     with open(path, "rb") as f:
         return f.read()
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_berturk_train_score_postfit_chain(tmp_path, synthetic_raw):
+def test_berturk_train_score_postfit_chain(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     import torch
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     splits = os.path.join(out_dir, "splits")
@@ -76,7 +81,8 @@ def test_berturk_train_score_postfit_chain(tmp_path, synthetic_raw):
         assert [row["epoch"] for row in rec["record"]["epochs"]] == list(range(1, k + 1))
         assert all(set(row) == set(berturk.EPOCH_FIELDS) for row in rec["record"]["epochs"])
         assert rec["record"]["param_device"] == "cpu" and rec["record"]["dtype"] == "torch.float32"
-        assert rec["canonical"]["encoder_lr"] == 2e-05 and rec["canonical"]["head_lr"] == 0.0001   # the BASE-03 fix
+        # head LR 1e-4: the first reference-check fix
+        assert rec["canonical"]["encoder_lr"] == 2e-05 and rec["canonical"]["head_lr"] == 0.0001
         groups = rec["record"].get("optimizer_groups") or []      # the fresh head at Laya's head LR, own groups
         assert [(g["group"], g["decay"], g["lr"]) for g in groups] == [
             ("encoder", True, 2e-05), ("encoder", False, 2e-05), ("head", True, 0.0001), ("head", False, 0.0001)]
@@ -107,7 +113,7 @@ def test_berturk_train_score_postfit_chain(tmp_path, synthetic_raw):
         assert rec["chosen"]["epoch"] in (1, 2) and postfit.T_MIN <= rec["chosen"]["temperature"] <= postfit.T_MAX
         rep = report.run_report(run_dirs[0], "val", manifest)
         assert sorted(rep["variants"]) == ["raw", "shipped"]
-        with pytest.raises(SystemExit, match="Phase 8"):
+        with pytest.raises(SystemExit, match="protocol gate"):
             score.main([os.path.join(splits, "test.jsonl"), "--model", "berturk", "--checkpoint", exports[0],
                         "--workers", "0", "--manifest", manifest, "--out-root", dump_root])
         assert not any(os.path.exists(os.path.join(d, "test.npz")) or os.path.exists(os.path.join(d, "test.json"))
@@ -117,7 +123,8 @@ def test_berturk_train_score_postfit_chain(tmp_path, synthetic_raw):
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_berturk_final_seed_chain(tmp_path, synthetic_raw, capsys):
+def test_berturk_final_seed_chain(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                  capsys: pytest.CaptureFixture[str]) -> None:
     import postfit as postfit_cli
     import torch
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
@@ -128,7 +135,7 @@ def test_berturk_final_seed_chain(tmp_path, synthetic_raw, capsys):
             "--base", base, "--device", "cpu", "--epochs", "2", "--batch", "4", "--max-len", "32", "--seed", "0",
             "--storage", storage]
     rid = _run(*(argv + ["--print-run-id"])).stdout.strip()
-    _run(*argv)                                              # the 06-03 tiny selection run
+    _run(*argv)                                              # the tiny selection run
     dump_root = str(tmp_path / "dumps")
     val = os.path.join(splits, "val.jsonl")
     threads = torch.get_num_threads()
@@ -178,7 +185,7 @@ def test_berturk_final_seed_chain(tmp_path, synthetic_raw, capsys):
         assert side["training"]["postfit_sha256"] == sha and side["training"]["calibrated"] is True
         with pytest.raises(SystemExit, match="selection_train"):                 # a final seed's val is in-sample
             postfit.candidate(final_dump, manifest)
-        # 06-REVIEW IN-01: report.py never selects θ on a BERTurk final seed's val dump, alone or on either side of
+        # report.py never selects θ on a BERTurk final seed's val dump, alone or on either side of
         # --compare (its training block names final_train and carries the postfit sha256)
         with pytest.raises(SystemExit, match="trained on final_train \\(postfit record %s\\)" % sha):
             report.run_report(final_dump, "val", manifest)
@@ -195,7 +202,7 @@ def test_berturk_final_seed_chain(tmp_path, synthetic_raw, capsys):
         assert len(man["config_sha256_sans_seed"]) == 64
         with open(out, encoding="utf-8") as f:
             assert json.load(f) == man
-        # 06-REVIEW IN-06: a record on the committed manifest binds only final seeds trained on it (these seeds were
+        # a record on the committed manifest binds only final seeds trained on it (these seeds were
         # trained on the synthetic manifest, so the same seeds are refused for a copy of the record marked committed)
         assert record["manifest"]["is_committed"] is False
         marked = postfit.write_record(dict(record, manifest=dict(record["manifest"], is_committed=True)),

@@ -1,9 +1,9 @@
-"""BERTurk through Laya's own postfit (BASE-02): pilot.postfit.protocol("berturk") and fit() dispatch by system kind
-over BERTurk val dumps (1 LR x epochs 1..30, pilot.berturk.EPOCHS since the second BASE-03 fix of the plan 06-16 gate;
-the head LR fixed at Laya's HEAD_LR 1e-4 since the first; Laya's seeds, objective, tie order, T and θ rules), the
+"""BERTurk through Laya's own postfit: pilot.postfit.protocol("berturk") and fit() dispatch by system kind over BERTurk
+val dumps (1 LR x epochs 1..30, pilot.berturk.EPOCHS since the second fix after the BERTurk reference check; the head
+LR fixed at Laya's HEAD_LR 1e-4 since the first; Laya's seeds, objective, tie order, T and θ rules), the
 30-epoch schedule through the record and the printed final commands, the superseded 10-epoch protocols kept with their
-own literals, the val-only refusals for BERTurk input, the Laya record unchanged by the dispatch, and the guarded prune
-of BERTurk exports through postfit.py --prune.
+own literals, the val-only refusals for BERTurk input, the Laya record unchanged by the dispatch, the guarded prune
+of BERTurk exports through postfit.py --prune and the BERTurk reference check.
 
 Candidate val dumps are written with pilot.dumps.write_dump on the synthetic val split (conftest), with a sidecar shaped
 like score.py --model berturk's (score.sidecar_base + pilot.berturk.training_block): no model, torch or Ray. Only the
@@ -12,6 +12,9 @@ prune tests train a tiny export with berturk_train.py on CPU and score it with s
 import json
 import os
 import random
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -23,6 +26,7 @@ from conftest import prepared
 from pilot import berturk, dumps, postfit
 from pilot.data import sha256_bytes
 from test_postfit import GRID as LAYA_GRID
+from test_postfit import Snap, SyntheticRaw
 from test_postfit import write_candidate as write_laya_candidate
 
 pytestmark = pytest.mark.unit
@@ -30,10 +34,12 @@ pytestmark = pytest.mark.unit
 LR = 2e-05
 EPOCHS = berturk.EPOCHS
 SCORER = {"device": "mps", "dtype": "torch.float32", "amp_enabled": False}
+# the berturk_export fixture: (export dir, dump root, manifest, val.jsonl, tiny base dir)
+Export = tuple[str, str, str, str, str]
 
 
 @pytest.fixture
-def snap(tmp_path, synthetic_raw):
+def snap(tmp_path: Path, synthetic_raw: SyntheticRaw) -> Snap:
     """(out_dir, manifest_path, val entry, val uids) of the synthetic snapshot prepared under tmp_path."""
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     path = os.path.join(out_dir, "splits", "val.jsonl")
@@ -43,7 +49,7 @@ def snap(tmp_path, synthetic_raw):
     return out_dir, manifest, entry, [r["uid"] for r in pilot.data.parse_jsonl(raw)]
 
 
-def _values(**over):
+def _values(**over: Any) -> dict[str, Any]:
     """Every pilot.berturk.IDENTITY value of a selection run on the pinned base (digests are placeholders)."""
     v = {k: None for k in berturk.IDENTITY}
     v.update(split="selection_train", data_sha256="s" * 64, data_role="train", base_model_sha256="b" * 64,
@@ -55,13 +61,15 @@ def _values(**over):
     return v
 
 
-def write_berturk_candidate(root, snap, epoch, lr=LR, seed=0, split="selection_train", calibrated=False, shipped=1.0,
-                            n=None, head_lr=postfit.HEAD_LR, kind="berturk", logits=None, epochs=EPOCHS):
+def write_berturk_candidate(root: str | Path, snap: Snap, epoch: int, lr: float = LR, seed: int = 0,
+                            split: str = "selection_train", calibrated: bool = False, shipped: float = 1.0,
+                            n: int | None = None, head_lr: float = postfit.HEAD_LR, kind: str = "berturk",
+                            logits: Any = None, epochs: int = EPOCHS) -> str:
     """A BERTurk candidate val dump under root/<dump run id>: random margins (or `logits`), a fake local BERTurk
     identity and the training block pilot.berturk.training_block builds from a berturk_train.json record (canonical
     with split, epochs (default EPOCHS = pilot.berturk.EPOCHS; a superseded-protocol candidate passes its protocol's
-    epochs), encoder_lr lr, head_lr (default Laya's pilot.postfit.HEAD_LR = pilot.berturk.HEAD_LR, the BASE-03 fix; a
-    test that wants the superseded tied head passes head_lr=lr), seed). Returns the run dir."""
+    epochs), encoder_lr lr, head_lr (default Laya's pilot.postfit.HEAD_LR = pilot.berturk.HEAD_LR, the first
+    reference-check fix; a test that wants the superseded tied head passes head_lr=lr), seed). Returns the run dir."""
     _, manifest, entry, uids = snap
     uids = uids if n is None else uids[:n]
     if logits is None:
@@ -88,18 +96,19 @@ def write_berturk_candidate(root, snap, epoch, lr=LR, seed=0, split="selection_t
     return run_dir
 
 
-def _all_epochs(tmp_path, snap, root="dumps"):
+def _all_epochs(tmp_path: Path, snap: Snap, root: str = "dumps") -> list[str]:
     """One candidate per epoch 1..EPOCHS (the current protocol's full grid)."""
     return [write_berturk_candidate(tmp_path / root, snap, e) for e in range(1, EPOCHS + 1)]
 
 
-def _grid_kw(kind):
+def _grid_kw(kind: str) -> dict[str, Any]:
+    """The select() keyword arguments of a system kind's protocol (no final_seeds)."""
     return {k: v for k, v in postfit.protocol(kind).items() if k != "final_seeds"}
 
 
 # --- the BERTurk record ------------------------------------------------------------------------------------------
 
-def test_berturk_record_from_the_30_epoch_grid(tmp_path, snap, capsys):
+def test_berturk_record_from_the_30_epoch_grid(tmp_path: Path, snap: Snap, capsys: pytest.CaptureFixture[str]) -> None:
     run_dirs = _all_epochs(tmp_path, snap)
     out = tmp_path / "postfit" / "berturk.json"
     postfit_cli.main(run_dirs + ["--manifest", snap[1], "--out", str(out)])
@@ -135,7 +144,7 @@ def test_berturk_record_from_the_30_epoch_grid(tmp_path, snap, capsys):
         assert postfit.record_bytes(postfit.fit(shuffled, snap[1])) == first
 
 
-def test_berturk_grid_equals_laya_grid():
+def test_berturk_grid_equals_laya_grid() -> None:
     assert berturk.LR_GRID == postfit.LR_GRID == (2e-05,)            # one LR for both models (equal tuning effort)
     assert berturk.LR in berturk.LR_GRID
     p = postfit.protocol("berturk")
@@ -147,15 +156,16 @@ def test_berturk_grid_equals_laya_grid():
                                         "head_lr": postfit.HEAD_LR, "selection_seed": 0, "final_seeds": (0, 1, 2)}
 
 
-def test_berturk_and_laya_share_both_lrs():
-    """Equal tuning: since the BASE-03 fix BERTurk and Laya share the encoder LR grid and the fixed head LR."""
+def test_berturk_and_laya_share_both_lrs() -> None:
+    """Equal tuning: since the first reference-check fix BERTurk and Laya share the encoder LR grid and the fixed head
+    LR."""
     b, laya = postfit.protocol("berturk"), postfit.protocol("laya")
     assert b["lr_grid"] == laya["lr_grid"] == postfit.LR_GRID
     assert b["head_lr"] == laya["head_lr"] == postfit.HEAD_LR == berturk.HEAD_LR == 0.0001
 
 
-def test_berturk_epoch_grid_is_the_second_base03_fix(tmp_path, snap):
-    """The second BASE-03 fix (plan 06-16 gate reply "fix: extend epochs (Recommended)", R2-3): BERTurk's selection
+def test_berturk_epoch_grid_is_the_second_reference_check_fix(tmp_path: Path, snap: Snap) -> None:
+    """The second reference-check fix (the user's reply "fix: extend epochs (Recommended)"): BERTurk's selection
     schedule is 30 epochs, exactly the delta the superseded head-LR run recorded; nothing else in the protocol moved,
     and a full 1..10 grid (the superseded protocol's) is no longer a complete grid."""
     last = berturk.SUPERSEDED[-1]
@@ -170,12 +180,13 @@ def test_berturk_epoch_grid_is_the_second_base03_fix(tmp_path, snap):
         postfit.fit(old, snap[1])
 
 
-def test_final_command_follows_the_30_epoch_schedule(tmp_path, snap):
+def test_final_command_follows_the_30_epoch_schedule(tmp_path: Path, snap: Snap) -> None:
     """The printed final-seed argv carries the 30-epoch selection schedule from the record (--epochs 30) and the
     chosen stop epoch: --stop-after-epoch 12 for a lone best epoch 12, no stop flag when epoch 30 is chosen."""
     cands = [postfit.candidate(d, snap[1]) for d in _all_epochs(tmp_path, snap)]
 
-    def command(best):
+    def command(best: int) -> tuple[dict[str, Any], list[str]]:
+        """(record, final-seed argv of seed 0) when epoch `best` alone scores best."""
         for c in cands:
             c["objective"] = {"tp": 9, "fp": 1, "fn": 1} if c["epoch"] == best else {"tp": 1, "fp": 3, "fn": 3}
         rec = postfit.build_record(cands, postfit.select(cands, **_grid_kw("berturk")), snap[1],
@@ -194,7 +205,7 @@ def test_final_command_follows_the_30_epoch_schedule(tmp_path, snap):
     assert "--stop-after-epoch" not in argv and rec["final"]["stop_after_epoch"] is None
 
 
-def test_superseded_protocol_still_ties_the_head_lr(tmp_path, snap):
+def test_superseded_protocol_still_ties_the_head_lr(tmp_path: Path, snap: Snap) -> None:
     """The superseded protocol keeps its tied head LR (head_lr None) and its own 10-epoch grid (a literal, never
     pilot.berturk.EPOCHS), so its history record still selects and reproduces; under it an untied candidate is
     refused."""
@@ -208,7 +219,7 @@ def test_superseded_protocol_still_ties_the_head_lr(tmp_path, snap):
         postfit.select([c for c in tied if c["epoch"] != 5] + [untied], **kw)
 
 
-def test_berturk_grid_must_be_complete(tmp_path, snap):
+def test_berturk_grid_must_be_complete(tmp_path: Path, snap: Snap) -> None:
     run_dirs = _all_epochs(tmp_path, snap)
     with pytest.raises(SystemExit, match="missing \\[\\(2e-05, 30\\)\\], unexpected \\[\\]"):
         postfit.fit(run_dirs[:-1], snap[1])                           # 29 epochs
@@ -222,7 +233,7 @@ def test_berturk_grid_must_be_complete(tmp_path, snap):
         postfit_cli.main(run_dirs[1:] + ["--manifest", snap[1]])      # the CLI refuses it the same way
 
 
-def test_berturk_ties_go_to_fewer_epochs(tmp_path, snap):
+def test_berturk_ties_go_to_fewer_epochs(tmp_path: Path, snap: Snap) -> None:
     cands = [postfit.candidate(d, snap[1]) for d in _all_epochs(tmp_path, snap)]
     for c in cands:
         c["objective"] = {"tp": 1, "fp": 3, "fn": 3}                  # 1/4 each
@@ -241,7 +252,7 @@ def test_berturk_ties_go_to_fewer_epochs(tmp_path, snap):
     assert rec["chosen"]["epoch"] == 30 and rec["chosen"]["stop_after_epoch"] is None
 
 
-def test_berturk_temperature_band_bounds(tmp_path, snap):
+def test_berturk_temperature_band_bounds(tmp_path: Path, snap: Snap) -> None:
     """The T rule keeps its band for BERTurk: an out-of-band optimum returns exactly 5.0 or 0.5."""
     _, manifest, entry, uids = snap
     Y = dumps.read_gold(entry, manifest, uids).astype(np.float64)
@@ -252,9 +263,9 @@ def test_berturk_temperature_band_bounds(tmp_path, snap):
     assert postfit.candidate(lo, manifest)["temperature"] == postfit.T_MIN == 0.5
 
 
-def test_berturk_head_lr_must_be_the_laya_head_lr(tmp_path, snap):
-    """The BASE-03 fix: under the BERTurk protocol a candidate whose head LR is tied to its encoder LR (the
-    superseded recipe) is refused."""
+def test_berturk_head_lr_must_be_the_laya_head_lr(tmp_path: Path, snap: Snap) -> None:
+    """The first reference-check fix: under the BERTurk protocol a candidate whose head LR is tied to its encoder LR
+    (the superseded recipe) is refused."""
     run_dirs = _all_epochs(tmp_path, snap)
     tied = write_berturk_candidate(tmp_path / "tied", snap, 5, head_lr=LR)
     dirs = [d for k, d in enumerate(run_dirs, 1) if k != 5] + [tied]
@@ -264,7 +275,7 @@ def test_berturk_head_lr_must_be_the_laya_head_lr(tmp_path, snap):
         postfit_cli.main(dirs + ["--manifest", snap[1]])
 
 
-def test_fit_refuses_mixed_kinds(tmp_path, snap):
+def test_fit_refuses_mixed_kinds(tmp_path: Path, snap: Snap) -> None:
     run_dirs = _all_epochs(tmp_path, snap)
     laya = write_laya_candidate(tmp_path / "laya", snap, LR, 1)
     with pytest.raises(SystemExit, match="mix system kinds \\['berturk', 'laya'\\]"):
@@ -273,7 +284,7 @@ def test_fit_refuses_mixed_kinds(tmp_path, snap):
         postfit_cli.main(run_dirs + [laya, "--manifest", snap[1]])
 
 
-def test_fit_refuses_unknown_kind(tmp_path, snap):
+def test_fit_refuses_unknown_kind(tmp_path: Path, snap: Snap) -> None:
     with pytest.raises(SystemExit, match="no postfit protocol for system kind 'fasttext'; expected laya or berturk"):
         postfit.protocol("fasttext")
     run_dirs = [write_berturk_candidate(tmp_path / "dumps", snap, e, kind="fasttext") for e in range(1, EPOCHS + 1)]
@@ -287,7 +298,7 @@ def test_fit_refuses_unknown_kind(tmp_path, snap):
     ({"shipped": 1.3}, "shipped temperature 1.3"),
     ({"n": 2}, "subset val dump"),
 ])
-def test_berturk_postfit_refuses_test_input(tmp_path, snap, kw, match):
+def test_berturk_postfit_refuses_test_input(tmp_path: Path, snap: Snap, kw: dict[str, Any], match: str) -> None:
     good = write_berturk_candidate(tmp_path / "dumps", snap, 1)
     assert postfit.candidate(good, snap[1])["system_kind"] == "berturk"    # a full selection val dump is accepted
     bad = write_berturk_candidate(tmp_path / "bad", snap, 2, **kw)
@@ -297,7 +308,7 @@ def test_berturk_postfit_refuses_test_input(tmp_path, snap, kw, match):
         postfit.fit(_all_epochs(tmp_path, snap, "all")[:-1] + [bad], snap[1])
 
 
-def test_berturk_postfit_refuses_a_test_dump(tmp_path, snap):
+def test_berturk_postfit_refuses_a_test_dump(tmp_path: Path, snap: Snap) -> None:
     run_dirs = _all_epochs(tmp_path, snap)
     with open(os.path.join(run_dirs[3], "test.json"), "w", encoding="utf-8") as f:
         f.write("{}")
@@ -312,7 +323,7 @@ def test_berturk_postfit_refuses_a_test_dump(tmp_path, snap):
 # --- guarded prune of BERTurk exports (a tiny export trained by berturk_train.py on CPU) ---------------------------
 
 @pytest.fixture
-def berturk_export(tmp_path, snap):
+def berturk_export(tmp_path: Path, snap: Snap) -> Iterator[Export]:
     """(export dir <storage>/<run_id>/exports/epoch-001, dump root, manifest, val.jsonl, tiny base dir): a 1-epoch
     berturk_train.py run on the tiny offline base, on CPU. Scoring sets torch's thread count; it is restored after."""
     import subprocess
@@ -336,13 +347,15 @@ def berturk_export(tmp_path, snap):
     torch.set_num_threads(threads)
 
 
-def _score_berturk_val(export_dir, dump_root, manifest, val_jsonl, *extra):
+def _score_berturk_val(export_dir: str, dump_root: str, manifest: str, val_jsonl: str, *extra: str) -> Any:
+    """score.py --model berturk of an export on val, in-process, into dump_root; returns score.main's result."""
     return score.main([val_jsonl, "--model", "berturk", "--checkpoint", export_dir, "--workers", "0",
                        "--cpus-per-worker", "1", "--manifest", manifest, "--out-root", dump_root, *extra])
 
 
 @pytest.mark.timeout(600)
-def test_prune_deletes_a_berturk_export_only_after_its_val_dump(berturk_export, capsys):
+def test_prune_deletes_a_berturk_export_only_after_its_val_dump(berturk_export: Export,
+                                                                 capsys: pytest.CaptureFixture[str]) -> None:
     path, dump_root, manifest, val_jsonl, _ = berturk_export
     with pytest.raises(SystemExit, match="no verified full val dump"):
         postfit_cli.main(["--prune", path, "--dump-root", dump_root, "--manifest", manifest])
@@ -361,7 +374,8 @@ def test_prune_deletes_a_berturk_export_only_after_its_val_dump(berturk_export, 
 
 
 @pytest.mark.timeout(600)
-def test_prune_refuses_a_berturk_export_without_a_dump_or_through_a_symlink(tmp_path, berturk_export):
+def test_prune_refuses_a_berturk_export_without_a_dump_or_through_a_symlink(tmp_path: Path,
+                                                                             berturk_export: Export) -> None:
     path, dump_root, manifest, val_jsonl, base = berturk_export
     with pytest.raises(SystemExit, match="no verified full val dump"):
         berturk.prune_export(path, dump_root, manifest)
@@ -393,7 +407,7 @@ def test_prune_refuses_a_berturk_export_without_a_dump_or_through_a_symlink(tmp_
 
 # --- the Laya path is unchanged ----------------------------------------------------------------------------------
 
-def test_laya_record_unchanged_by_the_dispatch(tmp_path, snap):
+def test_laya_record_unchanged_by_the_dispatch(tmp_path: Path, snap: Snap) -> None:
     run_dirs = [write_laya_candidate(tmp_path / "dumps", snap, lr, e) for lr, e in LAYA_GRID]
     assert [(lr, e) for lr, e in LAYA_GRID] == [(lr, e) for lr in postfit.LR_GRID
                                                 for e in range(1, postfit.EPOCHS + 1)]
@@ -409,7 +423,7 @@ def test_laya_record_unchanged_by_the_dispatch(tmp_path, snap):
     assert rec["protocol"]["head_lr"] == postfit.HEAD_LR and rec["protocol"]["epochs"] == postfit.EPOCHS
 
 
-# --- the BASE-03 reference check (fixed before any BERTurk val score) -----------------------------------------------
+# --- the BERTurk reference check (fixed before any BERTurk val score) -----------------------------------------------
 
 DIFFERENCES = [
     "a fixed split (selection train folds 0–13 with about 1,450 messages; final train folds 0–15 with about 1,658)",
@@ -420,9 +434,10 @@ DIFFERENCES = [
 ]
 
 
-def _record(tmp_path, snap, counts=None):
-    """(path, record, sha) of a BERTurk postfit record from the full grid of dumps; counts=(tp, fp, fn) replaces the chosen
-    candidate's objective counts (the record is rewritten, so its sha is of the written bytes)."""
+def _record(tmp_path: Path, snap: Snap,
+            counts: tuple[int, int, int] | None = None) -> tuple[str, dict[str, Any], str]:
+    """(path, record, sha) of a BERTurk postfit record from the full grid of dumps; counts=(tp, fp, fn) replaces the
+    chosen candidate's objective counts (the record is rewritten, so its sha is of the written bytes)."""
     rec = postfit.fit(_all_epochs(tmp_path, snap), snap[1])
     if counts is not None:
         c = next(c for c in rec["candidates"] if c["dump_sha256"] == rec["chosen"]["dump_sha256"])
@@ -439,7 +454,8 @@ def _record(tmp_path, snap, counts=None):
     ((706999, 293001, 293001), "investigate", [706999, 1000000]),   # 0.706999: no rounding to 0.707
     ((708, 292, 292), "ok", [177, 250]),
 ])
-def test_reference_threshold_is_exact_at_0_707(tmp_path, snap, counts, status, fraction):
+def test_reference_threshold_is_exact_at_0_707(tmp_path: Path, snap: Snap, counts: tuple[int, int, int], status: str,
+                                               fraction: list[int]) -> None:
     path, record, sha = _record(tmp_path, snap, counts)
     out = berturk.reference_check(record, path, sha)
     assert out["status"] == status and out["below_threshold"] is (status == "investigate")
@@ -448,7 +464,7 @@ def test_reference_threshold_is_exact_at_0_707(tmp_path, snap, counts, status, f
     assert out["resolution"] is None
 
 
-def test_reference_quotes_the_source_and_differences(tmp_path, snap):
+def test_reference_quotes_the_source_and_differences(tmp_path: Path, snap: Snap) -> None:
     path, record, sha = _record(tmp_path, snap)
     out = berturk.reference_check(record, path, sha)
     assert out["schema"] == berturk.REFERENCE_SCHEMA == "berturk-reference/1"
@@ -484,12 +500,12 @@ def test_reference_quotes_the_source_and_differences(tmp_path, snap):
     assert berturk.reference_check(record, path, sha) == out
 
 
-def test_reference_refuses_a_laya_record(tmp_path, snap):
+def test_reference_refuses_a_laya_record(tmp_path: Path, snap: Snap) -> None:
     run_dirs = [write_laya_candidate(tmp_path / "laya", snap, lr, e) for lr, e in LAYA_GRID]
     path = str(tmp_path / "postfit" / "laya.json")
     postfit.write_record(postfit.fit(run_dirs, snap[1]), path)
     record, sha = postfit.read_record(path)
-    with pytest.raises(SystemExit, match="applies to BERTurk \\(BASE-03\\)"):
+    with pytest.raises(SystemExit, match="applies to BERTurk only"):
         berturk.reference_check(record, path, sha)
     with pytest.raises(SystemExit, match="applies to BERTurk"):
         postfit_cli.main(["--reference-check", path])
@@ -498,7 +514,7 @@ def test_reference_refuses_a_laya_record(tmp_path, snap):
         berturk.reference_check(bad, path, sha)
 
 
-def test_reference_resolution_rules(tmp_path, snap):
+def test_reference_resolution_rules(tmp_path: Path, snap: Snap) -> None:
     path, record, sha = _record(tmp_path, snap, (707, 293, 293))
     with pytest.raises(SystemExit, match="nothing to resolve"):
         berturk.reference_check(record, path, sha, resolution="documented: lower LR")
@@ -509,7 +525,7 @@ def test_reference_resolution_rules(tmp_path, snap):
     assert out["status"] == "investigate" and out["resolution"] == "documented: the user accepts the shortfall"
 
 
-def test_reference_cli_writes_and_reproduces(tmp_path, snap, capsys):
+def test_reference_cli_writes_and_reproduces(tmp_path: Path, snap: Snap, capsys: pytest.CaptureFixture[str]) -> None:
     path, record, sha = _record(tmp_path, snap, (706, 294, 294))
     out = tmp_path / "postfit" / "berturk-reference.json"
     got = postfit_cli.main(["--reference-check", path, "--out", str(out)])
@@ -520,8 +536,8 @@ def test_reference_cli_writes_and_reproduces(tmp_path, snap, capsys):
     again = tmp_path / "again.json"
     postfit_cli.main(["--reference-check", path, "--out", str(again)])
     assert again.read_bytes() == out.read_bytes()                 # byte-identical for the same inputs
-    resolved = postfit_cli.main(["--reference-check", path, "--resolution", "fixed: see 06-10"])
-    assert resolved["resolution"] == "fixed: see 06-10"
+    resolved = postfit_cli.main(["--reference-check", path, "--resolution", "fixed: see the head-LR run"])
+    assert resolved["resolution"] == "fixed: see the head-LR run"
     ok_path, _, _ = _record(tmp_path / "ok", snap, (707, 293, 293))
     with pytest.raises(SystemExit, match="nothing to resolve"):
         postfit_cli.main(["--reference-check", ok_path, "--resolution", "x"])

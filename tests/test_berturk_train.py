@@ -1,22 +1,24 @@
-"""berturk_train.py as a recipe (Phase 6, BASE-01): a seeded CPU run reproduces byte for byte, every export is a
-complete, self-describing checkpoint, and done.json marks a finished run.
+"""berturk_train.py as a recipe: a seeded CPU run reproduces byte for byte, every export is a complete, self-describing
+checkpoint, and done.json marks a finished run.
 
-Two identical runs (tiny offline base, the conftest synthetic selection_train, --device cpu --batch 4 --max-len 32,
-2 epochs) go to two storage dirs; their weights, config and tokenizer files must be equal byte for byte (06-RESEARCH
-probe 1 and Pitfall 6: the seed is set right before the head is created; CPU is bit-reproducible, MPS is recorded as
-not). The record's timings and memory peaks differ between runs by design, so berturk_train.json is checked by
-content, not bytes.
+Two identical runs (tiny offline base, the conftest synthetic selection_train, --device cpu --batch 4 --max-len 32, 2
+epochs) go to two storage dirs; their weights, config and tokenizer files must be equal byte for byte (the seed is set
+right before the head is created, so the head is seeded too; CPU is bit-reproducible, MPS is recorded as not). The
+record's timings and memory peaks differ between runs by design, so berturk_train.json is checked by content, not bytes.
 
-The final-seed path (plan 06-08, BASE-01/02/03): --stop-after-epoch K at its boundaries and on the selection
-trajectory (byte-identical to the uninterrupted run's epoch K on CPU), the --postfit binding and the BASE-03
---reference gate refusing every departure before any fetch, load or run dir (also with --print-run-id), and the final
-checkpoint serving the record's T bit for bit. The record here is a hand-built postfit/1 record whose chosen canonical
-is the tiny selection command's own (captured from berturk_train.py --print-run-id), chosen epoch 1 of 2.
+The final-seed path: --stop-after-epoch K at its boundaries and on the selection trajectory (byte-identical to the
+uninterrupted run's epoch K on CPU), the --postfit binding and the reference-check gate (--reference) refusing every
+departure before any fetch, load or run dir (also with --print-run-id), and the final checkpoint serving the record's T
+bit for bit. The record here is a hand-built postfit/1 record whose chosen canonical is the tiny selection command's own
+(captured from berturk_train.py --print-run-id), chosen epoch 1 of 2.
 
-The optimizer (plan 06-14, the BASE-03 fix): four AdamW groups with the fresh head at --head-lr and the encoder at
+The optimizer (the first reference-check fix): four AdamW groups with the fresh head at --head-lr and the encoder at
 --lr, the Trainer's own class, kwargs and weight-decay rule, a constant head/encoder LR ratio under the Trainer's
 linear schedule and warm-up, byte-identical weights to the Trainer's own optim adamw_torch when the head LR equals the
 encoder LR, and the refusal of a base whose head is not freshly initialised.
+
+The few-shot modes: every refusal of --fewshot-base and --fewshot-draw/--fewshot-k before a load, a fetch or a run
+dir, under a synthetic frozen protocol.
 
 No marker: it runs in `make test` (no Ray, no weights, no data download; seconds), except the one weights-marked
 check of the pinned BERTurk base's head (HF_HUB_OFFLINE=1 reuses the local Hub cache).
@@ -27,6 +29,10 @@ import os
 import re
 import subprocess
 import sys
+import types
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -41,25 +47,31 @@ REPO = pilot.data.REPO_ROOT
 TIMEOUT = 600
 EPOCHS, BATCH, MAX_LEN = 2, 4, 32
 SAME_BYTES = ("model.safetensors", "config.json") + berturk.TOKENIZER_FILES
+Inputs = tuple[str, str, str]                     # the inputs fixture: (selection_train path, manifest, base dir)
+TwoRuns = tuple[str, list[Path]]                  # the two_runs fixture: (run id, [run dir a, run dir b])
+SyntheticRaw = Callable[..., tuple[str, dict[str, str]]]   # conftest's synthetic_raw fixture
+FewshotEnv = types.SimpleNamespace                # the fewshot_env fixture
 
 
-def _bytes(path):
+def _bytes(path: str) -> bytes:
+    """The bytes of a file."""
     with open(path, "rb") as f:
         return f.read()
 
 
-def _json(path):
+def _json(path: str) -> Any:
+    """The parsed JSON at path."""
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
-def train_argv(data, manifest, base, storage, *extra):
+def train_argv(data: str, manifest: str, base: str, storage: str | Path, *extra: Any) -> list[Any]:
     """berturk_train.py arguments of the smoke recipe on the synthetic split and the tiny base."""
     return ["--data", data, "--manifest", manifest, "--base", base, "--device", "cpu", "--epochs", str(EPOCHS),
             "--batch", str(BATCH), "--max-len", str(MAX_LEN), "--seed", "0", "--storage", str(storage)] + list(extra)
 
 
-def run_train(argv):
+def run_train(argv: list[Any]) -> subprocess.CompletedProcess[str]:
     """Run berturk_train.py as a subprocess with the test interpreter (no PYTHONPATH, like a user's command)."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable, "berturk_train.py"] + [str(x) for x in argv], cwd=REPO, env=env,
@@ -69,7 +81,7 @@ def run_train(argv):
 
 
 @pytest.fixture(scope="module")
-def inputs(tmp_path_factory):
+def inputs(tmp_path_factory: pytest.TempPathFactory) -> Inputs:
     """(selection_train path, manifest, base dir) of the synthetic snapshot and the tiny base, shared by the module."""
     root = tmp_path_factory.mktemp("inputs")
     raw_root, raw_sha256 = make_raw(str(root / "raw"))
@@ -80,7 +92,7 @@ def inputs(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def two_runs(inputs, tmp_path_factory):
+def two_runs(inputs: Inputs, tmp_path_factory: pytest.TempPathFactory) -> TwoRuns:
     """Two runs of the identical command into two storage dirs: (run id, [run dir a, run dir b])."""
     data, manifest, base = inputs
     root = tmp_path_factory.mktemp("runs")
@@ -92,11 +104,12 @@ def two_runs(inputs, tmp_path_factory):
     return rid, dirs
 
 
-def exports(run_dir):
+def exports(run_dir: str | Path) -> list[str]:
+    """The export dirs epoch-001..epoch-EPOCHS of a run dir."""
     return [os.path.join(str(run_dir), "exports", "epoch-%03d" % k) for k in range(1, EPOCHS + 1)]
 
 
-def strings(obj):
+def strings(obj: Any) -> Iterator[str]:
     """Every string (keys included) in a parsed JSON document."""
     if isinstance(obj, dict):
         for k, v in obj.items():
@@ -110,7 +123,7 @@ def strings(obj):
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_cpu_runs_are_deterministic(two_runs):
+def test_cpu_runs_are_deterministic(two_runs: TwoRuns) -> None:
     rid, (a, b) = two_runs
     assert os.path.basename(str(a)) == os.path.basename(str(b)) == rid      # the same command, the same run id
     for ea, eb in zip(exports(a), exports(b)):
@@ -123,7 +136,7 @@ def test_cpu_runs_are_deterministic(two_runs):
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_exports_hold_the_checkpoint_files(two_runs, inputs):
+def test_exports_hold_the_checkpoint_files(two_runs: TwoRuns, inputs: Inputs) -> None:
     _, _, base = inputs
     rid, (a, b) = two_runs
     for run_dir in (a, b):
@@ -144,7 +157,7 @@ def test_exports_hold_the_checkpoint_files(two_runs, inputs):
             r = rec["record"]
             assert r["device"] == r["param_device"] == "cpu" and r["dtype"] == "torch.float32" and r["amp"] is False
             assert r["bit_reproducible"] is True
-            assert r["fewshot"] is None and "fewshot" not in rec["canonical"]   # no Phase 9 run: no proof, no key
+            assert r["fewshot"] is None and "fewshot" not in rec["canonical"]   # no few-shot run: no proof, no key
             assert type(r["n_truncated"]) is int and 0 <= r["n_truncated"] <= r["n_messages"]
             assert type(r["n_messages"]) is int and r["n_messages"] > 0 and r["max_len"] == MAX_LEN
             assert [row["epoch"] for row in r["epochs"]] == list(range(1, k + 1))
@@ -159,10 +172,10 @@ def test_exports_hold_the_checkpoint_files(two_runs, inputs):
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_done_marker_written_after_the_last_epoch(two_runs):
+def test_done_marker_written_after_the_last_epoch(two_runs: TwoRuns) -> None:
     rid, (a, _) = two_runs
     done = os.path.join(str(a), berturk.DONE)
-    assert sorted(os.listdir(str(a))) == sorted([berturk.DONE, "exports"])  # no Trainer checkpoint or pickle (A6)
+    assert sorted(os.listdir(str(a))) == sorted([berturk.DONE, "exports"])  # no Trainer checkpoint or pickle
     rec = _json(done)
     assert rec["schema"] == berturk.RECORD_SCHEMA and rec["run_id"] == rid and rec["epoch"] == EPOCHS
     assert [row["epoch"] for row in rec["record"]["epochs"]] == list(range(1, EPOCHS + 1))
@@ -173,18 +186,19 @@ def test_done_marker_written_after_the_last_epoch(two_runs):
 # ---- refusals before any model load or run dir (Task 2) ----
 
 @pytest.fixture
-def no_load(monkeypatch):
+def no_load(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make every tokenizer or model load fail loudly: a refusal test passes only if main stops before one."""
     import transformers
 
-    def boom(*args, **kwargs):
+    def boom(*args: Any, **kwargs: Any) -> None:
+        """Fail the test: a load was reached."""
         raise AssertionError("a model or tokenizer was loaded before the refusal")
     monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", boom)
     monkeypatch.setattr(transformers.BertForSequenceClassification, "from_pretrained", boom)
     monkeypatch.setattr(transformers.PreTrainedModel, "from_pretrained", boom)
 
 
-def refused(argv, storage, match):
+def refused(argv: list[Any], storage: str | Path, match: str) -> None:
     """main(argv) raises SystemExit matching `match`, and the storage dir was not created."""
     import berturk_train
     with pytest.raises(SystemExit, match=match):
@@ -193,13 +207,14 @@ def refused(argv, storage, match):
 
 
 @pytest.mark.parametrize("name", ["val", "test", "hotels_probe"])
-def test_refuses_a_non_train_split(inputs, tmp_path, no_load, name):
+def test_refuses_a_non_train_split(inputs: Inputs, tmp_path: Path, no_load: None, name: str) -> None:
     data, manifest, base = inputs
     other = os.path.join(os.path.dirname(data), name + ".jsonl")
     refused(train_argv(other, manifest, base, tmp_path / "runs"), tmp_path / "runs", "has role")
 
 
-def test_refuses_a_tampered_or_unregistered_split(tmp_path, synthetic_raw, inputs, no_load):
+def test_refuses_a_tampered_or_unregistered_split(tmp_path: Path, synthetic_raw: SyntheticRaw, inputs: Inputs,
+                                                  no_load: None) -> None:
     from conftest import prepared
     _, _, base = inputs
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
@@ -217,12 +232,14 @@ def test_refuses_a_tampered_or_unregistered_split(tmp_path, synthetic_raw, input
     refused(train_argv(data, manifest, base, tmp_path / "runs"), tmp_path / "runs", "sha256")
 
 
-def test_refuses_a_row_missing_a_tag(inputs, tmp_path, monkeypatch, no_load):
+def test_refuses_a_row_missing_a_tag(inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                     no_load: None) -> None:
     import berturk_train
     data, manifest, base = inputs
     seen = {}
 
-    def parse_dropping_a_tag(raw):                          # a doctored file would fail its sha256 first
+    def parse_dropping_a_tag(raw: bytes) -> list[dict[str, Any]]:   # a doctored file would fail its sha256 first
+        """The parsed rows with tag TAGS[5] dropped from the first row's labels."""
         rows = pilot.data.parse_jsonl(raw)
         del rows[0]["expected"][berturk.TAGS[5]]
         seen["uid"] = rows[0]["uid"]
@@ -234,7 +251,8 @@ def test_refuses_a_row_missing_a_tag(inputs, tmp_path, monkeypatch, no_load):
     assert not os.path.exists(str(tmp_path / "runs"))
 
 
-def test_refuses_an_empty_selection(inputs, tmp_path, monkeypatch, no_load):
+def test_refuses_an_empty_selection(inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                    no_load: None) -> None:
     import berturk_train
     data, manifest, base = inputs
     monkeypatch.setattr(berturk_train, "parse_jsonl", lambda raw: [])
@@ -242,17 +260,18 @@ def test_refuses_an_empty_selection(inputs, tmp_path, monkeypatch, no_load):
 
 
 @pytest.mark.parametrize("tags", ["no_such_tag", "%s,%s" % (berturk.TAGS[0], berturk.TAGS[0]), "card"])
-def test_refuses_bad_mask_tags(inputs, tmp_path, no_load, capsys, tags):
-    """--mask-tags masks a Phase 9 base only (09-03): alone it is an argument error naming --fewshot-base, before the
+def test_refuses_bad_mask_tags(inputs: Inputs, tmp_path: Path, no_load: None, capsys: pytest.CaptureFixture[str],
+                               tags: str) -> None:
+    """--mask-tags masks a few-shot base only: alone it is an argument error naming --fewshot-base, before the
     split is read (pilot.berturk.check_mask_tags still refuses an unknown or repeated tag: test_berturk_unit)."""
     data, manifest, base = inputs
     code, err = exit_code(train_argv(data, manifest, base, tmp_path / "runs", "--mask-tags", tags), capsys)
-    assert code == 2 and "--mask-tags masks a Phase 9 base only" in err and "--fewshot-base" in err, err
+    assert code == 2 and "--mask-tags masks a few-shot base only" in err and "--fewshot-base" in err, err
     assert not os.path.exists(str(tmp_path / "runs"))
 
 
 @pytest.mark.parametrize("fault", list(berturk.BASE_FILES) + ["lowercasing"])
-def test_refuses_an_incomplete_or_lowercasing_base(inputs, tmp_path, no_load, fault):
+def test_refuses_an_incomplete_or_lowercasing_base(inputs: Inputs, tmp_path: Path, no_load: None, fault: str) -> None:
     import shutil
     data, manifest, base = inputs
     bad = str(tmp_path / "base")
@@ -269,7 +288,8 @@ def test_refuses_an_incomplete_or_lowercasing_base(inputs, tmp_path, no_load, fa
 
 @pytest.mark.parametrize("flag", ["--epochs", "--batch", "--max-len", "--max-messages", "--cpus", "--lr",
                                   "--head-lr"])
-def test_refuses_bad_numbers(inputs, tmp_path, no_load, capsys, flag):
+def test_refuses_bad_numbers(inputs: Inputs, tmp_path: Path, no_load: None, capsys: pytest.CaptureFixture[str],
+                             flag: str) -> None:
     import berturk_train
     data, manifest, base = inputs
     with pytest.raises(SystemExit) as e:
@@ -278,7 +298,8 @@ def test_refuses_bad_numbers(inputs, tmp_path, no_load, capsys, flag):
     assert not os.path.exists(str(tmp_path / "runs"))
 
 
-def test_refuses_mps_when_unavailable(inputs, tmp_path, monkeypatch, no_load):
+def test_refuses_mps_when_unavailable(inputs: Inputs, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                      no_load: None) -> None:
     import torch
     from pilot import spike
     data, manifest, base = inputs
@@ -294,7 +315,8 @@ def test_refuses_mps_when_unavailable(inputs, tmp_path, monkeypatch, no_load):
         torch.set_num_threads(threads)
 
 
-def test_refuses_an_existing_run_dir(inputs, tmp_path, capsys, no_load):
+def test_refuses_an_existing_run_dir(inputs: Inputs, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+                                     no_load: None) -> None:
     import berturk_train
     data, manifest, base = inputs
     storage = tmp_path / "runs"
@@ -307,7 +329,8 @@ def test_refuses_an_existing_run_dir(inputs, tmp_path, capsys, no_load):
     assert os.listdir(str(run_dir)) == []                   # nothing was written into it
 
 
-def test_print_run_id_starts_nothing(inputs, tmp_path, capsys, no_load):
+def test_print_run_id_starts_nothing(inputs: Inputs, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+                                     no_load: None) -> None:
     import re
     import berturk_train
     data, manifest, base = inputs
@@ -318,12 +341,12 @@ def test_print_run_id_starts_nothing(inputs, tmp_path, capsys, no_load):
     assert not storage.exists()
 
 
-# ---- the final-seed path: --stop-after-epoch, --out, --postfit, --reference (plan 06-08) ----
+# ---- the final-seed path: --stop-after-epoch, --out, --postfit, --reference ----
 
 T_EXACT = 1.2345678901234567                                 # 17 significant digits: any rounding would show
 
 
-def set_flag(argv, flag, value=None):
+def set_flag(argv: list[Any], flag: str, value: Any = None) -> list[str]:
     """argv with `flag` set to `value` (replaced or appended); value None removes the flag and its value."""
     argv = [str(x) for x in argv]
     if flag in argv:
@@ -332,7 +355,7 @@ def set_flag(argv, flag, value=None):
     return argv if value is None else argv + [flag, str(value)]
 
 
-def exit_code(argv, capsys):
+def exit_code(argv: list[Any], capsys: pytest.CaptureFixture[str]) -> tuple[Any, str]:
     """(exit code, stderr) of berturk_train.main(argv)."""
     import berturk_train
     with pytest.raises(SystemExit) as e:
@@ -341,7 +364,8 @@ def exit_code(argv, capsys):
 
 
 @pytest.mark.parametrize("k", [0, 3, 4])
-def test_stop_after_epoch_boundaries_refused(inputs, tmp_path, capsys, no_load, k):
+def test_stop_after_epoch_boundaries_refused(inputs: Inputs, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+                                             no_load: None, k: int) -> None:
     data, manifest, base = inputs
     argv = set_flag(train_argv(data, manifest, base, tmp_path / "runs", "--print-run-id"), "--epochs", 3)
     code, err = exit_code(argv + ["--stop-after-epoch", str(k)], capsys)
@@ -350,7 +374,8 @@ def test_stop_after_epoch_boundaries_refused(inputs, tmp_path, capsys, no_load, 
 
 
 @pytest.mark.parametrize("k", [1, 2])
-def test_stop_after_epoch_boundaries_accepted(inputs, tmp_path, capsys, no_load, k):
+def test_stop_after_epoch_boundaries_accepted(inputs: Inputs, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+                                              no_load: None, k: int) -> None:
     import berturk_train
     data, manifest, base = inputs
     argv = set_flag(train_argv(data, manifest, base, tmp_path / "runs", "--print-run-id"), "--epochs", 3)
@@ -363,8 +388,8 @@ def test_stop_after_epoch_boundaries_accepted(inputs, tmp_path, capsys, no_load,
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_stop_after_follows_the_schedule(inputs, tmp_path):
-    """A4: --epochs 3 --stop-after-epoch 2 --out O is the 3-epoch run's epoch 2 (the linear schedule and its warm-up
+def test_stop_after_follows_the_schedule(inputs: Inputs, tmp_path: Path) -> None:
+    """--epochs 3 --stop-after-epoch 2 --out O is the 3-epoch run's epoch 2 (the linear schedule and its warm-up
     stay sized by --epochs), byte for byte on CPU."""
     data, manifest, base = inputs
     full = set_flag(train_argv(data, manifest, base, tmp_path / "a"), "--epochs", 3)
@@ -389,14 +414,15 @@ def test_stop_after_follows_the_schedule(inputs, tmp_path):
 
 
 @pytest.fixture(scope="module")
-def selection_canon(inputs):
+def selection_canon(inputs: Inputs) -> tuple[str, dict[str, Any]]:
     """(run id, canonical config) of the tiny selection command, captured from berturk_train.py --print-run-id."""
     import berturk_train
     data, manifest, base = inputs
     seen = []
     run_id = berturk.run_id
 
-    def capture(canon):
+    def capture(canon: dict[str, Any]) -> str:
+        """pilot.berturk.run_id, recording the canonical config."""
         seen.append(canon)
         return run_id(canon)
     with pytest.MonkeyPatch.context() as mp:
@@ -405,7 +431,7 @@ def selection_canon(inputs):
     return run_id(seen[0]), seen[0]
 
 
-def fake_record(rid, canon, temperature=T_EXACT):
+def fake_record(rid: str, canon: dict[str, Any], temperature: float = T_EXACT) -> dict[str, Any]:
     """A postfit/1 BERTurk record whose chosen candidate is epoch 1 of the 2-epoch schedule of `canon`."""
     cand = {"dump_sha256": "d" * 64, "objective": {"tp": 1, "fp": 9, "fn": 9}, "val_micro_f1_at_global_theta": 0.1,
             "val_micro_f1_at_0_5": 0.1}
@@ -421,7 +447,8 @@ def fake_record(rid, canon, temperature=T_EXACT):
             "final": {"split": postfit.FINAL_SPLIT, "seeds": [0, 1, 2], "epochs": EPOCHS, "stop_after_epoch": 1}}
 
 
-def write_json(path, obj):
+def write_json(path: str | Path, obj: Any) -> str:
+    """Write obj as indented JSON at path (parent dirs made); returns str(path)."""
     os.makedirs(os.path.dirname(str(path)), exist_ok=True)
     with open(str(path), "w", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False, indent=2) + "\n")
@@ -429,7 +456,8 @@ def write_json(path, obj):
 
 
 @pytest.fixture(scope="module")
-def final_setup(inputs, selection_canon, tmp_path_factory):
+def final_setup(inputs: Inputs, selection_canon: tuple[str, dict[str, Any]],
+                tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
     """Paths of a tiny record (chosen epoch 1 of 2) and its resolved reference check, a second record with its own
     resolved check, and the record's unresolved check: {record, reference, other_record, other_reference,
     unresolved, final_train}."""
@@ -448,7 +476,7 @@ def final_setup(inputs, selection_canon, tmp_path_factory):
     return out
 
 
-def final_argv(inputs, final_setup, storage, seed=0):
+def final_argv(inputs: Inputs, final_setup: dict[str, str], storage: str | Path, seed: int = 0) -> list[str]:
     """berturk_train.py arguments of the record's final seed, as pilot.berturk.final_command prints them."""
     data, manifest, base = inputs
     rec, _ = postfit.read_record(final_setup["record"])
@@ -473,8 +501,9 @@ BINDING = [  # (edit of the printed final command, the refusal that names the ke
 
 @pytest.mark.parametrize("print_run_id", [False, True], ids=["train", "print_run_id"])
 @pytest.mark.parametrize("name,edit,match", BINDING, ids=[b[0] for b in BINDING])
-def test_postfit_binding_refuses_other_settings(inputs, final_setup, tmp_path, no_load, name, edit, match,
-                                                print_run_id):
+def test_postfit_binding_refuses_other_settings(inputs: Inputs, final_setup: dict[str, str], tmp_path: Path,
+                                                no_load: None, name: str, edit: Callable[[list[str], str], list[str]],
+                                                match: str, print_run_id: bool) -> None:
     data, _, _ = inputs
     storage = tmp_path / "runs"
     argv = edit(final_argv(inputs, final_setup, storage), data) + (["--print-run-id"] if print_run_id else [])
@@ -482,7 +511,7 @@ def test_postfit_binding_refuses_other_settings(inputs, final_setup, tmp_path, n
     assert not os.path.exists(str(storage) + "-ckpt")       # no --out either
 
 
-def test_final_command_prints_the_head_lr(inputs, final_setup, tmp_path):
+def test_final_command_prints_the_head_lr(inputs: Inputs, final_setup: dict[str, str], tmp_path: Path) -> None:
     """The head LR is bound, not transcribed: final_command prints the chosen canonical head_lr after --head-lr."""
     rec, _ = postfit.read_record(final_setup["record"])
     head_lr = rec["chosen"]["canonical"]["head_lr"]
@@ -492,7 +521,8 @@ def test_final_command_prints_the_head_lr(inputs, final_setup, tmp_path):
     assert argv[argv.index("--lr") + 1] == repr(rec["chosen"]["canonical"]["encoder_lr"])
 
 
-def test_postfit_binding_accepts_the_printed_command(inputs, final_setup, tmp_path, capsys, no_load):
+def test_postfit_binding_accepts_the_printed_command(inputs: Inputs, final_setup: dict[str, str], tmp_path: Path,
+                                                     capsys: pytest.CaptureFixture[str], no_load: None) -> None:
     import berturk_train
     storage = tmp_path / "runs"
     assert berturk_train.main(final_argv(inputs, final_setup, storage) + ["--print-run-id"]) is None
@@ -508,7 +538,7 @@ REFERENCE = [  # (the --reference given, the refusal)
     ("invalid_json", lambda s, d: d.joinpath("bad.json").write_text("{") and str(d / "bad.json"), "not valid JSON"),
     ("status_edited", lambda s, d: write_json(d / "edited.json", dict(_json(s["unresolved"]), status="ok")),
      "disagrees"),
-    # 06-REVIEW WR-01: a status and fraction edited together agree with each other, but not with the record
+    # a status and fraction edited together agree with each other, but not with the record
     ("value_edited", lambda s, d: write_json(d / "value.json", dict(
         _json(s["unresolved"]), status="ok", value=dict(_json(s["unresolved"])["value"], fraction=[800, 1000]))),
      "is not pilot.berturk.reference_check of the postfit record"),
@@ -517,12 +547,15 @@ REFERENCE = [  # (the --reference given, the refusal)
 
 @pytest.mark.parametrize("print_run_id", [False, True], ids=["train", "print_run_id"])
 @pytest.mark.parametrize("name,ref,match", REFERENCE, ids=[r[0] for r in REFERENCE])
-def test_reference_gate_refuses(inputs, final_setup, tmp_path, monkeypatch, no_load, name, ref, match, print_run_id):
-    """BASE-03 (OQ2): refused before any fetch: the command uses --base berturk, whose fetch fails loudly."""
+def test_reference_gate_refuses(inputs: Inputs, final_setup: dict[str, str], tmp_path: Path,
+                                monkeypatch: pytest.MonkeyPatch, no_load: None, name: str,
+                                ref: Callable[[dict[str, str], Path], str], match: str, print_run_id: bool) -> None:
+    """The reference-check gate refuses before any fetch: the command uses --base berturk, whose fetch fails loudly."""
     import pilot.weights
 
-    def no_fetch(*args, **kwargs):
-        raise AssertionError("the pinned base was fetched before the BASE-03 refusal")
+    def no_fetch(*args: Any, **kwargs: Any) -> None:
+        """Fail the test: the pinned fetch was reached."""
+        raise AssertionError("the pinned base was fetched before the reference-check refusal")
     monkeypatch.setattr(pilot.weights, "fetch", no_fetch)
     storage = tmp_path / "runs"
     argv = set_flag(set_flag(final_argv(inputs, final_setup, storage), "--base", "berturk"), "--reference",
@@ -530,8 +563,9 @@ def test_reference_gate_refuses(inputs, final_setup, tmp_path, monkeypatch, no_l
     refused(argv + (["--print-run-id"] if print_run_id else []), storage, re.escape(match))
 
 
-def test_a_leftover_out_tmp_is_refused_never_deleted(inputs, final_setup, tmp_path, no_load):
-    """06-REVIEW IN-04: a <out>.tmp sibling this process did not make is refused before training, and by
+def test_a_leftover_out_tmp_is_refused_never_deleted(inputs: Inputs, final_setup: dict[str, str], tmp_path: Path,
+                                                     no_load: None) -> None:
+    """A <out>.tmp sibling this process did not make is refused before training, and by
     _write_checkpoint itself (an export's or --out's temp dir), never silently deleted."""
     import berturk_train
     storage = tmp_path / "runs"
@@ -548,7 +582,8 @@ def test_a_leftover_out_tmp_is_refused_never_deleted(inputs, final_setup, tmp_pa
 
 
 @pytest.mark.parametrize("drop", ["--reference", "--out", "--postfit"])
-def test_postfit_needs_out_and_reference(inputs, final_setup, tmp_path, capsys, no_load, drop):
+def test_postfit_needs_out_and_reference(inputs: Inputs, final_setup: dict[str, str], tmp_path: Path,
+                                         capsys: pytest.CaptureFixture[str], no_load: None, drop: str) -> None:
     storage = tmp_path / "runs"
     code, err = exit_code(set_flag(final_argv(inputs, final_setup, storage), drop), capsys)
     want = {"--reference": "--reference", "--out": "--out", "--postfit": "--postfit"}[drop]
@@ -557,8 +592,8 @@ def test_postfit_needs_out_and_reference(inputs, final_setup, tmp_path, capsys, 
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_final_temperature_is_bit_exact(inputs, final_setup, tmp_path):
-    """A9: the final berturk_train.json serves the record's T as the same JSON float (no rounding, no arithmetic) and
+def test_final_temperature_is_bit_exact(inputs: Inputs, final_setup: dict[str, str], tmp_path: Path) -> None:
+    """The final berturk_train.json serves the record's T as the same JSON float (no rounding, no arithmetic) and
     carries pilot.postfit.final_block of the record; exports stay uncalibrated."""
     storage = tmp_path / "runs"
     argv = [x for x in final_argv(inputs, final_setup, storage) if x != "--no-export-epochs"]   # exports on
@@ -581,7 +616,7 @@ def test_final_temperature_is_bit_exact(inputs, final_setup, tmp_path):
     assert export["calibrated"] is False and export["temperature"] == 1.0 and export["postfit"] is None
 
 
-def test_selection_identity_has_no_final_keys(two_runs, selection_canon):
+def test_selection_identity_has_no_final_keys(two_runs: TwoRuns, selection_canon: tuple[str, dict[str, Any]]) -> None:
     rid, (a, _) = two_runs
     rec = _json(os.path.join(exports(a)[-1], berturk.RECORD))
     for canon in (rec["canonical"], selection_canon[1]):
@@ -590,12 +625,12 @@ def test_selection_identity_has_no_final_keys(two_runs, selection_canon):
     assert rec["stop_after_epoch"] is None and rec["postfit"] is None
 
 
-# ---- the optimizer: the head at --head-lr, the encoder at --lr (plan 06-14, the BASE-03 fix) ----
+# ---- the optimizer: the head at --head-lr, the encoder at --lr (the first reference-check fix) ----
 
 ENC_LR, HEAD_LR = 2e-05, berturk.HEAD_LR
 
 
-def test_optimizer_groups_split_head_and_encoder():
+def test_optimizer_groups_split_head_and_encoder() -> None:
     """Torch-free, on names: four groups in the fixed order, the head is exactly the classifier.* names, decay follows
     the given names, every name in exactly one group; refused unless the head is exactly the fresh names."""
     names = ["bert.embeddings.word_embeddings.weight", "bert.embeddings.LayerNorm.weight",
@@ -624,7 +659,7 @@ def test_optimizer_groups_split_head_and_encoder():
                                  0.01)
 
 
-def _rows(data, tok, n=None):
+def _rows(data: str, tok: Any, n: int | None = None) -> list[dict[str, Any]]:
     """The tokenised training rows berturk_train.main builds from the synthetic selection split."""
     with open(data, "rb") as f:
         rows = pilot.data.parse_jsonl(f.read())
@@ -636,7 +671,7 @@ def _rows(data, tok, n=None):
     return out
 
 
-def _load(base, seed=0):
+def _load(base: str, seed: int = 0) -> tuple[Any, list[str]]:
     """(model, newly initialised names) of the tiny base, loaded exactly as berturk_train.main loads a base."""
     import torch
     import transformers
@@ -647,7 +682,7 @@ def _load(base, seed=0):
     return model, info["missing_keys"]
 
 
-def _args(out, epochs=1):
+def _args(out: str | Path, epochs: int = 1) -> Any:
     """The TrainingArguments berturk_train.main builds (the recipe constants, the smoke batch, CPU)."""
     import transformers
     return transformers.TrainingArguments(
@@ -660,14 +695,15 @@ def _args(out, epochs=1):
 
 
 @pytest.fixture
-def keep_threads():
+def keep_threads() -> Iterator[None]:
+    """Restore torch's thread count after the test."""
     import torch
     threads = torch.get_num_threads()
     yield
     torch.set_num_threads(threads)
 
 
-def test_head_lr_param_groups_in_the_trainer(inputs, tmp_path, keep_threads):
+def test_head_lr_param_groups_in_the_trainer(inputs: Inputs, tmp_path: Path, keep_threads: None) -> None:
     import berturk_train
     import torch
     import transformers
@@ -713,7 +749,7 @@ def test_head_lr_param_groups_in_the_trainer(inputs, tmp_path, keep_threads):
     assert math.isclose(HEAD_LR / ENC_LR, 5.0, rel_tol=1e-12)
 
 
-def _train_one_epoch(base, data, out, own_optimizer):
+def _train_one_epoch(base: str, data: str, out: str | Path, own_optimizer: bool) -> dict[str, Any]:
     """The tiny base trained for one epoch with berturk_train's optimizer at head LR = encoder LR (own_optimizer
     False) or with the Trainer's own optim adamw_torch (True); the trained state_dict."""
     import berturk_train
@@ -734,7 +770,7 @@ def _train_one_epoch(base, data, out, own_optimizer):
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_tied_head_lr_equals_the_trainers_own_adamw(inputs, tmp_path, keep_threads):
+def test_tied_head_lr_equals_the_trainers_own_adamw(inputs: Inputs, tmp_path: Path, keep_threads: None) -> None:
     """The param groups change nothing but the head LR: tied, they train to exactly the Trainer's own weights."""
     import torch
     data, _, base = inputs
@@ -749,7 +785,7 @@ def test_tied_head_lr_equals_the_trainers_own_adamw(inputs, tmp_path, keep_threa
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_head_lr_reaches_the_record_and_the_weights(inputs, two_runs, tmp_path):
+def test_head_lr_reaches_the_record_and_the_weights(inputs: Inputs, two_runs: TwoRuns, tmp_path: Path) -> None:
     data, manifest, base = inputs
     rid, (a, _) = two_runs
     default = _json(os.path.join(exports(a)[0], berturk.RECORD))
@@ -769,7 +805,7 @@ def test_head_lr_reaches_the_record_and_the_weights(inputs, two_runs, tmp_path):
         != _bytes(os.path.join(exports(a)[0], "model.safetensors"))
 
 
-def test_refuses_a_base_whose_head_is_not_fresh(inputs, tmp_path, keep_threads):
+def test_refuses_a_base_whose_head_is_not_fresh(inputs: Inputs, tmp_path: Path, keep_threads: None) -> None:
     """A base that already holds a classifier (saved as BertForSequenceClassification) is refused before the run dir:
     its head would not be the freshly initialised parameters the head LR is meant for."""
     import shutil
@@ -789,9 +825,9 @@ def test_refuses_a_base_whose_head_is_not_fresh(inputs, tmp_path, keep_threads):
 
 
 @pytest.mark.weights
-def test_pinned_base_head_is_the_fresh_classifier(keep_threads):
+def test_pinned_base_head_is_the_fresh_classifier(keep_threads: None) -> None:
     """The pinned BERTurk base: from_pretrained newly initialises exactly classifier.weight and classifier.bias, and
-    optimizer_groups accepts them as the head (06-RESEARCH probe 4)."""
+    optimizer_groups accepts them as the head."""
     import torch
     import transformers
     from pilot import pins
@@ -808,10 +844,11 @@ def test_pinned_base_head_is_the_fresh_classifier(keep_threads):
     assert sum(len(g["params"]) for g in groups[:2]) == len(names) - 2
 
 
-# ---- Phase 9 few-shot modes: every refusal before a load, a fetch or a run dir (09-03, D-01) ----
+# ---- the few-shot modes: every refusal before a load, a fetch or a run dir ----
 
 @pytest.fixture
-def fewshot_env(tmp_path, synthetic_raw, monkeypatch, no_load):
+def fewshot_env(tmp_path: Path, synthetic_raw: SyntheticRaw, monkeypatch: pytest.MonkeyPatch,
+                no_load: None) -> types.SimpleNamespace:
     """tests/test_fewshot_berturk.py's synthetic frozen protocol installed in this process (tag card, k 1 and 2, draw
     0, the tiny recipes, a postfit record whose chosen canonical is the tiny unmasked command's), with every model load
     (no_load) and the pinned fetch failing the test if reached. Returns a namespace: ns (synthetic_protocol's),
@@ -819,21 +856,23 @@ def fewshot_env(tmp_path, synthetic_raw, monkeypatch, no_load):
     config) and plant(canonical=..., record=True, name=...) -> a tiny BERTurk checkpoint dir (the base's files, a
     config.json scoring INTENTS in order and a berturk_train.json naming the base run), as a continued run's --base."""
     import shutil
-    import types
     import berturk_train
     import pilot.weights
     from conftest import prepared
     from fewshot_synthetic import postfit_systems, synthetic_protocol
     from test_fewshot_berturk import COMMON, rules
 
-    def no_fetch(*a, **kw):
+    def no_fetch(*a: Any, **kw: Any) -> None:
+        """Fail the test: the pinned fetch was reached."""
         raise AssertionError("the pinned fetch reached; a few-shot refusal must come first")
     monkeypatch.setattr(pilot.weights, "fetch", no_fetch)
     tiny = tiny_base(tmp_path / "tiny")
     seen, run_id = [], berturk.run_id
 
-    def canon_of(argv):                                     # the canonical config main gives argv (--print-run-id)
-        def capture(canon):
+    def canon_of(argv: list[Any]) -> dict[str, Any]:
+        """The canonical config main gives argv (through --print-run-id)."""
+        def capture(canon: dict[str, Any]) -> str:
+            """pilot.berturk.run_id, recording the canonical config."""
             seen.append(canon)
             return run_id(canon)
         with pytest.MonkeyPatch.context() as mp:
@@ -846,22 +885,26 @@ def fewshot_env(tmp_path, synthetic_raw, monkeypatch, no_load):
     ns = synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, rules=rules(),
                             systems=postfit_systems(tmp_path, {"berturk": chosen}))
 
-    def split(name):
+    def split(name: str) -> str:
+        """The path of a synthetic split file."""
         return os.path.join(ns.out_dir, "splits", name + ".jsonl")
 
-    def base(*extra, data=None):
+    def base(*extra: Any, data: str | None = None) -> list[str]:
+        """argv of the frozen masked-base command, `extra` appended."""
         return [str(x) for x in ["--data", data or split("selection_train"), "--manifest", ns.manifest, "--base", tiny,
                                  "--out", tmp_path / "o", "--storage", tmp_path / "runs", "--epochs", "2",
                                  "--stop-after-epoch", "1", "--fewshot-base"] + COMMON + list(extra)]
 
-    def cont(base_dir, *extra):
+    def cont(base_dir: str, *extra: Any) -> list[str]:
+        """argv of the continued command (draw 0, k 2) from base_dir, `extra` appended."""
         return [str(x) for x in ["--data", split("selection_train"), "--manifest", ns.manifest, "--base", base_dir,
                                  "--out", tmp_path / "o", "--storage", tmp_path / "runs", "--epochs", "1",
                                  "--fewshot-draw", "0", "--fewshot-k", "2"] + COMMON + list(extra)]
 
     base_canon = canon_of(base())
 
-    def plant(canonical=None, record=True, name="planted"):
+    def plant(canonical: dict[str, Any] | None = None, record: bool = True, name: str = "planted") -> str:
+        """A tiny BERTurk checkpoint dir naming a base run (see the fixture docstring); returns it."""
         d = str(tmp_path / name)
         shutil.copytree(tiny, d)
         cfg = _json(os.path.join(d, "config.json"))
@@ -877,7 +920,7 @@ def fewshot_env(tmp_path, synthetic_raw, monkeypatch, no_load):
                                  tmp=tmp_path, storage=tmp_path / "runs", out=tmp_path / "o")
 
 
-def fewshot_refused(env, argv, match):
+def fewshot_refused(env: types.SimpleNamespace, argv: list[str], match: str) -> None:
     """main(argv) raises SystemExit matching `match`; no run dir, no --out and no load (no_load) followed."""
     import berturk_train
     with pytest.raises(SystemExit, match=match):
@@ -885,7 +928,8 @@ def fewshot_refused(env, argv, match):
     assert not env.storage.exists() and not env.out.exists()
 
 
-def test_fewshot_base_and_continued_commands_print_their_run_ids_without_a_load(fewshot_env, capsys):
+def test_fewshot_base_and_continued_commands_print_their_run_ids_without_a_load(
+        fewshot_env: FewshotEnv, capsys: pytest.CaptureFixture[str]) -> None:
     """The positive path the refusals below depart from: the frozen base command (with and without the frozen
     --mask-tags spelled out) and a continued command from a masked base of this protocol print a run id; no model,
     tokenizer or fetch is reached and nothing is created."""
@@ -904,13 +948,15 @@ def test_fewshot_base_and_continued_commands_print_their_run_ids_without_a_load(
 
 
 @pytest.mark.parametrize("case", ["missing", "unpinned", "changed"])
-def test_fewshot_protocol_is_required_before_the_split_is_read(fewshot_env, monkeypatch, case):
-    """D-01: require_frozen() runs first: a missing, unpinned or changed protocol is refused before verify_split_file
+def test_fewshot_protocol_is_required_before_the_split_is_read(fewshot_env: FewshotEnv, monkeypatch: pytest.MonkeyPatch,
+                                                               case: str) -> None:
+    """require_frozen() runs first: a missing, unpinned or changed protocol is refused before verify_split_file
     reads --data (monkeypatched to fail the test if reached), for the base and the continued command."""
     import berturk_train
     from pilot import protocol as pr
 
-    def no_split(*a, **kw):
+    def no_split(*a: Any, **kw: Any) -> None:
+        """Fail the test: the split was read."""
         raise AssertionError("verify_split_file reached before the protocol check")
     monkeypatch.setattr(berturk_train, "verify_split_file", no_split)
     base = fewshot_env.plant()
@@ -928,14 +974,16 @@ def test_fewshot_protocol_is_required_before_the_split_is_read(fewshot_env, monk
         fewshot_refused(fewshot_env, argv, match)
 
 
-def test_fewshot_decision_record_is_required(fewshot_env):
-    """D-08: the projection's decision record names the mode; without it no few-shot command trains."""
+def test_fewshot_decision_record_is_required(fewshot_env: FewshotEnv) -> None:
+    """The projection's compute decision record names the mode; without it no few-shot command trains."""
     os.remove(fewshot_env.ns.decision_path)
     fewshot_refused(fewshot_env, fewshot_env.base("--print-run-id"), "run `python fewshot.py --projection")
 
 
-def test_fewshot_protocol_mask_label_and_dtype_must_be_the_trainers(fewshot_env, tmp_path, synthetic_raw, monkeypatch):
-    """D-01: the frozen rules.base_runs.berturk name the mask label and dtype berturk_train.py trains with; a protocol
+def test_fewshot_protocol_mask_label_and_dtype_must_be_the_trainers(fewshot_env: FewshotEnv,
+                                                                     tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """The frozen rules.base_runs.berturk name the mask label and dtype berturk_train.py trains with; a protocol
     naming another is refused before the split is read."""
     from fewshot_synthetic import postfit_systems, synthetic_protocol
     from test_fewshot_berturk import rules
@@ -949,8 +997,8 @@ def test_fewshot_protocol_mask_label_and_dtype_must_be_the_trainers(fewshot_env,
         fewshot_refused(fewshot_env, fewshot_env.base("--print-run-id"), "cannot run this protocol unchanged")
 
 
-def test_mask_tags_other_than_the_protocols_are_refused_with_fewshot_base(fewshot_env):
-    """D-03: --mask-tags duplicates a frozen value, so any other list (another tag, an extra tag, a repeated tag) is
+def test_mask_tags_other_than_the_protocols_are_refused_with_fewshot_base(fewshot_env: FewshotEnv) -> None:
+    """--mask-tags duplicates a frozen value, so any other list (another tag, an extra tag, a repeated tag) is
     refused naming the frozen tags."""
     for tags in ("loan", "card,loan", "card,card"):
         fewshot_refused(fewshot_env, fewshot_env.base("--mask-tags", tags, "--print-run-id"),
@@ -963,7 +1011,7 @@ FLAG_ERRORS = [  # (argv edit, the argument error it gives)
     ("base_and_draw", lambda e: e.cont(e.plant(), "--fewshot-base"), "pass one of them"),
     ("stop_with_draw", lambda e: e.cont(e.plant(), "--stop-after-epoch", "1", "--epochs", "2"),
      "--fewshot-draw takes no --stop-after-epoch"),
-    ("mask_with_draw", lambda e: e.cont(e.plant(), "--mask-tags", "card"), "--mask-tags masks a Phase 9 base only"),
+    ("mask_with_draw", lambda e: e.cont(e.plant(), "--mask-tags", "card"), "--mask-tags masks a few-shot base only"),
     ("base_with_postfit", lambda e: e.base("--postfit", "p.json", "--reference", "r.json"),
      "--fewshot-base takes no --postfit or --reference"),
     ("base_with_reference", lambda e: e.base("--reference", "r.json"), "--fewshot-base takes no --postfit"),
@@ -975,23 +1023,26 @@ FLAG_ERRORS = [  # (argv edit, the argument error it gives)
 
 
 @pytest.mark.parametrize("name,edit,match", FLAG_ERRORS, ids=[f[0] for f in FLAG_ERRORS])
-def test_fewshot_flag_combinations_are_argument_errors(fewshot_env, capsys, name, edit, match):
-    """D-01: a few-shot mode is one frozen-protocol command; every other flag combination exits 2 naming the fix."""
+def test_fewshot_flag_combinations_are_argument_errors(fewshot_env: FewshotEnv,
+                                                       capsys: pytest.CaptureFixture[str], name: str,
+                                                       edit: Callable[[types.SimpleNamespace], list[str]],
+                                                       match: str) -> None:
+    """A few-shot mode is one frozen-protocol command; every other flag combination exits 2 naming the fix."""
     code, err = exit_code(edit(fewshot_env), capsys)
     assert code == 2 and match in err, err
     assert not fewshot_env.storage.exists() and not fewshot_env.out.exists()
 
 
-def test_fewshot_base_on_another_split_is_refused(fewshot_env):
-    """D-02: the few-shot source is the frozen selection_train; final_train (a train split) is refused by
+def test_fewshot_base_on_another_split_is_refused(fewshot_env: FewshotEnv) -> None:
+    """The few-shot source is the frozen selection_train; final_train (a train split) is refused by
     check_source."""
     final = os.path.join(fewshot_env.ns.out_dir, "splits", "final_train.jsonl")
     fewshot_refused(fewshot_env, fewshot_env.base("--print-run-id", data=final),
                     "the source entry has sha256 .* the frozen few-shot source")
 
 
-def test_fewshot_base_with_another_recipe_is_refused(fewshot_env):
-    """D-03: the base recipe is rules.base_runs.berturk: --epochs 10 is refused naming epochs, a seed outside the base
+def test_fewshot_base_with_another_recipe_is_refused(fewshot_env: FewshotEnv) -> None:
+    """The base recipe is rules.base_runs.berturk: --epochs 10 is refused naming epochs, a seed outside the base
     seeds and another batch likewise."""
     fewshot_refused(fewshot_env, fewshot_env.base("--epochs", "10", "--print-run-id"),
                     "epochs is 10 here but 2 in the frozen rules.base_runs.berturk")
@@ -1001,13 +1052,15 @@ def test_fewshot_base_with_another_recipe_is_refused(fewshot_env):
                     "batch is 8 here but 4 in the frozen rules.base_runs.berturk")
 
 
-def test_fewshot_masked_base_refuses_a_row_missing_an_old_tag(fewshot_env, monkeypatch):
-    """FEW-01 edge: label_vector never reads a missing label as a negative, so a masked base whose row lacks an
+def test_fewshot_masked_base_refuses_a_row_missing_an_old_tag(fewshot_env: FewshotEnv,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    """Masked-base edge: label_vector never reads a missing label as a negative, so a masked base whose row lacks an
     old-tag label is refused naming the uid and the tag (a missing held-out label is masked anyway)."""
     import berturk_train
     seen = {}
 
-    def parse_dropping_a_tag(raw):                          # a doctored file would fail its sha256 first
+    def parse_dropping_a_tag(raw: bytes) -> list[dict[str, Any]]:   # a doctored file would fail its sha256 first
+        """The parsed rows with tag loan dropped from the first row's labels."""
         rows = pilot.data.parse_jsonl(raw)
         del rows[0]["expected"]["loan"]
         seen["uid"] = rows[0]["uid"]
@@ -1017,15 +1070,17 @@ def test_fewshot_masked_base_refuses_a_row_missing_an_old_tag(fewshot_env, monke
     assert seen["uid"]
 
 
-def test_fewshot_continued_refuses_a_selected_uid_missing_from_the_rows(fewshot_env, monkeypatch):
-    """FEW-02 edge: a continued run builds its rows from the frozen lists only (pilot.fewshot.berturk_rows), so a
+def test_fewshot_continued_refuses_a_selected_uid_missing_from_the_rows(fewshot_env: FewshotEnv,
+                                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Continued-run edge: a continued run builds its rows from the frozen lists only (pilot.fewshot.berturk_rows), so a
     support uid missing from the rows is refused before any load, never trained on a shortened set (check_source,
     which would refuse first, is bypassed here to reach that refusal)."""
     import berturk_train
     from pilot import fewshot as fs
     support = sorted(fs.selection(fewshot_env.ns.block, 0, 2)["support"])
 
-    def parse_dropping_a_support_row(raw):
+    def parse_dropping_a_support_row(raw: bytes) -> list[dict[str, Any]]:
+        """The parsed rows without the first support uid."""
         return [r for r in pilot.data.parse_jsonl(raw) if r["uid"] != support[0]]
     monkeypatch.setattr(berturk_train, "parse_jsonl", parse_dropping_a_support_row)
     monkeypatch.setattr(berturk_train.fewshot, "check_source", lambda block, entry, rows: None)
@@ -1033,15 +1088,15 @@ def test_fewshot_continued_refuses_a_selected_uid_missing_from_the_rows(fewshot_
                     "selected uids are not in the rows")
 
 
-def test_fewshot_continued_from_the_pinned_base_is_refused(fewshot_env):
-    """D-06: a continued run starts from a masked base checkpoint, never the pinned weights (refused before the split
+def test_fewshot_continued_from_the_pinned_base_is_refused(fewshot_env: FewshotEnv) -> None:
+    """A continued run starts from a masked base checkpoint, never the pinned weights (refused before the split
     is read and before the fetch, which fails the test if reached)."""
     fewshot_refused(fewshot_env, fewshot_env.cont("berturk"), "pass a berturk_train.py --fewshot-base checkpoint as "
                                                               "--base, not berturk")
 
 
-def test_fewshot_continued_from_a_checkpoint_without_a_base_binding_is_refused(fewshot_env):
-    """T-09-11: the base names itself by its own record bytes: a dir without berturk_train.json (the tiny base
+def test_fewshot_continued_from_a_checkpoint_without_a_base_binding_is_refused(fewshot_env: FewshotEnv) -> None:
+    """The base names itself by its own record bytes: a dir without berturk_train.json (the tiny base
     itself), a record whose run id is not its canonical config's, a run that is not a masked base of this protocol,
     and a config.json that does not score INTENTS in order are each refused before any load."""
     fewshot_refused(fewshot_env, fewshot_env.cont(fewshot_env.plant(record=False, name="bare"), "--print-run-id"),
@@ -1062,14 +1117,14 @@ def test_fewshot_continued_from_a_checkpoint_without_a_base_binding_is_refused(f
     fewshot_refused(fewshot_env, fewshot_env.cont(d, "--print-run-id"), "does not score the 48 INTENTS tags")
 
 
-def test_fewshot_continued_seed_must_be_the_draw_seed(fewshot_env):
-    """D-07: the training seed of a continued run is the draw seed."""
+def test_fewshot_continued_seed_must_be_the_draw_seed(fewshot_env: FewshotEnv) -> None:
+    """The training seed of a continued run is the draw seed."""
     fewshot_refused(fewshot_env, fewshot_env.cont(fewshot_env.plant(), "--seed", "1", "--print-run-id"),
                     "seed is 1 here but draw 0's seed is 0; the training seed is the draw seed")
 
 
-def test_fewshot_continued_k_draw_and_epochs_outside_the_frozen_values_are_refused(fewshot_env):
-    """FEW-02: k is one of the frozen k_values (1, 2 here), the draw one of the frozen draws and the epochs the
+def test_fewshot_continued_k_draw_and_epochs_outside_the_frozen_values_are_refused(fewshot_env: FewshotEnv) -> None:
+    """k is one of the frozen k_values (1, 2 here), the draw one of the frozen draws and the epochs the
     frozen continued_training's."""
     base = fewshot_env.plant()
     fewshot_refused(fewshot_env, fewshot_env.cont(base, "--fewshot-k", "3", "--print-run-id"),

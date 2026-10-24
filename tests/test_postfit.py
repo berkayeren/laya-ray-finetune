@@ -1,12 +1,16 @@
-"""pilot.postfit and postfit.py (LAYA-05, LAYA-08): the val temperature fit, the selection rule, the record and its
-refusals of test input. No model, torch or Ray: candidate val dumps are written with pilot.dumps.write_dump on the
-synthetic val split (conftest), with a sidecar shaped like score.py's (score.sidecar_base + score.training_block).
+"""pilot.postfit and postfit.py: the val temperature fit, the selection rule, the record and its refusals of test input,
+the guarded export prune, and the final-seed commands and manifest. Candidate val dumps are written with
+pilot.dumps.write_dump on the synthetic val split (conftest), with a sidecar shaped like score.py's (score.sidecar_base
++ score.training_block): no model or Ray. Only the prune and final-manifest tests build a tiny Laya checkpoint (torch).
 """
 import json
 import os
 import random
 import subprocess
 import sys
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -24,11 +28,15 @@ GRID = [(lr, e) for lr in postfit.LR_GRID for e in range(1, postfit.EPOCHS + 1)]
 LR3 = (2e-05, 3e-05, 5e-05)                 # the selection rule's tie order across LRs, kept for a later LR grid search
 GRID3 = [(lr, e) for lr in LR3 for e in range(1, postfit.EPOCHS + 1)]
 SCORER = {"device": "mps", "dtype": "torch.float32", "amp_enabled": False}
+Snap = tuple[str, str, dict[str, Any], list[str]]     # the snap fixture: (out_dir, manifest, val entry, val uids)
+SyntheticRaw = Callable[..., tuple[str, dict[str, str]]]   # conftest's synthetic_raw fixture
+# the finals fixture: (record path, record, sha, make)
+Finals = tuple[str, dict[str, Any], str, Callable[..., str]]
 
 
 # --- temperature ------------------------------------------------------------------------------------------------
 
-def _planted(t, n=20000, seed=0):
+def _planted(t: float, n: int = 20000, seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
     """(margins, labels) whose labels are drawn from sigmoid(m / t): the NLL-optimal temperature is about t."""
     rng = np.random.default_rng(seed)
     m = rng.normal(0.0, 3.0, size=n)
@@ -36,33 +44,33 @@ def _planted(t, n=20000, seed=0):
     return m, y
 
 
-def test_temperature_recovers_a_planted_t():
+def test_temperature_recovers_a_planted_t() -> None:
     m, y = _planted(1.7)
     T, nll_t, nll_1 = postfit.fit_temperature(m, y)
     assert abs(T - 1.7) < 0.1, T
     assert nll_t <= nll_1
 
 
-def test_temperature_is_one_for_calibrated_margins():
+def test_temperature_is_one_for_calibrated_margins() -> None:
     m, y = _planted(1.0, seed=3)
     T, nll_t, nll_1 = postfit.fit_temperature(m.reshape(-1, 40), y.reshape(-1, 40))   # any [n, k] shape: every pair
     assert abs(T - 1.0) < 0.1, T
     assert nll_t <= nll_1
 
 
-def test_temperature_out_of_band_returns_the_exact_bound():
+def test_temperature_out_of_band_returns_the_exact_bound() -> None:
     assert postfit.fit_temperature(*_planted(20.0))[0] == postfit.T_MAX == 5.0
     assert postfit.fit_temperature(*_planted(0.1))[0] == postfit.T_MIN == 0.5
 
 
-def test_temperature_refuses_empty_and_all_zero_margins():
+def test_temperature_refuses_empty_and_all_zero_margins() -> None:
     with pytest.raises(SystemExit, match="no \\(message, tag\\) pairs"):
         postfit.fit_temperature(np.zeros((0, 48)), np.zeros((0, 48), dtype=bool))
     with pytest.raises(SystemExit, match="not identifiable"):
         postfit.fit_temperature(np.zeros((3, 48)), np.eye(3, 48, dtype=bool))
 
 
-def _laya_t(m, y):
+def _laya_t(m: np.ndarray, y: np.ndarray) -> float:
     """laya's own noul T (pilot.laya_adapter.fit_temperature_map, the oracle) on the same (margin, label) pairs: one
     noul record (qtype 2, logits [0, m], target [1 - y, y], 2 options) per pair."""
     from pilot import laya_adapter as la
@@ -71,9 +79,9 @@ def _laya_t(m, y):
     return fitted["temperature_by_options"].get("noul:2", fitted["temperature"][2])
 
 
-def test_temperature_matches_laya_fit():
-    """LAYA-05: the scipy fit on every val pair is laya's own temperature rule, without torch (planning probe:
-    0.0008-0.0011 apart for planted T 0.8, 1.0, 1.7); out of band both clamp to the exact bound."""
+def test_temperature_matches_laya_fit() -> None:
+    """The scipy fit on every val pair is laya's own temperature rule, without torch (a probe found them 0.0008-0.0011
+    apart for planted T 0.8, 1.0, 1.7); out of band both clamp to the exact bound."""
     for t in (0.8, 1.0, 1.7):
         m, y = _planted(t, n=2880, seed=11)
         mine, theirs = postfit.fit_temperature(m, y)[0], _laya_t(m, y)
@@ -84,12 +92,15 @@ def test_temperature_matches_laya_fit():
 
 # --- selection on candidate dicts -------------------------------------------------------------------------------
 
-def _canon(lr, **over):
+def _canon(lr: float, **over: Any) -> dict[str, Any]:
+    """A Laya selection run's canonical config subset at encoder LR lr, with `over` applied."""
     return dict({"split": "selection_train", "seed": 0, "neg_seed": 0, "epochs": 4, "encoder_lr": lr,
                  "head_lr": 0.0001, "device": "mps", "max_len": 128}, **over)
 
 
-def _cand(lr, epoch, counts=(1, 3, 3), seed=0, kind="laya", scorer=None, canon=None):
+def _cand(lr: float, epoch: int, counts: tuple[int, int, int] = (1, 3, 3), seed: int = 0, kind: str = "laya",
+          scorer: dict[str, Any] | None = None, canon: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A candidate dict as pilot.postfit.candidate returns it, with objective counts (tp, fp, fn)."""
     name = "laya-%s-%d" % (lr, epoch)
     return {"dump_run_id": name, "dump_sha256": sha256_bytes(name.encode()), "uids_sha256": "u" * 64,
             "system_kind": kind, "train_run_id": "laya-selection_train-neg8-s0-%s" % lr, "encoder_lr": lr,
@@ -100,27 +111,29 @@ def _cand(lr, epoch, counts=(1, 3, 3), seed=0, kind="laya", scorer=None, canon=N
             "val_micro_f1_at_global_theta": 0.0, "theta": {}}
 
 
-def _grid(**counts):
+def _grid(**counts: tuple[int, int, int]) -> list[dict[str, Any]]:
     """The 12 candidates of a 3-LR grid, each scoring F 0.25 unless counts[(lr, epoch)] gives other (tp, fp, fn)."""
     return [_cand(lr, e, counts.get((lr, e), (1, 3, 3))) for lr, e in GRID3]
 
 
-def _select(cands, **kw):
+def _select(cands: list[dict[str, Any]], **kw: Any) -> dict[str, Any]:
+    """pilot.postfit.select over the 3-LR grid LR3 (kw overrides)."""
     return postfit.select(cands, **dict({"lr_grid": LR3}, **kw))
 
 
-def _pick(cands):
+def _pick(cands: list[dict[str, Any]]) -> tuple[float, int]:
+    """(encoder LR, epoch) of the selected candidate."""
     c = _select(cands)
     return c["encoder_lr"], c["epoch"]
 
 
-def test_select_picks_the_highest_objective():
+def test_select_picks_the_highest_objective() -> None:
     cands = _grid()
     cands[GRID3.index((3e-05, 2))]["objective"] = {"tp": 9, "fp": 1, "fn": 1}
     assert _pick(cands) == (3e-05, 2)
 
 
-def test_select_ties_go_to_fewer_epochs_then_lower_lr():
+def test_select_ties_go_to_fewer_epochs_then_lower_lr() -> None:
     cands = _grid()                                          # (1, 1, 1) and (2, 2, 2) both score exactly 1/2
     cands[GRID3.index((5e-05, 2))]["objective"] = {"tp": 1, "fp": 1, "fn": 1}
     cands[GRID3.index((3e-05, 2))]["objective"] = {"tp": 2, "fp": 2, "fn": 2}
@@ -130,7 +143,7 @@ def test_select_ties_go_to_fewer_epochs_then_lower_lr():
     assert postfit.score(cands[GRID3.index((5e-05, 1))]) == postfit.score(cands[GRID3.index((3e-05, 2))])
 
 
-def test_select_is_independent_of_input_order():
+def test_select_is_independent_of_input_order() -> None:
     cands = _grid()
     for k, key in enumerate(((2e-05, 4), (5e-05, 3), (3e-05, 3))):
         cands[GRID3.index(key)]["objective"] = {"tp": 4, "fp": 2, "fn": 2}   # a three-way tie at 2/3
@@ -142,7 +155,7 @@ def test_select_is_independent_of_input_order():
     assert _pick(cands) == (3e-05, 3)
 
 
-def test_select_refuses_an_incomplete_or_duplicated_grid():
+def test_select_refuses_an_incomplete_or_duplicated_grid() -> None:
     with pytest.raises(SystemExit, match="no candidates"):
         _select([])
     with pytest.raises(SystemExit, match="missing \\[\\(5e-05, 4\\)\\]"):
@@ -173,7 +186,7 @@ def test_select_refuses_an_incomplete_or_duplicated_grid():
     (lambda c: c["canonical"].update(epochs=3), "canonical epochs"),
     (lambda c: c.update(train_run_id="another-run"), "two train runs"),
 ])
-def test_select_refuses_mixed_seeds_scorers_or_recipes(change, match):
+def test_select_refuses_mixed_seeds_scorers_or_recipes(change: Callable[[dict[str, Any]], None], match: str) -> None:
     cands = _grid()
     change(cands[5])
     with pytest.raises(SystemExit, match=match):
@@ -183,7 +196,7 @@ def test_select_refuses_mixed_seeds_scorers_or_recipes(change, match):
 # --- candidate val dumps on the synthetic snapshot -------------------------------------------------------------
 
 @pytest.fixture
-def snap(tmp_path, synthetic_raw):
+def snap(tmp_path: Path, synthetic_raw: SyntheticRaw) -> Snap:
     """(out_dir, manifest_path, val entry, val uids) of the synthetic snapshot prepared under tmp_path."""
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     path = os.path.join(out_dir, "splits", "val.jsonl")
@@ -193,8 +206,10 @@ def snap(tmp_path, synthetic_raw):
     return out_dir, manifest, entry, [r["uid"] for r in pilot.data.parse_jsonl(raw)]
 
 
-def write_candidate(root, snap, lr, epoch, seed=0, split="selection_train", calibrated=False, shipped=1.0,
-                    n=None, rng_seed=None, postfit_sha256=None, data_sha256=None):
+def write_candidate(root: str | Path, snap: Snap, lr: float, epoch: int, seed: int = 0,
+                    split: str = "selection_train", calibrated: bool = False, shipped: float = 1.0,
+                    n: int | None = None, rng_seed: int | None = None, postfit_sha256: str | None = None,
+                    data_sha256: str | None = None) -> str:
     """A candidate val dump under root/<run_id>: random margins, a fake local identity and a training block shaped
     like score.training_block's. Returns the run dir."""
     _, manifest, entry, uids = snap
@@ -225,8 +240,8 @@ def write_candidate(root, snap, lr, epoch, seed=0, split="selection_train", cali
     return run_dir
 
 
-def test_report_never_selects_theta_on_an_in_sample_val_dump(tmp_path, snap):
-    """05-REVIEW WR-02: report.py selects θ on a selection run's val dump (labelled in_sample on val), but refuses, in
+def test_report_never_selects_theta_on_an_in_sample_val_dump(tmp_path: Path, snap: Snap) -> None:
+    """report.py selects θ on a selection run's val dump (labelled in_sample on val), but refuses, in
     run_report and in --compare, the val dump of a final_train model and of a postfit-bound final seed."""
     import report
     manifest = snap[1]
@@ -244,11 +259,12 @@ def test_report_never_selects_theta_on_an_in_sample_val_dump(tmp_path, snap):
             report.compare([ok], [d], "val", manifest, B=10)
 
 
-def _grid_dumps(tmp_path, snap):
+def _grid_dumps(tmp_path: Path, snap: Snap) -> list[str]:
+    """One candidate val dump per (LR, epoch) of GRID."""
     return [write_candidate(tmp_path / "dumps", snap, lr, e) for lr, e in GRID]
 
 
-def test_record_from_the_grid_dumps(tmp_path, snap, capsys):
+def test_record_from_the_grid_dumps(tmp_path: Path, snap: Snap, capsys: pytest.CaptureFixture[str]) -> None:
     run_dirs = _grid_dumps(tmp_path, snap)
     out = tmp_path / "postfit" / "laya.json"
     postfit_cli.main(run_dirs + ["--manifest", snap[1], "--out", str(out)])
@@ -283,7 +299,7 @@ def test_record_from_the_grid_dumps(tmp_path, snap, capsys):
     assert record == rec and sha == pilot.data.sha256_file(str(out))
 
 
-def test_record_bytes_do_not_depend_on_argument_order(tmp_path, snap):
+def test_record_bytes_do_not_depend_on_argument_order(tmp_path: Path, snap: Snap) -> None:
     run_dirs = _grid_dumps(tmp_path, snap)
     first = postfit.record_bytes(postfit.fit(run_dirs, snap[1]))
     for seed in range(3):
@@ -295,7 +311,7 @@ def test_record_bytes_do_not_depend_on_argument_order(tmp_path, snap):
     assert (tmp_path / "a" / "laya.json").read_bytes() == (tmp_path / "b" / "laya.json").read_bytes() == first
 
 
-def test_read_record_refuses_missing_invalid_or_other_schema(tmp_path):
+def test_read_record_refuses_missing_invalid_or_other_schema(tmp_path: Path) -> None:
     p = tmp_path / "r.json"
     with pytest.raises(SystemExit, match="not found"):
         postfit.read_record(str(p))
@@ -310,7 +326,7 @@ def test_read_record_refuses_missing_invalid_or_other_schema(tmp_path):
         postfit.read_record(str(p))
 
 
-def test_postfit_refuses_test_input(tmp_path, snap):
+def test_postfit_refuses_test_input(tmp_path: Path, snap: Snap) -> None:
     out_dir, manifest = snap[0], snap[1]
     run_dir = write_candidate(tmp_path / "dumps", snap, 2e-05, 1)
     postfit.candidate(run_dir, manifest)                     # a full selection val dump is accepted
@@ -335,8 +351,9 @@ def test_postfit_refuses_test_input(tmp_path, snap):
         postfit_cli.main(["--manifest", manifest])           # no run dir at all: argparse error
 
 
-def test_postfit_binds_the_training_bytes_on_the_committed_manifest(tmp_path, snap, monkeypatch):
-    """06-REVIEW WR-02: on the committed manifest a candidate must have trained on the committed selection_train
+def test_postfit_binds_the_training_bytes_on_the_committed_manifest(tmp_path: Path, snap: Snap,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """On the committed manifest a candidate must have trained on the committed selection_train
     bytes (canonical data_sha256), not on any split a manifest copy named selection_train. The synthetic manifest
     stands in for the committed one; another manifest leaves data_sha256 free, as before."""
     out_dir, manifest = snap[0], snap[1]
@@ -357,13 +374,14 @@ def test_postfit_binds_the_training_bytes_on_the_committed_manifest(tmp_path, sn
     ({"calibrated": True}, "calibrated True"),
     ({"shipped": 1.3}, "shipped temperature 1.3"),
 ])
-def test_postfit_refuses_in_sample_or_calibrated_candidates(tmp_path, snap, kw, match):
+def test_postfit_refuses_in_sample_or_calibrated_candidates(tmp_path: Path, snap: Snap, kw: dict[str, Any],
+                                                             match: str) -> None:
     run_dir = write_candidate(tmp_path / "dumps", snap, 2e-05, 1, **kw)
     with pytest.raises(SystemExit, match=match):
         postfit.candidate(run_dir, snap[1])
 
 
-def test_postfit_module_is_torch_free():
+def test_postfit_module_is_torch_free() -> None:
     code = ("import sys, pilot.postfit, postfit; "
             "print(sorted(m for m in ('torch', 'ray', 'laya') if m in sys.modules))")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, check=True)
@@ -373,7 +391,7 @@ def test_postfit_module_is_torch_free():
 # --- guarded export prune (the tiny checkpoint, scored in-process on the synthetic val) ---------------------------
 
 @pytest.fixture
-def export(tmp_path, snap):
+def export(tmp_path: Path, snap: Snap) -> Iterator[tuple[str, str, str, str]]:
     """(export dir at storage/laya-x/exports/epoch-001, dump root, manifest, val.jsonl): a tiny checkpoint saved
     where ray_train.py writes its epoch exports. Scoring sets torch's thread count; it is restored afterwards."""
     import torch
@@ -384,12 +402,14 @@ def export(tmp_path, snap):
     torch.set_num_threads(threads)
 
 
-def _score_val(export_dir, dump_root, manifest, val_jsonl, *extra):
+def _score_val(export_dir: str, dump_root: str, manifest: str, val_jsonl: str, *extra: str) -> None:
+    """score.py of a Laya export on val, in-process, into dump_root."""
     score.main([val_jsonl, "--checkpoint", export_dir, "--workers", "0", "--cpus-per-worker", "1",
                 "--manifest", manifest, "--out-root", dump_root, *extra])
 
 
-def test_prune_deletes_an_export_only_after_its_val_dump(tmp_path, export, capsys):
+def test_prune_deletes_an_export_only_after_its_val_dump(tmp_path: Path, export: tuple[str, str, str, str],
+                                                         capsys: pytest.CaptureFixture[str]) -> None:
     path, dump_root, manifest, val_jsonl = export
     with pytest.raises(SystemExit, match="no verified full val dump"):
         postfit.prune_export(path, dump_root, manifest)
@@ -403,7 +423,8 @@ def test_prune_deletes_an_export_only_after_its_val_dump(tmp_path, export, capsy
     dumps.load_dump(os.path.join(dump_root, rid), "val", manifest)  # the dump stays and still verifies
 
 
-def test_prune_refuses_without_a_dump_symlinks_and_other_paths(tmp_path, export):
+def test_prune_refuses_without_a_dump_symlinks_and_other_paths(tmp_path: Path,
+                                                                export: tuple[str, str, str, str]) -> None:
     from tiny_laya import tiny_checkpoint
     path, dump_root, manifest, val_jsonl = export
     link = tmp_path / "link-epoch-001"
@@ -434,9 +455,10 @@ def test_prune_refuses_without_a_dump_symlinks_and_other_paths(tmp_path, export)
         assert os.path.isdir(p)                                    # every refusal left its target in place
 
 
-# --- final seeds: the printed commands and the final manifest (LAYA-08) ------------------------------------------
+# --- final seeds: the printed commands and the final manifest ------------------------------------------------------
 
-def _committed_entry(name):
+def _committed_entry(name: str) -> dict[str, Any]:
+    """The committed data/splits.json entry of split `name`."""
     with open(os.path.join(REPO_ROOT, "data", "splits.json"), encoding="utf-8") as f:
         return json.load(f)["splits"][name]
 
@@ -451,7 +473,8 @@ SELECTION_COMMANDS = [
 ]
 
 
-def _selection_record(ray_train, flags, tmp_path, stop=2):
+def _selection_record(ray_train: Any, flags: list[str], tmp_path: Path,
+                      stop: int | None = 2) -> tuple[str, dict[str, Any]]:
     """(record path, record) whose chosen canonical is the selection canonical of `flags` on the committed
     selection_train entry and the pinned base (ray_train.parser, resolve, identity_values)."""
     from pilot import runs
@@ -474,7 +497,7 @@ def _selection_record(ray_train, flags, tmp_path, stop=2):
 
 
 @pytest.mark.parametrize("flags", SELECTION_COMMANDS)
-def test_final_command_passes_the_binding(flags, tmp_path):
+def test_final_command_passes_the_binding(flags: list[str], tmp_path: Path) -> None:
     """Each printed final command, parsed by ray_train.py on the final_train entry with the record's sha, is a canonical
     config check_final accepts: every hyperparameter, the AMP and checkpointing choices and the stop epoch transfer."""
     ray_train = pytest.importorskip("ray_train")
@@ -502,7 +525,7 @@ def test_final_command_passes_the_binding(flags, tmp_path):
     assert postfit.final_command(other, 0, path, "s", "o", base="ckpt/base")[4] == "ckpt/base"   # a local base
 
 
-def test_final_command_omits_the_stop_flag_for_the_last_epoch(tmp_path):
+def test_final_command_omits_the_stop_flag_for_the_last_epoch(tmp_path: Path) -> None:
     ray_train = pytest.importorskip("ray_train")
     path, record = _selection_record(ray_train, SELECTION_COMMANDS[0], tmp_path, stop=None)
     argv = postfit.final_command(record, 1, path, "s", "o")
@@ -510,7 +533,7 @@ def test_final_command_omits_the_stop_flag_for_the_last_epoch(tmp_path):
     assert ray_train.parser().parse_args(argv[1:]).stop_after_epoch is None
 
 
-def test_print_final_commands_cli(tmp_path, capsys):
+def test_print_final_commands_cli(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     import shlex
     ray_train = pytest.importorskip("ray_train")
     path, record = _selection_record(ray_train, SELECTION_COMMANDS[0], tmp_path)
@@ -529,8 +552,9 @@ def test_print_final_commands_cli(tmp_path, capsys):
     assert r.returncode != 0 and "nonexistent.json not found" in r.stderr, r.stderr
 
 
-def test_print_final_commands_with_a_manifest_verify_against_it(tmp_path, synthetic_raw, capsys):
-    """05-REVIEW WR-03: with --manifest M (outside data/), every printed command's --data is the final_train split M
+def test_print_final_commands_with_a_manifest_verify_against_it(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                                 capsys: pytest.CaptureFixture[str]) -> None:
+    """With --manifest M (outside data/), every printed command's --data is the final_train split M
     registers, and it verifies against M through pilot.data.verify_split_file (the check ray_train.py runs)."""
     import shlex
     ray_train = pytest.importorskip("ray_train")
@@ -548,8 +572,8 @@ def test_print_final_commands_with_a_manifest_verify_against_it(tmp_path, synthe
                           "--manifest", str(tmp_path / "missing.json")])
 
 
-def test_cli_refuses_flags_outside_their_mode_and_a_bad_final_manifest(tmp_path):
-    """05-REVIEW IN-04: --manifest outside RUN_DIR, --prune and --print-final-commands, and --dump-root outside --prune,
+def test_cli_refuses_flags_outside_their_mode_and_a_bad_final_manifest(tmp_path: Path) -> None:
+    """--manifest outside RUN_DIR, --prune and --print-final-commands, and --dump-root outside --prune,
     are usage errors; a non-JSON final manifest given to --render is a refusal, not a traceback."""
     record = os.path.join(REPO_ROOT, "results", "postfit", "laya.json")
     for bad in (["--render", record, "--manifest", "m.json"], ["--final-manifest", record, "c", "--manifest", "m.json"],
@@ -566,7 +590,7 @@ def test_cli_refuses_flags_outside_their_mode_and_a_bad_final_manifest(tmp_path)
 
 
 @pytest.fixture
-def finals(tmp_path):
+def finals(tmp_path: Path) -> Iterator[Finals]:
     """(record path, record, sha, make) where make(name, seed, **change) writes a tiny checkpoint whose config carries
     the training block of a --postfit final seed of the record (final_train canonical, chosen epoch 2, T, record rows);
     change: postfit_sha (the bound record sha), split, epoch, temperature, data_sha256, neg_seed and committed (the
@@ -585,8 +609,10 @@ def finals(tmp_path):
     sha = pilot.data.sha256_file(path)
     threads = __import__("torch").get_num_threads()
 
-    def make(name, seed, postfit_sha=sha, split="final_train", epoch=2, temperature=T, data_sha256="f" * 64,
-             neg_seed=None, committed=True):
+    def make(name: str, seed: int, postfit_sha: str = sha, split: str = "final_train", epoch: int = 2,
+             temperature: float = T, data_sha256: str = "f" * 64, neg_seed: int | None = None,
+             committed: bool = True) -> str:
+        """A tiny checkpoint dir ckpt/<name> carrying the training block of a --postfit final seed; returns it."""
         d = tiny_checkpoint(tmp_path / "ckpt" / name, seed=seed)
         canon = dict(chosen_canon, split=split, seed=seed, neg_seed=seed if neg_seed is None else neg_seed,
                      data_sha256=data_sha256, stop_after_epoch=2, postfit_sha256=postfit_sha)
@@ -610,7 +636,8 @@ def finals(tmp_path):
     __import__("torch").set_num_threads(threads)
 
 
-def test_final_manifest_lists_the_three_seeds(finals, tmp_path, capsys):
+def test_final_manifest_lists_the_three_seeds(finals: Finals, tmp_path: Path,
+                                              capsys: pytest.CaptureFixture[str]) -> None:
     from pilot.weights import identity
     path, record, sha, make = finals
     dirs = [make("laya-final-s%d" % s, s) for s in (2, 0, 1)]                   # any argument order
@@ -636,8 +663,8 @@ def test_final_manifest_lists_the_three_seeds(finals, tmp_path, capsys):
     assert postfit.final_manifest(path, list(reversed(dirs))) == man                 # order-independent
 
 
-def test_final_manifest_refuses_an_incomplete_checkpoint(finals, tmp_path):
-    """05-REVIEW IN-03: a dir without rl_agent_config.json is refused before any hashing, and one without the files
+def test_final_manifest_refuses_an_incomplete_checkpoint(finals: Finals, tmp_path: Path) -> None:
+    """A dir without rl_agent_config.json is refused before any hashing, and one without the files
     laya.load reads (the weights, encoder/config.json) is refused by name, never as an unknown system."""
     import shutil
     path, record, sha, make = finals
@@ -665,7 +692,7 @@ def test_final_manifest_refuses_an_incomplete_checkpoint(finals, tmp_path):
     ("shared_neg_seed", "neg_seed is 0 but the seed is 2"),
     ("not_committed", "manifest_is_committed False"),
 ])
-def test_final_manifest_refuses_a_wrong_set(finals, case, match):
+def test_final_manifest_refuses_a_wrong_set(finals: Finals, case: str, match: str) -> None:
     path, record, sha, make = finals
     s0, s1 = make("s0", 0), make("s1", 1)
     third = {"another_sha": lambda: make("s2", 2, postfit_sha="0" * 64),
@@ -675,7 +702,7 @@ def test_final_manifest_refuses_a_wrong_set(finals, case, match):
              "another_epoch": lambda: make("s2", 2, epoch=3),
              "selection_split": lambda: make("s2", 2, split="selection_train"),
              "another_recipe": lambda: make("s2", 2, data_sha256="0" * 64),
-             "shared_neg_seed": lambda: make("s2", 2, neg_seed=0),        # 05-REVIEW WR-01: one negative draw
+             "shared_neg_seed": lambda: make("s2", 2, neg_seed=0),        # one negative draw per seed
              "not_committed": lambda: make("s2", 2, committed=False)}[case]()
     with pytest.raises(SystemExit, match=match):
         postfit.final_manifest(path, [s0, s1] + ([third] if third else []))

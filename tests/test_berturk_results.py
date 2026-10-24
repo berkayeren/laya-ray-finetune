@@ -1,5 +1,4 @@
-"""Committed Phase 6 BERTurk postfit records and their BASE-03 reference checks stay consistent and reproducible
-(BASE-02, BASE-03, T-06-30, T-06-31, T-06-38, T-06-40).
+"""Committed BERTurk postfit records and their reference checks stay consistent and reproducible.
 
 The helpers take explicit paths and a protocol, so the current run and the superseded runs use the same checks:
 
@@ -16,7 +15,7 @@ The helpers take explicit paths and a protocol, so the current run and the super
   write_record does, equals the committed bytes (needs `make data`, because the gold labels come from the verified
   splits)
 
-Superseded runs (pilot.berturk.SUPERSEDED, the BASE-03 fixes of the 06-10 and 06-16 gates): an ordered chain of two
+Superseded runs (pilot.berturk.SUPERSEDED, the two fixes after the BERTurk reference check): an ordered chain of two
 discarded selections, the tied-LR run and the head-LR, 10-epoch-grid run, each living byte for byte under
 results/superseded/<name>/. For each one, its record's sha256 is the pinned postfit_sha256, its protocol is the pinned
 protocol, its reference check still reads investigate with no resolution (so check_reference_for_final refuses it as
@@ -26,35 +25,35 @@ test_superseded_runs_change_one_recorded_key_per_step proves consecutive entries
 results/dumps dir holds one of its dumps or is named after one of its candidates, no tracked results/postfit file
 carries its sha256, and results/dumps holds BERTurk selection dumps of at most one train run.
 
-The current run is the 30-epoch selection run of plans 06-18/06-19 (berturk-selection_train-s0-4f36ae05; plan 06-20
-committed its record). results/postfit/berturk.json is mandatory: _current_record asserts it is tracked, so a missing
-current record fails every current-run test (the interim state of plans 06-17..06-19 has ended). The record is checked
-by the same helpers under pilot.postfit.protocol("berturk"); its protocol epochs and every candidate's canonical epochs
-are pilot.berturk.EPOCHS (30), every candidate's canonical head_lr is pilot.berturk.HEAD_LR and its sha256 is no
-superseded one; the Makefile's BERTURK_SELECTION lists its candidate dump run ids in record order and berturk-postfit is
-phony; results/postfit/berturk-reference.json equals its recompute, and an "investigate" status carries a resolution
-unless no final seed exists yet (results/postfit/berturk-final.json untracked); the record rebuilds from the committed
-dumps with the protocol dispatched by kind (data marker). test_exactly_one_current_berturk_selection_run (R2-2) proves
-the current selection is one train run: every tracked BERTurk selection val sidecar under results/dumps names the
-record's chosen train run, the BERTurk dump dirs there are exactly the record's candidates, and that run's canonical
-config is pilot.berturk.SUPERSEDED[-1]'s chosen one with SUPERSEDED[-1]["delta"] applied and nothing else changed (the
-end of the chain that test_superseded_runs_change_one_recorded_key_per_step checks step by step), and its run id is no
-superseded one. Both selection checks read berturk_val_sidecars, which skips a val sidecar whose training canonical
-carries a fewshot binding: a Phase 9 masked BERTurk base trains on selection_train too and is never a selection run
-(FEW-01; proven on a planted sidecar by test_berturk_selection_checks_skip_a_fewshot_dump).
+The current run is the 30-epoch selection run (berturk-selection_train-s0-4f36ae05). results/postfit/berturk.json is
+mandatory: _current_record asserts it is tracked, so a missing current record fails every current-run test. The record
+is checked by the same helpers under pilot.postfit.protocol("berturk"); its protocol epochs and every candidate's
+canonical epochs are pilot.berturk.EPOCHS (30), every candidate's canonical head_lr is pilot.berturk.HEAD_LR and its
+sha256 is no superseded one; the Makefile's BERTURK_SELECTION lists its candidate dump run ids in record order and
+berturk-postfit is phony; results/postfit/berturk-reference.json equals its recompute, and an "investigate" status
+carries a resolution unless no final seed exists yet (results/postfit/berturk-final.json untracked); the record rebuilds
+from the committed dumps with the protocol dispatched by kind (data marker).
+test_exactly_one_current_berturk_selection_run proves the current selection is one train run: every tracked BERTurk
+selection val sidecar under results/dumps names the record's chosen train run, the BERTurk dump dirs there are exactly
+the record's candidates, and that run's canonical config is pilot.berturk.SUPERSEDED[-1]'s chosen one with
+SUPERSEDED[-1]["delta"] applied and nothing else changed (the end of the chain that
+test_superseded_runs_change_one_recorded_key_per_step checks step by step), and its run id is no superseded one. Both
+selection checks read berturk_val_sidecars, which skips a val sidecar whose training canonical carries a fewshot
+binding: a few-shot masked BERTurk base trains on selection_train too and is never a selection run (proven on a planted
+sidecar by test_berturk_selection_checks_skip_a_fewshot_dump).
 
-Final seeds (plan 06-11): test_committed_berturk_final_manifest checks results/postfit/berturk-final.json
+Final seeds: test_committed_berturk_final_manifest checks results/postfit/berturk-final.json
 (postfit-final/1, system kind berturk): bound to the current record's sha256 (never a superseded one) and its chosen
 settings (30-epoch schedule, the chosen stop epoch and T), seeds exactly [0, 1, 2] on final_train with distinct train
 run ids, one config_sha256_sans_seed, each seed serving the chosen T over the chosen number of epochs, bare checkpoint
-names, and a final seed's tracked results/dumps dir (none before the 08-11 scoring run) holds only test and
-hotels_probe dumps whose sidecars carry protocol_sha256 == pilot.protocol.PROTOCOL_SHA256 (set): Phase 8's protocol
-gate is the only way a final seed is scored, never on val.
+names, and a final seed's tracked results/dumps dir (none before the final scoring) holds only test and hotels_probe
+dumps whose sidecars carry protocol_sha256 == pilot.protocol.PROTOCOL_SHA256 (set): score.py's protocol gate is the only
+way a final seed is scored, never on val.
 
-README block (plan 06-12): test_readme_berturk_block_matches_the_records proves the block between the berturk-postfit
+README block: test_readme_berturk_block_matches_the_records proves the block between the berturk-postfit
 markers is pilot.berturk.render_markdown of the committed record, reference check and final manifest plus
 pilot.berturk.load_superseded(); test_render_discloses_the_protocol_change proves every SUPERSEDED entry's run id,
-exact fraction, gate reply, change and history dir, the extra-run count, the reference check's differences and
+exact fraction, the user's reply, change and history dir, the extra-run count, the reference check's differences and
 caveats and the epoch-grid deviation reach it; test_load_superseded_refuses_a_changed_history refuses a history
 record with one byte changed, naming the file.
 """
@@ -65,6 +64,8 @@ import re
 import subprocess
 import sys
 from fractions import Fraction
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -75,8 +76,8 @@ pytestmark = pytest.mark.unit
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SUPERSEDED_IDS = [s["name"] for s in berturk.SUPERSEDED]
-# the reference value each superseded entry was retired at (plan 06-10: 150/551 = 0.2722 < 0.707; plan 06-16:
-# 113/238 = 0.4748 < 0.707)
+# the reference value each superseded entry was retired at (the tied-LR run: 150/551 = 0.2722 < 0.707; the 10-epoch
+# grid: 113/238 = 0.4748 < 0.707)
 SUPERSEDED_VALUE = {"berturk-tied-head-lr": {"status": "investigate", "fraction": [150, 551]},
                     "berturk-10-epoch-grid": {"status": "investigate", "fraction": [113, 238]}}
 RECORD = "results/postfit/berturk.json"
@@ -85,34 +86,37 @@ FINAL = "results/postfit/berturk-final.json"
 DUMPS = "results/dumps"
 
 
-def tracked(*pathspec):
+def tracked(*pathspec: str) -> list[str]:
     """Tracked paths via git ls-files (never a directory walk, which would see untracked scratch files)."""
     out = subprocess.run(["git", "ls-files", "-z", "--", *pathspec], cwd=REPO_ROOT, check=True,
                          capture_output=True, text=True, encoding="utf-8")
     return [f for f in out.stdout.split("\0") if f]
 
 
-def path(rel):
+def path(rel: str) -> str:
+    """The absolute path of a repo-relative path."""
     return os.path.join(REPO_ROOT, rel)
 
 
-def load(rel):
+def load(rel: str) -> Any:
+    """The parsed JSON at a repo-relative path."""
     with open(path(rel), encoding="utf-8") as f:
         return json.load(f)
 
 
-def as_json(v):
+def as_json(v: Any) -> Any:
+    """v after a JSON round trip (tuples become lists), for comparison with parsed records."""
     return json.loads(json.dumps(v, ensure_ascii=False))
 
 
-def fewshot_bound(side):
-    """True when a sidecar's training canonical config carries a fewshot binding: a Phase 9 masked BERTurk base
-    (FEW-01) trains on selection_train too, and its val dump is never a selection run's."""
+def fewshot_bound(side: dict[str, Any]) -> bool:
+    """True when a sidecar's training canonical config carries a fewshot binding: a few-shot masked BERTurk base trains
+    on selection_train too, and its val dump is never a selection run's."""
     canon = (side.get("training") or {}).get("canonical")
     return isinstance(canon, dict) and "fewshot" in canon
 
 
-def berturk_val_sidecars():
+def berturk_val_sidecars() -> dict[str, dict[str, Any]]:
     """{rel: parsed val.json} of every tracked BERTurk val dump under results/dumps without a few-shot binding."""
     out = {}
     for rel in tracked(DUMPS + "/"):
@@ -124,7 +128,7 @@ def berturk_val_sidecars():
     return out
 
 
-def _check_record(record_rel, dumps_rel, proto):
+def _check_record(record_rel: str, dumps_rel: str, proto: dict[str, Any]) -> dict[str, Any]:
     """The consistency checks of one committed BERTurk postfit record whose candidate dumps sit under dumps_rel and
     that ran under proto (pilot.postfit.protocol keys); returns the parsed record."""
     assert tracked(record_rel) == [record_rel], "%s is not tracked" % record_rel
@@ -165,7 +169,7 @@ def _check_record(record_rel, dumps_rel, proto):
     return r
 
 
-def _check_reference(record_rel, reference_rel, path_at_check):
+def _check_reference(record_rel: str, reference_rel: str, path_at_check: str) -> dict[str, Any]:
     """The committed reference check equals its recompute from the record (computed when the record sat at
     path_at_check); returns the parsed reference check."""
     assert tracked(reference_rel) == [reference_rel], "%s is not tracked" % reference_rel
@@ -182,7 +186,7 @@ def _check_reference(record_rel, reference_rel, path_at_check):
     return committed
 
 
-def _reproduce(record_rel, dumps_rel, grid):
+def _reproduce(record_rel: str, dumps_rel: str, grid: dict[str, Any]) -> None:
     """pilot.postfit.fit over the record's candidate dump dirs (record order) under grid rebuilds its bytes."""
     if not glob.glob(os.path.join(REPO_ROOT, "data", "splits", "*.jsonl")):
         pytest.fail("data/splits/ is empty; run `make data` first")
@@ -194,7 +198,7 @@ def _reproduce(record_rel, dumps_rel, grid):
 
 
 @pytest.mark.parametrize("s", berturk.SUPERSEDED, ids=SUPERSEDED_IDS)
-def test_superseded_record_is_complete_and_consistent(s):
+def test_superseded_record_is_complete_and_consistent(s: dict[str, Any]) -> None:
     assert sha256_file(path(s["record"])) == s["postfit_sha256"], \
         "%s is not the byte-identical superseded record pinned in pilot.berturk.SUPERSEDED" % s["record"]
     r = _check_record(s["record"], s["dumps"], s["protocol"])
@@ -203,15 +207,15 @@ def test_superseded_record_is_complete_and_consistent(s):
 
 
 @pytest.mark.parametrize("s", berturk.SUPERSEDED, ids=SUPERSEDED_IDS)
-def test_superseded_reference_check_equals_its_recompute(s, tmp_path):
+def test_superseded_reference_check_equals_its_recompute(s: dict[str, Any], tmp_path: Path) -> None:
     ref = _check_reference(s["record"], s["reference"], s["record_path_at_check"])
     assert ref["postfit"] == {"path": s["record_path_at_check"], "sha256": s["postfit_sha256"]}
     want = SUPERSEDED_VALUE[s["name"]]
     assert ref["status"] == want["status"] and ref["value"]["fraction"] == want["fraction"]
     assert ref["resolution"] is None
-    # a superseded run can never gate a final seed, not even with its status and fraction edited together (WR-01)
+    # a superseded run can never gate a final seed, not even with its status and fraction edited together
     record, sha = postfit.read_record(path(s["record"]))
-    with pytest.raises(SystemExit, match="BASE-03"):
+    with pytest.raises(SystemExit, match="reference check: BERTurk's val micro-F1"):
         berturk.check_reference_for_final(path(s["reference"]), s["postfit_sha256"], record)
     edited = dict(ref, status="ok", below_threshold=False, value=dict(ref["value"], fraction=[800, 1000]))
     edited_path = os.path.join(str(tmp_path), "berturk-reference.json")
@@ -223,11 +227,11 @@ def test_superseded_reference_check_equals_its_recompute(s, tmp_path):
 
 @pytest.mark.data
 @pytest.mark.parametrize("s", berturk.SUPERSEDED, ids=SUPERSEDED_IDS)
-def test_superseded_record_reproduces_from_its_dumps(s):
+def test_superseded_record_reproduces_from_its_dumps(s: dict[str, Any]) -> None:
     _reproduce(s["record"], s["dumps"], s["protocol"])
 
 
-def test_no_superseded_run_is_current():
+def test_no_superseded_run_is_current() -> None:
     train_ids = {s["train_run_id"] for s in berturk.SUPERSEDED}
     cand_ids = {c["dump_run_id"] for s in berturk.SUPERSEDED for c in load(s["record"])["candidates"]}
     shas = {s["postfit_sha256"] for s in berturk.SUPERSEDED}
@@ -249,16 +253,18 @@ def test_no_superseded_run_is_current():
     assert stale == [], "results/postfit holds a superseded record: %s" % stale
 
 
-def _sorted_json(v):
+def _sorted_json(v: Any) -> str:
+    """v as sorted-key JSON after a JSON round trip."""
     return json.dumps(as_json(v), sort_keys=True)
 
 
-def test_superseded_runs_change_one_recorded_key_per_step():
-    """R2-2: SUPERSEDED is an ordered chain, oldest gate first, and each step changes exactly its recorded delta: the
-    next run's chosen canonical config is the previous one's with delta applied and nothing else changed, its run id
-    follows, and the protocol blocks differ only where delta touches a protocol key."""
-    gates = [tuple(int(p) for p in s["gate"]["plan"].split("-")) for s in berturk.SUPERSEDED]
-    assert gates == sorted(gates) and len(set(gates)) == len(gates), "SUPERSEDED is not ordered by its gate plan"
+def test_superseded_runs_change_one_recorded_key_per_step() -> None:
+    """SUPERSEDED is an ordered chain, oldest first (the dates of the user's choices never decrease), and each step
+    changes exactly its recorded delta: the next run's chosen canonical config is the previous one's with delta applied
+    and nothing else changed, its run id follows, and the protocol blocks differ only where delta touches a protocol
+    key."""
+    dates = [s["user_choice"]["date"] for s in berturk.SUPERSEDED]
+    assert dates == sorted(dates), "SUPERSEDED is not ordered by the dates of the user's choices"
     for s in berturk.SUPERSEDED:
         d = s["delta"]
         assert isinstance(d, dict) and d, "%s: delta must be a non-empty dict" % s["name"]
@@ -280,18 +286,19 @@ def test_superseded_runs_change_one_recorded_key_per_step():
             "%s's protocol with its delta applied is not %s's protocol" % (a["name"], b["name"])
 
 
-def _canonical_of_chosen(record):
+def _canonical_of_chosen(record: dict[str, Any]) -> dict[str, Any]:
+    """The chosen run's canonical config of a postfit record."""
     return record["chosen"]["canonical"]
 
 
-def _current_record():
-    """The parsed current BERTurk postfit record; it must be tracked (plan 06-20 ended the interim state of plans
-    06-17..06-19, so a missing record fails the calling test, never skips it)."""
+def _current_record() -> dict[str, Any]:
+    """The parsed current BERTurk postfit record; it must be tracked (a missing record fails the calling test, never
+    skips it)."""
     assert tracked(RECORD) == [RECORD], "%s is not tracked; the current BERTurk selection record is mandatory" % RECORD
     return load(RECORD)
 
 
-def test_committed_berturk_record_is_complete_and_consistent():
+def test_committed_berturk_record_is_complete_and_consistent() -> None:
     _current_record()
     r = _check_record(RECORD, DUMPS, postfit.protocol("berturk"))
     assert r["protocol"]["head_lr"] == berturk.HEAD_LR == 0.0001
@@ -308,7 +315,7 @@ def test_committed_berturk_record_is_complete_and_consistent():
     assert r["chosen"]["train_run_id"] not in {s["train_run_id"] for s in berturk.SUPERSEDED}
 
 
-def test_makefile_lists_the_berturk_selection_dumps():
+def test_makefile_lists_the_berturk_selection_dumps() -> None:
     record = _current_record()
     with open(path("Makefile"), encoding="utf-8") as f:
         text = f.read()
@@ -324,7 +331,7 @@ def test_makefile_lists_the_berturk_selection_dumps():
         in recipe.group(1), "berturk-postfit does not rebuild %s from results/dumps/$(BERTURK_SELECTION)" % RECORD
 
 
-def test_committed_reference_check_equals_its_recompute():
+def test_committed_reference_check_equals_its_recompute() -> None:
     record = _current_record()
     ref = _check_reference(RECORD, REFERENCE, RECORD)
     assert ref["value"]["train_run_id"] == record["chosen"]["train_run_id"]
@@ -332,21 +339,21 @@ def test_committed_reference_check_equals_its_recompute():
     if ref["status"] == "investigate":
         res = ref["resolution"]
         assert (isinstance(res, str) and res.strip()) or tracked(FINAL) == [], \
-            "the BASE-03 check reads investigate with no resolution, yet %s is tracked (a final seed trained)" % FINAL
+            "the reference check reads investigate with no resolution, yet %s is tracked (a final seed trained)" % FINAL
     else:
         assert ref["resolution"] is None
-    # the committed check passes the final-seed gate, which recomputes it from the record (06-REVIEW WR-01)
+    # the committed check passes the final-seed gate, which recomputes it from the record
     rec, sha = postfit.read_record(path(RECORD))
     assert berturk.check_reference_for_final(path(REFERENCE), sha, rec) == ref
 
 
 @pytest.mark.data
-def test_berturk_record_reproduces_from_the_committed_dumps():
+def test_berturk_record_reproduces_from_the_committed_dumps() -> None:
     _current_record()
     _reproduce(RECORD, DUMPS, {})                # no grid: postfit.fit dispatches the protocol by system kind
 
 
-def test_exactly_one_current_berturk_selection_run():
+def test_exactly_one_current_berturk_selection_run() -> None:
     record = _current_record()
     chosen_run = record["chosen"]["train_run_id"]
     runs, dirs = set(), set()
@@ -377,8 +384,8 @@ def test_exactly_one_current_berturk_selection_run():
     assert berturk.run_id(applied) == chosen_run
 
 
-def test_berturk_selection_checks_skip_a_fewshot_dump(tmp_path, monkeypatch):
-    # a Phase 9 masked BERTurk base trains on selection_train too (FEW-01): its val dump is never a selection run
+def test_berturk_selection_checks_skip_a_fewshot_dump(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # a few-shot masked BERTurk base trains on selection_train too: its val dump is never a selection run
     module = sys.modules[__name__]
     real_tracked, real_path = module.tracked, module.path
     src = sorted(c["dump_run_id"] for c in _current_record()["candidates"])[0]
@@ -402,11 +409,11 @@ def test_berturk_selection_checks_skip_a_fewshot_dump(tmp_path, monkeypatch):
 FINAL_RUN_RE = re.compile(r"^berturk-final_train-s([012])-[0-9a-f]{8}$")
 
 
-def test_committed_berturk_final_manifest():
-    """BASE-01 (plan 06-11): the committed manifest of the 3 BERTurk final seeds is bound to the current record (its
+def test_committed_berturk_final_manifest() -> None:
+    """The committed manifest of the 3 BERTurk final seeds is bound to the current record (its
     sha256 and chosen settings, the 30-epoch schedule stopped at the chosen epoch), never to a superseded one; it lists
     all three seeds (never only the best), each serving the chosen T, and a final seed's tracked dumps are only its
-    protocol-gated test and hotels_probe dumps (Phase 8)."""
+    protocol-gated test and hotels_probe dumps (the final scoring)."""
     assert tracked(FINAL) == [FINAL], "%s is not tracked" % FINAL
     record = _current_record()
     m = load(FINAL)
@@ -436,7 +443,7 @@ def test_committed_berturk_final_manifest():
         assert "/" not in e["checkpoint_name"] and "\\" not in e["checkpoint_name"], e["checkpoint_name"]
         assert e["dump_run_id"] == berturk.dump_run_id(e["checkpoint_identity"])
     gated = {"test.npz", "test.json", "hotels_probe.npz", "hotels_probe.json"}
-    for e in seeds:                                         # Phase 8: gated test and HOTELS dumps only (08-08)
+    for e in seeds:                                         # the final scoring: gated test and HOTELS dumps only
         names = [f.split("/")[3] for f in tracked("%s/%s/" % (DUMPS, e["dump_run_id"]))]
         assert set(names) <= gated, "%s final seed %d's dump dir holds %s; only gated test and hotels_probe dumps" % (
             "BERTurk", e["seed"], sorted(set(names) - gated))
@@ -448,16 +455,17 @@ def test_committed_berturk_final_manifest():
                                                                                     protocol.PROTOCOL_SHA256))
 
 
-# ---- the README Phase 6 block (plan 06-12, BASE-03 disclosure, T-06-36, T-06-55, T-06-74) ----
+# ---- the README BERTurk baseline block, with the disclosure of the reference-check fixes ----
 README = "README.md"
 BERTURK_START, BERTURK_END = "<!-- berturk-postfit:start -->", "<!-- berturk-postfit:end -->"
 
 
-def _rendered_berturk():
+def _rendered_berturk() -> str:
+    """pilot.berturk.render_markdown of the committed record, reference check, final manifest and superseded history."""
     return berturk.render_markdown(_current_record(), load(REFERENCE), load(FINAL), berturk.load_superseded())
 
 
-def test_readme_berturk_block_matches_the_records():
+def test_readme_berturk_block_matches_the_records() -> None:
     """The README block between the berturk-postfit markers is render_markdown of the committed record, reference
     check and final manifest plus the superseded history; a hand edit or a stale block fails."""
     with open(path(README), encoding="utf-8") as f:
@@ -469,14 +477,15 @@ def test_readme_berturk_block_matches_the_records():
     assert text[i + len(BERTURK_START):j].strip() == _rendered_berturk().strip(), (
         "the README berturk-postfit block differs from pilot.berturk.render_markdown of the committed records; "
         "regenerate it with `python postfit.py --render-berturk %s %s %s`" % (RECORD, REFERENCE, FINAL))
-    assert text.index("## BERTurk baseline (Phase 6)") < i, "the block is not in the BERTurk baseline section"
+    assert text.index("## BERTurk baseline") < i, "the block is not in the BERTurk baseline section"
 
 
-def test_render_discloses_per_tag_theta_on_a_grid_edge():
-    """06-REVIEW IN-02: the block names the chosen candidate's per-tag θ on a grid edge and counts them over every
+def test_render_discloses_per_tag_theta_on_a_grid_edge() -> None:
+    """The block names the chosen candidate's per-tag θ on a grid edge and counts them over every
     candidate, from the record (the global-θ edge line alone ignores them)."""
     record = _current_record()
-    def edge(t):
+    def edge(t: dict[str, Any]) -> list[str]:
+        """The tags whose own θ sits on an edge of the θ grid of variant block t."""
         return [k for k, v in t["per_tag"].items() if v in (t["grid"]["start"], t["grid"]["stop"])]
     counts = {n: (sum(len(edge(c["theta"][n])) for c in record["candidates"]),
                   sum(bool(edge(c["theta"][n])) for c in record["candidates"])) for n in ("shipped", "raw")}
@@ -487,14 +496,15 @@ def test_render_discloses_per_tag_theta_on_a_grid_edge():
     assert ("shipped none" in line) == (not edge(chosen["shipped"])) and ("raw none" in line) == (not edge(chosen["raw"]))
 
 
-def test_render_discloses_the_protocol_change():
-    """Every SUPERSEDED entry's train run id, exact fraction, gate reply and history dir reach the block, with the
+def test_render_discloses_the_protocol_change() -> None:
+    """Every SUPERSEDED entry's train run id, exact fraction, the user's reply and history dir reach the block, with the
     count of extra selection runs; the reference check's value, threshold, status, differences and caveats too."""
     text = _rendered_berturk()
-    assert "Protocol changes after a val outcome (BASE-03 fixes)" in text
+    assert "Protocol changes after a val outcome (reference-check fixes)" in text
     for s in berturk.SUPERSEDED:
         num, den = SUPERSEDED_VALUE[s["name"]]["fraction"]
-        for want in (s["train_run_id"], "%d/%d" % (num, den), "`%s`" % s["gate"]["reply"], s["dir"], s["change"]):
+        reply = "`%s`" % s["user_choice"]["reply"]
+        for want in (s["train_run_id"], "%d/%d" % (num, den), reply, s["dir"], s["change"]):
             assert want in text, "%s: %r is missing from the rendered block" % (s["name"], want)
     assert "150/551" in text and "113/238" in text
     assert "results/superseded/berturk-tied-head-lr" in text and "results/superseded/berturk-10-epoch-grid" in text
@@ -518,7 +528,7 @@ def test_render_discloses_the_protocol_change():
         "the rendered block mentions a test number"
 
 
-def test_load_superseded_refuses_a_changed_history(tmp_path):
+def test_load_superseded_refuses_a_changed_history(tmp_path: Path) -> None:
     """A history record with one byte changed (a tmp copy of results/superseded/) is refused, naming the file."""
     import shutil
     shutil.copytree(path("results/superseded"), tmp_path / "results" / "superseded")
@@ -534,7 +544,7 @@ def test_load_superseded_refuses_a_changed_history(tmp_path):
     assert s["record"] in str(e.value.code), e.value.code
 
 
-def test_render_berturk_refuses_a_laya_record_and_another_records_reference():
+def test_render_berturk_refuses_a_laya_record_and_another_records_reference() -> None:
     import postfit as postfit_cli
     with pytest.raises(SystemExit, match="BERTurk"):
         berturk.render_markdown(load("results/postfit/laya.json"), load(REFERENCE))

@@ -1,43 +1,41 @@
-"""Committed Phase 5 Laya records stay consistent with the protocol in pilot/postfit.py (LAYA-08, T-05-32, T-05-34).
+"""Committed records of the Laya val selection stay consistent with the protocol in pilot/postfit.py: the
+selection-grid guard, the postfit record, the final-seed manifest and the README block.
 
-Plan 05-06 adds the selection-grid guard; plans 05-07, 05-08 and 05-09 add the postfit-record, final-manifest and
-README tests.
-
-- test_single_lr_protocol_constants: the 05-06 user override (2026-10-15) is in force: one encoder LR (LR_GRID
+- test_single_lr_protocol_constants: the user's single-LR decision (2026-10-15) is in force: one encoder LR (LR_GRID
   (2e-05,)), head LR 0.0001, epochs 1..4, selection seed 0 and final seeds 0, 1, 2, and protocol("laya") is exactly
-  those constants; BERTurk shares the one LR (A1). The approved compute budget (pilot.compute.MATRIX lr_grid 3,
+  those constants; BERTurk shares the one LR. The approved compute budget (pilot.compute.MATRIX lr_grid 3,
   results/compute/) is not rewritten: Laya runs one of its three approved LR runs, a deviation the README discloses
 - test_laya_selection_dumps_are_the_single_lr_grid: the tracked Laya selection val dumps (system.kind laya, training
   split selection_train; the zero-shot dump has no training block, the kind filter keeps the BERTurk dumps out, and a
-  Phase 9 masked base's val dump, whose training canonical carries a fewshot binding, is skipped: proven on a planted
-  sidecar by test_laya_selection_collector_skips_a_fewshot_dump) are
-  exactly the grid postfit reads: one train run, one full val dump per (LR, epoch) of LR_GRID x 1..EPOCHS, seed 0,
-  uncalibrated (shipped T 1.0), one rung and one canonical recipe, every dump verified (pilot.dumps.load_dump), and no
-  test dump. A dump at any other encoder LR (3e-05, 5e-05) fails it
-- test_committed_record_is_complete_and_consistent (plan 05-07): RECORD (results/postfit/laya.json, postfit/1, system
-  kind laya) is tracked; its protocol and rules are pilot.postfit's constants; its candidates cover LR_GRID x
-  1..EPOCHS once each and are exactly the tracked Laya selection dumps, each verified with its dump_sha256 and train run
-  id and with no test dump; its chosen candidate is what pilot.postfit.select returns on the recorded candidates; T lies
-  in [T_MIN, T_MAX]; stop_after_epoch is None exactly at epoch EPOCHS; the final block is final_train with FINAL_SEEDS
+  few-shot masked base's val dump, whose training canonical carries a fewshot binding, is skipped: proven on a planted
+  sidecar by test_laya_selection_collector_skips_a_fewshot_dump) are exactly the grid postfit reads: one train run, one
+  full val dump per (LR, epoch) of LR_GRID x 1..EPOCHS, seed 0, uncalibrated (shipped T 1.0), one rung and one canonical
+  recipe, every dump verified (pilot.dumps.load_dump), and no test dump. A dump at any other encoder LR (3e-05, 5e-05)
+  fails it
+- test_committed_record_is_complete_and_consistent: RECORD (results/postfit/laya.json, postfit/1, system kind laya) is
+  tracked; its protocol and rules are pilot.postfit's constants; its candidates cover LR_GRID x 1..EPOCHS once each and
+  are exactly the tracked Laya selection dumps, each verified with its dump_sha256 and train run id and with no test
+  dump; its chosen candidate is what pilot.postfit.select returns on the recorded candidates; T lies in [T_MIN, T_MAX];
+  stop_after_epoch is None exactly at epoch EPOCHS; the final block is final_train with FINAL_SEEDS
 - test_makefile_lists_the_selection_dumps: the Makefile's LAYA_SELECTION is the record's candidate dump run ids in
   record order, and `make laya-postfit` rebuilds RECORD from results/dumps/$(LAYA_SELECTION)
 - test_record_reproduces_from_the_committed_dumps (data): pilot.postfit.fit over the candidate dirs, with no grid
   arguments (the protocol dispatches by system kind), rebuilds RECORD byte for byte
-- test_committed_final_manifest (plan 05-08): FINAL (results/postfit/laya-final.json, postfit-final/1) is tracked and
+- test_committed_final_manifest: FINAL (results/postfit/laya-final.json, postfit-final/1) is tracked and
   bound to RECORD (its path and sha256, its chosen settings, the single encoder LR 2e-05 == LR_GRID[0]); it lists
   final_train and exactly seeds 0, 1, 2 (never only the best), with three distinct train run ids carrying their seed and
   one config_sha256_sans_seed; every seed serves the chosen T, has one row per epoch up to the chosen epoch, ran at the
   chosen rung, flags code_changed_on_resume as a bool, names a bare checkpoint dir and carries the dump run id of its
-  checkpoint identity; a final seed's tracked results/dumps dir (none before the 08-11 scoring run) holds only test
-  and hotels_probe dumps, each sidecar carrying protocol_sha256 == pilot.protocol.PROTOCOL_SHA256 (set): a final seed
-  is scored only behind Phase 8's protocol gate, never on val
-- test_readme_postfit_block_matches_the_record (plan 05-09, LAYA-08): README.md holds exactly one pair of the
+  checkpoint identity; a final seed's tracked results/dumps dir (none before the final scoring) holds only test and
+  hotels_probe dumps, each sidecar carrying protocol_sha256 == pilot.protocol.PROTOCOL_SHA256 (set): a final seed is
+  scored only behind score.py's protocol gate, never on val
+- test_readme_postfit_block_matches_the_record: README.md holds exactly one pair of the
   laya-postfit markers, and the block between them equals pilot.postfit.render_markdown of the committed record and
   final manifest, so the reported chosen settings cannot be edited by hand or go stale
 - test_render_discloses_the_selection: the rendered block names the single encoder LR 2e-05 against the approved
   lr_grid of pilot.compute.MATRIX (fixed, not tuned), the grid-edge verdict of the chosen epoch (never "interior
-  optimum" while a candidate's shipped θ is clipped at a θ-grid edge), the θ-edge count over every candidate
-  (05-REVIEW CR-01, WR-04), every candidate's exact objective fraction 2TP/(2TP + FP + FN), unreduced, and every
+  optimum" while a candidate's shipped θ is clipped at a θ-grid edge), the θ-edge count over every candidate, every
+  candidate's exact objective fraction 2TP/(2TP + FP + FN), unreduced, and every
   final seed's train run id, and holds no local path
 - test_render_names_an_interior_optimum_only_without_a_clipped_theta: a copy of the record with every global θ inside
   the grid is an interior optimum without the margin-cutoff disclosure; the committed record is the reverse
@@ -52,6 +50,8 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any, Callable
 
 import pytest
 
@@ -66,37 +66,40 @@ SELECTION_RUN_RE = re.compile(r"^laya-selection_train-neg8-s0-[0-9a-f]{8}$")
 RECORD = "results/postfit/laya.json"
 
 
-def tracked(*pathspec):
+def tracked(*pathspec: str) -> list[str]:
     """Tracked paths via git ls-files (never a directory walk, which would see untracked scratch files)."""
     out = subprocess.run(["git", "ls-files", "-z", "--", *pathspec], cwd=REPO_ROOT, check=True,
                          capture_output=True, text=True, encoding="utf-8")
     return [f for f in out.stdout.split("\0") if f]
 
 
-def path(rel):
+def path(rel: str) -> str:
+    """The absolute path of a repo-relative path."""
     return os.path.join(REPO_ROOT, rel)
 
 
-def load(rel):
+def load(rel: str) -> Any:
+    """The parsed JSON at a repo-relative path."""
     with open(path(rel), encoding="utf-8") as f:
         return json.load(f)
 
 
-def as_json(v):
+def as_json(v: Any) -> Any:
+    """v after a JSON round trip (tuples become lists), for comparison with parsed records."""
     return json.loads(json.dumps(v, ensure_ascii=False))
 
 
-def fewshot_bound(side):
-    """True when a sidecar's training canonical config carries a fewshot binding: a Phase 9 masked base (FEW-01)
-    trains on selection_train too, and its val dump is never a selection candidate."""
+def fewshot_bound(side: dict[str, Any]) -> bool:
+    """True when a sidecar's training canonical config carries a fewshot binding: a few-shot masked base trains on
+    selection_train too, and its val dump is never a selection candidate."""
     canon = (side.get("training") or {}).get("canonical")
     return isinstance(canon, dict) and "fewshot" in canon
 
 
-def laya_selection_sidecars():
+def laya_selection_sidecars() -> dict[str, dict[str, Any]]:
     """{dump dir name: parsed val.json} of every tracked Laya selection val dump: system.kind laya with a training
     block on selection_train (the kind is filtered first: BERTurk selection dumps carry that split too), without a
-    few-shot binding (fewshot_bound: a Phase 9 masked base's val dump is skipped)."""
+    few-shot binding (fewshot_bound: a few-shot masked base's val dump is skipped)."""
     out = {}
     for rel in tracked(DUMPS + "/"):
         if not rel.endswith("/val.json") or not os.path.isfile(path(rel)):
@@ -110,7 +113,8 @@ def laya_selection_sidecars():
     return out
 
 
-def _plant_selection_copy(tmp_path, monkeypatch, collect, kind, fewshot_binding):
+def _plant_selection_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                          collect: Callable[[], dict[str, dict[str, Any]]], kind: str, fewshot_binding: bool) -> str:
     """Plant a copy of a committed `kind` selection val sidecar (planted dir laya-fewshot-planted) beside the tracked
     ones, its training canonical given a fewshot binding when `fewshot_binding`; returns the planted dir name."""
     module = sys.modules[__name__]
@@ -129,8 +133,8 @@ def _plant_selection_copy(tmp_path, monkeypatch, collect, kind, fewshot_binding)
     return name
 
 
-def test_laya_selection_collector_skips_a_fewshot_dump(tmp_path, monkeypatch):
-    # a Phase 9 masked base trains on selection_train too (FEW-01): its val dump is never a selection candidate
+def test_laya_selection_collector_skips_a_fewshot_dump(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # a few-shot masked base trains on selection_train too: its val dump is never a selection candidate
     committed = laya_selection_sidecars()
     assert len(committed) == postfit.EPOCHS
     with monkeypatch.context() as m:
@@ -141,8 +145,8 @@ def test_laya_selection_collector_skips_a_fewshot_dump(tmp_path, monkeypatch):
     test_laya_selection_dumps_are_the_single_lr_grid()
 
 
-def test_single_lr_protocol_constants():
-    # the 05-06 user override (2026-10-15, restated 2026-10-21): one encoder LR, fixed, not tuned
+def test_single_lr_protocol_constants() -> None:
+    # the user's single-LR decision (2026-10-15, restated 2026-10-21): one encoder LR, fixed, not tuned
     assert postfit.LR_GRID == (2e-05,), postfit.LR_GRID
     assert postfit.HEAD_LR == 0.0001, postfit.HEAD_LR
     assert postfit.EPOCHS == 4, postfit.EPOCHS
@@ -151,14 +155,15 @@ def test_single_lr_protocol_constants():
     assert postfit.protocol("laya") == {"lr_grid": postfit.LR_GRID, "epochs": postfit.EPOCHS,
                                         "head_lr": postfit.HEAD_LR, "selection_seed": postfit.SELECTION_SEED,
                                         "final_seeds": postfit.FINAL_SEEDS}
-    assert berturk.LR_GRID == postfit.LR_GRID, "A1: BERTurk shares Laya's one LR (%s vs %s)" % (berturk.LR_GRID,
-                                                                                             postfit.LR_GRID)
+    assert berturk.LR_GRID == postfit.LR_GRID, "BERTurk shares Laya's one LR (%s vs %s)" % (berturk.LR_GRID,
+                                                                                         postfit.LR_GRID)
     assert compute.MATRIX["lr_grid"] == 3, (
-        "pilot.compute.MATRIX lr_grid is %r; the approved budget (plan 04-08) stays recorded as approved (3), and "
-        "Laya runs one of its three LR runs (05-06 override, disclosed in the README)" % (compute.MATRIX["lr_grid"],))
+        "pilot.compute.MATRIX lr_grid is %r; the approved compute budget stays recorded as approved (3), and Laya "
+        "runs one of its three LR runs (the single-LR decision, disclosed in the README)"
+        % (compute.MATRIX["lr_grid"],))
 
 
-def test_laya_selection_dumps_are_the_single_lr_grid():
+def test_laya_selection_dumps_are_the_single_lr_grid() -> None:
     sides = laya_selection_sidecars()
     runs = {side["training"]["run_id"] for side in sides.values()}
     assert len(runs) == 1, "results/dumps holds Laya selection dumps of %s, not of exactly one train run" % sorted(runs)
@@ -195,20 +200,20 @@ def test_laya_selection_dumps_are_the_single_lr_grid():
             d, verified["dump_sha256"], side["dump_sha256"])
         assert logits.shape == (len(uids), 48), "%s: logits %s" % (d, logits.shape)
         held = tracked("%s/%s/test.npz" % (DUMPS, d), "%s/%s/test.json" % (DUMPS, d))
-        assert not held, ("%s holds a tracked test dump %s; a selection candidate is scored on val only (Phase 8 "
-                          "scores only the final seeds on test)" % (d, held))
+        assert not held, ("%s holds a tracked test dump %s; a selection candidate is scored on val only (the final "
+                          "scoring scores only the final seeds on test)" % (d, held))
 
     assert len(rungs) == 1, "the Laya selection dumps ran at rungs %s, not one" % sorted(rungs)
     assert len(canons) == 1, "the Laya selection dumps carry %d canonical configs, not one recipe" % len(canons)
 
 
-def _laya_record():
-    """The parsed committed Laya postfit record; it must be tracked (plan 05-07), so a missing record fails the caller."""
+def _laya_record() -> dict[str, Any]:
+    """The parsed committed Laya postfit record; it must be tracked, so a missing record fails the caller."""
     assert tracked(RECORD) == [RECORD], "%s is not tracked; build it with `make laya-postfit` and commit it" % RECORD
     return load(RECORD)
 
 
-def test_committed_record_is_complete_and_consistent():
+def test_committed_record_is_complete_and_consistent() -> None:
     r = _laya_record()
     proto = postfit.protocol("laya")
     assert r["schema"] == postfit.SCHEMA == "postfit/1"
@@ -261,7 +266,7 @@ def test_committed_record_is_complete_and_consistent():
     assert f["epochs"] == postfit.EPOCHS and f["stop_after_epoch"] == c["stop_after_epoch"]
 
 
-def test_makefile_lists_the_selection_dumps():
+def test_makefile_lists_the_selection_dumps() -> None:
     record = _laya_record()
     with open(path("Makefile"), encoding="utf-8") as f:
         text = f.read()
@@ -278,7 +283,7 @@ def test_makefile_lists_the_selection_dumps():
 
 
 @pytest.mark.data
-def test_record_reproduces_from_the_committed_dumps():
+def test_record_reproduces_from_the_committed_dumps() -> None:
     record = _laya_record()
     if not glob.glob(os.path.join(REPO_ROOT, "data", "splits", "*.jsonl")):
         pytest.fail("data/splits/ is empty; run `make data` first")
@@ -292,11 +297,11 @@ FINAL = "results/postfit/laya-final.json"
 FINAL_RUN_RE = re.compile(r"^laya-final_train-neg8-s([012])-[0-9a-f]{8}$")
 
 
-def test_committed_final_manifest():
-    """LAYA-08 (plan 05-08): the committed manifest of the 3 Laya final seeds is bound to the committed record (its
+def test_committed_final_manifest() -> None:
+    """The committed manifest of the 3 Laya final seeds is bound to the committed record (its
     sha256 and chosen settings, the 4-epoch schedule stopped at the chosen epoch, the single encoder LR 2e-05); it lists
     all three seeds (never only the best), each serving the chosen T at the chosen rung, and a final seed's tracked
-    dumps are only its protocol-gated test and hotels_probe dumps (Phase 8)."""
+    dumps are only its protocol-gated test and hotels_probe dumps (the final scoring)."""
     assert tracked(FINAL) == [FINAL], "%s is not tracked" % FINAL
     record = _laya_record()
     m = load(FINAL)
@@ -328,7 +333,7 @@ def test_committed_final_manifest():
         assert "/" not in e["checkpoint_name"] and "\\" not in e["checkpoint_name"], e["checkpoint_name"]
         assert e["dump_run_id"] == dumps.run_id("laya", e["checkpoint_identity"]), "seed %d dump_run_id" % s
     gated = {"test.npz", "test.json", "hotels_probe.npz", "hotels_probe.json"}
-    for e in seeds:                                         # Phase 8: gated test and HOTELS dumps only (08-08)
+    for e in seeds:                                         # the final scoring: gated test and HOTELS dumps only
         names = [f.split("/")[3] for f in tracked("%s/%s/" % (DUMPS, e["dump_run_id"]))]
         assert set(names) <= gated, "%s final seed %d's dump dir holds %s; only gated test and hotels_probe dumps" % (
             "Laya", e["seed"], sorted(set(names) - gated))
@@ -344,12 +349,13 @@ README = "README.md"
 POSTFIT_START, POSTFIT_END = "<!-- laya-postfit:start -->", "<!-- laya-postfit:end -->"
 
 
-def _rendered():
+def _rendered() -> str:
+    """pilot.postfit.render_markdown of the committed Laya record and its final manifest."""
     record = _laya_record()
     return postfit.render_markdown(record, load(FINAL))
 
 
-def test_readme_postfit_block_matches_the_record():
+def test_readme_postfit_block_matches_the_record() -> None:
     with open(path(README), encoding="utf-8") as f:
         text = f.read()
     assert text.count(POSTFIT_START) == 1 and text.count(POSTFIT_END) == 1, \
@@ -362,7 +368,7 @@ def test_readme_postfit_block_matches_the_record():
         "`python postfit.py --render %s %s`" % (RECORD, FINAL, RECORD, FINAL))
 
 
-def test_render_discloses_the_selection():
+def test_render_discloses_the_selection() -> None:
     record = _laya_record()
     text = _rendered()
     assert "2e-05" in text and "not tuned" in text, "the single fixed encoder LR is not disclosed"
@@ -374,15 +380,15 @@ def test_render_discloses_the_selection():
             "interior in the epoch grid" if clipped else "interior optimum")
     assert edge in text, "the grid-edge verdict %r is missing" % edge
     assert ("interior optimum" in text) is (not clipped and 1 < epoch < top), \
-        "an epoch is called an interior optimum while a candidate's θ is clipped at a θ-grid edge (05-REVIEW CR-01)"
+        "an epoch is called an interior optimum while a candidate's θ is clipped at a θ-grid edge"
     n = len(record["candidates"])
     assert "%d of %d candidates choose the shipped global θ on the upper edge" % (len(up), n) in text, \
-        "the θ-edge count over every candidate is missing (05-REVIEW WR-04)"
+        "the θ-edge count over every candidate is missing"
     assert ("T-dependent margin cutoff" in text) is clipped
     assert "max_epochs %d" % compute.MATRIX["max_epochs"] in text, "the approved max_epochs is not named"
     for c in record["candidates"]:
         o = c["objective"]
-        frac = "%d/%d" % (2 * o["tp"], 2 * o["tp"] + o["fp"] + o["fn"])           # unreduced (05-REVIEW IN-02)
+        frac = "%d/%d" % (2 * o["tp"], 2 * o["tp"] + o["fp"] + o["fn"])           # unreduced
         assert frac in text, "candidate epoch %d's fraction %s is missing" % (c["epoch"], frac)
         assert postfit.score(c) == __import__("fractions").Fraction(*map(int, frac.split("/")))
     for e in load(FINAL)["seeds"]:
@@ -390,7 +396,7 @@ def test_render_discloses_the_selection():
     assert "/Users/" not in text and "/home/" not in text, "the rendered block holds a local path"
 
 
-def test_render_names_an_interior_optimum_only_without_a_clipped_theta():
+def test_render_names_an_interior_optimum_only_without_a_clipped_theta() -> None:
     """The committed record (every shipped θ on the upper edge) and a copy with every global θ inside the grid: only
     the copy is called an interior optimum, and only the committed one gets the margin-cutoff disclosure."""
     import copy
@@ -407,8 +413,8 @@ def test_render_names_an_interior_optimum_only_without_a_clipped_theta():
     assert "interior optimum" not in clipped and "4 of 4 candidates" in clipped and "margin cutoff" in clipped
 
 
-def test_render_shows_unmeasured_final_seed_values_as_na():
-    """05-REVIEW IN-01: a final seed whose epoch rows hold no peak, swap or loss renders n/a, never 0.00 or a crash."""
+def test_render_shows_unmeasured_final_seed_values_as_na() -> None:
+    """A final seed whose epoch rows hold no peak, swap or loss renders n/a, never 0.00 or a crash."""
     import copy
     final = copy.deepcopy(load(FINAL))
     for r in final["seeds"][0]["epochs"]:
@@ -420,12 +426,12 @@ def test_render_shows_unmeasured_final_seed_values_as_na():
     assert cells[3:6] == ["n/a", "n/a", "n/a"], cells          # final-epoch loss, peak GiB, largest swap delta MiB
 
 
-def test_render_refuses_a_berturk_record():
+def test_render_refuses_a_berturk_record() -> None:
     with pytest.raises(SystemExit, match="laya"):
         postfit.render_markdown(load("results/postfit/berturk.json"))
 
 
-def test_render_refuses_a_manifest_of_another_record():
+def test_render_refuses_a_manifest_of_another_record() -> None:
     import postfit as postfit_cli
     sha = sha256_file(path(RECORD))
     with pytest.raises(SystemExit) as e:

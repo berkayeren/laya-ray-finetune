@@ -1,30 +1,31 @@
-"""Postfit (LAYA-05, LAYA-08): selection val dumps -> the val-fitted temperature, the val-selected thresholds and the
-chosen (encoder LR, epoch), in one committed, byte-reproducible record. numpy, scipy and pilot modules only: no torch,
-Ray or laya, so BERTurk (Phase 6) runs the same functions on its own val dumps.
+"""Postfit: selection val dumps -> the val-fitted temperature, the val-selected thresholds and the chosen (encoder LR,
+epoch), in one committed, byte-reproducible record. numpy, scipy and pilot modules only: no torch, Ray or laya, so the
+BERTurk baseline runs the same functions on its own val dumps. Training never calibrates: the temperature comes only
+from val, fitted here after training.
 
 Inputs are val dumps only. candidate() reads a run dir through pilot.dumps.load_dump(run_dir, "val", manifest) and
 never takes a split argument; it refuses a path that is a file (a .jsonl, an .npz), a run dir that holds a test dump,
 a --n subset val dump, a candidate trained on another split than selection_train (a final_train model has seen the
 val folds, so its val outputs are in-sample), on the committed manifest a candidate whose canonical data_sha256 is not
-the committed selection_train sha256 (06-REVIEW WR-02: the bytes, not the split name), a calibrated candidate and one
-whose shipped T is not 1.0. Test never
-shapes T, θ or the selection (ROADMAP Phase 5 criterion 3).
+the committed selection_train sha256 (the bytes, not the split name), a calibrated candidate and one whose shipped T
+is not 1.0. Test never shapes T, θ or the selection.
 
-Protocol (05-RESEARCH Open Questions 1-4, confirmed by the user at plan 05-10: "Protocol decision: confirm"):
-- A1: encoder LR grid LR_GRID, head LR fixed at HEAD_LR (laya's default)
-- A2: OBJECTIVE and TIE_ORDER below; the objective is compared exactly, as the fraction 2TP / (2TP + FP + FN) of the
+Protocol (confirmed by the user before the Laya val selection):
+- encoder LR grid LR_GRID (one value, 2e-05: the user's single-LR decision, fixed, not tuned), head LR fixed at
+  HEAD_LR (laya's default)
+- OBJECTIVE and TIE_ORDER below; the objective is compared exactly, as the fraction 2TP / (2TP + FP + FN) of the
   summed counts, so equal scores tie exactly and the tie order decides, independent of input order
-- A3: EPOCH_TRANSFER: the final seeds run the EPOCHS schedule and stop after the chosen epoch
-- A4: SELECTION_SEED for every selection run, FINAL_SEEDS for the final runs
+- EPOCH_TRANSFER: the final seeds run the EPOCHS schedule and stop after the chosen epoch
+- SELECTION_SEED for every selection run, FINAL_SEEDS for the final runs
 Per system kind (protocol(kind), the one source of a selection grid): "laya" is the constants above; "berturk" is
-pilot.berturk.PROTOCOL (Phase 6, confirmed at plan 06-02): the same LR grid and the same fixed head LR as Laya (HEAD_LR,
-since the BASE-03 fix of 2026-10-21; tests keep both equal), epochs 1..pilot.berturk.EPOCHS (30 since the second BASE-03
-fix of 2026-10-21) and the same seeds. The superseded protocols (pilot.berturk.SUPERSEDED, epochs 10, the first with
-head_lr None: each candidate's head LR tied to its own encoder LR, which select still accepts) are kept only so their
-records still reproduce. fit() with no grid arguments takes the protocol of its
-candidates' system kind (one kind, else refused), so BERTurk runs exactly these functions, objective, tie order, T and
-θ rules on its own val dumps (BASE-02), and the Laya record is byte for byte what it was before the dispatch.
-rules.epoch_transfer names the kind's schedule (EPOCH_TRANSFER_TEMPLATE).
+pilot.berturk.PROTOCOL: the same LR grid and the same fixed head LR as Laya (HEAD_LR, since the first BERTurk
+reference-check fix of 2026-10-21; tests keep both equal), epochs 1..pilot.berturk.EPOCHS (30 since the second
+reference-check fix of 2026-10-21) and the same seeds. The superseded protocols (pilot.berturk.SUPERSEDED, epochs 10,
+the first with head_lr None: each candidate's head LR tied to its own encoder LR, which select still accepts) are kept
+only so their records still reproduce. fit() with no grid arguments takes the protocol of its candidates' system kind
+(one kind, else refused), so BERTurk runs exactly these functions, objective, tie order, T and θ rules on its own val
+dumps, and the Laya record is byte for byte what it was before the dispatch. rules.epoch_transfer names the kind's
+schedule (EPOCH_TRANSFER_TEMPLATE).
 Temperature (TEMPERATURE_RULE): one noul T for every (message, tag) pair of val (all 48 tags of every message), the
 minimiser of the mean binary cross-entropy of sigmoid(m / T) over log T in [T_MIN, T_MAX] (scipy's bounded scalar
 minimiser); the two bounds are scored with the optimiser's point and a bound wins an exact tie, so an optimum outside
@@ -37,16 +38,16 @@ settings, from ids, digests and numbers only: no timestamp, no local path, no me
 rebuilds byte for byte from the committed dumps in any argument order. prune_export deletes a ray_train.py epoch export
 only after a verified full val dump of exactly that export exists.
 
-Final seeds (LAYA-08): ray_train.py --postfit RECORD calls check_final, which refuses a final-seed command whose
+Final seeds: ray_train.py --postfit RECORD calls check_final, which refuses a final-seed command whose
 canonical run config is not the chosen selection run's (outside FINAL_FREE_KEYS; neg_seed must still equal the seed, and
 a record of the committed manifest binds data_sha256 to the committed final_train), and stamps final_block into the
 final config. final_command prints the exact ray_train.py argv of each final seed from the record (nobody retypes a
 hyperparameter); final_manifest (FINAL_SCHEMA) lists the finished checkpoints only when they are exactly the record's
 final seeds, each bound to its sha256, at the chosen epoch and T, with one shared config_sha256_sans_seed.
 
-render_markdown renders the README's Phase 5 block (postfit.py --render) from a Laya record and its final manifest:
-the chosen settings, the rules, the encoder-LR and grid-edge lines against pilot.compute.MATRIX, the θ and T bound
-positions, the candidates and the final seeds, rounded for display only (it changes no record byte).
+render_markdown renders the README's Laya val selection block (postfit.py --render) from a Laya record and its final
+manifest: the chosen settings, the rules, the encoder-LR and grid-edge lines against pilot.compute.MATRIX, the θ and T
+bound positions, the candidates and the final seeds, rounded for display only (it changes no record byte).
 
 usage: from pilot import postfit; record = postfit.fit(run_dirs, manifest_path); postfit.write_record(record, path)
        record, sha = postfit.read_record(path); postfit.prune_export(export_dir, dump_root, manifest_path)
@@ -63,7 +64,9 @@ import json
 import os
 import re
 import shutil
+from collections.abc import Callable, Iterable
 from fractions import Fraction
+from typing import Any
 
 import numpy as np
 from scipy.optimize import minimize_scalar
@@ -74,13 +77,13 @@ from pilot.data import DEFAULT_MANIFEST, manifest_is_committed, repo_relpath, sh
 SCHEMA = "postfit/1"
 FINAL_SCHEMA = "postfit-final/1"            # final_manifest: the three final seeds bound to one record
 T_MIN, T_MAX = 0.5, 5.0                     # laya TEMP_MIN / TEMP_MAX: laya.load clamps a served T to this band
-LR_GRID = (2e-05,)                          # A1: one encoder LR for now (05-06 user override); a grid search later
-HEAD_LR = 0.0001                            # A1: head LR, fixed (laya's default)
+LR_GRID = (2e-05,)                          # one encoder LR, fixed, not tuned (the user's single-LR decision)
+HEAD_LR = 0.0001                            # head LR, fixed (laya's default)
 EPOCHS = 4                                  # the approved max_epochs: every selection run's schedule
 SELECTION_SPLIT = "selection_train"
 FINAL_SPLIT = "final_train"
-SELECTION_SEED = 0                          # A4
-FINAL_SEEDS = (0, 1, 2)                     # A4
+SELECTION_SEED = 0                          # every selection run
+FINAL_SEEDS = (0, 1, 2)                     # the final seeds
 TEMPERATURE_RULE = ("one noul T over every val (message, tag) pair: the minimiser of the mean binary cross-entropy of "
                     "sigmoid(m / T) over log T in [0.5, 5.0] (scipy bounded scalar minimiser), a bound winning an "
                     "exact tie")
@@ -91,7 +94,7 @@ EPOCH_TRANSFER_TEMPLATE = ("the final seeds train on final_train with the select
                            "after the chosen epoch (--stop-after-epoch), never --epochs k*")
 EPOCH_TRANSFER = EPOCH_TRANSFER_TEMPLATE % EPOCHS           # Laya's; a record names its own kind's schedule
 CANDIDATE_SCORER_KEYS = ("device", "dtype", "amp_enabled")
-# canonical run-config keys a final seed may differ in from the chosen selection run (LAYA-08): its split and data,
+# canonical run-config keys a final seed may differ in from the chosen selection run: its split and data,
 # its seeds, its stop epoch (checked against the chosen epoch on its own) and the record it is bound to
 FINAL_FREE_KEYS = ("split", "data_sha256", "data_role", "seed", "neg_seed", "stop_after_epoch", "postfit_sha256")
 EXPORT_RE = re.compile(r"^epoch-[0-9]{3}$")              # ray_train.py's <storage>/<run_id>/exports/epoch-NNN
@@ -99,7 +102,7 @@ EXPORT_RE = re.compile(r"^epoch-[0-9]{3}$")              # ray_train.py's <stora
 FINAL_CHOSEN_KEYS = ("train_run_id", "encoder_lr", "epoch", "epochs_schedule", "stop_after_epoch", "temperature")
 
 
-def protocol(kind):
+def protocol(kind: str) -> dict[str, Any]:
     """The selection grid of a system kind: {lr_grid, epochs, head_lr, selection_seed, final_seeds}, the keyword
     arguments of select and build_record. head_lr None ties each candidate's head LR to its own encoder LR (only the
     superseded BERTurk protocol, pilot.berturk.SUPERSEDED, uses it)."""
@@ -112,15 +115,15 @@ def protocol(kind):
     raise SystemExit("no postfit protocol for system kind %r; expected laya or berturk" % (kind,))
 
 
-def _nll(m, y):
+def _nll(m: np.ndarray, y: np.ndarray) -> Callable[[float], float]:
     """The mean binary cross-entropy of sigmoid(m / exp(log_t)) against y, as a function of log T."""
-    def nll(log_t):
+    def nll(log_t: float) -> float:
         z = m / np.exp(log_t)
         return float(np.mean(np.logaddexp(0.0, z) - y * z))
     return nll
 
 
-def fit_temperature(logits, Y):
+def fit_temperature(logits: Any, Y: Any) -> tuple[float, float, float]:
     """(T, NLL at T, NLL at T = 1) of the val margins `logits` [n, 48] against the gold Y [n, 48], every pair counted.
 
     SystemExit on empty input or margins that are all exactly 0 (every T scores the same: T is not identifiable).
@@ -144,7 +147,7 @@ def fit_temperature(logits, Y):
     return float(best_t), best, nll(0.0)
 
 
-def candidate(run_dir, manifest_path=DEFAULT_MANIFEST):
+def candidate(run_dir: str, manifest_path: str = DEFAULT_MANIFEST) -> dict[str, Any]:
     """The selection candidate of one run dir's full val dump: its training provenance, its val-fitted T, θ for the
     shipped (after T) and raw (T = 1) variants and the objective counts. Reads only the val dump (see the refusals in
     the module docstring)."""
@@ -153,8 +156,8 @@ def candidate(run_dir, manifest_path=DEFAULT_MANIFEST):
                          "dump or any other split)" % run_dir)
     for ext in (".npz", ".json"):
         if os.path.exists(os.path.join(run_dir, "test" + ext)):
-            raise SystemExit("%s holds a test dump; a selection candidate is never scored on test in Phase 5 and "
-                             "postfit reads val only" % run_dir)
+            raise SystemExit("%s holds a test dump; a selection candidate is never scored on test and postfit "
+                             "reads val only" % run_dir)
     logits, uids, side, entry = dumps.load_dump(run_dir, "val", manifest_path)
     if entry["role"] != "val":
         raise SystemExit("%s: postfit reads val dumps only (manifest role %s); test never shapes T, θ or the "
@@ -169,7 +172,7 @@ def candidate(run_dir, manifest_path=DEFAULT_MANIFEST):
     if tr.get("split") != SELECTION_SPLIT:
         raise SystemExit("%s: trained on %s; postfit selects only on %s runs (a %s model's val is in-sample)"
                          % (run_dir, tr.get("split"), SELECTION_SPLIT, FINAL_SPLIT))
-    if manifest_is_committed(manifest_path):                 # 06-REVIEW WR-02: the bytes, not the split name
+    if manifest_is_committed(manifest_path):                 # the bytes, not the split name
         with open(DEFAULT_MANIFEST, encoding="utf-8") as f:
             want = ((json.load(f).get("splits") or {}).get(SELECTION_SPLIT) or {}).get("sha256")
         have = (tr.get("canonical") or {}).get("data_sha256")
@@ -202,19 +205,20 @@ def candidate(run_dir, manifest_path=DEFAULT_MANIFEST):
             "val_micro_f1_at_global_theta": at_theta["micro_f1"], "theta": theta}
 
 
-def _json(v):
+def _json(v: Any) -> str:
     """Exact JSON form of a value (no float tolerance; 1, 1.0 and true differ)."""
     return json.dumps(v, sort_keys=True, ensure_ascii=False)
 
 
-def score(c):
+def score(c: dict[str, Any]) -> Fraction:
     """The exact objective of a candidate: Fraction(2TP, 2TP + FP + FN) of its summed counts, 0 on a 0 denominator."""
     o = c["objective"]
     den = 2 * o["tp"] + o["fp"] + o["fn"]
     return Fraction(2 * o["tp"], den) if den else Fraction(0)
 
 
-def select(cands, lr_grid=LR_GRID, epochs=EPOCHS, selection_seed=SELECTION_SEED, head_lr=HEAD_LR):
+def select(cands: list[dict[str, Any]], lr_grid: Iterable[float] = LR_GRID, epochs: int = EPOCHS,
+           selection_seed: int = SELECTION_SEED, head_lr: float | None = HEAD_LR) -> dict[str, Any]:
     """The chosen candidate: the highest score(); ties go to fewer epochs, then the lower encoder LR. SystemExit unless
     the candidates are exactly one full selection grid (lr_grid x epochs 1..epochs) of one system and recipe. head_lr
     None: every candidate's canonical head_lr must equal its own encoder_lr (one LR for encoder and head)."""
@@ -271,7 +275,8 @@ def select(cands, lr_grid=LR_GRID, epochs=EPOCHS, selection_seed=SELECTION_SEED,
     return max(cands, key=lambda c: (score(c), -c["epoch"], -c["encoder_lr"]))
 
 
-def _val_entry(manifest_path):
+def _val_entry(manifest_path: str) -> dict[str, Any]:
+    """The manifest's val entry; SystemExit when it registers none with role val."""
     with open(manifest_path, encoding="utf-8") as f:
         m = json.load(f)
     entry = (m.get("splits") or {}).get("val")
@@ -280,8 +285,9 @@ def _val_entry(manifest_path):
     return entry
 
 
-def build_record(cands, chosen, manifest_path, lr_grid=LR_GRID, epochs=EPOCHS, selection_seed=SELECTION_SEED,
-                 final_seeds=FINAL_SEEDS, head_lr=HEAD_LR):
+def build_record(cands: list[dict[str, Any]], chosen: dict[str, Any], manifest_path: str,
+                 lr_grid: Iterable[float] = LR_GRID, epochs: int = EPOCHS, selection_seed: int = SELECTION_SEED,
+                 final_seeds: Iterable[int] = FINAL_SEEDS, head_lr: float | None = HEAD_LR) -> dict[str, Any]:
     """The postfit record (SCHEMA) of the candidates and the chosen one (select's result)."""
     entry = _val_entry(manifest_path)
     for c in cands:
@@ -315,7 +321,7 @@ def build_record(cands, chosen, manifest_path, lr_grid=LR_GRID, epochs=EPOCHS, s
         "final": {"split": FINAL_SPLIT, "seeds": list(final_seeds), "epochs": epochs, "stop_after_epoch": stop}}
 
 
-def fit(run_dirs, manifest_path=DEFAULT_MANIFEST, **grid):
+def fit(run_dirs: Iterable[str], manifest_path: str = DEFAULT_MANIFEST, **grid: Any) -> dict[str, Any]:
     """candidate() of every run dir, select(), build_record(): the record of one selection grid. Without grid
     arguments the grid is protocol() of the candidates' system kind (SystemExit when they mix kinds)."""
     cands = [candidate(d, manifest_path) for d in run_dirs]
@@ -328,18 +334,20 @@ def fit(run_dirs, manifest_path=DEFAULT_MANIFEST, **grid):
     return build_record(cands, chosen, manifest_path, **grid)
 
 
-def record_bytes(record):
+def record_bytes(record: dict[str, Any]) -> bytes:
+    """The record's bytes: indented JSON with a trailing newline."""
     return (json.dumps(record, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
-def write_record(record, path):
-    """Write the record atomically, as indented JSON with a trailing newline (no timestamp: rebuilds byte for byte)."""
+def write_record(record: dict[str, Any], path: str) -> str:
+    """Write the record atomically, as indented JSON with a trailing newline (no timestamp: rebuilds byte for byte);
+    returns path."""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     write_atomic(path, record_bytes(record))
     return path
 
 
-def read_record(path):
+def read_record(path: str) -> tuple[dict[str, Any], str]:
     """(record, sha256 of the file bytes) of a postfit record; SystemExit on a missing file, invalid JSON, another
     schema or a missing chosen, final or protocol block. The sha256 is of the same bytes that were parsed."""
     if not os.path.isfile(path):
@@ -359,16 +367,16 @@ def read_record(path):
     return record, sha256_bytes(raw)
 
 
-def check_final(record, canon):
+def check_final(record: dict[str, Any], canon: dict[str, Any]) -> None:
     """Refuse (SystemExit) a final-seed command whose canonical run config `canon` (pilot.runs.canonical of the
-    ray_train.py command) is not bound to the record: the split must be the record's final split, the seed one of its
-    final seeds, stop_after_epoch the chosen one (None when the chosen epoch is the last of the schedule), and every
-    other key outside FINAL_FREE_KEYS must equal the chosen selection run's canonical value exactly (JSON equality: 1
-    and 1.0 differ). The first differing key in sorted order is named with both values, a key missing on one side as
-    <absent> (LAYA-08). Two free keys are
-    bound on their own (05-REVIEW WR-01): neg_seed must equal the seed when the chosen run's did (A4: --neg-seed is
-    never passed), and when the record was built on the committed manifest (manifest.is_committed) data_sha256 must be
-    the committed final_train sha256 of data/splits.json, read at check time (the record stays byte-identical)."""
+    ray_train.py command, or pilot.berturk.canonical of the berturk_train.py command) is not bound to the record: the
+    split must be the record's final split, the seed one of its final seeds, stop_after_epoch the chosen one (None when
+    the chosen epoch is the last of the schedule), and every other key outside FINAL_FREE_KEYS must equal the chosen
+    selection run's canonical value exactly (JSON equality: 1 and 1.0 differ). The first differing key in sorted order
+    is named with both values, a key missing on one side as <absent>. Two free keys are bound on their own: neg_seed
+    must equal the seed when the chosen run's did (--neg-seed is never passed), and when the record was built on the
+    committed manifest (manifest.is_committed) data_sha256 must be the committed final_train sha256 of data/splits.json,
+    read at check time (the record stays byte-identical)."""
     chosen, final = record["chosen"], record["final"]
     if canon.get("split") != final.get("split"):
         raise SystemExit("--postfit trains the final seeds on %s; --data is %s"
@@ -401,13 +409,13 @@ def check_final(record, canon):
     for key in sorted((set(canon) | set(want_canon)) - set(FINAL_FREE_KEYS)):
         have, want = canon.get(key, missing), want_canon.get(key, missing)
         if have is missing or want is missing or _json(have) != _json(want):
-            shown = ["<absent>" if v is missing else repr(v) for v in (have, want)]   # 05-REVIEW IN-06: not "None"
+            shown = ["<absent>" if v is missing else repr(v) for v in (have, want)]   # a missing key is not "None"
             raise SystemExit("--postfit: %s is %s here but %s in the chosen selection run %s; pass the chosen value "
                              "(postfit.py --print-final-commands prints each command)"
                              % (key, shown[0], shown[1], chosen.get("train_run_id")))
 
 
-def final_block(record, sha256, path):
+def final_block(record: dict[str, Any], sha256: str, path: str) -> dict[str, Any]:
     """training.postfit of a final seed's config (and ray_train.py's cfg["postfit"]): the record's sha256 and
     repo-relative path, the chosen settings, the val-fitted T (written as the config's noul temperature) and θ, and
     the selection rules. Ids, digests and numbers only."""
@@ -424,7 +432,7 @@ def final_block(record, sha256, path):
             "rules": {k: rules.get(k) for k in ("objective", "tie_order", "epoch_transfer")}}
 
 
-def prune_export(export_dir, dump_root=dumps.DUMP_ROOT, manifest_path=DEFAULT_MANIFEST):
+def prune_export(export_dir: str, dump_root: str = dumps.DUMP_ROOT, manifest_path: str = DEFAULT_MANIFEST) -> str:
     """Delete one ray_train.py epoch export once its verified full val dump exists; returns the dump's run id.
 
     Refused, and left in place: a symlink (the export or its exports/ dir), a path that is not a real
@@ -457,16 +465,17 @@ def prune_export(export_dir, dump_root=dumps.DUMP_ROOT, manifest_path=DEFAULT_MA
     return rid
 
 
-def _device_amp(device):
+def _device_amp(device: str) -> bool:
     """ray_train.resolve's AMP default: on only for cuda."""
     return device == "cuda"
 
 
-def final_command(record, seed, record_path, storage, out_prefix, base="multilingual",
-                  data="data/splits/final_train.jsonl", manifest=None):
+def final_command(record: dict[str, Any], seed: int, record_path: str, storage: str, out_prefix: str,
+                  base: str = "multilingual", data: str = "data/splits/final_train.jsonl",
+                  manifest: str | None = None) -> list[str]:
     """The ray_train.py argv (starting with "ray_train.py") that trains final seed `seed` with the chosen settings:
     every hyperparameter from the chosen canonical config, the chosen stop epoch, --postfit record_path and
-    --no-export-epochs; --out is "<out_prefix>-s<seed>". neg_seed is never passed (it defaults to the seed, A4).
+    --no-export-epochs; --out is "<out_prefix>-s<seed>". neg_seed is never passed (it defaults to the seed).
     ray_train.py's check_final is still the binding; this only spares the operator the transcription."""
     final, chosen = record["final"], record["chosen"]
     if seed not in (final.get("seeds") or []):
@@ -501,8 +510,8 @@ def final_command(record, seed, record_path, storage, out_prefix, base="multilin
     return argv
 
 
-def final_data(record, manifest):
-    """The --data of a final-seed command printed with --manifest M (05-REVIEW WR-03): the path M registers for the
+def final_data(record: dict[str, Any], manifest: str) -> str:
+    """The --data of a final-seed command printed with --manifest M: the path M registers for the
     record's final split, joined to M's directory (pilot.data resolves split paths relative to the manifest), so the
     printed command verifies against M. SystemExit when M is unreadable or registers no such split."""
     split = record["final"]["split"]
@@ -516,12 +525,12 @@ def final_data(record, manifest):
     return os.path.join(os.path.dirname(manifest), entry["path"])
 
 
-def _final_entry(record, sha, ckpt_dir):
+def _final_entry(record: dict[str, Any], sha: str, ckpt_dir: str) -> dict[str, Any]:
     """One final_manifest entry of a finished --postfit checkpoint, or SystemExit naming what does not bind it."""
     from pilot.weights import checkpoint_digests, identity  # torch-free; imported here, like prune_export
     chosen, name = record["chosen"], os.path.basename(os.path.normpath(ckpt_dir))
     path = os.path.join(ckpt_dir, "rl_agent_config.json")
-    if not os.path.isfile(path):                            # checked before any hashing (05-REVIEW IN-03)
+    if not os.path.isfile(path):                            # checked before any hashing
         raise SystemExit("%s has no rl_agent_config.json; pass the final checkpoint dirs ray_train.py wrote" % name)
     ident = identity(ckpt_dir)
     checkpoint_digests(ckpt_dir, ident)                     # refuses missing weights, tokenizer/ or encoder/ files
@@ -537,7 +546,7 @@ def _final_entry(record, sha, ckpt_dir):
     canon, rec, prov = rt["canonical"], rt.get("record") or {}, rt.get("provenance") or {}
     if prov.get("manifest_is_committed") is not True or prov.get("data_sha256") != canon.get("data_sha256"):
         raise SystemExit("%s: provenance manifest_is_committed %r (data sha256 %s, canonical %s); a final seed trains "
-                         "on the committed data/splits.json (05-REVIEW WR-01)"
+                         "on the committed data/splits.json"
                          % (name, prov.get("manifest_is_committed"), prov.get("data_sha256"), canon.get("data_sha256")))
     if (tr.get("postfit") or {}).get("sha256") != sha or canon.get("postfit_sha256") != sha:
         raise SystemExit("%s is bound to postfit record %s, not %s; train it with --postfit of this record"
@@ -565,14 +574,13 @@ def _final_entry(record, sha, ckpt_dir):
             "config_sha256_sans_seed": dumps.training_digest(canon, tr.get("epoch"))}
 
 
-def final_manifest(record_path, ckpt_dirs):
+def final_manifest(record_path: str, ckpt_dirs: Iterable[str]) -> dict[str, Any]:
     """The FINAL_SCHEMA manifest of the final checkpoints of one postfit record: refused unless every dir is bound to
     the record's sha256 (config and canonical), trained under the committed data/splits.json (its provenance
-    manifest_is_committed True, its provenance data sha256 the canonical one), on its final split with the chosen
-    recipe (check_final), stops
-    at the chosen epoch, serves the chosen T exactly with no temperature_by_options, the seeds are exactly the record's
-    final seeds (no duplicate, none missing) and every seed shares one config_sha256_sans_seed. Seeds sorted; ids,
-    digests and numbers only (checkpoint_name is a base name; no timestamp, no local path)."""
+    manifest_is_committed True, its provenance data sha256 the canonical one), on its final split with the chosen recipe
+    (check_final), stops at the chosen epoch, serves the chosen T exactly with no temperature_by_options, the seeds are
+    exactly the record's final seeds (no duplicate, none missing) and every seed shares one config_sha256_sans_seed.
+    Seeds sorted; ids, digests and numbers only (checkpoint_name is a base name; no timestamp, no local path)."""
     record, sha = read_record(record_path)
     entries = [_final_entry(record, sha, d) for d in ckpt_dirs]
     seeds = sorted(e["seed"] for e in entries)
@@ -593,33 +601,34 @@ def final_manifest(record_path, ckpt_dirs):
                       for e in sorted(entries, key=lambda e: e["seed"])]}
 
 
-def _md(header, rows):
+def _md(header: Iterable[str], rows: Iterable[Iterable[str]]) -> str:
     """A markdown table in report.py's _md layout (pilot modules never import the CLI scripts)."""
     lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
     return "\n".join(lines + ["| " + " | ".join(r) + " |" for r in rows])
 
 
-def _f1(c):
+def _f1(c: dict[str, Any]) -> str:
     """Val micro-F1 at the global θ with its exact fraction 2TP / (2TP + FP + FN) of the summed counts, not reduced
-    (05-REVIEW IN-02: the counts stay readable), e.g. "0.8107 (852/1051)"."""
+    (so the counts stay readable), e.g. "0.8107 (852/1051)"."""
     o = c["objective"]
     return "%.4f (%d/%d)" % (c["val_micro_f1_at_global_theta"], 2 * o["tp"], 2 * o["tp"] + o["fp"] + o["fn"])
 
 
-def theta_edges(cands, name):
+def theta_edges(cands: list[dict[str, Any]], name: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """(candidates on the upper θ-grid edge, on the lower edge) of variant `name` (shipped or raw): those whose global
-    θ equals their own grid's stop or start. A clipped θ means the candidate is scored at the edge, not at its best θ
-    (05-REVIEW CR-01, WR-04)."""
+    θ equals their own grid's stop or start. A clipped θ means the candidate is scored at the edge, not at its best
+    θ."""
     up = [c for c in cands if c["theta"][name]["global"] == c["theta"][name]["grid"]["stop"]]
     lo = [c for c in cands if c["theta"][name]["global"] == c["theta"][name]["grid"]["start"]]
     return up, lo
 
 
-def per_tag_edge_line(cands, th):
-    """The README line of per-tag θ on a grid edge (06-REVIEW IN-02): the chosen candidate's (`th`, its theta block)
+def per_tag_edge_line(cands: list[dict[str, Any]], th: dict[str, Any]) -> str:
+    """The README line of per-tag θ on a grid edge: the chosen candidate's (`th`, its theta block)
     by tag, and the count over every candidate, shipped and raw. A per-tag θ on an edge is clipped there for its tag;
     per-tag θ serve the val-selected rows and the final seeds, while the selection objective uses the global θ only."""
-    def on_edge(t):
+    def on_edge(t: dict[str, Any]) -> list[str]:
+        """The tags whose own θ sits on an edge of the θ grid of variant block t, sorted."""
         return sorted(k for k, v in (t.get("per_tag") or {}).items() if v in (t["grid"]["start"], t["grid"]["stop"]))
     names = ("shipped", "raw")
     mine = ["%s %s" % (n, ", ".join("%s %.2f" % (k, th[n]["per_tag"][k]) for k in on_edge(th[n])) or "none")
@@ -634,14 +643,15 @@ def per_tag_edge_line(cands, th):
                                 " and ".join(every)))
 
 
-def render_markdown(record, final=None):
-    """The README's Phase 5 block (markdown) of a Laya postfit record and, optionally, its final manifest: the chosen
-    settings, the rule line, the encoder-LR line against the approved pilot.compute.MATRIX lr_grid, the grid-edge line
-    against its max_epochs, the θ-grid and T-bound positions, the θ-edge line (how many candidates' global θ is clipped
-    at a θ-grid edge, theta_edges; while any shipped θ is, the epoch is never called a plain interior optimum), the
-    per-tag θ edge line (per_tag_edge_line), the candidates (chosen and runner-up marked) and the final seeds. Display rounding only; every number comes from the
-    record; no timestamp, no local path, no test number. SystemExit on a record of another system kind (BERTurk has its
-    own renderer) or a manifest whose chosen block or final split is not the record's."""
+def render_markdown(record: dict[str, Any], final: dict[str, Any] | None = None) -> str:
+    """The README's Laya val selection block (markdown) of a Laya postfit record and, optionally, its final manifest:
+    the chosen settings, the rule line, the encoder-LR line against the approved pilot.compute.MATRIX lr_grid, the
+    grid-edge line against its max_epochs, the θ-grid and T-bound positions, the θ-edge line (how many candidates'
+    global θ is clipped at a θ-grid edge, theta_edges; while any shipped θ is, the epoch is never called a plain
+    interior optimum), the per-tag θ edge line (per_tag_edge_line), the candidates (chosen and runner-up marked) and the
+    final seeds. Display rounding only; every number comes from the record; no timestamp, no local path, no test number.
+    SystemExit on a record of another system kind (BERTurk has its own renderer) or a manifest whose chosen block or
+    final split is not the record's."""
     from pilot import compute                               # torch-free; lazy like the other optional imports
     if record.get("system_kind") != "laya":
         raise SystemExit("render_markdown renders postfit records of system kind 'laya' only (BERTurk has its own "
@@ -741,7 +751,7 @@ def render_markdown(record, final=None):
         frows = []
         for e in final["seeds"]:
             ep = e.get("epochs") or []
-            # an unmeasured value (None) is n/a, never 0 (05-REVIEW IN-01)
+            # an unmeasured value (None) is n/a, never 0
             peaks = [r["peak_total_bytes"] for r in ep if r.get("peak_total_bytes") is not None]
             swaps = [r["swap_delta_bytes"] for r in ep if r.get("swap_delta_bytes") is not None]
             loss = ep[-1].get("loss") if ep else None
@@ -750,7 +760,8 @@ def render_markdown(record, final=None):
                           "n/a" if not peaks else "%.2f" % (max(peaks) / 2 ** 30),
                           "n/a" if not swaps else "%.0f" % (max(swaps) / 2 ** 20), str(e.get("rung")),
                           str(e.get("code_changed_on_resume"))))
-        out += ["", "**Final seeds** (%s, --epochs %d stopped after epoch %d, serving T %.4f; not scored before Phase 8)"
+        out += ["", "**Final seeds** (%s, --epochs %d stopped after epoch %d, serving T %.4f; not scored before the "
+                    "final scoring)"
                 % (final["final_split"], chosen["epochs_schedule"], epoch, chosen["temperature"]), "",
                 _md(("seed", "train run id", "epochs trained", "final-epoch loss", "peak GiB", "largest swap delta MiB",
                      "rung", "code changed on resume"), frows)]

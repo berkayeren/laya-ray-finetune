@@ -1,7 +1,7 @@
-"""BERTurk on the Apple GPU (BASE-01 fp32, BASE-02 shared scorer): a tiny BERT base trained by berturk_train.py
---device mps keeps every parameter on mps in float32, and score.py --model berturk --device mps --workers 0 writes an
-fp32 val dump (autocast off) whose logits match the CPU dump of the same export within 1e-4 (06-RESEARCH probe 5 saw
-1.79e-05 on the pinned base).
+"""BERTurk on the Apple GPU (fp32 training, the shared scorer): a tiny BERT base trained by berturk_train.py --device
+mps keeps every parameter on mps in float32, and score.py --model berturk --device mps --workers 0 writes an fp32 val
+dump (autocast off) whose logits match the CPU dump of the same export within 1e-4 (a probe on the pinned base saw
+1.79e-05).
 
 Needs Apple MPS, so it is excluded from `make test`: run `pytest -m mps tests/test_berturk_mps.py` on the M4, with no
 other MPS job running.
@@ -10,6 +10,8 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 import pytest
@@ -25,9 +27,10 @@ pytestmark = pytest.mark.mps
 REPO = pilot.data.REPO_ROOT
 TIMEOUT = 600
 TOLERANCE = 1e-4
+SyntheticRaw = Callable[..., tuple[str, dict[str, str]]]   # conftest's synthetic_raw fixture
 
 
-def _run(*args):
+def _run(*args: Any) -> subprocess.CompletedProcess[str]:
     """Run a repo script with the test interpreter (no PYTHONPATH, so it imports like a user's command)."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable] + [str(x) for x in args], cwd=REPO, env=env, capture_output=True, text=True,
@@ -37,7 +40,7 @@ def _run(*args):
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_berturk_trains_and_scores_on_mps_in_fp32(tmp_path, synthetic_raw):
+def test_berturk_trains_and_scores_on_mps_in_fp32(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     import torch
     if not torch.backends.mps.is_available():
         pytest.fail("the mps marker needs Apple MPS; run it on the M4, or deselect it with -m 'not mps'")

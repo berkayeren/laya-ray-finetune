@@ -1,63 +1,61 @@
-"""Torch-free BERTurk bookkeeping (Phase 6, BASE-01/02): the locked recipe, the run identity, the 48 labels in INTENTS
+"""Torch-free BERTurk bookkeeping for the BERTurk baseline: the recipe, the run identity, the 48 labels in INTENTS
 order, the checkpoint identity and dump run id, and the berturk_train.json record the scorer reads.
 
 berturk_train.py trains dbmdz/bert-base-turkish-cased with the HF Trainer as a 48-label multi-label classifier;
 score.py --model berturk scores its checkpoints into ordinary dumps. Both import this module before torch, so it never
 imports torch, transformers, accelerate, Ray or laya (a test enforces it).
 
-Recipe (confirmed by the user at plan 06-02, "Protocol decision: confirm"): A1 one encoder LR, LR (Laya's single
-encoder LR), and the freshly initialised classifier head (the HEAD_PREFIX parameters) at HEAD_LR, Laya's head LR: the
-BASE-03 fix (plan 06-10 gate, 2026-10-21; SUPERSEDED holds the run that tied the head LR to LR); A2 an EPOCHS
-schedule (30 since the second BASE-03 fix, plan 06-16 gate) whose every epoch is a selection candidate; A3 batch
-BATCH, a LR_SCHEDULER schedule with a WARMUP_RATIO warm-up, AdamW (OPTIM, WEIGHT_DECAY), MAX_GRAD_NORM, MAX_LEN, fp32,
-no gradient checkpointing, the seed set right before the head is created; A6 no resume (a run dir that exists is
-refused; a run is rerun from scratch); A7 a masked BCE (LOSS): a masked (message, tag) label is MASK_LABEL and the loss
-averages over the unmasked entries only.
+Recipe (confirmed by the user before the first BERTurk run): one encoder LR, LR (Laya's single encoder LR), and the
+freshly initialised classifier head (the HEAD_PREFIX parameters) at HEAD_LR, Laya's head LR (the first reference-check
+fix; SUPERSEDED holds the run that tied the head LR to LR); an EPOCHS schedule (30 since the second reference-check
+fix) whose every epoch is a selection candidate; batch BATCH, a LR_SCHEDULER schedule with a WARMUP_RATIO warm-up,
+AdamW (OPTIM, WEIGHT_DECAY), MAX_GRAD_NORM, MAX_LEN, fp32, no gradient checkpointing, the seed set right before the
+head is created; no resume (a run dir that exists is refused; a run is rerun from scratch); a masked BCE (LOSS): a
+masked (message, tag) label is MASK_LABEL and the loss averages over the unmasked entries only.
 
 Labels: id2label/label2id and every label vector follow INTENTS order, the dump's column order. check_label_order
 refuses a config.json that scores another order (plausible but wrong per-tag numbers otherwise); label_vector refuses
-a row missing a tag (Phase 6 never masks by omission). check_cased refuses a lowercasing tokenizer: lowercasing merges
-the Turkish dotted and dotless i.
+a row missing a tag (a tag is masked only by name, through mask_tags, never by omission). check_cased refuses a
+lowercasing tokenizer: lowercasing merges the Turkish dotted and dotless i.
 
 Run identity: IDENTITY lists every value that changes what a run trains; canonical() keeps exactly those (a
 DROPPED_WHEN_NONE key whose value is None is left out) and run_id() names the run berturk-<split>-s<seed>-<first 8 hex
 of the sha256 of the sorted, compact canonical JSON>, so two seeds or configs never share <storage>/<run_id>/. Every
 berturk_train.py flag is in exactly one of IDENTITY, NOT_IDENTITY or RESOLVED (a test enforces it).
 
-Postfit (BASE-02, plan 06-04): PROTOCOL is BERTurk's selection grid for pilot.postfit.protocol("berturk"): LR_GRID
-(explicit, kept equal to pilot.postfit.LR_GRID by a test: equal tuning effort, the 2026-10-15 user decision), epochs
-1..EPOCHS (30 since the second BASE-03 fix; the 10-epoch protocols are kept in SUPERSEDED), head_lr HEAD_LR (Laya's,
-so both models share both LRs; a test enforces it) and pilot.postfit's selection and final seeds (A4). postfit.py runs
-Laya's own functions on BERTurk val dumps under it. prune_export deletes one berturk_train.py epoch export only
-after a verified full val dump of exactly that export exists (postfit.py --prune picks it for a dir holding RECORD).
+Postfit: PROTOCOL is BERTurk's selection grid for pilot.postfit.protocol("berturk"): LR_GRID (explicit, kept equal to
+pilot.postfit.LR_GRID by a test: equal tuning effort, the user's single-LR decision), epochs 1..EPOCHS (30 since the
+second reference-check fix; the 10-epoch protocols are kept in SUPERSEDED), head_lr HEAD_LR (Laya's, so both models
+share both LRs; a test enforces it) and pilot.postfit's selection and final seeds. postfit.py runs Laya's own
+functions on BERTurk val dumps under it. prune_export deletes one berturk_train.py epoch export only after a verified
+full val dump of exactly that export exists (postfit.py --prune picks it for a dir holding RECORD).
 
-Superseded runs (BASE-03 fixes, plan 06-10 and 06-16 gates): SUPERSEDED is an ordered chain, oldest first, of the
-BERTurk selections discarded after their val outcome. Each entry's delta holds the canonical keys and values the run
-that replaced it changed, and nothing else changed (the replacing run is the next entry, or the current run for the
-last entry; tests/test_berturk_results.py enforces both). Each run's dumps and records moved byte for byte (git
-renames) from results/dumps and results/postfit to its own labelled dir under results/superseded/, so results/dumps
-and results/postfit only ever hold the current BERTurk run. One pinned digest anchors each run's chain:
-postfit_sha256 is the record's sha256, the reference check binds that sha256 and the record binds every candidate's
-dump_sha256. The protocol each ran under is kept as literals, never as a reference to PROTOCOL. A superseded run is
-never current: no tracked current dump or record may belong to it, and its reference reads investigate without a
-resolution, so check_reference_for_final refuses it as the gate of any final seed (tests/test_berturk_results.py
-enforces both).
+Superseded runs: SUPERSEDED is an ordered chain, oldest first, of the BERTurk selections discarded after their val
+outcome (each read "investigate" in the reference check, and the user chose a recipe fix). Each entry's delta holds the
+canonical keys and values the run that replaced it changed, and nothing else changed (the replacing run is the next
+entry, or the current run for the last entry; tests/test_berturk_results.py enforces both). Each run's dumps and
+records moved byte for byte (git renames) from results/dumps and results/postfit to its own labelled dir under
+results/superseded/, so results/dumps and results/postfit only ever hold the current BERTurk run. One pinned digest
+anchors each run's chain: postfit_sha256 is the record's sha256, the reference check binds that sha256 and the record
+binds every candidate's dump_sha256. The protocol each ran under is kept as literals, never as a reference to
+PROTOCOL. A superseded run is never current: no tracked current dump or record may belong to it, and its reference
+reads investigate without a resolution, so check_reference_for_final refuses it as the gate of any final seed
+(tests/test_berturk_results.py enforces both).
 
-Reference check (BASE-03, fixed in code before any BERTurk val score): reference_check(record, ...) compares the chosen
-candidate's val micro-F1 at its val-selected global θ after T (the selection objective, A5) with THRESHOLD = 707/1000,
-more than 10 micro-F1 points below the lower published reference 80.7 (REFERENCE: Moghe et al., Multi3NLU++, Table 12
-Turkish BANKING, frozen-encoder MLPs at θ 0.3). The comparison is exact (Fraction of the summed counts, never a rounded
-float): exactly 0.707 is "ok", anything below is "investigate". The result (REFERENCE_SCHEMA) quotes the source, the
-setup DIFFERENCES verbatim and the CAVEATS (θ and T were chosen on the same val messages), and records the user's
-resolution, which is allowed only on "investigate" (OQ2: an investigate result may be written without one).
+The BERTurk reference check (fixed in code before any BERTurk val score): reference_check(record, ...) compares the
+chosen candidate's val micro-F1 at its val-selected global θ after T (the selection objective) with THRESHOLD =
+707/1000, more than 10 micro-F1 points below the lower published reference 80.7 (REFERENCE: Moghe et al., Multi3NLU++,
+Table 12 Turkish BANKING, frozen-encoder MLPs at θ 0.3). The comparison is exact (Fraction of the summed counts, never
+a rounded float): exactly 0.707 is "ok", anything below is "investigate". The result (REFERENCE_SCHEMA) quotes the
+source, the setup DIFFERENCES verbatim and the CAVEATS (θ and T were chosen on the same val messages), and records the
+user's resolution, which is allowed only on "investigate" (an investigate result may be written without one).
 
-Final seeds (BASE-01/02/03, plan 06-08; A4, A9 and OQ2 confirmed at plan 06-02): berturk_train.py --postfit RECORD
---reference REF trains one final seed on final_train with the val-chosen settings and stops after the chosen epoch of
-the selection schedule. check_reference_for_final refuses it unless REF is the reference check of exactly that record
-(its sha256), equals reference_check recomputed from that record (06-REVIEW WR-01) and reads ok or carries a recorded
-resolution; pilot.postfit.check_final refuses any other setting. The
-final checkpoint serves the record's T (calibrated true, postfit = pilot.postfit.final_block). final_command prints the
-argv of each final seed from the record; final_manifest (pilot.postfit.FINAL_SCHEMA) lists the finished checkpoints only
+Final seeds: berturk_train.py --postfit RECORD --reference REF trains one final seed on final_train with the
+val-chosen settings and stops after the chosen epoch of the selection schedule. check_reference_for_final refuses it
+unless REF is the reference check of exactly that record (its sha256), equals reference_check recomputed from that
+record and reads ok or carries a recorded resolution; pilot.postfit.check_final refuses any other setting. The final
+checkpoint serves the record's T (calibrated true, postfit = pilot.postfit.final_block). final_command prints the argv
+of each final seed from the record; final_manifest (pilot.postfit.FINAL_SCHEMA) lists the finished checkpoints only
 when they are exactly the record's final seeds, each bound to its sha256, at the chosen epoch and T.
 
 Checkpoint (an export or a final seed) = CHECKPOINT_FILES: model.safetensors, config.json (id2label in
@@ -66,25 +64,25 @@ whose bytes depend on HF_HUB_OFFLINE) and RECORD (schema RECORD_SCHEMA). identit
 dump_run_id() is berturk-<model sha256[:12]>-<record sha256[:8]>-<digest of config.json and the tokenizer files[:8]>,
 so checkpoints that differ in any file the scorer reads never share a dump dir.
 
-Optimizer (the BASE-03 fix): optimizer_groups splits the parameter names into four AdamW groups, the encoder at the
-encoder LR and the head at the head LR, each with the HF Trainer's own weight-decay split; it refuses unless the head
-(the HEAD_PREFIX names) is exactly the set of parameters from_pretrained newly initialised. berturk_train.py hands the
-optimizer to the Trainer, which still builds the linear schedule and its warm-up over it (both LRs scale alike). Its
-continued mode (continued=True, Phase 9 FEW-02, D-06) is the one exception: a few-shot run continues from a masked
-base's own fine-tuned head, so the head is the HEAD_PREFIX names and nothing may be newly initialised (a base of
-another architecture or label set is refused); the same four groups otherwise (no weight imprinting, no fresh head:
-XCMP-04 is v2).
+Optimizer (the first reference-check fix): optimizer_groups splits the parameter names into four AdamW groups, the
+encoder at the encoder LR and the head at the head LR, each with the HF Trainer's own weight-decay split; it refuses
+unless the head (the HEAD_PREFIX names) is exactly the set of parameters from_pretrained newly initialised.
+berturk_train.py hands the optimizer to the Trainer, which still builds the linear schedule and its warm-up over it
+(both LRs scale alike). Its continued mode (continued=True, a continued run of the few-shot experiment) is the one
+exception: a few-shot run continues from a masked base's own fine-tuned head, so the head is the HEAD_PREFIX names and
+nothing may be newly initialised (a base of another architecture or label set is refused); the same four groups
+otherwise (no fresh head and no weight imprinting, which this pilot does not try).
 
-Few-shot (Phase 9, FEW-01, FEW-02): fewshot is an IDENTITY key left out when None (the pilot.fewshot.binding of a
-masked base or a continued run), so every committed BERTurk run id is unchanged; the --fewshot-base, --fewshot-draw
-and --fewshot-k flags are NOT_IDENTITY (represented by fewshot and mask_tags).
+Few-shot experiment: fewshot is an IDENTITY key left out when None (the pilot.fewshot.binding of a masked base or a
+continued run), so every committed BERTurk run id is unchanged; the --fewshot-base, --fewshot-draw and --fewshot-k
+flags are NOT_IDENTITY (represented by fewshot and mask_tags).
 
-README block (BASE-03 disclosure, plan 06-12): load_superseded() reads every SUPERSEDED entry's history record and
-reference check, refused unless both are bound to its postfit_sha256; render_markdown(record, reference, final,
-superseded) renders the README's Phase 6 block (postfit.py --render-berturk): the chosen settings, the LR and epoch-grid
-lines against Laya's protocol and the approved compute budget, the grid-edge, θ and T bound positions, the reference
-check with every difference and caveat, the 30 candidates, one "Protocol changes after a val outcome" row per
-superseded entry from its delta (with the count of extra selection runs against Laya's) and the final seeds.
+README block: load_superseded() reads every SUPERSEDED entry's history record and reference check, refused unless both
+are bound to its postfit_sha256; render_markdown(record, reference, final, superseded) renders the README's BERTurk
+baseline block (postfit.py --render-berturk): the chosen settings, the LR and epoch-grid lines against Laya's protocol
+and the approved compute budget, the grid-edge, θ and T bound positions, the reference check with every difference
+and caveat, the 30 candidates, one "Protocol changes after a val outcome" row per superseded entry from its delta
+(with the count of extra selection runs against Laya's) and the final seeds.
 
 usage: from pilot import berturk; rid = berturk.run_id(berturk.canonical(values)); berturk.label_vector(row)
        ident = berturk.identity(ckpt); berturk.dump_run_id(ident); seed, training = berturk.training_block(
@@ -103,41 +101,44 @@ import json
 import math
 import os
 import shutil
+from collections.abc import Collection, Iterable
 from fractions import Fraction
+from typing import Any
 
 from intents import INTENTS
 from pilot import dumps, pins, postfit
 from pilot.data import DEFAULT_MANIFEST, REPO_ROOT, repo_relpath, sha256_bytes, sha256_file
 
-# ---- the recipe (A1-A3, A7), confirmed at plan 06-02 ----
-LR = 2e-05                                  # A1: the encoder LR, equal to Laya's single encoder LR
-# the BASE-03 fix (plan 06-10 gate reply "fix: head LR 1e-4 (Recommended)", 2026-10-21): the freshly initialised
-# classifier head trains at Laya's head LR; the encoder keeps LR and every other recipe value is unchanged
+# ---- the recipe, confirmed by the user before the first BERTurk run ----
+LR = 2e-05                                  # the encoder LR, equal to Laya's single encoder LR
+# the first reference-check fix (the user's reply "fix: head LR 1e-4 (Recommended)", 2026-10-21): the freshly
+# initialised classifier head trains at Laya's head LR; the encoder keeps LR and every other recipe value is unchanged
 HEAD_LR = postfit.HEAD_LR
 HEAD_PREFIX = "classifier."                 # the head's parameter names: exactly the ones from_pretrained initialises
-# A2: the selection schedule. The second BASE-03 fix (plan 06-16 gate reply "fix: extend epochs (Recommended)",
-# 2026-10-21): 30, the user's choice (the gate option's own example); SUPERSEDED[-1] holds the 10-epoch run. The linear
-# schedule and its 10% warm-up span all 30 epochs. It deviates from the approved compute budget (berturk_epochs 10),
-# which pilot/compute.py keeps as approved and the README discloses.
+# the selection schedule. The second reference-check fix (the user's reply "fix: extend epochs (Recommended)",
+# 2026-10-21): 30 epochs, the user's choice; SUPERSEDED[-1] holds the 10-epoch run. The linear schedule and its 10%
+# warm-up span all 30 epochs. It deviates from the approved compute budget (berturk_epochs 10), which pilot/compute.py
+# keeps as approved and the README discloses.
 EPOCHS = 30
-BATCH = 32                                  # A3: messages per optimizer step (approved berturk_batch)
-MAX_LEN = 128                               # A3: Laya's max_len, in WordPiece tokens with [CLS] and [SEP]
+BATCH = 32                                  # messages per optimizer step (approved berturk_batch)
+MAX_LEN = 128                               # Laya's max_len, in WordPiece tokens with [CLS] and [SEP]
 WEIGHT_DECAY = 0.01
 WARMUP_RATIO = 0.1
 LR_SCHEDULER = "linear"
 MAX_GRAD_NORM = 1.0
 OPTIM = "adamw_torch"                       # explicit: the transformers 5.19 default is adamw_torch_fused
-LOSS = "masked_bce"                         # A7
+LOSS = "masked_bce"                         # BCE over the unmasked (message, tag) labels only
 MASK_LABEL = -100.0                         # a masked (message, tag) label; the Trainer counts labels != -100
 
-# ---- the postfit protocol (BASE-02, plan 06-04) ----
-LR_GRID = (2e-05,)                          # A1: explicit; equal to pilot.postfit.LR_GRID (one LR for both models)
+# ---- the postfit protocol ----
+LR_GRID = (2e-05,)                          # explicit; equal to pilot.postfit.LR_GRID (one LR for both models)
 PROTOCOL = {"lr_grid": LR_GRID, "epochs": EPOCHS, "head_lr": HEAD_LR, "selection_seed": postfit.SELECTION_SEED,
-            "final_seeds": postfit.FINAL_SEEDS}       # head_lr: Laya's fixed head LR (BASE-03 fix); seeds Laya's (A4)
+            "final_seeds": postfit.FINAL_SEEDS}       # head_lr: Laya's fixed head LR; seeds: Laya's
 
-# ---- superseded selection runs (BASE-03 fixes, plan 06-10 and 06-16 gates; RP-2, R2-2) ----
+# ---- superseded selection runs (the two reference-check fixes) ----
 # an ordered chain, oldest first, kept as disclosed history under results/superseded/<name>/, never current; protocol
-# values and deltas are literals on purpose (delta: the canonical change of the run that replaced the entry)
+# values and deltas are literals on purpose (delta: the canonical change of the run that replaced the entry);
+# user_choice is the user's decision after the entry's val outcome, with the reply quoted verbatim
 _TIED = "results/superseded/berturk-tied-head-lr"
 _GRID10 = "results/superseded/berturk-10-epoch-grid"
 SUPERSEDED = (
@@ -147,7 +148,7 @@ SUPERSEDED = (
      "postfit_sha256": "8975cfa506deddaea77db6cdc883407a7a13b2cb7c6a95155e02e22e219db21a",
      "train_run_id": "berturk-selection_train-s0-c0c9505e",
      "protocol": {"lr_grid": (2e-05,), "epochs": 10, "head_lr": None, "selection_seed": 0, "final_seeds": (0, 1, 2)},
-     "gate": {"plan": "06-10", "date": "2026-10-21", "decision": "fix", "reply": "fix: head LR 1e-4 (Recommended)"},
+     "user_choice": {"date": "2026-10-21", "decision": "fix", "reply": "fix: head LR 1e-4 (Recommended)"},
      "change": ("the classifier head's LR stops being tied to the encoder LR 2e-05 and becomes 1e-4, Laya's head LR "
                 "(pilot.postfit.HEAD_LR); the encoder LR and every other setting are unchanged"),
      "delta": {"head_lr": 0.0001}},
@@ -157,14 +158,14 @@ SUPERSEDED = (
      "postfit_sha256": "7086c7f100007c1ab812e1f473a537cb460d0b911962b12de3940618ffd40d58",
      "train_run_id": "berturk-selection_train-s0-8c033154",
      "protocol": {"lr_grid": (2e-05,), "epochs": 10, "head_lr": 0.0001, "selection_seed": 0, "final_seeds": (0, 1, 2)},
-     "gate": {"plan": "06-16", "date": "2026-10-21", "decision": "fix", "reply": "fix: extend epochs (Recommended)"},
-     "change": ("the epoch grid of the selection schedule grows from 10 to 30 epochs, the user's choice at the 06-16 "
-                "gate, while the encoder LR 2e-05, the head LR 1e-4 and every other setting stay; the linear schedule "
-                "and its warm-up then span 30 epochs"),
+     "user_choice": {"date": "2026-10-21", "decision": "fix", "reply": "fix: extend epochs (Recommended)"},
+     "change": ("the epoch grid of the selection schedule grows from 10 to 30 epochs, the user's choice after this val "
+                "outcome, while the encoder LR 2e-05, the head LR 1e-4 and every other setting stay; the linear "
+                "schedule and its warm-up then span 30 epochs"),
      "delta": {"epochs": 30}},
 )
 
-# ---- the published reference check (BASE-03, A5, OQ2), confirmed at plan 06-02 ----
+# ---- the BERTurk reference check against the published numbers; the texts below land in berturk-reference/1 ----
 REFERENCE_SCHEMA = "berturk-reference/1"
 REFERENCE = {
     "paper": "Moghe et al., Multi3NLU++ (multilingual, multi-intent, multi-domain NLU dataset)",
@@ -202,7 +203,7 @@ CHECKPOINT_FILES = BASE_FILES + (RECORD,)
 RECORD_SCHEMA = "berturk-train/1"
 DONE = "done.json"                          # <storage>/<run_id>/done.json: a finished run
 # one row per completed epoch; peak_driver_bytes is None on cpu (never 0), where peak_total_bytes is the peak RSS; loss
-# is the unweighted mean of the epoch's per-step batch losses (diagnostic only; 06-REVIEW IN-05)
+# is the unweighted mean of the epoch's per-step batch losses (diagnostic only)
 EPOCH_FIELDS = ("epoch", "loss", "train_s", "optimizer_steps", "n_messages", "peak_total_bytes", "peak_driver_bytes",
                 "peak_rss_bytes", "swap_delta_bytes")
 LOGIT_NOTE = "classifier logit per tag; P(tag) = sigmoid(logit / T)"
@@ -217,20 +218,20 @@ IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_conf
 #   storage: where the run dir goes; print_run_id: prints the run id and exits
 #   export_epochs: whether per-epoch exports are written (outputs, not training); cpus: torch threads (a resource)
 #   out: where the final checkpoint goes; postfit: a path, represented by postfit_sha256 (the record's bytes);
-#   reference: the BASE-03 gate, a refusal only (check_reference_for_final binds it to the record's sha256)
-#   fewshot_base, fewshot_draw, fewshot_k: the Phase 9 modes, represented by the fewshot binding (pilot.fewshot.binding:
-#   stage, draw, k, the draw digest and the base's run id) and mask_tags
+#   reference: the reference check, a refusal only (check_reference_for_final binds it to the record's sha256)
+#   fewshot_base, fewshot_draw, fewshot_k: the few-shot modes, represented by the fewshot binding
+#   (pilot.fewshot.binding: stage, draw, k, the draw digest and the base's run id) and mask_tags
 NOT_IDENTITY = ("data", "base", "storage", "manifest", "print_run_id", "export_epochs", "cpus", "out", "postfit",
                 "reference", "fewshot_base", "fewshot_draw", "fewshot_k")
-# flags that enter IDENTITY through resolved keys: --lr is the encoder LR (A1); --head-lr is its own IDENTITY key
+# flags that enter IDENTITY through resolved keys: --lr is the encoder LR; --head-lr is its own IDENTITY key
 RESOLVED = {"lr": ("encoder_lr",)}
 # left out when None: base_files_sha256 (None for the pinned base, whose files the pin fixes), max_messages (a smoke
-# subsample), mask_tags (Phase 6 trains unmasked), stop_after_epoch and postfit_sha256 (a final seed, plan 06-08), and
-# fewshot (a Phase 9 run, 09-03), so every selection and final-seed run id is fixed now
+# subsample), mask_tags (only a few-shot masked base masks), stop_after_epoch and postfit_sha256 (a final seed), and
+# fewshot (a few-shot run), so every selection and final-seed run id stays as it was before those keys existed
 DROPPED_WHEN_NONE = ("base_files_sha256", "max_messages", "mask_tags", "stop_after_epoch", "postfit_sha256", "fewshot")
 
 
-def canonical(values):
+def canonical(values: dict[str, Any]) -> dict[str, Any]:
     """{key: values[key]} for exactly the IDENTITY keys, without a DROPPED_WHEN_NONE key whose value is None; ValueError
     naming any missing or unexpected key (a DROPPED_WHEN_NONE key must still be given, as None)."""
     missing = [k for k in IDENTITY if k not in values]
@@ -241,16 +242,18 @@ def canonical(values):
     return {k: values[k] for k in IDENTITY if not (k in DROPPED_WHEN_NONE and values[k] is None)}
 
 
-def run_id(canon):
+def run_id(canon: dict[str, Any]) -> str:
     """berturk-<split>-s<seed>-<first 8 hex of the sha256 of the sorted, compact canonical JSON>; independent of key
     order."""
     blob = json.dumps(canon, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     return "berturk-%s-s%d-%s" % (canon["split"], canon["seed"], hashlib.sha256(blob).hexdigest()[:8])
 
 
-# ---- the optimizer groups (the BASE-03 fix) ----
+# ---- the optimizer groups (the first reference-check fix) ----
 
-def optimizer_groups(param_names, decay_names, new_names, encoder_lr, head_lr, weight_decay, continued=False):
+def optimizer_groups(param_names: Iterable[str], decay_names: Iterable[str], new_names: Iterable[str],
+                     encoder_lr: float, head_lr: float, weight_decay: float,
+                     continued: bool = False) -> list[dict[str, Any]]:
     """Four AdamW param groups over the parameter names, in the fixed order encoder + decay, encoder + no decay,
     head + decay, head + no decay: {"group": "encoder" | "head", "decay": bool, "lr", "weight_decay" (weight_decay
     for a decay group, else 0.0), "params": [names in param_names order]}. The head is the names starting with
@@ -258,7 +261,7 @@ def optimizer_groups(param_names, decay_names, new_names, encoder_lr, head_lr, w
     exactly new_names, the parameters from_pretrained newly initialised (a pretrained parameter at the head LR, or a
     fresh one left at the encoder LR, would be another recipe). Every name lands in exactly one group.
 
-    continued=True (a Phase 9 continued run, FEW-02, D-06): the head is the loaded, fine-tuned head of a masked base,
+    continued=True (a continued few-shot run): the head is the loaded, fine-tuned head of a masked base,
     so new_names must be empty (SystemExit naming them otherwise: a base that newly initialised anything is of another
     architecture or label set, and its head would not be the base's); the same four groups."""
     names, decay, new = list(param_names), set(decay_names), set(new_names)
@@ -282,16 +285,17 @@ def optimizer_groups(param_names, decay_names, new_names, encoder_lr, head_lr, w
 
 # ---- labels ----
 
-def id2label():
+def id2label() -> dict[int, str]:
     """{index: tag} in INTENTS order (the classifier's output columns = the dump's columns)."""
     return dict(enumerate(TAGS))
 
 
-def label2id():
+def label2id() -> dict[str, int]:
+    """{tag: index} in INTENTS order, the inverse of id2label."""
     return {t: i for i, t in enumerate(TAGS)}
 
 
-def check_mask_tags(tags):
+def check_mask_tags(tags: Iterable[str]) -> tuple[str, ...]:
     """Sorted tuple of the --mask-tags; SystemExit naming an unknown or a duplicated tag."""
     tags = [t for t in tags]
     unknown = sorted({t for t in tags if t not in INTENTS})
@@ -303,7 +307,7 @@ def check_mask_tags(tags):
     return tuple(sorted(tags))
 
 
-def label_vector(row, mask_tags=()):
+def label_vector(row: dict[str, Any], mask_tags: Collection[str] = ()) -> list[float]:
     """48 floats in INTENTS order: MASK_LABEL for a masked tag, else 1.0 or 0.0 from row["expected"]. SystemExit naming
     the uid and the tag when the row does not label a tag (a missing label is never read as a negative)."""
     expected = row.get("expected") or {}
@@ -319,7 +323,7 @@ def label_vector(row, mask_tags=()):
     return out
 
 
-def check_label_order(cfg, where):
+def check_label_order(cfg: dict[str, Any], where: str) -> None:
     """SystemExit unless a config.json dict scores the 48 INTENTS tags in INTENTS order as a multi-label classifier."""
     want = id2label()
     try:
@@ -331,7 +335,7 @@ def check_label_order(cfg, where):
                          "problem_type); retrain it with berturk_train.py" % where)
 
 
-def check_cased(tcfg, where):
+def check_cased(tcfg: Any, where: str) -> None:
     """SystemExit unless the tokenizer config keeps case (do_lower_case false): lowercasing merges İ/i and I/ı."""
     if not isinstance(tcfg, dict) or tcfg.get("do_lower_case") is not False:
         raise SystemExit("%s: tokenizer_config.json does not set do_lower_case false; BERTurk must use the pinned "
@@ -340,11 +344,12 @@ def check_cased(tcfg, where):
 
 # ---- checkpoint identity and dump run id ----
 
-def _sha(path):
+def _sha(path: str) -> str | None:
+    """The sha256 of a file, None when it is missing."""
     return sha256_file(path) if os.path.isfile(path) else None
 
 
-def identity(ckpt_dir):
+def identity(ckpt_dir: str) -> dict[str, Any]:
     """The checkpoint identity of a BERTurk checkpoint dir: sha256 of every file the scorer reads (None for a missing
     one). Hashes only, never a load."""
     return {"local": True, "kind": "berturk",
@@ -354,7 +359,7 @@ def identity(ckpt_dir):
             "files_sha256": {f: _sha(os.path.join(ckpt_dir, f)) for f in TOKENIZER_FILES}}
 
 
-def require_files(ckpt_dir, what):
+def require_files(ckpt_dir: str, what: str) -> None:
     """SystemExit naming every CHECKPOINT_FILES entry missing from ckpt_dir: without them transformers would read a
     config or tokenizer from the Hub, unpinned."""
     missing = [f for f in CHECKPOINT_FILES if not os.path.isfile(os.path.join(ckpt_dir, f))]
@@ -364,8 +369,9 @@ def require_files(ckpt_dir, what):
                             ", ".join(CHECKPOINT_FILES)))
 
 
-def dump_run_id(ident):
-    """berturk-<model sha256[:12]>-<record sha256[:8]>-<files_digest of config.json and the tokenizer files[:8]>."""
+def dump_run_id(ident: Any) -> str:
+    """berturk-<model sha256[:12]>-<record sha256[:8]>-<files_digest of config.json and the tokenizer files[:8]>;
+    SystemExit when ident is not an identity() dict with every digest."""
     files = ident.get("files_sha256") if isinstance(ident, dict) else None
     parts = [ident.get(k) if isinstance(ident, dict) else None for k in ("model_sha256", "record_sha256",
                                                                          "config_sha256")]
@@ -378,14 +384,15 @@ def dump_run_id(ident):
 
 # ---- the record ----
 
-def record_bytes(obj):
+def record_bytes(obj: dict[str, Any]) -> bytes:
+    """The bytes of a berturk_train.json record (or done.json): indented JSON with a trailing newline."""
     return (json.dumps(obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
-def read_record(ckpt_dir, ident):
+def read_record(ckpt_dir: str, ident: dict[str, Any]) -> dict[str, Any]:
     """The parsed berturk_train.json of a checkpoint, from bytes whose sha256 is ident's record_sha256 (the bytes that
     name the dump run id); SystemExit on changed bytes, another schema, or a canonical max_len that is not a positive
-    int or a temperature that is not a finite float > 0, the two values score.py scores with (06-REVIEW IN-03)."""
+    int or a temperature that is not a finite float > 0, the two values score.py scores with."""
     path = os.path.join(ckpt_dir, RECORD)
     with open(path, "rb") as f:
         raw = f.read()
@@ -411,7 +418,7 @@ def read_record(ckpt_dir, ident):
     return rec
 
 
-def training_block(rec):
+def training_block(rec: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     """(seed, training) of a BERTurk dump sidecar: exactly the keys of score.training_block (the ones pilot.postfit
     reads); neg_seed, rung, fallback and weaker are Laya-only and None."""
     canon = rec["canonical"]
@@ -426,13 +433,13 @@ def training_block(rec):
         "config_sha256_sans_seed": dumps.training_digest(canon, epoch)}
 
 
-def prune_export(export_dir, dump_root=dumps.DUMP_ROOT, manifest_path=DEFAULT_MANIFEST):
+def prune_export(export_dir: str, dump_root: str = dumps.DUMP_ROOT, manifest_path: str = DEFAULT_MANIFEST) -> str:
     """Delete one berturk_train.py epoch export once its verified full val dump exists; returns the dump's run id.
 
     Refused, and left in place: a symlink (the export or its exports/ dir), a path that is not a real
     <storage>/<run_id>/exports/epoch-NNN dir holding RECORD, and an export without a full val dump under dump_root
     whose sidecar checkpoint_identity equals the export's identity() (load_dump verifies the dump bytes). Only that one
-    dir is ever deleted (mirrors pilot.postfit.prune_export, A8).
+    dir is ever deleted (mirrors pilot.postfit.prune_export).
     """
     path = os.path.abspath(export_dir)
     if os.path.islink(path) or os.path.islink(os.path.dirname(path)):
@@ -456,14 +463,15 @@ def prune_export(export_dir, dump_root=dumps.DUMP_ROOT, manifest_path=DEFAULT_MA
     return rid
 
 
-def reference_check(record, record_path, record_sha256, resolution=None):
-    """The BASE-03 check (REFERENCE_SCHEMA) of a BERTurk postfit record: the chosen candidate's val micro-F1 at its
-    val-selected global θ after T, as the exact Fraction(2TP, 2TP + FP + FN) of its summed counts, against THRESHOLD.
-    status "investigate" when below, else "ok". SystemExit on a record of another system kind, a chosen candidate
-    missing from the candidates, or a resolution on an "ok" status (nothing to resolve). No timestamp, no local path:
-    the same inputs give the same JSON bytes."""
+def reference_check(record: dict[str, Any], record_path: str, record_sha256: str | None,
+                    resolution: str | None = None) -> dict[str, Any]:
+    """The BERTurk reference check (REFERENCE_SCHEMA) of a BERTurk postfit record: the chosen candidate's val
+    micro-F1 at its val-selected global θ after T, as the exact Fraction(2TP, 2TP + FP + FN) of its summed counts,
+    against THRESHOLD. status "investigate" when below, else "ok". SystemExit on a record of another system kind, a
+    chosen candidate missing from the candidates, or a resolution on an "ok" status (nothing to resolve). No timestamp,
+    no local path: the same inputs give the same JSON bytes."""
     if record.get("system_kind") != "berturk":
-        raise SystemExit("%s: system kind %r; the published reference check applies to BERTurk (BASE-03)"
+        raise SystemExit("%s: system kind %r; the published reference check applies to BERTurk only"
                          % (record_path, record.get("system_kind")))
     chosen = record.get("chosen") or {}
     cand = next((c for c in record.get("candidates") or [] if c.get("dump_sha256") == chosen.get("dump_sha256")), None)
@@ -490,15 +498,15 @@ def reference_check(record, record_path, record_sha256, resolution=None):
             "caveats": CAVEATS, "resolution": resolution}
 
 
-def check_reference_for_final(reference_path, record_sha256, record):
-    """The BASE-03 gate of a final seed (OQ2): the parsed reference check at reference_path, refused (SystemExit) when
+def check_reference_for_final(reference_path: str, record_sha256: str, record: dict[str, Any]) -> dict[str, Any]:
+    """The reference-check gate of a final seed: the parsed reference check at reference_path, refused (SystemExit) when
     it is missing, not valid JSON, of another schema, of another postfit record than record_sha256, its status
     disagrees with its own exact fraction, it reads "investigate" without a non-empty resolution, or it is not
     reference_check of `record` (the parsed record of that sha256) at its recorded path and resolution: the gate
-    recomputes the value from the record and never trusts the file's own (06-REVIEW WR-01). No final seed is trained
+    recomputes the value from the record and never trusts the file's own. No final seed is trained
     (or printed) before the shortfall is investigated and then fixed or documented."""
     if not os.path.isfile(reference_path):
-        raise SystemExit("%s not found; build the BASE-03 reference check with postfit.py --reference-check RECORD "
+        raise SystemExit("%s not found; build the BERTurk reference check with postfit.py --reference-check RECORD "
                          "--out %s before any final seed" % (reference_path, reference_path))
     with open(reference_path, "rb") as f:
         raw = f.read()
@@ -525,9 +533,9 @@ def check_reference_for_final(reference_path, record_sha256, record):
                          "--reference-check" % (reference_path, status, frac[0], frac[1]))
     res = ref.get("resolution")
     if status == "investigate" and not (isinstance(res, str) and res.strip()):
-        raise SystemExit("BASE-03: BERTurk's val micro-F1 %s is below 0.707 and no resolution is recorded; investigate, "
-                         "then fix (a new selection run) or document it (postfit.py --reference-check --resolution) "
-                         "before any final seed" % value.get("val_micro_f1_at_global_theta"))
+        raise SystemExit("reference check: BERTurk's val micro-F1 %s is below 0.707 and no resolution is recorded; "
+                         "investigate, then fix (a new selection run) or document it (postfit.py --reference-check "
+                         "--resolution) before any final seed" % value.get("val_micro_f1_at_global_theta"))
     got = reference_check(record, os.path.join(REPO_ROOT, ref["postfit"].get("path") or ""), record_sha256, res)
     if postfit._json(got) != postfit._json(ref):
         raise SystemExit("%s is not pilot.berturk.reference_check of the postfit record %s (its value, status or "
@@ -536,8 +544,9 @@ def check_reference_for_final(reference_path, record_sha256, record):
     return ref
 
 
-def final_command(record, seed, record_path, reference_path, storage, out_prefix, base="berturk",
-                  data="data/splits/final_train.jsonl", manifest=None):
+def final_command(record: dict[str, Any], seed: int, record_path: str, reference_path: str, storage: str,
+                  out_prefix: str, base: str = "berturk", data: str = "data/splits/final_train.jsonl",
+                  manifest: str | None = None) -> list[str]:
     """The berturk_train.py argv (starting with "berturk_train.py") that trains final seed `seed` of a BERTurk postfit
     record: every hyperparameter from the chosen canonical config, the chosen stop epoch, --postfit record_path,
     --reference reference_path and --no-export-epochs; --out is "<out_prefix>-s<seed>". berturk_train.py's
@@ -570,7 +579,7 @@ def final_command(record, seed, record_path, reference_path, storage, out_prefix
     return argv
 
 
-def _final_entry(record, sha, ckpt_dir):
+def _final_entry(record: dict[str, Any], sha: str, ckpt_dir: str) -> dict[str, Any]:
     """One final_manifest entry of a finished berturk_train.py --postfit checkpoint, or SystemExit naming what does not
     bind it (mirrors pilot.postfit._final_entry)."""
     chosen, name = record["chosen"], os.path.basename(os.path.normpath(ckpt_dir))
@@ -580,13 +589,12 @@ def _final_entry(record, sha, ckpt_dir):
     canon = rec["canonical"]
     prov = rec.get("provenance") or {}
     man, split = prov.get("manifest") or {}, prov.get("split") or {}
-    # 06-REVIEW IN-06 (Laya parity, 05-REVIEW WR-01): a record built on the committed manifest binds final seeds
-    # trained on it, whose provenance split bytes are the canonical data_sha256; other records keep it free, as
-    # check_final does
+    # as for Laya's final seeds: a record built on the committed manifest binds final seeds trained on it, whose
+    # provenance split bytes are the canonical data_sha256; other records keep it free, as check_final does
     if (record.get("manifest") or {}).get("is_committed") is True and \
             (man.get("is_committed") is not True or split.get("sha256") != canon.get("data_sha256")):
         raise SystemExit("%s: provenance manifest is_committed %r (split sha256 %s, canonical %s); a final seed of a "
-                         "record on the committed manifest trains on the committed data/splits.json (06-REVIEW IN-06)"
+                         "record on the committed manifest trains on the committed data/splits.json"
                          % (name, man.get("is_committed"), split.get("sha256"), canon.get("data_sha256")))
     if (rec.get("postfit") or {}).get("sha256") != sha or canon.get("postfit_sha256") != sha:
         raise SystemExit("%s is bound to postfit record %s, not %s; train it with berturk_train.py --postfit of this "
@@ -609,7 +617,7 @@ def _final_entry(record, sha, ckpt_dir):
             "config_sha256_sans_seed": dumps.training_digest(canon, rec.get("epoch"))}
 
 
-def final_manifest(record_path, ckpt_dirs):
+def final_manifest(record_path: str, ckpt_dirs: Iterable[str]) -> dict[str, Any]:
     """The pilot.postfit.FINAL_SCHEMA manifest of a BERTurk record's final checkpoints: refused unless every dir is
     bound to the record's sha256 (berturk_train.json postfit and canonical), trained on its final split with the chosen
     recipe (check_final), stops at the chosen epoch, serves the chosen T exactly, the seeds are exactly the record's
@@ -638,9 +646,9 @@ def final_manifest(record_path, ckpt_dirs):
                       for e in sorted(entries, key=lambda e: e["seed"])]}
 
 
-# ---- the README block (BASE-03 disclosure, plan 06-12) ----
+# ---- the README block, with the disclosure of the reference-check fixes ----
 
-def load_superseded(repo_root=REPO_ROOT):
+def load_superseded(repo_root: str = REPO_ROOT) -> list[dict[str, Any]]:
     """The disclosed history of every SUPERSEDED entry, in chain order: [{"entry", "record", "reference"}], the parsed
     history record and its reference check. SystemExit naming the file unless it exists, is JSON, the record's sha256
     is the entry's postfit_sha256 and the reference check's postfit.sha256 is that sha256 too (the history is read
@@ -669,13 +677,13 @@ def load_superseded(repo_root=REPO_ROOT):
     return out
 
 
-def _ref_f1(ref):
+def _ref_f1(ref: dict[str, Any]) -> str:
     """A reference check's value with its exact fraction in lowest terms, e.g. "0.8138 (389/478)"."""
     v = ref["value"]
     return "%.4f (%d/%d)" % (v["val_micro_f1_at_global_theta"], v["fraction"][0], v["fraction"][1])
 
 
-def _old_value(key, canon):
+def _old_value(key: str, canon: dict[str, Any]) -> str:
     """A delta key's value in the run it replaced; a head LR equal to the encoder LR is the tied recipe."""
     if key == "head_lr" and canon.get("head_lr") == canon.get("encoder_lr"):
         return "tied to the encoder LR (%g)" % canon.get("encoder_lr")
@@ -683,7 +691,7 @@ def _old_value(key, canon):
     return "%g" % v if isinstance(v, float) else str(v)
 
 
-def _gib(e):
+def _gib(e: dict[str, Any]) -> tuple[str, str, str]:
     """(final-epoch loss, peak GiB, largest swap delta MiB) of a final-manifest seed; an unmeasured value is n/a."""
     ep = e.get("epochs") or []
     peaks = [r["peak_total_bytes"] for r in ep if r.get("peak_total_bytes") is not None]
@@ -693,13 +701,15 @@ def _gib(e):
             "n/a" if not swaps else "%.0f" % (max(swaps) / 2 ** 20))
 
 
-def render_markdown(record, reference, final=None, superseded=()):
-    """The README's Phase 6 block (markdown) of the BERTurk postfit record, its BASE-03 reference check, optionally its
+def render_markdown(record: dict[str, Any], reference: dict[str, Any], final: dict[str, Any] | None = None,
+                    superseded: Iterable[dict[str, Any]] = ()) -> str:
+    """The README's BERTurk baseline block (markdown) of the BERTurk postfit record, its reference check, optionally its
     final manifest and the superseded history (load_superseded()): the chosen settings, the rule line, the LR and
     epoch-grid lines against Laya's protocol and the approved pilot.compute.MATRIX, the grid-edge, θ and T bound
     positions, the reference check (value against 0.707, status, the quoted source values, every difference, every
     caveat, the resolution), the candidates, one "Protocol changes after a val outcome" row per superseded entry (its
-    delta's old and new value, its chosen epoch, its val micro-F1, status, gate and reply verbatim, its history dir)
+    delta's old and new value, its chosen epoch, its val micro-F1, status, the user's choice with its date and reply
+    verbatim, its history dir)
     with the count of extra selection runs, and the final seeds. Display rounding only; every number comes from the
     records; no timestamp, no local path, no test number. SystemExit on a record of another system kind, a reference
     check that is not the recompute of this record's chosen candidate, or a manifest whose chosen block or final split
@@ -734,7 +744,7 @@ def render_markdown(record, reference, final=None, superseded=()):
     epoch, sched, stop, top = chosen["epoch"], chosen["epochs_schedule"], chosen["stop_after_epoch"], proto["epochs"]
     md = postfit._md
     out = ["**Chosen on val** (selection run on %s, seed %s, %d val messages x %d tags; val numbers, in-sample; no "
-           "BERTurk test number exists before Phase 8)"
+           "BERTurk test number exists before the final scoring)"
            % (proto["selection_split"], proto["selection_seed"], record["split"]["n_messages"], len(TAGS)), ""]
     out.append(md(("setting", "value"), [
         ("train run id", chosen["train_run_id"]),
@@ -805,10 +815,10 @@ def render_markdown(record, reference, final=None, superseded=()):
                    "; the objective is clipped at a θ-grid edge for those candidates" if clipped
                    else "; no candidate's objective is clipped at a θ-grid edge"))
     out.append(postfit.per_tag_edge_line(cands, th))
-    # the published reference check (BASE-03)
+    # the published reference check
     v, ref = reference["value"], reference["reference"]
     t12, t18 = ref["table_12"], ref["table_18"]
-    out += ["", "**Published reference check (BASE-03)** (%s, %s; %s)" % (ref["paper"], ref["venue"], ref["url"]), "",
+    out += ["", "**Published reference check** (%s, %s; %s)" % (ref["paper"], ref["venue"], ref["url"]), "",
             md(("check", "value"), [
                 ("BERTurk val micro-F1 at the global θ (epoch %d, T %.4f)" % (v["epoch"], v["temperature"]),
                  _ref_f1(reference)),
@@ -837,7 +847,7 @@ def render_markdown(record, reference, final=None, superseded=()):
             % (chosen["train_run_id"], chosen["encoder_lr"]), "",
             md(("epoch", "T", "NLL at T", "NLL at T = 1", "micro-F1 @0.5", "micro-F1 @global θ", "θ shipped", "θ raw",
                 "pick"), rows)]
-    # the protocol changes after a val outcome (BASE-03 fixes)
+    # the protocol changes after a val outcome (the reference-check fixes)
     items = list(superseded)
     if items:
         prows, notes = [], []
@@ -847,17 +857,17 @@ def render_markdown(record, reference, final=None, superseded=()):
             change = "; ".join("%s: %s -> %s" % (k, _old_value(k, sc["canonical"]),
                                                  "%g" % d if isinstance(d, float) else d)
                                for k, d in sorted(s["delta"].items()))
-            g = s["gate"]
+            g = s["user_choice"]
             prows.append((s["train_run_id"], change, "%d of %d" % (sc["epoch"], rec["protocol"]["epochs"]),
                           _ref_f1(sref), "%s (resolution: %s)" % (sref["status"], sref["resolution"] or "none"),
-                          "%s, %s: `%s`" % (g["plan"], g["date"], g["reply"]), "%s/" % s["dir"]))
+                          "%s: `%s`" % (g["date"], g["reply"]), "%s/" % s["dir"]))
             notes.append("- %s: %s." % (s["train_run_id"], s["change"]))
         n_laya, n_bert = len(laya["lr_grid"]), len(items) + 1   # Laya: one selection run per encoder LR
-        out += ["", "**Protocol changes after a val outcome (BASE-03 fixes)** (each discarded run below scored under "
-                    "0.707 at val; the user chose the fix at its gate; the run is kept as disclosed history, never "
-                    "current)", "",
+        out += ["", "**Protocol changes after a val outcome (reference-check fixes)** (each discarded run below scored "
+                    "under 0.707 at val; the user chose the fix after that outcome; the run is kept as disclosed "
+                    "history, never current)", "",
                 md(("discarded train run", "changed by the fix (old -> new)", "chosen epoch", "val micro-F1 at the "
-                    "global θ", "status", "gate plan, date and reply", "history"), prows), ""]
+                    "global θ", "status", "user's choice: date and reply", "history"), prows), ""]
         out += notes
         more = n_bert - n_laya
         out.append("- BERTurk had %d more selection run%s than Laya: %d in all (the current %s and the %d discarded "
@@ -868,14 +878,15 @@ def render_markdown(record, reference, final=None, superseded=()):
         frows = []
         for e in final["seeds"]:
             frows.append(("%d" % e["seed"], e["train_run_id"], "%d" % len(e.get("epochs") or []), *_gib(e)))
-        out += ["", "**Final seeds** (%s, --epochs %d stopped after epoch %d, serving T %.4f; not scored before Phase 8)"
+        out += ["", "**Final seeds** (%s, --epochs %d stopped after epoch %d, serving T %.4f; not scored before the "
+                    "final scoring)"
                 % (final["final_split"], chosen["epochs_schedule"], epoch, chosen["temperature"]), "",
                 md(("seed", "train run id", "epochs trained", "final-epoch loss", "peak GiB", "largest swap delta MiB"),
                    frows)]
     return "\n".join(out) + "\n"
 
 
-def disk_need_bytes(model_bytes, epochs, export_epochs, final):
+def disk_need_bytes(model_bytes: int, epochs: int, export_epochs: bool, final: bool) -> int:
     """Bytes a run needs under --storage: one export per epoch, the final checkpoint and a 1 GiB margin (no Trainer
-    checkpoint, optimizer state or RNG pickle is ever written, A6)."""
+    checkpoint, optimizer state or RNG pickle is ever written: a run is never resumed)."""
     return (epochs * model_bytes if export_epochs else 0) + (model_bytes if final else 0) + 2**30

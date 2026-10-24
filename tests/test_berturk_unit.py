@@ -1,13 +1,16 @@
-"""Pure contracts of the BERTurk slice (Phase 6, BASE-01/02): the masked BCE (A7), labels and masks in INTENTS order,
-the label-order and casing refusals, the run identity and the checkpoint identity, and the torch-free pilot.berturk.
+"""Pure contracts of the BERTurk baseline: the masked BCE, labels and masks in INTENTS order, the label-order and
+casing refusals, the run identity, the optimizer groups, the checkpoint identity, and the torch-free pilot.berturk.
 
-Offline (unit): the loss tests use torch on CPU tensors only; nothing loads a model.
+Offline (unit): the loss tests use torch on CPU tensors only; only the Trainer-contract test loads the tiny offline
+BERT base (tests/tiny_berturk.py).
 """
 import json
 import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,9 +25,10 @@ pytestmark = pytest.mark.unit
 TAGS = list(INTENTS)
 
 
-# ---- masked BCE (A7) ----------------------------------------------------------------------------------------------
+# ---- masked BCE ---------------------------------------------------------------------------------------------------
 
-def _batch(n=4, seed=0, p=0.2):
+def _batch(n: int = 4, seed: int = 0, p: float = 0.2) -> tuple[Any, Any]:
+    """(logits, labels): seeded float32 CPU tensors [n, 48], each label 1.0 with probability p."""
     import torch
     g = torch.Generator().manual_seed(seed)
     logits = torch.randn(n, len(TAGS), generator=g, dtype=torch.float32)
@@ -32,11 +36,12 @@ def _batch(n=4, seed=0, p=0.2):
     return logits, labels
 
 
-def _loss(logits, labels, n=None):
+def _loss(logits: Any, labels: Any, n: Any = None) -> Any:
+    """berturk_train.masked_bce of logits and labels, num_items_in_batch n."""
     return berturk_train.masked_bce({"logits": logits}, labels, n)
 
 
-def test_masked_bce_equals_mean_bce_when_unmasked():
+def test_masked_bce_equals_mean_bce_when_unmasked() -> None:
     import torch
     logits, labels = _batch()
     want = torch.nn.BCEWithLogitsLoss()(logits, labels)
@@ -45,7 +50,7 @@ def test_masked_bce_equals_mean_bce_when_unmasked():
     assert abs(float(_loss(logits, labels, n)) - float(want)) < 1e-6
 
 
-def test_masked_tag_gets_zero_gradient():
+def test_masked_tag_gets_zero_gradient() -> None:
     logits, labels = _batch()
     labels[:, 3] = berturk.MASK_LABEL
     logits.requires_grad_(True)
@@ -54,7 +59,7 @@ def test_masked_tag_gets_zero_gradient():
     assert (logits.grad[:, [0, 1, 2, 4]] != 0).all()
 
 
-def test_all_masked_batch_is_finite_zero():
+def test_all_masked_batch_is_finite_zero() -> None:
     import torch
     logits, labels = _batch()
     labels[:] = berturk.MASK_LABEL
@@ -67,7 +72,7 @@ def test_all_masked_batch_is_finite_zero():
         assert (logits.grad == 0).all()
 
 
-def test_loss_divides_by_num_items_across_micro_batches():
+def test_loss_divides_by_num_items_across_micro_batches() -> None:
     """The Trainer's accumulation contract: sum / num_items over the window, so the micro-batch losses add up to the
     merged batch's loss (a per-batch mean would not)."""
     import torch
@@ -80,13 +85,13 @@ def test_loss_divides_by_num_items_across_micro_batches():
     assert abs(float(_loss(la, ya, n) + _loss(lb, yb, n)) - float(merged)) < 1e-6
 
 
-def test_loss_int_and_tensor_num_items_agree():
+def test_loss_int_and_tensor_num_items_agree() -> None:
     import torch
     logits, labels = _batch()
     assert float(_loss(logits, labels, 100)) == float(_loss(logits, labels, torch.tensor(100)))
 
 
-def test_loss_ignores_masked_logits_and_label_values():
+def test_loss_ignores_masked_logits_and_label_values() -> None:
     """A masked entry contributes nothing: changing its logit leaves the loss value unchanged."""
     logits, labels = _batch()
     labels[1, 7] = berturk.MASK_LABEL
@@ -95,9 +100,10 @@ def test_loss_ignores_masked_logits_and_label_values():
     assert float(_loss(logits, labels)) == before
 
 
-def test_loss_gets_the_trainers_unmasked_label_count(tmp_path):
-    """The transformers contract A7 rests on: with compute_loss_func set, the Trainer pops the labels and passes
-    num_items_in_batch = the count of labels != -100 over the whole accumulation window (2 micro-batches here)."""
+def test_loss_gets_the_trainers_unmasked_label_count(tmp_path: Path) -> None:
+    """The transformers contract the masked BCE rests on: with compute_loss_func set, the Trainer pops the labels and
+    passes num_items_in_batch = the count of labels != -100 over the whole accumulation window (2 micro-batches here).
+    """
     import torch
     import transformers
     from tiny_berturk import tiny_base
@@ -111,7 +117,8 @@ def test_loss_gets_the_trainers_unmasked_label_count(tmp_path):
     want = sum(sum(v != berturk.MASK_LABEL for v in r["labels"]) for r in rows)
     seen = []
 
-    def loss_fn(outputs, labels, num_items_in_batch=None):
+    def loss_fn(outputs: Any, labels: Any, num_items_in_batch: Any = None) -> Any:
+        """masked_bce, recording the Trainer's num_items_in_batch."""
         seen.append(int(num_items_in_batch))
         return berturk_train.masked_bce(outputs, labels, num_items_in_batch)
 
@@ -131,7 +138,7 @@ def test_loss_gets_the_trainers_unmasked_label_count(tmp_path):
     assert seen == [want, want]                               # one count for the window, both micro-batches
 
 
-def test_masked_bce_refuses_non_fp32_logits():
+def test_masked_bce_refuses_non_fp32_logits() -> None:
     import torch
     logits, labels = _batch()
     for dtype in (torch.float16, torch.bfloat16):
@@ -141,11 +148,12 @@ def test_masked_bce_refuses_non_fp32_logits():
 
 # ---- labels and masks ---------------------------------------------------------------------------------------------
 
-def _row(pos=("card", "lost_stolen"), uid="bank_0_0"):
+def _row(pos: tuple[str, ...] = ("card", "lost_stolen"), uid: str = "bank_0_0") -> dict[str, Any]:
+    """A training row labelling all 48 tags, positive exactly on `pos`."""
     return {"uid": uid, "expected": {t: t in pos for t in TAGS}}
 
 
-def test_label_vector_follows_intents_order():
+def test_label_vector_follows_intents_order() -> None:
     vec = berturk.label_vector(_row())
     assert len(vec) == len(TAGS)
     assert [t for t, v in zip(TAGS, vec) if v == 1.0] == [t for t in TAGS if t in ("card", "lost_stolen")]
@@ -157,7 +165,7 @@ def test_label_vector_follows_intents_order():
     assert berturk.label2id() == {t: i for i, t in enumerate(TAGS)}
 
 
-def test_label_vector_refuses_a_missing_tag():
+def test_label_vector_refuses_a_missing_tag() -> None:
     row = _row(uid="bank_7_3")
     del row["expected"]["pin"]
     with pytest.raises(SystemExit, match="bank_7_3.*pin"):
@@ -165,7 +173,7 @@ def test_label_vector_refuses_a_missing_tag():
     assert berturk.label_vector(row, ("pin",))[TAGS.index("pin")] == berturk.MASK_LABEL   # masked: never read
 
 
-def test_mask_tags_are_validated():
+def test_mask_tags_are_validated() -> None:
     assert berturk.check_mask_tags(["pin", "card"]) == ("card", "pin")
     assert berturk.check_mask_tags([]) == ()
     with pytest.raises(SystemExit, match="unknown.*not_a_tag"):
@@ -174,12 +182,13 @@ def test_mask_tags_are_validated():
         berturk.check_mask_tags(["card", "pin", "card"])
 
 
-def _cfg():
+def _cfg() -> dict[str, Any]:
+    """The label part of the config.json berturk_train.py writes."""
     return {"id2label": {str(i): t for i, t in enumerate(TAGS)}, "label2id": {t: i for i, t in enumerate(TAGS)},
             "problem_type": berturk.PROBLEM_TYPE}
 
 
-def test_label_order_refuses_a_permutation():
+def test_label_order_refuses_a_permutation() -> None:
     berturk.check_label_order(_cfg(), "ok")                  # the config berturk_train.py writes
     swapped = _cfg()
     swapped["id2label"]["0"], swapped["id2label"]["1"] = TAGS[1], TAGS[0]
@@ -191,7 +200,7 @@ def test_label_order_refuses_a_permutation():
             berturk.check_label_order(bad, "ckpt")
 
 
-def test_check_cased_refuses_a_lowercasing_tokenizer():
+def test_check_cased_refuses_a_lowercasing_tokenizer() -> None:
     berturk.check_cased({"do_lower_case": False, "max_len": 512, "init_inputs": []}, "pinned")
     for bad in ({"do_lower_case": True}, {}, {"do_lower_case": 0}, []):
         with pytest.raises(SystemExit, match="do_lower_case"):
@@ -200,7 +209,8 @@ def test_check_cased_refuses_a_lowercasing_tokenizer():
 
 # ---- run identity -------------------------------------------------------------------------------------------------
 
-def _values(**over):
+def _values(**over: Any) -> dict[str, Any]:
+    """Every pilot.berturk.IDENTITY value of a 10-epoch selection run (digests are placeholders), `over` applied."""
     v = {"split": "selection_train", "data_sha256": "a" * 64, "data_role": "train", "base_model_sha256": "b" * 64,
          "base_config_sha256": "c" * 64, "base_files_sha256": None, "transformers_version": "5.19.0",
          "accelerate_version": "1.15.0", "device": "mps", "epochs": 10, "batch": 32, "encoder_lr": 2e-05,
@@ -211,7 +221,7 @@ def _values(**over):
     return v
 
 
-def test_identity_classifies_every_flag():
+def test_identity_classifies_every_flag() -> None:
     dests = [act.dest for act in berturk_train.parser()._actions if act.dest != "help"]
     for d in dests:
         homes = [d in berturk.IDENTITY, d in berturk.NOT_IDENTITY, d in berturk.RESOLVED]
@@ -221,9 +231,9 @@ def test_identity_classifies_every_flag():
     assert not set(berturk.NOT_IDENTITY) & set(berturk.IDENTITY)
 
 
-def test_identity_resolves_lr_to_the_encoder_only():
-    """The BASE-03 fix: --lr is the encoder LR only; the head LR is its own flag and IDENTITY key, so two runs that
-    differ only in it never share a run dir."""
+def test_identity_resolves_lr_to_the_encoder_only() -> None:
+    """The first reference-check fix: --lr is the encoder LR only; the head LR is its own flag and IDENTITY key, so two
+    runs that differ only in it never share a run dir."""
     assert berturk.RESOLVED == {"lr": ("encoder_lr",)}
     dests = {act.dest: act for act in berturk_train.parser()._actions}
     assert "head_lr" in dests and "head_lr" in berturk.IDENTITY and dests["head_lr"].default == berturk.HEAD_LR
@@ -232,7 +242,7 @@ def test_identity_resolves_lr_to_the_encoder_only():
     assert len(ids) == 2
 
 
-def _superseded_canonical(entry):
+def _superseded_canonical(entry: dict[str, Any]) -> dict[str, Any]:
     """The chosen canonical config of a SUPERSEDED entry's committed postfit record."""
     with open(os.path.join(REPO_ROOT, entry["record"]), encoding="utf-8") as f:
         return json.load(f)["chosen"]["canonical"]
@@ -242,7 +252,7 @@ RECIPE_KEYS = ("encoder_lr", "batch", "max_len", "weight_decay", "warmup_ratio",
                "optim", "loss", "seed")
 
 
-def _recipe():
+def _recipe() -> dict[str, Any]:
     """The current recipe constants other than the epoch grid and the head LR, keyed like the canonical config."""
     return {"encoder_lr": berturk.LR, "batch": berturk.BATCH, "max_len": berturk.MAX_LEN,
             "weight_decay": berturk.WEIGHT_DECAY, "warmup_ratio": berturk.WARMUP_RATIO,
@@ -250,8 +260,8 @@ def _recipe():
             "loss": berturk.LOSS, "seed": 0}
 
 
-def test_head_lr_is_the_only_change_from_the_superseded_run():
-    """RP-3 (plan 06-14): the head-LR run's canonical config is the tied run's with its recorded delta (head_lr
+def test_head_lr_is_the_only_change_from_the_superseded_run() -> None:
+    """The head-LR run's canonical config is the tied run's with its recorded delta (head_lr
     HEAD_LR), nothing else; the tied run's recipe is compared with its own protocol literals (epochs 10), never with
     the current EPOCHS."""
     tied, head = berturk.SUPERSEDED[0], berturk.SUPERSEDED[1]
@@ -270,10 +280,10 @@ def test_head_lr_is_the_only_change_from_the_superseded_run():
     assert berturk.PROTOCOL["final_seeds"] == (0, 1, 2) and berturk.PROTOCOL["lr_grid"] == (berturk.LR,)
 
 
-def test_epochs_is_the_only_change_from_the_head_lr_run():
-    """R2-3 (plan 06-18, the second BASE-03 fix): the 30-epoch selection command's canonical config is the head-LR
-    run's (SUPERSEDED[-1]) with its recorded delta, epochs EPOCHS = 30, and nothing else, so its run id is known offline
-    (checked again when plan 06-19 trains it); every other recipe constant equals the head-LR run's canonical value."""
+def test_epochs_is_the_only_change_from_the_head_lr_run() -> None:
+    """The second reference-check fix: the 30-epoch selection command's canonical config is the head-LR run's
+    (SUPERSEDED[-1]) with its recorded delta, epochs EPOCHS = 30, and nothing else, so its run id is known offline (the
+    committed selection run carries it); every other recipe constant equals the head-LR run's canonical value."""
     last = berturk.SUPERSEDED[-1]
     old = _superseded_canonical(last)
     assert berturk.run_id(old) == last["train_run_id"] == "berturk-selection_train-s0-8c033154"
@@ -290,7 +300,7 @@ def test_epochs_is_the_only_change_from_the_head_lr_run():
     assert dests["epochs"].default == berturk.EPOCHS
 
 
-def test_identity_canonical_refuses_missing_and_unexpected_keys():
+def test_identity_canonical_refuses_missing_and_unexpected_keys() -> None:
     v = _values()
     del v["seed"]
     with pytest.raises(ValueError, match="missing seed"):
@@ -303,7 +313,7 @@ def test_identity_canonical_refuses_missing_and_unexpected_keys():
     assert canon["epochs"] == 10 and canon["seed"] == 0       # never dropped
 
 
-def test_identity_run_id_is_order_independent():
+def test_identity_run_id_is_order_independent() -> None:
     canon = berturk.canonical(_values())
     rid = berturk.run_id(canon)
     assert rid == berturk.run_id(dict(reversed(list(canon.items()))))
@@ -312,14 +322,14 @@ def test_identity_run_id_is_order_independent():
     assert berturk.run_id(berturk.canonical(_values(mask_tags=["card"]))) != rid
 
 
-def test_identity_seeds_never_share_a_run_dir():
+def test_identity_seeds_never_share_a_run_dir() -> None:
     ids = [berturk.run_id(berturk.canonical(_values(seed=s))) for s in (0, 1, 2)]
     assert len(set(ids)) == 3
     assert [i.split("-")[2] for i in ids] == ["s0", "s1", "s2"]
 
 
-def test_identity_fewshot_key_is_dropped_when_none():
-    """Phase 9 (09-03, T-09-12): fewshot is an IDENTITY key left out when None, and the three few-shot flags are
+def test_identity_fewshot_key_is_dropped_when_none() -> None:
+    """fewshot is an IDENTITY key left out when None, and the three few-shot flags are
     NOT_IDENTITY (represented by fewshot and mask_tags); a bound base and a continued binding each get their own id."""
     assert "fewshot" in berturk.IDENTITY and "fewshot" in berturk.DROPPED_WHEN_NONE
     assert {"fewshot_base", "fewshot_draw", "fewshot_k"} <= set(berturk.NOT_IDENTITY)
@@ -331,8 +341,8 @@ def test_identity_fewshot_key_is_dropped_when_none():
     assert len({berturk.run_id(c) for c in (plain, base, cont)}) == 3
 
 
-def test_identity_committed_final_seed_run_ids_are_unchanged():
-    """T-09-12: the three committed BERTurk final seeds' train run ids recompute from the committed postfit record and
+def test_identity_committed_final_seed_run_ids_are_unchanged() -> None:
+    """The three committed BERTurk final seeds' train run ids recompute from the committed postfit record and
     data/splits.json with every DROPPED_WHEN_NONE key (fewshot included) given as None; the selection run's id is
     test_epochs_is_the_only_change_from_the_head_lr_run's (berturk-selection_train-s0-4f36ae05)."""
     with open(os.path.join(REPO_ROOT, "results", "postfit", "berturk-final.json"), encoding="utf-8") as f:
@@ -361,8 +371,8 @@ OG_NAMES = ["bert.embeddings.word_embeddings.weight", "bert.embeddings.LayerNorm
 OG_DECAY = [n for n in OG_NAMES if n.endswith(".weight") and "LayerNorm" not in n]
 
 
-def test_optimizer_groups_continued_mode_trains_the_loaded_head():
-    """FEW-02, D-06 (T-09-10): continued=True takes the classifier.* names as the head of a masked base, loaded, so
+def test_optimizer_groups_continued_mode_trains_the_loaded_head() -> None:
+    """continued=True (a continued few-shot run) takes the classifier.* names as the head of a masked base, loaded, so
     nothing may be newly initialised; the same four groups, the head at the head LR."""
     groups = berturk.optimizer_groups(OG_NAMES, OG_DECAY, [], 2e-05, 1e-4, 0.01, continued=True)
     assert [(g["group"], g["decay"], g["lr"], g["weight_decay"]) for g in groups] == [
@@ -377,9 +387,9 @@ def test_optimizer_groups_continued_mode_trains_the_loaded_head():
         berturk.optimizer_groups(OG_NAMES[:4], OG_DECAY, [], 2e-05, 1e-4, 0.01, continued=True)
 
 
-def test_optimizer_groups_default_mode_still_needs_a_fresh_head():
-    """continued=False (every non-few-shot run) keeps the BASE-03 rule: the head is exactly the newly initialised
-    names, so a loaded head (nothing newly initialised) is refused."""
+def test_optimizer_groups_default_mode_still_needs_a_fresh_head() -> None:
+    """continued=False (every non-few-shot run) keeps the first reference-check fix's rule: the head is exactly the
+    newly initialised names, so a loaded head (nothing newly initialised) is refused."""
     fresh = ["classifier.bias", "classifier.weight"]
     assert berturk.optimizer_groups(OG_NAMES, OG_DECAY, fresh, 2e-05, 1e-4, 0.01) \
         == berturk.optimizer_groups(OG_NAMES, OG_DECAY, [], 2e-05, 1e-4, 0.01, continued=True)
@@ -388,7 +398,8 @@ def test_optimizer_groups_default_mode_still_needs_a_fresh_head():
             berturk.optimizer_groups(OG_NAMES, OG_DECAY, new, 2e-05, 1e-4, 0.01)
 
 
-def _checkpoint(d):
+def _checkpoint(d: str) -> str:
+    """A fake BERTurk checkpoint dir holding every CHECKPOINT_FILES entry with placeholder bytes; returns d."""
     os.makedirs(d, exist_ok=True)
     for name in berturk.CHECKPOINT_FILES:
         with open(os.path.join(d, name), "wb") as f:
@@ -396,7 +407,7 @@ def _checkpoint(d):
     return d
 
 
-def test_identity_dump_run_id_binds_every_file(tmp_path):
+def test_identity_dump_run_id_binds_every_file(tmp_path: Path) -> None:
     d = _checkpoint(str(tmp_path / "ckpt"))
     berturk.require_files(d, "ckpt")
     ident = berturk.identity(d)
@@ -419,7 +430,8 @@ def test_identity_dump_run_id_binds_every_file(tmp_path):
         berturk.require_files(d, "ckpt")
 
 
-def _record(**over):
+def _record(**over: Any) -> dict[str, Any]:
+    """A berturk_train.json record of a 2-epoch run at epoch 1, `over` applied."""
     canon = berturk.canonical(_values(epochs=2))
     rec = {"schema": berturk.RECORD_SCHEMA, "run_id": berturk.run_id(canon), "canonical": canon, "epoch": 1,
            "epochs_schedule": 2, "stop_after_epoch": None, "calibrated": False, "temperature": 1.0, "postfit": None,
@@ -428,7 +440,7 @@ def _record(**over):
     return rec
 
 
-def test_identity_record_changed_after_hash_is_refused(tmp_path):
+def test_identity_record_changed_after_hash_is_refused(tmp_path: Path) -> None:
     d = _checkpoint(str(tmp_path / "ckpt"))
     path = os.path.join(d, berturk.RECORD)
     with open(path, "wb") as f:
@@ -456,8 +468,8 @@ def test_identity_record_changed_after_hash_is_refused(tmp_path):
     ({"canonical": {"seed": 0, "max_len": 0}}, "max_len 0"),
     ({"canonical": {"seed": 0, "max_len": 128.0}}, "max_len 128.0"),
 ])
-def test_read_record_refuses_values_the_scorer_cannot_use(tmp_path, over, match):
-    """06-REVIEW IN-03: a refusal, not a KeyError or TypeError, before the scorer reads max_len and the temperature."""
+def test_read_record_refuses_values_the_scorer_cannot_use(tmp_path: Path, over: dict[str, Any], match: str) -> None:
+    """A refusal, not a KeyError or TypeError, before the scorer reads max_len and the temperature."""
     d = _checkpoint(str(tmp_path / "ckpt"))
     with open(os.path.join(d, berturk.RECORD), "wb") as f:
         f.write(berturk.record_bytes(_record(**over)))
@@ -465,7 +477,7 @@ def test_read_record_refuses_values_the_scorer_cannot_use(tmp_path, over, match)
         berturk.read_record(d, berturk.identity(d))
 
 
-def test_identity_training_block_has_the_laya_keys(tmp_path):
+def test_identity_training_block_has_the_laya_keys(tmp_path: Path) -> None:
     """The sidecar training block of a BERTurk dump has exactly the keys score.training_block writes for Laya, the
     ones pilot.postfit.candidate reads."""
     laya = tmp_path / "laya"
@@ -482,7 +494,7 @@ def test_identity_training_block_has_the_laya_keys(tmp_path):
     assert tr["config_sha256_sans_seed"] == dumps.training_digest(tr["canonical"], 1)
 
 
-def test_berturk_module_is_torch_free():
+def test_berturk_module_is_torch_free() -> None:
     code = ("import sys, pilot.berturk, berturk_train; "
             "print(sorted(m for m in ('torch', 'transformers', 'accelerate', 'ray', 'laya') if m in sys.modules))")
     out = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, check=True)

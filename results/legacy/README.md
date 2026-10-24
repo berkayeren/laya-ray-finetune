@@ -7,8 +7,8 @@ These two reports predate the frozen splits in `data/splits.json`. They follow t
 - metrics were computed at the fixed thresholds 0.3/0.5/0.7/0.9, and values were rounded during aggregation,
   not only for display.
 
-They are kept for provenance only. They are **not comparable** to the full-test reports under `results/reports/`
-(Phase 3 onward), which score every message of the frozen test split (no-intent rows included), take the majority
+They are kept for provenance only. They are **not comparable** to the full-test reports under `results/reports/` (from
+the baselines onward), which score every message of the frozen test split (no-intent rows included), take the majority
 tag and label prior from the matching training split, and are recomputed from committed logit dumps under
 `results/dumps/`.
 

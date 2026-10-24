@@ -10,6 +10,7 @@ usage: from tiny_berturk import tiny_base; base_dir = tiny_base(tmp_path / "base
 """
 import json
 import os
+from pathlib import Path
 
 SPECIALS = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"]          # ids 0-4, BERT's default special tokens
 WORDS = ["Kartım", "Kartımı", "kayboldu", "Oda", "ayırtmak", "istiyorum", "Evet", "evet", "İptal", "iptal", "etmek",
@@ -18,11 +19,12 @@ WORDS = ["Kartım", "Kartımı", "kayboldu", "Oda", "ayırtmak", "istiyorum", "E
 PUNCT = [".", ",", "?", "!", "'"]
 
 
-def vocab():
+def vocab() -> list[str]:
+    """The tiny WordPiece vocabulary in id order: the specials, the words, the digits 0-19, the punctuation."""
     return SPECIALS + WORDS + [str(i) for i in range(20)] + PUNCT
 
 
-def tiny_base(path, seed=0):
+def tiny_base(path: str | Path, seed: int = 0) -> str:
     """Write a tiny cased BERT base dir at `path`; returns str(path)."""
     import torch
     import transformers
