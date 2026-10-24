@@ -13,6 +13,7 @@
 #   make confidence-reports  rebuild the Phase 7 val confidence records from the committed dumps and postfit records (no model)
 #   make final-scoring  score the six final seeds once on test and HOTELS behind the protocol gate (model, about 35 min on the M4; never rerun: the gate refuses an existing dump)
 #   make final-reports  rebuild results/final/ (per-seed reports, verdict, confidence records) from the committed dumps (no model)
+#   make fewshot-scoring  score every few-shot checkpoint of results/fewshot/runs.json once (bases on val and test, continued models on test) behind the protocol gate (model, about 30 min on the M4; never rerun: the gate refuses an existing dump)
 #   make fewshot-reports  rebuild results/fewshot/fewshot.json from the committed few-shot dumps (no model)
 PYTHON ?= python
 UV ?= uv
@@ -33,8 +34,9 @@ LAYA_FINAL := laya-a6a866dd69fc-88cfaa80-cc216d59 laya-f43484c8aab4-b43eaa54-cc2
 BERTURK_FINAL := berturk-c500b06ccf34-f37197ee-29446b61 berturk-1f0bb00cd6f7-a14835e4-29446b61 berturk-06685feeb69f-faf017a7-29446b61
 FINAL := results/final
 FEWSHOT := results/fewshot
+FEWSHOT_ROOT ?= .
 
-.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports fewshot-reports
+.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports fewshot-scoring fewshot-reports
 
 env:
 	$(PY312) -m venv $(VENV)
@@ -138,6 +140,32 @@ final-reports:
 	$(PYTHON) report.py --confidence results/dumps/$(LAYA_ZS) --split test --out $(FINAL)/confidence/$(LAYA_ZS)-test.json > /dev/null
 	$(PYTHON) report.py --confidence results/dumps/$(LAYA_ZS) --split hotels_probe --out $(FINAL)/confidence/$(LAYA_ZS)-hotels_probe.json > /dev/null
 	$(PYTHON) report.py --confidence results/dumps/prior --split test --out $(FINAL)/confidence/prior-test.json > /dev/null
+
+fewshot-scoring:
+	$(PYTHON) score.py data/splits/val.jsonl --model berturk --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-berturk-base-s0 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model berturk --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-berturk-base-s0 --device mps --workers 0
+	$(PYTHON) score.py data/splits/val.jsonl --model berturk --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-berturk-base-s1 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model berturk --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-berturk-base-s1 --device mps --workers 0
+	$(PYTHON) score.py data/splits/val.jsonl --model berturk --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-berturk-base-s2 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model berturk --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-berturk-base-s2 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model berturk --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-berturk-d0-k5 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model berturk --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-berturk-d0-k10 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model berturk --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-berturk-d1-k5 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model berturk --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-berturk-d1-k10 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model berturk --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-berturk-d2-k5 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model berturk --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-berturk-d2-k10 --device mps --workers 0
+	$(PYTHON) score.py data/splits/val.jsonl --model laya --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-laya-base-s0 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model laya --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-laya-base-s0 --device mps --workers 0
+	$(PYTHON) score.py data/splits/val.jsonl --model laya --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-laya-base-s1 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model laya --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-laya-base-s1 --device mps --workers 0
+	$(PYTHON) score.py data/splits/val.jsonl --model laya --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-laya-base-s2 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model laya --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-laya-base-s2 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model laya --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-laya-d0-k5 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model laya --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-laya-d0-k10 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model laya --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-laya-d1-k5 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model laya --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-laya-d1-k10 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model laya --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-laya-d2-k5 --device mps --workers 0
+	$(PYTHON) score.py data/splits/test.jsonl --model laya --checkpoint $(FEWSHOT_ROOT)/ckpt-fewshot-laya-d2-k10 --device mps --workers 0
 
 fewshot-reports:
 	$(PYTHON) fewshot.py --report --out $(FEWSHOT)/fewshot.json

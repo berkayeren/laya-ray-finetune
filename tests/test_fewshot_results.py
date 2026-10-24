@@ -19,10 +19,22 @@ runs manifest, the few-shot result record and the README block.
   projection and an empty text, and rewrites a primary record of this protocol into the fallback record naming the
   failure, everything else unchanged.
 - data-marked: `fewshot.py --projection` rebuilds the record byte for byte from the committed data.
+
+09-11 (D-04, D-05, D-09, D-11, FEW-01, FEW-02):
+- results/fewshot/runs.json (fewshot-runs/1) is tracked and pilot.fewshot.read_runs accepts it under the frozen pin and
+  the recorded D-08 mode; per kind it lists one masked base per allowed base seed and one continued run per frozen
+  (draw, k) (pilot.fewshot.slots), every base proof reads 0 for each held-out tag (Laya held_out_items, BERTurk
+  unmasked_held_out_labels), every continued proof counts exactly its frozen support rows per tag and the frozen
+  replay size (BERTurk replay_unmasked_held_out_labels 0); its bytes hold no bank_ or hotel_ uid and no local path.
+- `make fewshot-scoring` is exactly the command list derived from the committed runs.json: in entry order, per base
+  its val line (ungated) then its test line (gated), per continued run its test line, each `score.py ... --model
+  <kind> --checkpoint $(FEWSHOT_ROOT)/<checkpoint_name> --device mps --workers 0`; no line holds --force, --n or
+  --out-root; the header line, `FEWSHOT_ROOT ?= .` and the .PHONY entry exist.
 Offline except the `data` tests.
 """
 import json
 import os
+import re
 import subprocess
 
 import pytest
@@ -277,3 +289,118 @@ def test_projection_cli_refuses_misplaced_flags(argv, match, capsys):
     with pytest.raises(SystemExit):
         runner.main(argv)
     assert match in capsys.readouterr().err
+
+
+# ---- 09-11: the runs manifest and the once-only scoring target (D-04, D-05, D-09, D-11) ----
+
+RUNS = os.path.join(REPO_ROOT, "results", "fewshot", "runs.json")
+
+
+def git(*args):
+    """stdout of a git command in the repo, captured before any parsing."""
+    out = subprocess.run(["git", *args], cwd=REPO_ROOT, check=True, capture_output=True, text=True, encoding="utf-8")
+    return out.stdout
+
+
+def committed_runs():
+    """(runs manifest, its sha256, its bytes) read through pilot.fewshot.read_runs under the frozen pin."""
+    proto, pin = frozen()
+    runs, sha = fs.read_runs(proto, pin, RUNS)
+    assert runs is not None, "results/fewshot/runs.json does not exist"
+    return runs, sha, read_bytes(RUNS)
+
+
+def test_runs_manifest_is_committed_and_valid():
+    out = git("ls-files", "--", "results/fewshot/runs.json")
+    assert out.strip() == "results/fewshot/runs.json", "results/fewshot/runs.json is not tracked"
+    proto, pin = frozen()
+    block = proto["fewshot"]
+    mode = fs.read_mode(pin)
+    runs, sha, raw = committed_runs()
+    assert sha == sha256_bytes(raw)
+    assert runs["schema"] == fs.RUNS_SCHEMA == "fewshot-runs/1"
+    assert runs["protocol_sha256"] == pin == pr.PROTOCOL_SHA256 and runs["mode"] == mode
+    entries = runs["entries"]
+    have = [(e["kind"], e["stage"], e["seed"], e["draw"], e["k"]) for e in entries]
+    assert have == fs.slots(block, mode), have
+    n_bases = len(fs.allowed_base_seeds(block, mode))
+    n_cont = len(block["draws"]) * len(block["k_values"])
+    for kind in fs.KINDS:
+        assert sum(e["kind"] == kind and e["stage"] == "base" for e in entries) == n_bases, kind
+        assert sum(e["kind"] == kind and e["stage"] == "continued" for e in entries) == n_cont, kind
+    if mode == "primary":
+        assert (n_bases, n_cont, len(entries)) == (3, 6, 18)
+    tags = sorted(block["tags"])
+    assert runs["tags"] == tags and len(tags) == 6
+    for e in entries:
+        proof, name = e["proof"], e["checkpoint_name"]
+        assert name == ("ckpt-fewshot-%s-base-s%d" % (e["kind"], e["seed"]) if e["stage"] == "base" else
+                        "ckpt-fewshot-%s-d%d-k%d" % (e["kind"], e["draw"], e["k"])), name
+        if e["stage"] == "base":
+            key = "held_out_items" if e["kind"] == "laya" else "unmasked_held_out_labels"
+            assert sorted(proof) == [key], (name, sorted(proof))
+            assert proof[key] == {t: 0 for t in tags}, (name, proof[key])
+            continue
+        sel = fs.selection(block, e["draw"], e["k"])
+        n = len(sel["support"])
+        assert proof["support_rows"] == n and proof["replay_rows"] == len(sel["replay"]), name
+        key = "new_tag_items" if e["kind"] == "laya" else "new_tag_labels"
+        assert proof[key] == {t: n for t in tags}, (name, proof[key])
+        if e["kind"] == "berturk":
+            assert proof["replay_unmasked_held_out_labels"] == 0, name
+        assert e["base_seed"] == fs.base_seed_of(block, e["draw"], mode), name
+    for kind in fs.KINDS:                           # both models train on the same rows per (draw, k)
+        rows = {(e["draw"], e["k"]): (e["proof"]["support_rows"], e["proof"]["replay_rows"])
+                for e in entries if e["kind"] == kind and e["stage"] == "continued"}
+        assert rows == {(e["draw"], e["k"]): (e["proof"]["support_rows"], e["proof"]["replay_rows"])
+                        for e in entries if e["kind"] == fs.KINDS[0] and e["stage"] == "continued"}
+    text = raw.decode("utf-8")
+    assert "bank_" not in text and "hotel_" not in text
+    assert os.path.expanduser("~") not in text and REPO_ROOT not in text
+    assert raw.endswith(b"\n") and raw == (json.dumps(runs, ensure_ascii=False, indent=2, sort_keys=True)
+                                          + "\n").encode("utf-8")
+
+
+def makefile():
+    with open(os.path.join(REPO_ROOT, "Makefile"), encoding="utf-8") as f:
+        return f.read()
+
+
+def fewshot_scoring_recipe(text):
+    """The recipe lines (tab stripped) of the fewshot-scoring target."""
+    m = re.search(r"^fewshot-scoring:\n((?:\t.*\n)+)", text, re.M)
+    assert m, "Makefile has no fewshot-scoring target"
+    return [line[1:] for line in m.group(1).splitlines()]
+
+
+def expected_fewshot_lines(runs):
+    """Per entry in runs.json order: a base's val line then its test line, a continued run's test line."""
+    out = []
+    for e in runs["entries"]:
+        for split in (("val", "test") if e["stage"] == "base" else ("test",)):
+            out.append("$(PYTHON) score.py data/splits/%s.jsonl --model %s --checkpoint $(FEWSHOT_ROOT)/%s "
+                       "--device mps --workers 0" % (split, e["kind"], e["checkpoint_name"]))
+    return out
+
+
+def test_makefile_fewshot_scoring_matches_runs():
+    proto, _ = frozen()
+    assert proto["scoring"]["device"] == "mps" and proto["scoring"]["workers"] == 0
+    runs, _, _ = committed_runs()
+    text = makefile()
+    phony = re.search(r"^\.PHONY: (.+)$", text, re.M)
+    assert phony and "fewshot-scoring" in phony.group(1).split(), "fewshot-scoring is not in .PHONY"
+    assert re.search(r"^FEWSHOT_ROOT \?= \.$", text, re.M), "Makefile has no `FEWSHOT_ROOT ?= .` line"
+    assert re.search(r"^#   make fewshot-scoring  score every few-shot checkpoint of results/fewshot/runs.json once ",
+                     text, re.M), "Makefile header has no fewshot-scoring line"
+    lines = fewshot_scoring_recipe(text)
+    want = expected_fewshot_lines(runs)
+    assert lines == want, lines
+    n_bases = sum(e["stage"] == "base" for e in runs["entries"])
+    assert len(lines) == len(runs["entries"]) + n_bases
+    if runs["mode"] == "primary":
+        assert len(lines) == 24
+    for line in lines:
+        words = line.split()
+        assert "--force" not in words and "--n" not in words and "--out-root" not in words, line
+        assert "hotels_probe" not in line, line
