@@ -2,13 +2,15 @@
 
 The run record must say the parameters landed on mps, list the spike's worker env (strict fallback 0, HIGH and LOW
 watermarks 1.0) as KEY=VALUE strings, record checkpointing on, AMP off and AdamW's single-tensor loop, and hold live
-MPS memory readings (LAYA-02, LAYA-03, LAYA-06). The output must load through the public laya.load.
+MPS memory readings. The output must load through the public laya.load. A run killed after epoch 1 resumes on mps.
 
 Needs Apple MPS, so it is excluded from `make test`: run `pytest -m mps tests/test_train_mps.py`.
 """
 import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,7 +25,8 @@ REPO = pilot.data.REPO_ROOT
 TIMEOUT = 600
 
 
-def _run(*args):
+def _run(*args: Any) -> subprocess.CompletedProcess:
+    """Run a repo script with the test interpreter (no PYTHONPATH); assert it succeeds."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable] + [str(x) for x in args], cwd=REPO, env=env, capture_output=True, text=True,
                        timeout=TIMEOUT)
@@ -32,7 +35,7 @@ def _run(*args):
 
 
 @pytest.mark.timeout(600)
-def test_mps_record(tmp_path):
+def test_mps_record(tmp_path: Path) -> None:
     root, raw_sha256 = make_raw(str(tmp_path / "raw"))
     out_dir = str(tmp_path / "data")
     pilot.data.prepare(root, out_dir, raw_sha256)
@@ -61,7 +64,8 @@ def test_mps_record(tmp_path):
     assert agent is not None
 
 
-def _run_fail(*args):
+def _run_fail(*args: Any) -> subprocess.CompletedProcess:
+    """Run a repo script like _run; assert it fails."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable] + [str(x) for x in args], cwd=REPO, env=env, capture_output=True, text=True,
                        timeout=TIMEOUT)
@@ -70,9 +74,9 @@ def _run_fail(*args):
 
 
 @pytest.mark.timeout(600)
-def test_resume_on_mps(tmp_path):
+def test_resume_on_mps(tmp_path: Path) -> None:
     """Killed after epoch 1 and rerun: the MPS run resumes at epoch 2 (MPS is not bitwise deterministic, so only the
-    resume mechanics are checked, RESEARCH Pitfall 3)."""
+    resume mechanics are checked)."""
     import math
     root, raw_sha256 = make_raw(str(tmp_path / "raw"))
     out_dir = str(tmp_path / "data")

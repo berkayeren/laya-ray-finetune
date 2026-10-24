@@ -1,49 +1,45 @@
 """Distributed fine-tuning of a Laya checkpoint with Ray Train (PyTorch DDP).
 
-`laya.train.finetune` / `laya-train` run on one device. This script keeps Laya's
-own building blocks -- item encoding, RLCD / soft-CE loss and the checkpoint
-layout `laya.load` reads, all reached through
-pilot/laya_adapter.py (the only private-API module, pinned to one laya version)
--- and runs the training loop under Ray's TorchTrainer, so it scales from 1 CPU worker to N GPUs on one
-node with only --workers / --device changed. It is single-node: workers read the
-base weights and the split from driver-local paths, so it refuses a multi-node
-Ray cluster.
+`laya.train.finetune` / `laya-train` run on one device. This script keeps Laya's own building blocks -- item
+encoding, RLCD / soft-CE loss and the checkpoint layout `laya.load` reads, all reached through pilot/laya_adapter.py
+(the only private-API module, pinned to one laya version) -- and runs the training loop under Ray's TorchTrainer, so
+it scales from 1 CPU worker to N GPUs on one node with only --workers / --device changed. It is single-node: workers
+read the base weights and the split from driver-local paths, so it refuses a multi-node Ray cluster.
 
 Per worker:  load base -> build items -> shard by rank -> DDP train
 Rank 0:      save the final, uncalibrated checkpoint (T = 1) and report it to Ray; postfit.py fits the temperature
-             on message-level val data after training (LAYA-05). A --postfit final seed serves that val-fitted T.
+             on message-level val data after training. A --postfit final seed serves that val-fitted T.
 
 Devices (--device cpu|cuda|mps, default cpu; --gpu is an alias for --device cuda): cpu and cuda take the device from
 Ray (use_gpu on cuda, DDP across --workers). Ray has no MPS device manager, so --device mps runs one Ray worker with
-use_gpu False on an explicit torch.device("mps"), with the Phase 2 spike's worker env (strict fallback 0, HIGH and LOW
-MPS watermarks 1.0) passed through ray.init(runtime_env) and checked in the worker. On every device the worker
+use_gpu False on an explicit torch.device("mps"), with the MPS feasibility spike's worker env (strict fallback 0, HIGH
+and LOW MPS watermarks 1.0) passed through ray.init(runtime_env) and checked in the worker. On every device the worker
 refuses to train unless every model parameter landed on the requested device (no silent CPU run). Gradient
 checkpointing (encoder and head) is on for every full-encoder run (--no-grad-checkpointing turns it off); AMP is a
 separate --amp choice, on by default only on cuda.
 
-Run record (LAYA-06): the checkpoint config holds training.ray_train.record: device, parameter device, torch threads,
-worker env, precision and checkpointing choices, load and final-save seconds (calib_s is None: training no longer
-calibrates, LAYA-05), and one row per completed
-epoch with the pilot.runs.EPOCH_FIELDS (device-synchronised wall clock of the training steps, save time of the train
-state, RNG and export plus Ray's persist of the epoch checkpoint (save_s_includes_persist; the epoch a rerun resumes
-from keeps the time up to the persist, from save.json), optimizer steps, items, peak memory sampled after every
-micro-batch backward and optimizer step, system swap delta, and the segment that trained it). Across a kill and resume
-the record keeps exactly one row per completed epoch (the partial epoch leaves none) and one pilot.runs.SEGMENT_FIELDS
-entry per run segment (start epoch, git sha, dirty flag and uncommitted-diff digest, device, resume load seconds and
-memory), plus code_changed_on_resume (another HEAD or another uncommitted diff between segments, or no git; flagged,
-never refused), the relative export names, train_state_bytes and export_bytes.
+Run record: the checkpoint config holds training.ray_train.record: device, parameter device, torch threads, worker env,
+precision and checkpointing choices, load and final-save seconds (calib_s is None: training no longer calibrates), and
+one row per completed epoch with the pilot.runs.EPOCH_FIELDS (device-synchronised wall clock of the training steps, save
+time of the train state, RNG and export plus Ray's persist of the epoch checkpoint (save_s_includes_persist; the epoch a
+rerun resumes from keeps the time up to the persist, from save.json), optimizer steps, items, peak memory sampled after
+every micro-batch backward and optimizer step, system swap delta, and the segment that trained it). Across a kill and
+resume the record keeps exactly one row per completed epoch (the partial epoch leaves none) and one
+pilot.runs.SEGMENT_FIELDS entry per run segment (start epoch, git sha, dirty flag and uncommitted-diff digest, device,
+resume load seconds and memory), plus code_changed_on_resume (another HEAD or another uncommitted diff between segments,
+or no git; flagged, never refused), the relative export names, train_state_bytes and export_bytes.
 
 Items (data_neg8 by default): the split files label all 48 tags. Every message the --max-messages subsample selects
-(all of them without it) trains: there is no calibration holdout (LAYA-05: the temperature comes only from val). Every
+(all of them without it) trains: there is no calibration holdout (the temperature comes only from val). Every
 message keeps all its positives plus --neg K random negatives (pilot.spike.neg8_rows, one random.Random(--neg-seed)
 draw per run, --neg-seed defaulting to --seed); --neg 0 trains on all 48 labels (data_full). The record carries the
 items laya built and the torch-free count pilot.runs.neg_items gives, so the compute projection can count any split
 without a tokenizer. Every export and the final checkpoint carry temperature UNCALIBRATED_TEMPERATURE and an empty
 temperature_by_options, reset explicitly, never inherited from the base (a base with a fitted T must not leak it).
 
-Fallback ladder (LAYA-03): every run starts from the Phase 2 spike's measured config (pilot.runs.SPIKE_START: micro-batch
-8, max_len 128, grad-accum 4, full encoder). The fallbacks are flags, never an in-process retry (the MPS allocator keeps a
-process-wide high-water mark): --freeze-embeddings (rung embeddings_frozen), then also --micro-batch 4 --grad-accum 8
+Fallback ladder: every run starts from the MPS feasibility spike's measured config (pilot.runs.SPIKE_START: micro-batch
+8, max_len 128, grad-accum 4, full encoder). The fallbacks are flags, never an in-process retry (the MPS allocator keeps
+a process-wide high-water mark): --freeze-embeddings (rung embeddings_frozen), then also --micro-batch 4 --grad-accum 8
 (rung embeddings_frozen+smaller_batch, effective batch 32 kept), then --freeze-encoder (rung encoder_frozen, head-only,
 weaker). pilot.runs.rung_label derives the rung from the resolved flags; the record carries rung, fallback, weaker,
 spike_departures and the trainable/total parameter counts. An MPS out-of-memory error ends the run with one line naming
@@ -56,44 +52,45 @@ flag would change the run_id and retrain from epoch 0. That rerun resumes a trai
 epoch and writes the final checkpoint again: it never loads the optimizer, scheduler or scaler state
 (restore_optimizer), and an OOM while it moves the model is a resume stage too (pilot.runs.STAGE_FINALIZE_MOVE).
 
-Run identity (LAYA-04): the run_id is pilot.runs.run_id of the command's canonical config (pilot.runs.IDENTITY: split,
+Run identity: the run_id is pilot.runs.run_id of the command's canonical config (pilot.runs.IDENTITY: split,
 data and base digests (a local base's tokenizer/ and encoder/ files too), laya version, the resolved device and precision
 choices, every hyperparameter and the seeds; never a path, a resource or the time), e.g.
 laya-selection_train-neg8-s0-1a2b3c4d. It is the Ray experiment name, so
 storage/<run_id>/ is the run's only directory and the same command always lands in it; --print-run-id prints it after
 the split, base and pin checks and exits without starting Ray.
 
-Resume (LAYA-04): at the end of every epoch every rank reports Ray checkpoint storage/<run_id>/epoch-NNN: rank 0's
-train_state.pt (fp32 model, AdamW, cosine scheduler, GradScaler on cuda, epoch, record rows and segments, run_id and
-canonical config) and each rank's rng-rank<r>.pt (torch CPU RNG, MPS or CUDA RNG, the option-order random.Random). Ray
-keeps one (num_to_keep 1) and never retries in-process (max_failures 0). Rerunning the same command after a kill
-resumes from the last one: Ray's get_checkpoint hands it back on every rank, every load is weights_only, every rank
-refuses a state of another kind, run_id or canonical config (pilot.runs.check_state), and on cpu the result is
-byte-identical to an uninterrupted run. The fp16 laya export is never resume state. A finished run's final
-checkpoint carries final.json, so its rerun copies that checkpoint to the new --out without training. Rank 0 also writes
-each epoch's uncalibrated laya export to storage/<run_id>/exports/epoch-NNN, outside the rotation (--no-export-epochs
-skips them), for Phase 5 to pick the epoch on val. Before ray.init the driver refuses when the free disk under --storage
-is below pilot.runs.disk_need_bytes. A failed run ends in one line: the MPS OOM rung message, the snapshot dir to delete
-when Ray's snapshot points at deleted checkpoints, a worker's refusal (SystemExit) as is, or "rerun the same command to
+Resume: at the end of every epoch every rank reports Ray checkpoint storage/<run_id>/epoch-NNN: rank 0's train_state.pt
+(fp32 model, AdamW, cosine scheduler, GradScaler on cuda, epoch, record rows and segments, run_id and canonical config)
+and each rank's rng-rank<r>.pt (torch CPU RNG, MPS or CUDA RNG, the option-order random.Random). Ray keeps one
+(num_to_keep 1) and never retries in-process (max_failures 0). Rerunning the same command after a kill resumes from the
+last one: Ray's get_checkpoint hands it back on every rank, every load is weights_only, every rank refuses a state of
+another kind, run_id or canonical config (pilot.runs.check_state), and on cpu the result is byte-identical to an
+uninterrupted run. The fp16 laya export is never resume state. A finished run's final checkpoint carries final.json, so
+its rerun copies that checkpoint to the new --out without training. Rank 0 also writes each epoch's uncalibrated laya
+export to storage/<run_id>/exports/epoch-NNN, outside the rotation (--no-export-epochs skips them), for the Laya val
+selection to pick the epoch on val. Before ray.init the driver refuses when the free disk under --storage is below
+pilot.runs.disk_need_bytes. A failed run ends in one line: the MPS OOM rung message, the snapshot dir to delete when
+Ray's snapshot points at deleted checkpoints, a worker's refusal (SystemExit) as is, or "rerun the same command to
 resume".
 
-Final seeds (Phase 5, LAYA-08): --stop-after-epoch K trains epochs 1..K of the --epochs schedule and publishes epoch K
-as the final checkpoint; the cosine T_max and the sigma anneal stay sized by --epochs, so epoch K is the selection run's
-epoch K (RESEARCH A3; on cpu its weights are byte-identical to that run's exports/epoch-NNN). K is 1..--epochs - 1:
+Final seeds of the Laya val selection: --stop-after-epoch K trains epochs 1..K of the --epochs schedule and publishes
+epoch K as the final checkpoint; the cosine T_max and the sigma anneal stay sized by --epochs, so epoch K is the
+selection run's epoch K (on cpu its weights are byte-identical to that run's exports/epoch-NNN). K is 1..--epochs - 1:
 K = --epochs has one spelling, the omitted flag. --postfit RECORD binds a final seed to the val selection by refusal,
 not transcription: the record is read (schema, sha256 of its bytes) before any fetch, and once the base identity is
 known, before --print-run-id and ray.init, pilot.postfit.check_final refuses unless --data is the record's final split
 (final_train), --seed is one of its final seeds, --stop-after-epoch is the chosen one and every other canonical value
-equals the chosen selection run's (naming the first differing key). The final config then serves the record's
-val-fitted T (temperature [1, 1, T] bit for bit, temperature_by_options {}, training.calibrated True, training.postfit
-with the record's sha256, chosen settings, T and θ) and the run record carries postfit {sha256, chosen, temperature}.
+equals the chosen selection run's (naming the first differing key). The final config then serves the record's val-fitted
+T (temperature [1, 1, T] bit for bit, temperature_by_options {}, training.calibrated True, training.postfit with the
+record's sha256, chosen settings, T and θ) and the run record carries postfit {sha256, chosen, temperature}.
 stop_after_epoch and postfit_sha256 are run-identity keys left out when None (every selection run id is unchanged);
 postfit.py --print-final-commands prints the commands.
 
-Few-shot (Phase 9, FEW-01, FEW-02): two modes run the frozen protocol.json few-shot block unchanged, each bound to it
-by refusal before --print-run-id and ray.init. pilot.protocol.require_frozen() and the D-08 decision record
-(pilot.fewshot.read_mode) come first, before the split is read; pilot.fewshot.check_source then proves --data is the
-frozen source (selection_train) and that every frozen draw regenerates from its verified bytes.
+Few-shot experiment: two modes run the frozen protocol.json few-shot block unchanged, each bound to it by refusal before
+--print-run-id and ray.init. pilot.protocol.require_frozen() and the compute decision record
+(results/fewshot/projection.json, read by pilot.fewshot.read_mode: primary or fallback mode) come first, before the
+split is read; pilot.fewshot.check_source then proves --data is the frozen source (selection_train) and that every
+frozen draw regenerates from its verified bytes.
 - --fewshot-base trains a label-masked base: the protocol's held-out tags (--mask-tags is optional and refused unless
   it names exactly them) are deleted from every row's expected before neg sampling (pilot.fewshot.masked_rows; every
   message is kept); pilot.fewshot.check_base binds the command to rules.base_runs.laya and to the chosen selection run's
@@ -108,16 +105,17 @@ frozen source (selection_train) and that every frozen draw regenerates from its 
 mask_tags and fewshot (pilot.fewshot.binding) are run-identity keys left out when None, so every committed run id is
 unchanged. The frozen uid lists reach the worker in the config key fewshot_rows, which the run record and every
 checkpoint config leave out; the record's fewshot entry holds only counts, tags, the protocol sha256, the draw digest
-and the base's run id and canonical config (the masking proof, D-04).
+and the base's run id and canonical config (the masking proof).
 
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
 (tampered, unregistered, val/test/probe) is refused before Ray starts, and so is a train split under any manifest that
 holds committed held-out content (pilot.data.refuse_held_out: committed test content, or committed val content in
-selection_train; 06-REVIEW WR-02). --base multilingual fetches the pinned,
-sha256-verified Laya weights (pilot.weights) before Ray starts; any other value must be a local checkpoint dir. A base
-whose tokenizer/tokenizer_config.json laya would have to rewrite on load in a read-only tokenizer/ (or that is not a
-JSON object) is refused before Ray starts too (pilot.weights.check_tokenizer_config_rewritable, 04-REVIEW CR-01); the
-worker's post-load check_tokenizer_config_rewritten stays the backstop.
+selection_train, keyed on the content, so a manifest copy cannot relabel val or test as a train split). --base
+multilingual fetches the pinned, sha256-verified Laya weights (pilot.weights) before Ray starts; any other value must
+be a local checkpoint dir. A base whose tokenizer/tokenizer_config.json laya would have to rewrite on load in a
+read-only tokenizer/ (or that is not a JSON object) is refused before Ray starts too
+(pilot.weights.check_tokenizer_config_rewritable); the worker's post-load check_tokenizer_config_rewritten stays the
+backstop.
 --manifest selects the prepare-written splits.json to verify against (default: the committed data/splits.json; use
 OTHER_DIR/splits.json for a `prepare_data.py --out OTHER_DIR` variant). Verification itself cannot be skipped, a
 manifest cannot change any split's role, path or folds, and the checkpoint provenance records manifest_is_committed.
@@ -133,10 +131,10 @@ usage:
                       --postfit results/postfit/laya.json --no-export-epochs   # a final seed (postfit.py prints it)
   python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt-fewshot-base-s0 \
                       --device mps --workers 1 --epochs 4 --stop-after-epoch 3 --encoder-lr 2e-05 --seed 0 \
-                      --fewshot-base                        # a Phase 9 masked base (the frozen recipe)
+                      --fewshot-base                        # a few-shot masked base (the frozen recipe)
   python ray_train.py --data data/splits/selection_train.jsonl --base ckpt-fewshot-base-s0 --out ckpt-fewshot-d0-k10 \
                       --device mps --workers 1 --epochs 10 --encoder-lr 2e-05 --seed 0 \
-                      --fewshot-draw 0 --fewshot-k 10       # a Phase 9 continued run from it
+                      --fewshot-draw 0 --fewshot-k 10       # a few-shot continued run from it
 """
 import argparse
 import gc
@@ -148,7 +146,9 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
+from typing import Any
 
 import psutil
 import ray
@@ -166,14 +166,14 @@ from pilot.weights import (check_tokenizer_config_rewritable, check_tokenizer_co
 
 WEIGHT_DECAY = 0.01                                         # AdamW weight decay (part of the run identity)
 CLIP_GRAD_NORM = 1.0                                        # gradient-norm clip per optimizer step (same)
-# laya's QTYPES order (choice, score, noul): T = 1 until postfit.py fits T on val (LAYA-05). Every writer copies it
+# laya's QTYPES order (choice, score, noul): T = 1 until postfit.py fits T on val. Every writer copies it
 # (list(UNCALIBRATED_TEMPERATURE)), never shares the list object.
 UNCALIBRATED_TEMPERATURE = [1.0, 1.0, 1.0]
 FINAL_MARK = "final.json"                                   # in the final checkpoint: the run is finished
 SAVE_META = "save.json"                                     # in an epoch checkpoint: that epoch's save time
 
 
-def read_verified_rows(path, sha256):
+def read_verified_rows(path: str, sha256: str) -> list[dict[str, Any]]:
     """Rows of a JSONL split whose bytes must hash to `sha256` (the driver-verified digest); parses those same bytes.
 
     Workers re-check because they read the file minutes after the driver verified it (fetch, ray.init).
@@ -188,7 +188,7 @@ def read_verified_rows(path, sha256):
     return parse_jsonl(raw)
 
 
-def require_single_node(nodes):
+def require_single_node(nodes: list[dict[str, Any]]) -> None:
     """Refuse a multi-node cluster: base_dir and the split path are the driver's local paths (no copy elsewhere)."""
     alive = [n for n in nodes if n.get("Alive")]
     if len(alive) > 1:
@@ -196,14 +196,14 @@ def require_single_node(nodes):
                          "but the Ray cluster has %d alive nodes" % len(alive))
 
 
-def require_driver_node(node_id, driver_node_id):
+def require_driver_node(node_id: str, driver_node_id: str) -> None:
     """Worker-side half of require_single_node: an autoscaler can add a node after the driver's one-time check."""
     if node_id != driver_node_id:
         raise SystemExit("ray_train.py is single-node: this worker runs on node %s, not the driver's node %s, so the "
                          "driver-local base weights and split are not here" % (node_id, driver_node_id))
 
 
-def check_env(expected):
+def check_env(expected: dict[str, str]) -> dict[str, str | None]:
     """{name: value seen} for the expected env vars; refuses on the first one the worker did not get."""
     seen = {k: os.environ.get(k) for k in expected}
     for k in sorted(expected):
@@ -213,20 +213,21 @@ def check_env(expected):
     return seen
 
 
-def require_param_device(model, device_type):
-    """Refuse unless every model parameter sits on `device_type` (LAYA-02: a run asserts where the model landed)."""
+def require_param_device(model: torch.nn.Module, device_type: str) -> None:
+    """Refuse unless every model parameter sits on `device_type` (a run asserts where the model landed)."""
     have = {p.device.type for p in model.parameters()}
     if have != {device_type}:
         raise SystemExit("model parameters on %s, expected %s; refusing to train on the wrong device (no silent CPU "
                          "run)" % (", ".join(sorted(have)), device_type))
 
 
-def resolve(a):
+def resolve(a: argparse.Namespace) -> dict[str, Any]:
     """The one resolved device and its precision, checkpointing, thread and optimizer choices for parsed args `a`.
 
     --gpu is an alias for --device cuda (ValueError next to any other --device). AMP defaults on only for cuda;
     checkpointing is on for every full-encoder run unless --no-grad-checkpointing. AdamW's foreach and fused are pinned
-    off on mps (what the Phase 2 spike measured; torch's default there anyway) and left to torch on cpu and cuda.
+    off on mps (what the MPS feasibility spike measured; torch's default there anyway) and left to torch on cpu and
+    cuda.
     """
     if a.gpu and a.device not in (None, "cuda"):
         raise ValueError("--gpu is an alias for --device cuda; it conflicts with --device %s" % a.device)
@@ -243,7 +244,7 @@ def resolve(a):
 
 
 @contextmanager
-def mps_oom_exit(epoch, step, rung, stage=None):
+def mps_oom_exit(epoch: int | None, step: int | None, rung: str, stage: str | None = None) -> Iterator[None]:
     """Turn an MPS out-of-memory RuntimeError into the one-line rung message (pilot.runs.oom_message); no retry, since
     the MPS allocator keeps a process-wide high-water mark. stage names an MPS allocation outside the training step
     (model move, resume, epoch save, final save). Any other error propagates unchanged."""
@@ -255,13 +256,13 @@ def mps_oom_exit(epoch, step, rung, stage=None):
         raise
 
 
-def raw_mps_oom(text):
+def raw_mps_oom(text: Any) -> bool:
     """True when a (multi-line) failure text holds the MPS allocator's own out-of-memory line (`RuntimeError: MPS
     backend out of memory ...`), i.e. an MPS OOM that no mps_oom_exit turned into the rung message."""
     return any(spike.is_mps_oom(ln.strip().split(": ", 1)[-1]) or spike.is_mps_oom(ln) for ln in str(text).splitlines())
 
 
-def _failure_text(e):
+def _failure_text(e: BaseException) -> str:
     """Type names and messages of `e` and every exception behind it (cause, context, Ray's controller and worker
     failures), so a wrapped CheckpointManagerInitializationError is still found."""
     seen, todo, parts = set(), [e], []
@@ -276,7 +277,7 @@ def _failure_text(e):
     return "\n".join(parts)
 
 
-def worker_refusal(text):
+def worker_refusal(text: Any) -> str | None:
     """The message of a worker's SystemExit in a (multi-line) Ray failure text (Ray Train reports it as a
     `SystemExit: <message>` line), or None."""
     for line in reversed(str(text).splitlines()):
@@ -286,14 +287,14 @@ def worker_refusal(text):
     return None
 
 
-def fit_or_exit(trainer, run_dir=None, rung="none"):
+def fit_or_exit(trainer: TorchTrainer, run_dir: str | None = None, rung: str = "none") -> ray.train.Result:
     """trainer.fit(), with Ray's failures turned into one console line (SystemExit):
     - a worker's MPS out-of-memory exit: the rung line (pilot.runs.oom_message), which wins over the others; a raw MPS
       out-of-memory error that no mps_oom_exit wrapped still gets the rung line of `rung` (rerunning would only resume
       into the same allocation), so the compute orchestrator walks the ladder;
     - a snapshot under run_dir whose checkpoints are gone (CheckpointManagerInitializationError): name the dir to delete;
     - a worker's refusal (a SystemExit in train_loop_per_worker, e.g. the tokenizer-config backstop or check_env):
-      its own message, which names its own fix, never resume advice (04-REVIEW CR-01);
+      its own message, which names its own fix, never resume advice;
     - any other training failure: rerun the same command to resume from the last epoch checkpoint in run_dir.
     Exceptions that are not Ray training failures propagate unchanged."""
     try:
@@ -317,25 +318,24 @@ def fit_or_exit(trainer, run_dir=None, rung="none"):
                          % (runs.last_line(str(e)), run_dir)) from None
 
 
-def code_state():
+def code_state() -> dict[str, Any]:
     """{"git_sha", "git_dirty", "git_diff_sha256"} of the repo this script runs from; all None without git. Both
-    git_dirty and git_diff_sha256 read the same files (04-REVIEW IN-08): tracked changes outside .planning/ (planning
-    docs are not code) plus untracked, unignored *.py files (a new module an import can pick up). git_diff_sha256 is
-    the sha256 of `git diff HEAD --binary` over them, then each untracked .py file's name and bytes, so it is the
-    sha256 of an empty diff exactly when git_dirty is False, and an uncommitted edit between a kill and its rerun
-    changes it while HEAD stays put. Recorded per run segment, never part of the run_id (a code fix must not orphan a
-    long epoch's checkpoint)."""
-    def git(*args):
+    git_dirty and git_diff_sha256 read the same files: tracked changes plus untracked, unignored *.py files (a new
+    module an import can pick up). git_diff_sha256 is the sha256 of `git diff HEAD --binary` over them, then each
+    untracked .py file's name and bytes, so it is the sha256 of an empty diff exactly when git_dirty is False, and an
+    uncommitted edit between a kill and its rerun changes it while HEAD stays put. Recorded per run segment, never part
+    of the run_id (a code fix must not orphan a long epoch's checkpoint)."""
+    def git(*args: str) -> bytes:
         r = subprocess.run(("git",) + args, cwd=REPO_ROOT, capture_output=True, timeout=60)
         if r.returncode:
             raise OSError(r.stderr.decode("utf-8", "replace"))
         return r.stdout
-    code = ("--", ".", ":(exclude).planning")
+    code = ("--", ".")
     try:
         sha = git("rev-parse", "HEAD").decode("ascii").strip()
         tracked = git("status", "--porcelain", "--untracked-files=no", *code).strip()
-        new = sorted(n for n in git("ls-files", "--others", "--exclude-standard", "-z", "--", "*.py",
-                                    ":(exclude).planning").split(b"\0") if n)
+        new = sorted(n for n in git("ls-files", "--others", "--exclude-standard", "-z", "--", "*.py").split(b"\0")
+                     if n)
         digest = hashlib.sha256(git("diff", "HEAD", "--binary", *code))
         for n in new:
             with open(os.path.join(REPO_ROOT, os.fsdecode(n)), "rb") as f:
@@ -345,10 +345,11 @@ def code_state():
         return {"git_sha": None, "git_dirty": None, "git_diff_sha256": None}
 
 
-def code_changed(segments):
+def code_changed(segments: list[dict[str, Any]]) -> bool:
     """code_changed_on_resume of a run record: True when the segments ran different code (another HEAD or another
-    uncommitted diff), or when a resumed run cannot tell (git unavailable in a segment). Flagged, never refused
-    (RESEARCH A3). A segment of an older train state without git_diff_sha256 counts as unknown."""
+    uncommitted diff), or when a resumed run cannot tell (git unavailable in a segment). Flagged, never refused (a
+    code fix must not orphan a long run's checkpoint). A segment of an older train state without git_diff_sha256
+    counts as unknown."""
     if len(segments) < 2:
         return False
     if any(s.get("git_sha") is None or s.get("git_diff_sha256") is None for s in segments):
@@ -356,7 +357,8 @@ def code_changed(segments):
     return len({(s["git_sha"], s["git_diff_sha256"]) for s in segments}) > 1
 
 
-def provenance(entry, manifest_path, base, base_dir, ident=None):
+def provenance(entry: dict[str, Any], manifest_path: str, base: str, base_dir: str,
+               ident: dict[str, Any] | None = None) -> dict[str, Any]:
     """Checkpoint provenance: split, manifest and base model by repo-relative path and sha256, never a local path."""
     return {"data": entry["path"], "data_role": entry["role"], "data_sha256": entry["sha256"],
             "manifest": repo_relpath(manifest_path), "manifest_sha256": sha256_file(manifest_path),
@@ -364,24 +366,27 @@ def provenance(entry, manifest_path, base, base_dir, ident=None):
             "base": identity("multilingual" if base == "multilingual" else base_dir) if ident is None else ident}
 
 
-def epoch_config(cfg, max_len, head_max_len, ray_cfg, epoch):
+def epoch_config(cfg: dict[str, Any], max_len: int, head_max_len: int, ray_cfg: dict[str, Any],
+                 epoch: int) -> dict[str, Any]:
     """Config of an intermediate epoch checkpoint: marked fine-tuned and uncalibrated, and traceable to its data
     (provenance, run record) like the final one, so a best-epoch pick from ray_results stays auditable. Every selected
     message trains (no calibration holdout); the temperature is reset to UNCALIBRATED_TEMPERATURE with no
-    temperature_by_options, never inherited from the base (RESEARCH Pitfall 5): postfit.py fits T on val (LAYA-05)."""
+    temperature_by_options, never inherited from the base: postfit.py fits T on val."""
     return dict(cfg, max_len=max_len, head_max_len=head_max_len, fine_tuned=True,
                 temperature=list(UNCALIBRATED_TEMPERATURE), temperature_by_options={},
                 training=dict(cfg.get("training") or {}, ray_train=ray_cfg, epoch=epoch, calibrated=False))
 
 
-def identity_values(a, r, entry, base_name, base_ident, postfit_sha256=None, mask_tags=None, fewshot=None):
+def identity_values(a: argparse.Namespace, r: dict[str, Any], entry: dict[str, Any], base_name: str,
+                    base_ident: dict[str, Any], postfit_sha256: str | None = None, mask_tags: list[str] | None = None,
+                    fewshot: dict[str, Any] | None = None) -> dict[str, Any]:
     """The pilot.runs.IDENTITY values of a command: parsed args `a`, resolve(a) `r`, the verified split `entry` and the
     base identity. Paths enter only as their verified digests, aliases (--gpu) only as their resolved value. A local
-    base also enters by the digest of its tokenizer/ and encoder/ files (the tokenizer builds every training item;
-    04-REVIEW WR-01); the pinned base's are fixed by the pin, so base_files_sha256 is None there and
+    base also enters by the digest of its tokenizer/ and encoder/ files (the tokenizer builds every training item);
+    the pinned base's are fixed by the pin, so base_files_sha256 is None there and
     pilot.runs.canonical leaves it out, which keeps every pinned run id unchanged. stop_after_epoch and postfit_sha256
     (the sha256 of the --postfit record) are None and left out the same way unless a final seed sets them; mask_tags
-    (a masked base's sorted held-out tags) and fewshot (the pilot.fewshot.binding of a Phase 9 run) likewise."""
+    (a masked base's sorted held-out tags) and fewshot (the pilot.fewshot.binding of a few-shot run) likewise."""
     return {"split": os.path.splitext(os.path.basename(entry["path"]))[0],
             "data_sha256": entry["sha256"], "data_role": entry["role"],
             "base_model_sha256": base_ident["model_sha256"],
@@ -402,7 +407,7 @@ def identity_values(a, r, entry, base_name, base_ident, postfit_sha256=None, mas
             "mask_tags": mask_tags, "fewshot": fewshot}
 
 
-def fewshot_base_of(base_dir, base_ident):
+def fewshot_base_of(base_dir: str, base_ident: dict[str, Any]) -> dict[str, Any]:
     """{"run_id", "canonical"} of a continued run's base, read from its rl_agent_config.json bytes, which must hash to
     the base identity's config_sha256 (the digest the run identity and the workers bind); SystemExit naming the fix for
     other bytes, a checkpoint without a ray_train.py run id and canonical config, or a run id that is not the one its
@@ -426,10 +431,10 @@ def fewshot_base_of(base_dir, base_ident):
     return {"run_id": rid, "canonical": canon}
 
 
-def fewshot_proof(c, per_q, n_items, counted):
-    """The run record's fewshot entry of a Phase 9 run (None otherwise), from the items laya built (per_q =
+def fewshot_proof(c: dict[str, Any], per_q: dict[str, int], n_items: int, counted: int) -> dict[str, Any] | None:
+    """The run record's fewshot entry of a few-shot run (None otherwise), from the items laya built (per_q =
     la.items_per_question of them, n_items their number, counted the torch-free count); SystemExit, on every rank
-    before training, when the masking proof fails (D-04, FEW-01, FEW-02).
+    before training, when the masking proof fails.
 
     A masked base must hold no item of a held-out question: {protocol_sha256, stage base, tags, held_out_items (all
     0), items_per_question}. A continued run must hold exactly one item of each held-out question per support row (so
@@ -445,7 +450,7 @@ def fewshot_proof(c, per_q, n_items, counted):
         leaked = ["%s %d" % (t, n) for t, n in held.items() if n]
         if leaked:
             raise SystemExit("the masked base built items of held-out question(s) (%s); refusing to train: masking "
-                             "deletes the held-out keys before negative sampling (FEW-01)" % ", ".join(leaked))
+                             "deletes the held-out keys before negative sampling" % ", ".join(leaked))
         return {"protocol_sha256": b["protocol_sha256"], "stage": "base", "tags": tags, "held_out_items": held,
                 "items_per_question": per_q}
     rows = c["fewshot_rows"]
@@ -464,7 +469,7 @@ def fewshot_proof(c, per_q, n_items, counted):
             "new_tag_items": new, "items_per_question": per_q, "base": c["fewshot_base"]}
 
 
-def worker_device(c):
+def worker_device(c: dict[str, Any]) -> tuple[torch.device, dict[str, str | None]]:
     """(torch device, env seen) of this worker: explicit mps (Ray has no MPS device manager), else Ray's device."""
     # a local torch: cloudpickle cannot ship torch.backends.mps when it is reached through the module-global torch
     import torch
@@ -482,9 +487,10 @@ def worker_device(c):
     return device, {}
 
 
-def memory_sampler(device):
-    """(reset, sync, sample, current, peak) for per-epoch memory peaks, sampled like the Phase 2 spike (torch.mps keeps
-    no max_memory_allocated).
+def memory_sampler(device: torch.device) -> tuple[Callable[[], None], Callable[[], None], Callable[[], None],
+                                                 Callable[[], int | None], dict[str, Any]]:
+    """(reset, sync, sample, current, peak) for per-epoch memory peaks, sampled like the MPS feasibility spike
+    (torch.mps keeps no max_memory_allocated).
 
     peak["driver"]: torch.mps.driver_allocated_memory() on mps, torch.cuda.max_memory_allocated() on cuda, None on cpu
     (never 0); peak["rss"]: the worker's resident set; peak["total"]: driver + rss (the spike's peak_memory_bytes
@@ -492,18 +498,18 @@ def memory_sampler(device):
     """
     proc, kind, peak = psutil.Process(), device.type, {}
 
-    def reset():
+    def reset() -> None:
         peak.update(total=0, driver=None, rss=0)
         if kind == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
 
-    def sync():
+    def sync() -> None:
         if kind == "mps":
             torch.mps.synchronize()
         elif kind == "cuda":
             torch.cuda.synchronize(device)
 
-    def sample():
+    def sample() -> None:
         driver = (torch.mps.driver_allocated_memory() if kind == "mps"
                   else torch.cuda.max_memory_allocated(device) if kind == "cuda" else None)
         rss = proc.memory_info().rss
@@ -511,7 +517,7 @@ def memory_sampler(device):
         if driver is not None:
             peak["driver"] = driver if peak["driver"] is None else max(peak["driver"], driver)
 
-    def current():
+    def current() -> int | None:
         return (torch.mps.current_allocated_memory() if kind == "mps"
                 else torch.cuda.memory_allocated(device) if kind == "cuda" else None)
 
@@ -519,7 +525,7 @@ def memory_sampler(device):
     return reset, sync, sample, current, peak
 
 
-def _rewrite_config(path, cfg):
+def _rewrite_config(path: str, cfg: dict[str, Any]) -> None:
     """Rewrite a just-saved checkpoint's config in laya's own layout (json indent 2), e.g. to add its save time."""
     tmp = os.path.join(path, "rl_agent_config.json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:
@@ -527,7 +533,8 @@ def _rewrite_config(path, cfg):
     os.replace(tmp, os.path.join(path, "rl_agent_config.json"))
 
 
-def load_resume(c, rank):
+def load_resume(c: dict[str, Any],
+                rank: int) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], int, float] | str | None:
     """(train state, this rank's RNG state, save.json of that epoch, train_state.pt bytes, load seconds), or "final"
     when the run already finished, or None when storage/<run_id> holds no checkpoint (a fresh start).
 
@@ -549,14 +556,14 @@ def load_resume(c, rank):
         return state, rng_state, meta, os.path.getsize(path), time.perf_counter() - t
 
 
-def device_rng_state(device):
+def device_rng_state(device: torch.device) -> torch.Tensor | None:
     """The device RNG state (mps or cuda), None on cpu."""
     if device.type == "mps":
         return torch.mps.get_rng_state()
     return torch.cuda.get_rng_state(device) if device.type == "cuda" else None
 
 
-def set_rng_states(rs, device, rng):
+def set_rng_states(rs: dict[str, Any], device: torch.device, rng: random.Random) -> None:
     """Restore torch's CPU RNG, the device RNG and the option-order random.Random from a saved rng-rank<r>.pt."""
     torch.set_rng_state(rs["torch"])
     if device.type == "mps":
@@ -567,17 +574,19 @@ def set_rng_states(rs, device, rng):
     rng.setstate((version, tuple(internal), gauss))         # random.Random wants its (version, tuple, gauss) shape
 
 
-def training_done(state, epochs):
+def training_done(state: dict[str, Any] | None, epochs: int) -> bool:
     """True when a resumed train state already holds the last epoch (a rerun after an OOM in the final save): the
     epoch loop is empty and the rerun only writes the final checkpoint."""
     return state is not None and state["epoch"] >= epochs
 
 
-def restore_optimizer(state, epochs, opt, sched, scaler, rung):
+def restore_optimizer(state: dict[str, Any], epochs: int, opt: torch.optim.Optimizer,
+                      sched: torch.optim.lr_scheduler.LRScheduler, scaler: torch.amp.GradScaler | None,
+                      rung: str) -> bool:
     """Restore AdamW, the cosine scheduler and the GradScaler of a resumed train state; returns True, or False without
-    touching them when no epoch is left to train (04-REVIEW WR-01): the AdamW moments (about 2.6 GB of the measured
-    3.86 GB full-encoder train state) would move to the device only to be freed before the final save, on the machine
-    that just ran out of memory writing the final checkpoint."""
+    touching them when no epoch is left to train: the AdamW moments (about 2.6 GB of the measured 3.86 GB
+    full-encoder train state) would move to the device only to be freed before the final save, on the machine that
+    just ran out of memory writing the final checkpoint."""
     if training_done(state, epochs):
         return False
     with mps_oom_exit(None, None, rung, "while restoring the optimizer state of epoch %d" % state["epoch"]):
@@ -588,16 +597,17 @@ def restore_optimizer(state, epochs, opt, sched, scaler, rung):
     return True
 
 
-def dir_bytes(path):
+def dir_bytes(path: str) -> int:
+    """Total bytes of the files under `path` (recursive)."""
     return sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(path) for f in fs)
 
 
-def prune_exports(exports_dir, start_epoch):
+def prune_exports(exports_dir: str, start_epoch: int) -> list[str]:
     """Delete every export a dead segment left beyond the epoch this segment resumes from (and any partial .tmp);
     returns the names removed. An export is written before its epoch's train state registers, so a kill in between
     leaves an export of weights the resumed run never continues from (MPS is not bitwise deterministic); the rerun
     retrains that epoch and writes it again. Rank 0 only, before training. A deletion that fails refuses the segment
-    before training (04-REVIEW IN-09): a half-deleted stale export must never be kept as the retrained epoch's."""
+    before training: a half-deleted stale export must never be kept as the retrained epoch's."""
     if not os.path.isdir(exports_dir):
         return []
     gone = []
@@ -613,19 +623,21 @@ def prune_exports(exports_dir, start_epoch):
     return gone
 
 
-def export_record(record, name):
-    """The run record an epoch export embeds: a pre-save snapshot (04-REVIEW IN-06). It is written before the epoch's
-    train state, so the export already lists itself in exports, while what only the save measures (this epoch's save_s,
-    train_state_bytes, export_bytes) is None, never the previous epoch's value. Phase 5 reads these exports."""
+def export_record(record: dict[str, Any], name: str) -> dict[str, Any]:
+    """The run record an epoch export embeds: a pre-save snapshot. It is written before the epoch's train state, so
+    the export already lists itself in exports, while what only the save measures (this epoch's save_s,
+    train_state_bytes, export_bytes) is None, never the previous epoch's value. The Laya val selection reads these
+    exports."""
     rows = record["epochs"]
     return dict(record, exports=sorted(set(record["exports"]) | {"exports/" + name}), train_state_bytes=None,
                 export_bytes=None, epochs=rows[:-1] + [dict(rows[-1], save_s=None)] if rows else [])
 
 
-def write_export(inner, tok, ecfg, run_dir, name):
+def write_export(inner: torch.nn.Module, tok: Any, ecfg: dict[str, Any], run_dir: str, name: str) -> str:
     """Rank 0's uncalibrated laya export of a completed epoch at run_dir/exports/<name>, outside Ray's checkpoint
-    rotation (Phase 5 picks the epoch on val without retraining). The segment's start removed every export past the
-    resumed epoch (prune_exports), so an existing one here is a stale export that survived: refused, never kept."""
+    rotation (the Laya val selection picks the epoch on val without retraining); returns its path. The segment's start
+    removed every export past the resumed epoch (prune_exports), so an existing one here is a stale export that
+    survived: refused, never kept."""
     final = os.path.join(run_dir, "exports", name)
     if os.path.lexists(final):
         raise SystemExit("exports/%s already exists before its epoch was saved (a stale export of a killed segment); "
@@ -638,7 +650,9 @@ def write_export(inner, tok, ecfg, run_dir, name):
     return final
 
 
-def train_loop_per_worker(c):
+def train_loop_per_worker(c: dict[str, Any]) -> None:
+    """One Ray Train worker: load (or resume) the base, build and shard the items, train the epochs DDP, report each
+    epoch's checkpoint, and on rank 0 report the final laya checkpoint. `c` is the driver's train config (main)."""
     require_driver_node(ray.get_runtime_context().get_node_id(), c["driver_node_id"])
     ctx = ray.train.get_context()
     rank, world = ctx.get_world_rank(), ctx.get_world_size()
@@ -648,7 +662,7 @@ def train_loop_per_worker(c):
     torch.set_num_threads(c["cpus_per_worker"])
     torch.manual_seed(c["seed"])
 
-    # Resume (LAYA-04): rerunning the same command hands this run's latest checkpoint back through Ray
+    # Resume: rerunning the same command hands this run's latest checkpoint back through Ray
     resume = load_resume(c, rank)
     if resume == "final":                                   # finished: Ray returns the final checkpoint to the driver
         if rank == 0:
@@ -662,32 +676,32 @@ def train_loop_per_worker(c):
     t_load = time.perf_counter()
     verify_files(c["base_dir"], c["base_sha256"], "base checkpoint")
     model, tok, cfg = la.load_checkpoint(c["base_dir"])
-    check_tokenizer_config_rewritten(c["base_dir"], "base checkpoint")    # laya only warns (04-REVIEW IN-01)
+    check_tokenizer_config_rewritten(c["base_dir"], "base checkpoint")    # laya only warns when it cannot rewrite
     load_s = time.perf_counter() - t_load
     max_len = c["max_len"] or cfg.get("max_len", 512)
     head_max_len = c["head_max_len"] or cfg.get("head_max_len", 192)
     parallel = la.uses_parallel_layout(cfg)
 
     # Every rank builds the same items (fixed seed), then takes its own shard of the training items. Every selected
-    # message trains: there is no calibration holdout (LAYA-05: T is fitted on message-level val data by postfit.py).
+    # message trains: there is no calibration holdout (T is fitted on message-level val data by postfit.py).
     rows = read_verified_rows(c["data"], c["data_sha256"])
     if c["max_messages"]:
         random.Random(c["seed"]).shuffle(rows)
         rows = rows[:c["max_messages"]]
     fs_rows = c.get("fewshot_rows")
-    if fs_rows:                                             # Phase 9 continued: the frozen support and replay rows
+    if fs_rows:                                             # few-shot continued run: frozen support + replay rows
         sel = {"support": set(fs_rows["support"]), "replay": set(fs_rows["replay"])}
         train_rows = fewshot.laya_rows(rows, sel, fs_rows["tags"], c["neg_seed"], c["neg"])
         counted = fewshot.laya_item_count(rows, sel, fs_rows["tags"], c["neg"])
     else:
-        # a Phase 9 masked base deletes the held-out keys BEFORE negative sampling (laya builds a negative item for a
+        # a few-shot masked base deletes the held-out keys BEFORE negative sampling (laya builds a negative item for a
         # False value, and sampling after the deletion can never keep a held-out label)
         train_rows = fewshot.masked_rows(rows, c["mask_tags"]) if c.get("mask_tags") else rows
         counted = runs.neg_items(train_rows, c["neg"])
         if c["neg"]:
             train_rows = spike.neg8_rows(train_rows, c["neg_seed"], c["neg"])
     train_items, skipped = la.items_from_rows(tok, train_rows, max_len, head_max_len)
-    # the masking proof (D-04): counted from the items laya built, refused on every rank before training
+    # the few-shot masking proof: counted from the items laya built, refused on every rank before training
     fs_proof = fewshot_proof(c, la.items_per_question(train_items), len(train_items), counted) \
         if c.get("fewshot") else None
     # driver-local absolute paths (data, base_dir, storage), the run's node id, the raw env dict and the frozen uid
@@ -718,11 +732,11 @@ def train_loop_per_worker(c):
     if rank == 0:
         print("rung %s%s | trainable params %d of %d" % (c["rung"], " (head-only, weaker)" if runs.weaker(c["rung"])
                                                           else "", trainable_params, total_params), flush=True)
-    # the model move (and a resume's weights) allocate on the device outside the training step (04-REVIEW WR-01); a
+    # the model move (and a resume's weights) allocate on the device outside the training step; a
     # rerun with no epoch left only writes the final checkpoint, so its OOM says to rerun, never the next rung (a rung
     # flag would change the run_id and retrain every epoch)
     # a final seed stops after the val-chosen epoch K of the --epochs schedule (--stop-after-epoch): the cosine T_max and
-    # the sigma anneal below keep c["epochs"], so epochs 1..K follow the selection run's own trajectory (RESEARCH A3)
+    # the sigma anneal below keep c["epochs"], so epochs 1..K follow the selection run's own trajectory
     stop = c["stop_after_epoch"] or c["epochs"]
     move = runs.STAGE_FINALIZE_MOVE if training_done(state, stop) else "while moving the model to the device"
     with mps_oom_exit(None, None, c["rung"], move):
@@ -732,7 +746,7 @@ def train_loop_per_worker(c):
             resume_load_s += time.perf_counter() - t
         model = ray.train.torch.prepare_model(model, move_to_device=device,
                                               parallel_strategy_kwargs={"find_unused_parameters": True})
-    amp = c["amp"]                                          # decoupled from checkpointing (02-REVIEW CR-01)
+    amp = c["amp"]                                          # decoupled from checkpointing
     gc.collect()                                            # drop the CPU copy before any memory sampling
     require_param_device(model, device.type)
     inner = model.module if hasattr(model, "module") else model
@@ -799,21 +813,22 @@ def train_loop_per_worker(c):
               "canonical": c["canonical"], "segments": segments,
               "code_changed_on_resume": code_changed(segments),
               "exports": [], "train_state_bytes": state_bytes, "export_bytes": None, "save_s_includes_persist": True,
-              # a final seed's binding to the val selection (LAYA-08): the record's sha256, chosen settings and T
+              # a final seed's binding to the val selection: the record's sha256, chosen settings and T
               "postfit": ({k: c["postfit"][k] for k in ("sha256", "chosen", "temperature")} if c["postfit"]
                           else None),
-              # a Phase 9 run's masking proof and binding (counts, tags and digests only, never a uid), else None
+              # a few-shot run's masking proof and binding (counts, tags and digests only, never a uid), else None
               "fewshot": fs_proof,
               "epochs": rows_out}
 
-    def note_exports():
+    def note_exports() -> None:
+        """Point the record at the exports now on disk (relative names) and the newest one's size."""
         names = sorted(n for n in os.listdir(exports_dir) if len(n) == 9 and n.startswith("epoch-")) \
             if os.path.isdir(exports_dir) else []
         record["exports"] = ["exports/" + n for n in names]   # relative names only, never the storage path
         if names:
             record["export_bytes"] = dir_bytes(os.path.join(exports_dir, names[-1]))
 
-    if rank == 0:                                           # a dead segment's exports past the resumed epoch (WR-02)
+    if rank == 0:                                           # a dead segment's exports past the resumed epoch
         gone = prune_exports(exports_dir, start_epoch)
         if gone:
             print("dropped export(s) %s of a killed segment beyond epoch %d" % (", ".join(gone), start_epoch),
@@ -871,7 +886,7 @@ def train_loop_per_worker(c):
                   % (epoch + 1, c["epochs"], " (stop after %d)" % stop if stop != c["epochs"] else "", row["loss"],
                      train_s, row["peak_total_bytes"] / 2**30, swap_delta / 2**20), flush=True)
 
-        # Epoch checkpoint (LAYA-04): rank 0's fp32 train state + every rank's RNG; never the fp16 laya export
+        # Epoch checkpoint: rank 0's fp32 train state + every rank's RNG; never the fp16 laya export
         if device.type == "mps":
             torch.mps.empty_cache()                         # the allocator cache before the state copies to CPU
         gc.collect()
@@ -900,16 +915,16 @@ def train_loop_per_worker(c):
             ray.train.report(metrics, checkpoint=Checkpoint.from_directory(d),
                              checkpoint_dir_name="epoch-%03d" % (epoch + 1))
             # plus Ray's persist (the train-state copy into storage, the rotation): a per-epoch cost the compute
-            # projection charges per epoch (04-REVIEW IN-02); the next epoch's state and the final record carry it,
+            # projection charges per epoch; the next epoch's state and the final record carry it,
             # save.json (the resumed epoch's row) only the time up to the report
             row["save_s"] = time.perf_counter() - t_save
         if c["fail_after_epoch"] == epoch + 1:              # test hook: every rank fails after the checkpoint
             raise RuntimeError("simulated failure after epoch %d (--fail-after-epoch)" % (epoch + 1))
         last = metrics
 
-    # Publish the final checkpoint from rank 0: uncalibrated (T = 1; postfit.py fits T on val later, LAYA-05), or, for a
+    # Publish the final checkpoint from rank 0: uncalibrated (T = 1; postfit.py fits T on val later), or, for a
     # --postfit final seed, serving the record's val-fitted T bit for bit (a JSON float round trip, never rounded), which
-    # laya.load then serves (LAYA-08). record["calib_s"] stays None: training never calibrates.
+    # laya.load then serves. record["calib_s"] stays None: training never calibrates.
     del opt, sched, scaler, params, groups                 # free optimizer state before the final save
     gc.collect()
     if device.type == "mps":
@@ -936,7 +951,8 @@ def train_loop_per_worker(c):
         ray.train.report(last)
 
 
-def parser():
+def parser() -> argparse.ArgumentParser:
+    """The ray_train.py argument parser."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True)
     ap.add_argument("--base", default="multilingual")
@@ -978,8 +994,8 @@ def parser():
                     help="print the run id this command trains under (its Ray dir and resume key), then exit without "
                          "starting Ray")
     ap.add_argument("--export-epochs", action=argparse.BooleanOptionalAction, default=True,
-                    help="write each epoch's uncalibrated laya export to storage/<run_id>/exports/epoch-NNN for Phase 5 "
-                         "epoch selection (default on)")
+                    help="write each epoch's uncalibrated laya export to storage/<run_id>/exports/epoch-NNN for the "
+                         "val epoch selection (default on)")
     ap.add_argument("--stop-after-epoch", type=int, default=None,
                     help="stop after epoch K of the --epochs schedule (the cosine schedule and the sigma anneal keep "
                          "--epochs): the val-selected epoch of a final seed; 1..--epochs - 1, omit it for every epoch")
@@ -988,21 +1004,23 @@ def parser():
                          "val-chosen settings, refused unless every hyperparameter matches, and writes the val-fitted T "
                          "into the final config")
     ap.add_argument("--fewshot-base", action="store_true",
-                    help="Phase 9: train a label-masked base of the frozen few-shot protocol (protocol.json); refused "
+                    help="few-shot: train a label-masked base of the frozen few-shot protocol (protocol.json); refused "
                          "unless every setting is the frozen one")
     ap.add_argument("--mask-tags", default=None,
                     help="with --fewshot-base: the held-out tags, comma-separated; refused unless they are the frozen "
                          "protocol's (the default)")
     ap.add_argument("--fewshot-draw", type=int, default=None,
-                    help="Phase 9: continue the masked --base on the frozen support set of this draw plus its "
+                    help="few-shot: continue the masked --base on the frozen support set of this draw plus its "
                          "replay set")
     ap.add_argument("--fewshot-k", type=int, default=None,
-                    help="Phase 9: the frozen k of the --fewshot-draw support set")
+                    help="few-shot: the frozen k of the --fewshot-draw support set")
     ap.add_argument("--fail-after-epoch", type=int, default=None, help=argparse.SUPPRESS)   # test hook, never an env var
     return ap
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
+    """Parse and check the command, bind it (split, base, postfit record, few-shot protocol), then train under Ray
+    and copy the final checkpoint to --out; --print-run-id prints the run id instead."""
     ap = parser()
     a = ap.parse_args(argv)
     if a.epochs < 1:
@@ -1012,7 +1030,7 @@ def main(argv=None):
     # here, not in the worker: a bad value there fails after ray.init, the run dir and the fetch, with resume advice
     for flag, v in (("--workers", a.workers), ("--micro-batch", a.micro_batch), ("--grad-accum", a.grad_accum),
                     ("--cpus-per-worker", a.cpus_per_worker), ("--max-messages", a.max_messages),
-                    # 0 would fall back to the config default while the run identity recorded 0 (IN-10)
+                    # 0 would fall back to the config default while the run identity recorded 0
                     ("--max-len", a.max_len), ("--head-max-len", a.head_max_len)):
         if v is not None and v < 1:
             ap.error("%s must be at least 1" % flag)
@@ -1022,7 +1040,7 @@ def main(argv=None):
     if a.stop_after_epoch is not None and not 1 <= a.stop_after_epoch < a.epochs:
         ap.error("--stop-after-epoch must be at least 1 and below --epochs (%d); omit it to train every epoch"
                  % a.epochs)
-    # Phase 9 (D-01): a few-shot mode is one frozen-protocol command; every other combination is an argument error
+    # a few-shot mode is one frozen-protocol command; every other combination is an argument error
     continued = a.fewshot_draw is not None or a.fewshot_k is not None
     fs_flags = [f for f, on in (("--fewshot-base", a.fewshot_base), ("--fewshot-draw", a.fewshot_draw is not None),
                                 ("--fewshot-k", a.fewshot_k is not None), ("--mask-tags", a.mask_tags is not None))
@@ -1035,7 +1053,7 @@ def main(argv=None):
         ap.error("--fewshot-draw takes no --stop-after-epoch or --mask-tags: a continued run trains every frozen epoch "
                  "on the support and replay rows, the held-out tags labelled on support rows only")
     if a.mask_tags is not None and not a.fewshot_base:
-        ap.error("--mask-tags masks a Phase 9 base only: pass it with --fewshot-base (the frozen protocol's tags)")
+        ap.error("--mask-tags masks a few-shot base only: pass it with --fewshot-base (the frozen protocol's tags)")
     if fs_flags and a.postfit:
         ap.error("%s takes no --postfit: a few-shot run is bound to the frozen protocol, not to a postfit record"
                  % fs_flags[0])
@@ -1051,28 +1069,28 @@ def main(argv=None):
     if a.amp and r["device"] in ("mps", "cpu"):
         ap.error("--amp is CUDA-only (the MPS fine-tune is measured with AMP off); drop --amp")
     proto = pin = block = mode = None
-    if a.fewshot_base or continued:                         # D-01: the frozen protocol first, before the split is read
+    if a.fewshot_base or continued:                         # the frozen protocol first, before the split is read
         proto, pin = protocol.require_frozen()
         block = proto.get("fewshot")
         if not isinstance(block, dict):
             raise SystemExit("the frozen protocol holds no few-shot block; restore protocol.json with `git checkout -- "
                              "protocol.json`")
-        mode = fewshot.read_mode(pin)                       # the D-08 decision record names primary or fallback
+        mode = fewshot.read_mode(pin)                       # the compute decision record names primary or fallback
         if continued and a.base == "multilingual":
             raise SystemExit("--fewshot-draw continues a masked base: pass a ray_train.py --fewshot-base checkpoint as "
                              "--base, not multilingual")
-    entry = verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))   # before ray.init (D-03)
+    entry = verify_split_file(a.data, manifest_path=a.manifest, roles=("train",))   # before ray.init
     rows = read_verified_rows(a.data, entry["sha256"])
-    refuse_held_out(a.data, entry, rows)                    # keyed on the content (WR-02)
+    refuse_held_out(a.data, entry, rows)                    # keyed on the content, under any manifest
     mask = sel = None
     if block is not None:
-        fewshot.check_source(block, entry, rows)            # --data is the frozen source; every draw regenerates (D-02)
+        fewshot.check_source(block, entry, rows)            # --data is the frozen source; every draw regenerates
         if a.fewshot_base:
             mask = sorted(block["tags"])
             given = None if a.mask_tags is None else [t.strip() for t in a.mask_tags.split(",")]
             if given is not None and (sorted(given) != mask or len(set(given)) != len(given)):
                 raise SystemExit("--mask-tags %s is not the frozen protocol's held-out tags %s; pass them (or omit "
-                                 "--mask-tags): Phase 9 runs the frozen protocol unchanged"
+                                 "--mask-tags): the few-shot experiment runs the frozen protocol unchanged"
                                  % (a.mask_tags, ",".join(mask)))
         else:
             sel = fewshot.selection(block, a.fewshot_draw, a.fewshot_k)
@@ -1082,14 +1100,14 @@ def main(argv=None):
     if not a.print_run_id and os.path.exists(a.out) and (not os.path.isdir(a.out) or os.listdir(a.out)):
         # copying over old files could leave a mixed checkpoint that laya.load still accepts
         raise SystemExit("--out %s exists and is not empty; choose a new dir" % a.out)
-    # the device must exist here before any pin check, fetch or ray.init (LAYA-02)
+    # the device must exist here before any pin check, fetch or ray.init
     if r["device"] == "mps" and not torch.backends.mps.is_available():
         raise SystemExit("--device mps, but MPS is not available here; use --device cpu, or run on Apple silicon with "
                          "the locked torch build")
     if r["device"] == "cuda" and not torch.cuda.is_available():
         raise SystemExit("--device cuda (or --gpu), but CUDA is not available here; use --device cpu or mps")
     la.check_version()                                      # the adapter's laya pin, before the fetch and ray.init
-    if a.base == "multilingual":                            # download once on the driver, pinned + verified (ENV-02)
+    if a.base == "multilingual":                            # download once on the driver, pinned + verified
         base_dir = fetch(pins.LAYA)
     elif os.path.isfile(os.path.join(a.base, "rl_agent_config.json")):
         base_dir = os.path.abspath(a.base)
@@ -1098,7 +1116,7 @@ def main(argv=None):
     base_name = "multilingual" if a.base == "multilingual" else base_dir
     base_ident = identity(base_name)
     base_sha256 = checkpoint_digests(base_name, base_ident)   # workers verify these bytes before loading
-    check_tokenizer_config_rewritable(base_dir, "base checkpoint")   # before ray.init, not after a worker load (CR-01)
+    check_tokenizer_config_rewritable(base_dir, "base checkpoint")   # before ray.init, not after a worker load
     fs_binding = base_info = None
     if a.fewshot_base:
         fs_binding = fewshot.binding(pin, "base")
@@ -1109,12 +1127,12 @@ def main(argv=None):
     canon = runs.canonical(identity_values(a, r, entry, base_name, base_ident, record_sha, mask_tags=mask,
                                            fewshot=fs_binding))
     pf_block = None
-    if record is not None:                                  # bound by refusal, never by transcription (LAYA-08)
+    if record is not None:                                  # bound by refusal, never by transcription
         postfit.check_final(record, canon)
         pf_block = postfit.final_block(record, record_sha, a.postfit)   # refuses a T outside laya's band here
-    if a.fewshot_base:                                      # bound by refusal to the frozen protocol (D-01, D-03)
+    if a.fewshot_base:                                      # bound by refusal to the frozen protocol
         fewshot.check_base(proto, pin, "laya", canon, fewshot.chosen_canonical(proto, "laya"), mode)
-    elif continued:                                         # D-06, D-07: the frozen draw, k, epochs, LRs and base
+    elif continued:                                         # the frozen draw, k, epochs, LRs and base
         fewshot.check_continued(proto, pin, "laya", canon, base_info["canonical"], base_info["run_id"],
                                 a.fewshot_draw, a.fewshot_k, mode)
     rid = runs.run_id(canon)                                # the Ray experiment name: storage/<rid> is the resume dir
@@ -1152,7 +1170,7 @@ def main(argv=None):
                 "storage": os.path.abspath(a.storage), "export_epochs": a.export_epochs,
                 "fail_after_epoch": a.fail_after_epoch, "stop_after_epoch": a.stop_after_epoch,
                 "postfit": pf_block,
-                # Phase 9: the binding and mask (recorded), the frozen uid lists (never recorded: the worker leaves
+                # few-shot: the binding and mask (recorded), the frozen uid lists (never recorded: the worker leaves
                 # fewshot_rows out of ray_cfg) and a continued run's base (run id and canonical config)
                 "mask_tags": mask, "fewshot": fs_binding,
                 "fewshot_rows": ({"support": sorted(sel["support"]), "replay": sorted(sel["replay"]),

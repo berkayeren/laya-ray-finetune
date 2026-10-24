@@ -1,8 +1,8 @@
-"""EVAL-08 CPU smoke: train a tiny Laya checkpoint with ray_train.py, then score and report it through the new path.
+"""CPU smoke: train a tiny Laya checkpoint with ray_train.py, then score it with score.py and report it with report.py.
 
 Offline end to end: a random-init tiny checkpoint (tests/tiny_laya.py) and the synthetic splits (tests/conftest.py),
 so nothing downloads. ray_train.py runs 1 Ray worker for 1 epoch with the encoder frozen on 12 messages of the
-synthetic selection_train (all 12 train: there is no calibration holdout, LAYA-05) through pilot/laya_adapter.py;
+synthetic selection_train (all 12 train: there is no calibration holdout) through pilot/laya_adapter.py;
 score.py dumps the uncalibrated checkpoint (T = 1) on the synthetic val and test splits and report.py turns the dumps
 into metrics.
 Runs in `make test` under the ray marker (CPU only, no weights or data).
@@ -11,6 +11,8 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -26,7 +28,7 @@ REPO = pilot.data.REPO_ROOT
 TIMEOUT = 600
 
 
-def _run(*args):
+def _run(*args: Any) -> subprocess.CompletedProcess:
     """Run a repo script with the test interpreter (no PYTHONPATH, so it imports like a user's command)."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable] + [str(x) for x in args], cwd=REPO, env=env, capture_output=True, text=True,
@@ -36,7 +38,7 @@ def _run(*args):
 
 
 @pytest.fixture(scope="module")
-def trained(tmp_path_factory):
+def trained(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str, str, str]:
     """(work dir, splits dir, manifest, uncalibrated checkpoint dir) of one ray_train.py run on the tiny checkpoint."""
     d = tmp_path_factory.mktemp("smoke")
     root, raw_sha256 = make_raw(str(d / "raw"))
@@ -51,23 +53,24 @@ def trained(tmp_path_factory):
     return d, os.path.join(out_dir, "splits"), manifest, str(ckpt)
 
 
-def _score(splits, split, manifest, ckpt, out_root):
+def _score(splits: str, split: str, manifest: str, ckpt: str, out_root: Path) -> str:
+    """Score `split` with score.py in-process into out_root; returns the dump's run dir."""
     _run("score.py", os.path.join(splits, "%s.jsonl" % split), "--model", "laya", "--checkpoint", ckpt,
          "--workers", "0", "--manifest", manifest, "--out-root", out_root)
     return os.path.join(str(out_root), dumps.run_id("laya", identity(ckpt)))
 
 
-def _read_json(path):
+def _read_json(path: str | Path) -> Any:
     with open(str(path), encoding="utf-8") as f:
         return json.load(f)
 
 
 @pytest.mark.timeout(600)
-def test_ray_train_then_score_and_report(trained):
+def test_ray_train_then_score_and_report(trained: tuple[Path, str, str, str]) -> None:
     d, splits, manifest, ckpt = trained
     cfg = _read_json(os.path.join(ckpt, "rl_agent_config.json"))
     assert cfg["training"]["ray_train"] and cfg["training"]["calibrated"] is False, cfg.get("training")
-    assert cfg["temperature"] == [1.0, 1.0, 1.0]            # uncalibrated: postfit.py fits T on val (LAYA-05)
+    assert cfg["temperature"] == [1.0, 1.0, 1.0]            # uncalibrated: postfit.py fits T on val
     _score(splits, "val", manifest, ckpt, d / "dumps")
     run_dir = _score(splits, "test", manifest, ckpt, d / "dumps")
     _run("report.py", run_dir, "--split", "test", "--manifest", manifest, "--out", d / "r.json")
@@ -85,7 +88,7 @@ def test_ray_train_then_score_and_report(trained):
 
 
 @pytest.mark.timeout(600)
-def test_evaluate_wrapper_matches_report(trained):
+def test_evaluate_wrapper_matches_report(trained: tuple[Path, str, str, str]) -> None:
     """evaluate.py (the thin wrapper) prints and writes byte for byte what report.py computes from the same dump."""
     d, splits, manifest, ckpt = trained
     _score(splits, "val", manifest, ckpt, d / "dumps2")     # the val dump the val-selected θ comes from

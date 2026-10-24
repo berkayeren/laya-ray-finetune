@@ -1,8 +1,10 @@
-"""pilot/runs.py: the torch-free run-record schema of ray_train.py (LAYA-06)."""
+"""pilot/runs.py: the torch-free run-record schema, run identity and fallback ladder of ray_train.py."""
 import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -13,51 +15,51 @@ pytestmark = pytest.mark.unit
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def _row(epoch, **kw):
+def _row(epoch: int, **kw: Any) -> dict[str, Any]:
     row = {k: 0 for k in runs.EPOCH_FIELDS}
     row.update(epoch=epoch, **kw)
     return row
 
 
-def _ckpt(tmp_path, training):
+def _ckpt(tmp_path: Path, training: dict[str, Any]) -> str:
     d = tmp_path / "ckpt"
     d.mkdir()
     (d / "rl_agent_config.json").write_text(json.dumps({"encoder": "x", "training": training}), encoding="utf-8")
     return str(d)
 
 
-def test_epoch_fields_are_the_thirteen_record_columns():
+def test_epoch_fields_are_the_thirteen_record_columns() -> None:
     assert runs.EPOCH_FIELDS == ("epoch", "loss", "train_s", "save_s", "optimizer_steps", "n_items",
                                  "peak_total_bytes", "peak_driver_bytes", "peak_rss_bytes", "current_allocated_bytes",
                                  "swap_delta_bytes", "segment", "resumed")
 
 
-def test_epoch_fields_cover_segments():
+def test_epoch_fields_cover_segments() -> None:
     assert "segment" in runs.EPOCH_FIELDS and "resumed" in runs.EPOCH_FIELDS
     assert runs.SEGMENT_FIELDS == ("segment", "start_epoch", "resumed", "git_sha", "git_dirty", "git_diff_sha256",
                                    "device", "resume_load_s", "resume_peak_total_bytes")
 
 
-def test_env_strings_are_sorted_key_value_pairs():
+def test_env_strings_are_sorted_key_value_pairs() -> None:
     env = {"PYTORCH_MPS_LOW_WATERMARK_RATIO": "1.0", "OMP_NUM_THREADS": "4", "PYTORCH_ENABLE_MPS_FALLBACK": "0"}
     assert runs.env_strings(env) == ["OMP_NUM_THREADS=4", "PYTORCH_ENABLE_MPS_FALLBACK=0",
                                      "PYTORCH_MPS_LOW_WATERMARK_RATIO=1.0"]
     assert runs.env_strings({}) == []
 
 
-def test_read_record_returns_the_ray_train_record(tmp_path):
+def test_read_record_returns_the_ray_train_record(tmp_path: Path) -> None:
     record = {"device": "cpu", "epochs": [_row(1), _row(2, loss=0.5)]}
     d = _ckpt(tmp_path, {"ray_train": {"seed": 0, "record": record}, "epoch": 2})
     assert runs.read_record(d) == record
 
 
-def test_read_record_refuses_a_checkpoint_without_a_record(tmp_path):
+def test_read_record_refuses_a_checkpoint_without_a_record(tmp_path: Path) -> None:
     d = _ckpt(tmp_path, {"ray_train": {"seed": 0}})
     with pytest.raises(SystemExit, match="holds no ray_train run record"):
         runs.read_record(d)
 
 
-def test_read_record_refuses_an_epoch_row_missing_a_field(tmp_path):
+def test_read_record_refuses_an_epoch_row_missing_a_field(tmp_path: Path) -> None:
     row = _row(2)
     del row["swap_delta_bytes"]
     d = _ckpt(tmp_path, {"ray_train": {"record": {"device": "cpu", "epochs": [_row(1), row]}}})
@@ -65,18 +67,18 @@ def test_read_record_refuses_an_epoch_row_missing_a_field(tmp_path):
         runs.read_record(d)
 
 
-def test_import_is_torch_free():
+def test_import_is_torch_free() -> None:
     code = "import sys, pilot.runs; print('TORCH' if 'torch' in sys.modules else 'NO_TORCH')"
     r = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "NO_TORCH", r.stdout
 
 
-def _labelled(n_pos, n_labels=48):
+def _labelled(n_pos: int, n_labels: int = 48) -> dict[str, Any]:
     return {"expected": {"t%02d" % i: i < n_pos for i in range(n_labels)}}
 
 
-def test_neg_items_counts_positives_plus_k_negatives():
+def test_neg_items_counts_positives_plus_k_negatives() -> None:
     assert runs.neg_items([_labelled(2)], 8) == 10
     assert runs.neg_items([_labelled(0)], 8) == 8
     assert runs.neg_items([_labelled(45)], 8) == 48            # only 3 negatives left to keep
@@ -86,7 +88,7 @@ def test_neg_items_counts_positives_plus_k_negatives():
         runs.neg_items([_labelled(2)], -1)
 
 
-def test_neg_items_equals_what_neg8_rows_keeps():
+def test_neg_items_equals_what_neg8_rows_keeps() -> None:
     from pilot import spike
     rows = [_labelled(p) for p in (0, 1, 3, 12, 41, 47)]
     for k in (1, 8, 20):
@@ -95,7 +97,7 @@ def test_neg_items_equals_what_neg8_rows_keeps():
 
 
 @pytest.mark.data
-def test_neg8_items_on_the_committed_train_splits():
+def test_neg8_items_on_the_committed_train_splits() -> None:
     """The compute projection's torch-free count equals the spike's n_neg8_items (14,854) on selection_train."""
     import pilot.data
     for name, want in (("selection_train", 14854), ("final_train", 17001)):
@@ -107,11 +109,11 @@ def test_neg8_items_on_the_committed_train_splits():
         assert runs.neg_items(rows, 8) == want, name
 
 
-def _cfg(freeze_encoder=False, freeze_embeddings=False, **kw):
+def _cfg(freeze_encoder: bool = False, freeze_embeddings: bool = False, **kw: Any) -> dict[str, Any]:
     return dict(runs.SPIKE_START, freeze_encoder=freeze_encoder, freeze_embeddings=freeze_embeddings, **kw)
 
 
-def _apply(flags, cfg):
+def _apply(flags: list[str], cfg: dict[str, Any]) -> dict[str, Any]:
     """The config a ray_train.py command gets when `flags` are added to it (the four flags the ladder uses)."""
     cfg, it = dict(cfg), iter(flags)
     for f in it:
@@ -122,7 +124,7 @@ def _apply(flags, cfg):
     return cfg
 
 
-def test_rung_label_table():
+def test_rung_label_table() -> None:
     for (enc, emb, mb), want in (((False, False, 8), "none"), ((False, True, 8), "embeddings_frozen"),
                                  ((False, False, 4), "smaller_batch"),
                                  ((False, True, 4), "embeddings_frozen+smaller_batch"),
@@ -131,7 +133,7 @@ def test_rung_label_table():
     assert [r for r in runs.RUNG_NEXT if runs.weaker(r)] == ["encoder_frozen"]
 
 
-def test_ladder_order():
+def test_ladder_order() -> None:
     chain, r = [], "none"
     while r is not None:
         chain.append(r)
@@ -147,14 +149,14 @@ def test_ladder_order():
         assert runs.rung_label(_apply(runs.rung_flags(rung), _cfg())) == rung
 
 
-def test_spike_start_matches_the_committed_spike():
+def test_spike_start_matches_the_committed_spike() -> None:
     with open(os.path.join(REPO_ROOT, "results", "spike", "mps_spike.json"), encoding="utf-8") as f:
         chosen = json.load(f)["verdict"]["chosen"]
     assert runs.SPIKE_START == {k: chosen[k] for k in ("micro_batch", "max_len", "grad_accum")}
     assert chosen["rung"] == "none"
 
 
-def test_oom_message_names_the_next_rung():
+def test_oom_message_names_the_next_rung() -> None:
     msg = runs.oom_message(2, 17, "none")
     assert msg.startswith(runs.OOM_MARK) and "\n" not in msg
     for part in ("epoch 2", "micro-batch 17", "rung none", "--freeze-embeddings"):
@@ -169,8 +171,8 @@ def test_oom_message_names_the_next_rung():
 
 
 @pytest.mark.parametrize("stage", sorted(runs.RESUME_STAGES))
-def test_an_oom_after_the_last_epoch_says_resume_not_the_next_rung(stage):
-    """04-REVIEW WR-01: every epoch is saved there; a rung flag would change the run_id and retrain from epoch 0."""
+def test_an_oom_after_the_last_epoch_says_resume_not_the_next_rung(stage: str) -> None:
+    """Every epoch is saved there; a rung flag would change the run_id and retrain from epoch 0."""
     for label in ("none", "embeddings_frozen", "encoder_frozen"):
         msg = runs.oom_message(None, None, label, stage)
         assert msg.startswith(runs.OOM_MARK + " " + stage) and runs.failure_line(msg) == msg
@@ -182,7 +184,7 @@ def test_an_oom_after_the_last_epoch_says_resume_not_the_next_rung(stage):
         assert not runs.resume_oom(line), line
 
 
-def test_spike_departures():
+def test_spike_departures() -> None:
     assert runs.spike_departures(_cfg(), 128) == {}
     assert runs.spike_departures(_cfg(), 256) == {"max_len": 256}
     smaller = runs.spike_departures(_cfg(micro_batch=4, grad_accum=8), 128)
@@ -190,14 +192,14 @@ def test_spike_departures():
     assert runs.spike_departures(_cfg(grad_accum=2), 128)["effective_batch"] == 16
 
 
-def _identity(**kw):
+def _identity(**kw: Any) -> dict[str, Any]:
     vals = {k: 0 for k in runs.IDENTITY}
     vals.update(split="selection_train", neg=8, seed=0, device="cpu", data_sha256="a" * 64)
     vals.update(kw)
     return vals
 
 
-def test_canonical_refuses_missing_and_extra_keys():
+def test_canonical_refuses_missing_and_extra_keys() -> None:
     vals = _identity()
     assert runs.canonical(vals) == vals
     with pytest.raises(ValueError, match="missing seed"):
@@ -206,7 +208,7 @@ def test_canonical_refuses_missing_and_extra_keys():
         runs.canonical(dict(vals, out="ckpt"))
 
 
-def test_run_id_is_stable_and_follows_seed_and_neg():
+def test_run_id_is_stable_and_follows_seed_and_neg() -> None:
     a = runs.run_id(runs.canonical(_identity()))
     assert a == runs.run_id(runs.canonical(_identity()))
     assert a.startswith("laya-selection_train-neg8-s0-") and len(a.rsplit("-", 1)[1]) == 8
@@ -216,14 +218,14 @@ def test_run_id_is_stable_and_follows_seed_and_neg():
     assert runs.run_id(runs.canonical(_identity(encoder_lr=1e-5))) != a
 
 
-def test_run_id_does_not_depend_on_key_order():
+def test_run_id_does_not_depend_on_key_order() -> None:
     vals = _identity()
     reordered = dict(reversed(list(vals.items())))
     assert list(reordered) != list(vals)
     assert runs.run_id(reordered) == runs.run_id(vals) == runs.run_id(runs.canonical(reordered))
 
 
-def test_check_state_refuses_foreign_state():
+def test_check_state_refuses_foreign_state() -> None:
     canon = runs.canonical(_identity())
     rid = runs.run_id(canon)
     state = {"kind": "train_state", "run_id": rid, "canonical": dict(canon), "epoch": 1}
@@ -235,19 +237,19 @@ def test_check_state_refuses_foreign_state():
         runs.check_state({}, rid, canon)
 
 
-def test_disk_need_bytes():
+def test_disk_need_bytes() -> None:
     m = 614 * 2**20
     assert runs.disk_need_bytes(m, 2, True) == 18 * m + 2 * m + m + 2**30
     assert runs.disk_need_bytes(m, 2, False) == 18 * m + m + 2**30
     assert runs.disk_need_bytes(m, 4, True) - runs.disk_need_bytes(m, 4, False) == 4 * m
 
 
-def test_fail_after_epoch_and_export_epochs_never_change_the_run_id():
+def test_fail_after_epoch_and_export_epochs_never_change_the_run_id() -> None:
     assert {"fail_after_epoch", "export_epochs"} <= set(runs.NOT_IDENTITY)
 
 
-def test_identity_holds_no_calibration_keys():
-    """LAYA-05: training no longer calibrates, so no calibration value is part of the run identity, and only the two
+def test_identity_holds_no_calibration_keys() -> None:
+    """Training no longer calibrates, so no calibration value is part of the run identity, and only the two
     post-training stages (the final save and a finished rerun's model move) say rerun the same command."""
     keys = set(runs.IDENTITY) | set(runs.NOT_IDENTITY)
     assert not [k for k in keys if k.startswith("calib")], sorted(keys)
@@ -255,15 +257,15 @@ def test_identity_holds_no_calibration_keys():
     assert not hasattr(runs, "STAGE_CALIBRATE") and not hasattr(runs, "STAGE_RECALIBRATE_MOVE")
 
 
-def test_last_line_and_free_bytes(tmp_path):
-    """04-REVIEW IN-02: the one shared copy of the failure-text and free-disk helpers."""
+def test_last_line_and_free_bytes(tmp_path: Path) -> None:
+    """The one shared copy of the failure-text and free-disk helpers."""
     assert runs.last_line("Traceback\n  File x\nValueError: bad\n\n") == "ValueError: bad"
     assert runs.last_line("") == "" and runs.last_line("  \n", "none") == "none"
     assert runs.free_bytes(str(tmp_path / "not" / "yet" / "made")) > 0         # the nearest existing parent's volume
     assert runs.free_bytes(os.path.abspath(os.sep)) > 0
 
 
-def test_canonical_keeps_the_final_seed_keys_only_when_set():
+def test_canonical_keeps_the_final_seed_keys_only_when_set() -> None:
     """stop_after_epoch and postfit_sha256 enter a final seed's run id and stay out of every selection run's."""
     sel = _identity(stop_after_epoch=None, postfit_sha256=None, base_files_sha256=None)
     canon = runs.canonical(sel)
@@ -275,15 +277,15 @@ def test_canonical_keeps_the_final_seed_keys_only_when_set():
         runs.canonical({k: v for k, v in sel.items() if k != "stop_after_epoch"})
 
 
-def test_identity_and_not_identity_stay_disjoint():
+def test_identity_and_not_identity_stay_disjoint() -> None:
     assert not set(runs.IDENTITY) & set(runs.NOT_IDENTITY)
     assert {"stop_after_epoch", "postfit_sha256"} <= set(runs.IDENTITY) & set(runs.DROPPED_WHEN_NONE)
     assert "postfit" in runs.NOT_IDENTITY and set(runs.DROPPED_WHEN_NONE) <= set(runs.IDENTITY)
 
 
-def test_committed_run_id_d92447f4_is_unchanged_by_the_fewshot_keys():
-    """Pitfall 5, T-09-08: mask_tags and fewshot are IDENTITY keys dropped when None, so the committed chosen Laya
-    selection run (results/postfit/laya.json, every Phase 5-8 record and dump names it) recomputes to the same id."""
+def test_committed_run_id_d92447f4_is_unchanged_by_the_fewshot_keys() -> None:
+    """mask_tags and fewshot are IDENTITY keys dropped when None, so the committed chosen Laya selection run
+    (results/postfit/laya.json; every later record and dump names it) recomputes to the same id."""
     with open(os.path.join(REPO_ROOT, "results", "postfit", "laya.json"), encoding="utf-8") as f:
         chosen = json.load(f)["chosen"]
     vals = {k: chosen["canonical"].get(k) for k in runs.IDENTITY}
@@ -292,8 +294,8 @@ def test_committed_run_id_d92447f4_is_unchanged_by_the_fewshot_keys():
     assert runs.run_id(runs.canonical(vals)) == chosen["train_run_id"] == "laya-selection_train-neg8-s0-d92447f4"
 
 
-def test_canonical_keeps_mask_tags_and_fewshot_only_when_set():
-    """D-03: a Phase 9 masked base and a continued run name their mask and protocol binding in the run id; every other
+def test_canonical_keeps_mask_tags_and_fewshot_only_when_set() -> None:
+    """A few-shot masked base and a continued run name their mask and protocol binding in the run id; every other
     run leaves both keys out (they must still be given, as None)."""
     assert {"mask_tags", "fewshot"} <= set(runs.IDENTITY) & set(runs.DROPPED_WHEN_NONE)
     assert {"fewshot_base", "fewshot_draw", "fewshot_k"} <= set(runs.NOT_IDENTITY)

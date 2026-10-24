@@ -7,6 +7,8 @@ public laya.load reads. Laya itself is reached only through the adapter.
 usage: from tiny_laya import tiny_checkpoint; agent_dir = tiny_checkpoint(tmp_path / "ckpt", temperature=1.3)
 """
 import re
+from pathlib import Path
+from typing import Any
 
 from intents import INTENTS
 from pilot import laya_adapter as la
@@ -15,7 +17,8 @@ SPECIALS = ["[PAD]", "[CLS]", "[SEP]", "[MASK]", "[UNK]"]          # ids 0-4
 EXTRA_WORDS = ["Kartım", "kayboldu", "Evet", "."]
 
 
-def _vocab():
+def _vocab() -> dict[str, int]:
+    """{token: id}: the specials (ids 0-4), then every question word and EXTRA_WORDS, sorted."""
     words = set(EXTRA_WORDS)
     for text in INTENTS.values():
         words.update(re.findall(r"\w+|[^\w\s]+", text))            # the Whitespace pre-tokenizer's split
@@ -25,7 +28,8 @@ def _vocab():
     return vocab
 
 
-def tiny_tokenizer():
+def tiny_tokenizer() -> Any:
+    """A transformers PreTrainedTokenizerFast over _vocab() (WordLevel, Whitespace pre-tokenizer, [UNK] fallback)."""
     from tokenizers import Tokenizer, models, pre_tokenizers
     from transformers import PreTrainedTokenizerFast
 
@@ -35,8 +39,9 @@ def tiny_tokenizer():
                                    mask_token="[MASK]", unk_token="[UNK]")
 
 
-def tiny_checkpoint(path, temperature=1.0, seed=0):
-    """Save a random-init tiny Laya checkpoint to `path` (noul temperature `temperature`); returns str(path)."""
+def tiny_checkpoint(path: str | Path, temperature: float = 1.0, seed: int = 0) -> str:
+    """Save a random-init tiny Laya checkpoint (torch seed `seed`, noul temperature `temperature`) to `path`; returns
+    str(path)."""
     import torch
     from transformers import ModernBertConfig, ModernBertModel
 

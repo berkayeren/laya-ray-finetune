@@ -1,13 +1,17 @@
-"""ray_train.py run identity and resume (LAYA-04, LAYA-06) on the tiny checkpoint, offline, on --device cpu.
+"""ray_train.py run identity and resume on the tiny checkpoint, offline, on --device cpu.
 
 The run_id comes from the command's canonical config and seed and names the Ray experiment dir, so the same command
 always lands in storage/<run_id>/ and a different seed in another dir; --print-run-id prints it without starting Ray.
+A killed run resumes byte for byte, a finished run reruns without training, and a read-only base tokenizer/ or low
+disk is refused before Ray starts.
 Runs in `make test` under the ray marker (CPU only, no weights or data).
 """
 import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,10 +24,13 @@ pytestmark = pytest.mark.ray
 
 REPO = pilot.data.REPO_ROOT
 TIMEOUT = 600
+Prepared = tuple[Path, list[Any]]                           # the prepared fixture: (work dir, ARGS)
+FullRun = tuple[str, Path]                                  # the full_run fixture: (run id, out dir)
 
 
-def _run(*args, ok=True):
-    """Run a repo script with the test interpreter (no PYTHONPATH, so it imports like a user's command)."""
+def _run(*args: Any, ok: bool = True) -> subprocess.CompletedProcess:
+    """Run a repo script with the test interpreter (no PYTHONPATH, so it imports like a user's command); with ok,
+    assert it succeeds."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable] + [str(x) for x in args], cwd=REPO, env=env, capture_output=True, text=True,
                        timeout=TIMEOUT)
@@ -33,7 +40,7 @@ def _run(*args, ok=True):
 
 
 @pytest.fixture(scope="module")
-def prepared(tmp_path_factory):
+def prepared(tmp_path_factory: pytest.TempPathFactory) -> Prepared:
     """(work dir, ARGS): the synthetic splits, the tiny base and the shared flags of every run in this module."""
     d = tmp_path_factory.mktemp("resume")
     root, raw_sha256 = make_raw(str(d / "raw"))
@@ -47,7 +54,7 @@ def prepared(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def full_run(prepared):
+def full_run(prepared: Prepared) -> FullRun:
     """(rid, out dir) of one uninterrupted run of ARGS into storage a."""
     d, args = prepared
     rid = _run("ray_train.py", *args, "--out", d / "x", "--storage", d / "a", "--print-run-id").stdout.strip()
@@ -56,7 +63,7 @@ def full_run(prepared):
 
 
 @pytest.mark.timeout(600)
-def test_print_run_id_names_the_storage_dir(prepared, full_run):
+def test_print_run_id_names_the_storage_dir(prepared: Prepared, full_run: FullRun) -> None:
     d, args = prepared
     r = _run("ray_train.py", *args, "--out", d / "x", "--storage", d / "p", "--print-run-id")
     lines = r.stdout.splitlines()
@@ -72,14 +79,14 @@ def test_print_run_id_names_the_storage_dir(prepared, full_run):
     assert s1 != rid and "-s1-" in s1
 
 
-def _sha256(path):
+def _sha256(path: str | Path) -> str:
     import hashlib
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
 
 
 @pytest.mark.timeout(600)
-def test_killed_run_resumes_bitwise(prepared, full_run):
+def test_killed_run_resumes_bitwise(prepared: Prepared, full_run: FullRun) -> None:
     """Killed after epoch 1 and rerun with the same command: the result is byte-identical to an uninterrupted run."""
     d, args = prepared
     rid, full = full_run
@@ -101,14 +108,14 @@ def test_killed_run_resumes_bitwise(prepared, full_run):
     assert rec["segments"][0]["resumed"] is False and rec["segments"][0]["resume_load_s"] is None
     assert rec["segments"][1]["resumed"] is True and rec["segments"][1]["resume_load_s"] > 0
     assert rec["segments"][1]["resume_peak_total_bytes"] > 0
-    # same code in both segments; without git (an exported tree) the flag says it cannot tell (04-REVIEW IN-13)
+    # same code in both segments; without git (an exported tree) the flag says it cannot tell
     assert rec["code_changed_on_resume"] is (rec["segments"][0]["git_sha"] is None)
     assert rec["train_state_bytes"] > 0 and rec["export_bytes"] > 0
     assert rec["exports"] == ["exports/epoch-001", "exports/epoch-002"]
-    assert all(row["save_s"] > 0 for row in rec["epochs"]) and rec["save_s_includes_persist"] is True   # IN-02
+    assert all(row["save_s"] > 0 for row in rec["epochs"]) and rec["save_s_includes_persist"] is True
     assert rec["run_id"] == rid
     assert sorted(p.name for p in (run_dir / "exports").iterdir()) == ["epoch-001", "epoch-002"]
-    ex = runs.read_record(str(run_dir / "exports" / "epoch-002"))                # a pre-save snapshot (IN-06)
+    ex = runs.read_record(str(run_dir / "exports" / "epoch-002"))                # a pre-save snapshot
     assert ex["exports"] == ["exports/epoch-001", "exports/epoch-002"] and ex["epochs"][-1]["save_s"] is None
     assert ex["epochs"][0]["save_s"] > 0 and ex["train_state_bytes"] is None
     assert not (run_dir / "epoch-001").exists()                                  # num_to_keep=1 rotated it out
@@ -117,10 +124,10 @@ def test_killed_run_resumes_bitwise(prepared, full_run):
 
 
 @pytest.mark.timeout(600)
-def test_a_failure_after_the_last_epoch_resumes_into_the_final_save_only(prepared, full_run):
-    """04-REVIEW WR-01 (end-of-phase gate): the rerun after a failure past the last epoch's checkpoint (as after a
+def test_a_failure_after_the_last_epoch_resumes_into_the_final_save_only(prepared: Prepared, full_run: FullRun) -> None:
+    """The rerun after a failure past the last epoch's checkpoint (as after a
     final-save OOM) trains nothing and never loads the optimizer state; it writes the final checkpoint of the same
-    weights the uninterrupted run published (uncalibrated, LAYA-05)."""
+    weights the uninterrupted run published (uncalibrated)."""
     d, args = prepared
     rid, full = full_run
     r = _run("ray_train.py", *args, "--storage", d / "c", "--out", d / "fin", "--fail-after-epoch", "2", ok=False)
@@ -136,7 +143,7 @@ def test_a_failure_after_the_last_epoch_resumes_into_the_final_save_only(prepare
 
 
 @pytest.mark.timeout(600)
-def test_finished_run_reruns_without_training(prepared, full_run):
+def test_finished_run_reruns_without_training(prepared: Prepared, full_run: FullRun) -> None:
     d, args = prepared
     rid, full = full_run
     r = _run("ray_train.py", *args, "--storage", d / "a", "--out", d / "full2")
@@ -146,7 +153,7 @@ def test_finished_run_reruns_without_training(prepared, full_run):
 
 
 @pytest.mark.timeout(600)
-def test_snapshot_with_deleted_checkpoints_names_the_dir(prepared, full_run, tmp_path):
+def test_snapshot_with_deleted_checkpoints_names_the_dir(prepared: Prepared, full_run: FullRun, tmp_path: Path) -> None:
     import shutil
     d, args = prepared
     rid, full = full_run
@@ -160,14 +167,15 @@ def test_snapshot_with_deleted_checkpoints_names_the_dir(prepared, full_run, tmp
 
 @pytest.mark.timeout(120)
 @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
-def test_a_read_only_base_tokenizer_dir_is_refused_before_ray(prepared, tmp_path, monkeypatch):
-    """04-REVIEW CR-01: a base whose tokenizer_config.json laya must rewrite (a fresh save_checkpoint output holds
+def test_a_read_only_base_tokenizer_dir_is_refused_before_ray(prepared: Prepared, tmp_path: Path,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    """A base whose tokenizer_config.json laya must rewrite (a fresh save_checkpoint output holds
     TokenizersBackend) in a read-only tokenizer/ is refused on the driver, before --print-run-id and ray.init, with
     its own fix, not after a worker's full base load as "training failed ...; rerun the same command to resume"."""
     import ray_train
     d, args = prepared
 
-    def no_ray(*a, **kw):
+    def no_ray(*a: Any, **kw: Any) -> None:
         raise AssertionError("ray.init reached; the read-only tokenizer/ must be refused first")
     base = tiny_checkpoint(tmp_path / "base")                 # its own base: a loaded one is already rewritten
     args = list(args)
@@ -193,8 +201,8 @@ def test_a_read_only_base_tokenizer_dir_is_refused_before_ray(prepared, tmp_path
 
 @pytest.mark.timeout(300)
 @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
-def test_a_worker_refusal_ends_the_run_without_resume_advice(prepared, tmp_path):
-    """04-REVIEW CR-01: with the driver preflight switched off, the worker's post-load backstop refuses the read-only
+def test_a_worker_refusal_ends_the_run_without_resume_advice(prepared: Prepared, tmp_path: Path) -> None:
+    """With the driver preflight switched off, the worker's post-load backstop refuses the read-only
     base after ray.init; fit_or_exit shows that refusal as is, never "training failed ...; rerun the same command"."""
     d, args = prepared
     base = tiny_checkpoint(tmp_path / "base")
@@ -217,12 +225,12 @@ def test_a_worker_refusal_ends_the_run_without_resume_advice(prepared, tmp_path)
 
 
 @pytest.mark.timeout(600)
-def test_low_disk_is_refused_before_ray(prepared, tmp_path, monkeypatch):
+def test_low_disk_is_refused_before_ray(prepared: Prepared, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import collections
     import ray_train
     d, args = prepared
 
-    def no_ray(*a, **kw):
+    def no_ray(*a: Any, **kw: Any) -> None:
         raise AssertionError("ray.init reached; the disk refusal must come first")
     usage = collections.namedtuple("usage", "total used free")
     monkeypatch.setattr(ray_train.ray, "init", no_ray)

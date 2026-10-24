@@ -2,18 +2,20 @@
 
 Offline (tests/tiny_laya.py + the synthetic splits of tests/conftest.py): 2 epochs on 12 messages with the encoder
 trainable, so gradient checkpointing is on and AMP off. The checkpoint config's training.ray_train.record must name the
-device the parameters landed on and hold one row per epoch with exactly pilot.runs.EPOCH_FIELDS (LAYA-02, LAYA-06).
+device the parameters landed on and hold one row per epoch with exactly pilot.runs.EPOCH_FIELDS.
 Every selected message trains (no calibration holdout), and every export and final checkpoint is uncalibrated at
-T = 1, also from a base that ships another temperature (LAYA-05).
-The Phase 5 chain runs end to end on the tiny checkpoint: a selection run's epoch exports scored on val build a postfit
-record, a --postfit final seed on final_train serves the record's val-fitted T, and --stop-after-epoch K reproduces the
-selection run's epoch K (LAYA-05, LAYA-08).
+T = 1, also from a base that ships another temperature.
+The Laya val selection chain runs end to end on the tiny checkpoint: a selection run's epoch exports scored on val
+build a postfit record, a --postfit final seed on final_train serves the record's val-fitted T, and
+--stop-after-epoch K reproduces the selection run's epoch K.
 Runs in `make test` under the ray marker (CPU only, no weights or data).
 """
 import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -30,7 +32,7 @@ REPO = pilot.data.REPO_ROOT
 TIMEOUT = 600
 
 
-def _run(*args):
+def _run(*args: Any) -> subprocess.CompletedProcess:
     """Run a repo script with the test interpreter (no PYTHONPATH, so it imports like a user's command)."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable] + [str(x) for x in args], cwd=REPO, env=env, capture_output=True, text=True,
@@ -40,17 +42,18 @@ def _run(*args):
 
 
 @pytest.fixture(scope="module")
-def tiny_train(tmp_path_factory):
+def tiny_train(tmp_path_factory: pytest.TempPathFactory) -> Any:
     """train(name, *flags, base=None, split="selection_train") -> checkpoint dir of a full-encoder ray_train.py run on
     --device cpu, from the tiny base (temperature 1.0) unless `base` names another local checkpoint. train.storage is
-    the Ray storage dir, train.data the prepared synthetic snapshot (splits/ and splits.json)."""
+    the Ray storage dir, train.work the module's work dir, train.data the prepared synthetic snapshot (splits/ and
+    splits.json)."""
     d = tmp_path_factory.mktemp("train_cpu")
     root, raw_sha256 = make_raw(str(d / "raw"))
     out_dir = str(d / "data")
     pilot.data.prepare(root, out_dir, raw_sha256)
     tiny = tiny_checkpoint(d / "base")
 
-    def train(name, *flags, base=None, split="selection_train"):
+    def train(name: str, *flags: Any, base: str | None = None, split: str = "selection_train") -> str:
         ckpt = d / name
         _run("ray_train.py", "--data", os.path.join(out_dir, "splits", split + ".jsonl"),
              "--manifest", os.path.join(out_dir, "splits.json"), "--base", base or tiny, "--out", ckpt,
@@ -63,13 +66,13 @@ def tiny_train(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def cpu_run(tiny_train):
+def cpu_run(tiny_train: Any) -> str:
     """Checkpoint dir of a 2-epoch full-encoder run at the default flags (neg 8, rung none)."""
     return tiny_train("ckpt", "--epochs", "2")
 
 
 @pytest.mark.timeout(600)
-def test_cpu_record(cpu_run):
+def test_cpu_record(cpu_run: str) -> None:
     rec = runs.read_record(cpu_run)
     assert rec["device"] == "cpu" and rec["param_device"] == "cpu"
     assert rec["grad_checkpointing"] is True and rec["amp"] is False
@@ -85,13 +88,13 @@ def test_cpu_record(cpu_run):
     # every epoch saves its train state (and export), the last one too; the final checkpoint saves after training
     assert all(row["save_s"] > 0 for row in rec["epochs"])
     assert [row["segment"] for row in rec["epochs"]] == [0, 0] and not any(row["resumed"] for row in rec["epochs"])
-    # training no longer calibrates (LAYA-05): the key stays, with None
+    # training no longer calibrates: the key stays, with None
     assert rec["calib_s"] is None
     assert rec["load_s"] > 0 and rec["final_save_s"] > 0
 
 
 @pytest.mark.timeout(600)
-def test_cpu_record_keeps_local_paths_and_raw_env_out(cpu_run):
+def test_cpu_record_keeps_local_paths_and_raw_env_out(cpu_run: str) -> None:
     with open(os.path.join(cpu_run, "rl_agent_config.json"), encoding="utf-8") as f:
         ray_cfg = json.load(f)["training"]["ray_train"]
     assert not {"data", "base_dir", "driver_node_id", "expect_env"} & set(ray_cfg), sorted(ray_cfg)
@@ -99,9 +102,9 @@ def test_cpu_record_keeps_local_paths_and_raw_env_out(cpu_run):
 
 
 @pytest.mark.timeout(600)
-def test_neg_items_match_the_count(cpu_run):
+def test_neg_items_match_the_count(cpu_run: str) -> None:
     """Default --neg 8: train items are the sampled positives + 8 negatives, on every one of the 12 selected messages
-    (no calibration holdout, LAYA-05)."""
+    (no calibration holdout)."""
     rec = runs.read_record(cpu_run)
     assert rec["neg"] == 8 and rec["neg_seed"] == 0
     assert rec["n_train_messages"] == 12                    # the whole --max-messages subsample trains
@@ -114,15 +117,16 @@ def test_neg_items_match_the_count(cpu_run):
     assert "calibration_holdout" not in ray_cfg, sorted(ray_cfg)
 
 
-def _config(path):
+def _config(path: str | Path) -> dict[str, Any]:
+    """The rl_agent_config.json of a checkpoint dir."""
     with open(os.path.join(str(path), "rl_agent_config.json"), encoding="utf-8") as f:
         return json.load(f)
 
 
 @pytest.mark.timeout(600)
-def test_uncalibrated_from_a_base_with_another_temperature(tiny_train):
+def test_uncalibrated_from_a_base_with_another_temperature(tiny_train: Any) -> None:
     """A base that ships T 1.3 never leaks it: the epoch export and the final checkpoint both reset the temperature to
-    [1, 1, 1] with no temperature_by_options and say calibrated False (LAYA-05, RESEARCH Pitfall 5)."""
+    [1, 1, 1] with no temperature_by_options and say calibrated False."""
     base = tiny_checkpoint(tiny_train.work / "base_t13", temperature=1.3)
     assert _config(base)["temperature"] == [1.0, 1.0, 1.3]
     ckpt = tiny_train("ckpt_t13", "--epochs", "1", base=base)
@@ -135,7 +139,7 @@ def test_uncalibrated_from_a_base_with_another_temperature(tiny_train):
 
 
 @pytest.mark.timeout(600)
-def test_default_run_is_rung_none(cpu_run):
+def test_default_run_is_rung_none(cpu_run: str) -> None:
     rec = runs.read_record(cpu_run)
     assert rec["rung"] == "none" and rec["fallback"] is False and rec["weaker"] is False
     assert 0 < rec["trainable_params"] == rec["total_params"]
@@ -144,7 +148,7 @@ def test_default_run_is_rung_none(cpu_run):
 
 
 @pytest.mark.timeout(600)
-def test_embeddings_frozen_run_is_labelled(tiny_train):
+def test_embeddings_frozen_run_is_labelled(tiny_train: Any) -> None:
     rec = runs.read_record(tiny_train("ckpt_emb", "--epochs", "1", "--freeze-embeddings"))
     assert rec["rung"] == "embeddings_frozen" and rec["fallback"] is True and rec["weaker"] is False
     assert 0 < rec["trainable_params"] < rec["total_params"]
@@ -156,7 +160,7 @@ from ray.train import RunConfig, ScalingConfig
 from ray.train.torch import TorchTrainer
 
 
-def loop(c):
+def loop(c: dict) -> None:
     with ray_train.mps_oom_exit(2, 17, "none"):
         raise RuntimeError("MPS backend out of memory (MPS allocated: 9.10 GiB, other allocations: 1.02 GiB)")
 
@@ -168,7 +172,7 @@ ray_train.fit_or_exit(TorchTrainer(loop, scaling_config=ScalingConfig(num_worker
 
 
 @pytest.mark.timeout(600)
-def test_worker_oom_ends_the_driver_with_one_line(tmp_path):
+def test_worker_oom_ends_the_driver_with_one_line(tmp_path: Path) -> None:
     """A worker MPS OOM crosses the Ray process boundary and ends the driver with the rung message, exit 1."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable, "-c", OOM_DRIVER % str(tmp_path / "ray")], cwd=REPO, env=env,
@@ -178,7 +182,7 @@ def test_worker_oom_ends_the_driver_with_one_line(tmp_path):
     assert runs.oom_message(2, 17, "none") in r.stderr.splitlines(), r.stderr[-4000:]
 
 
-def _score_val(train, ckpt):
+def _score_val(train: Any, ckpt: str) -> str:
     """score.py --workers 0 of a checkpoint on the synthetic val split into train.work/dumps; returns the dump dir."""
     root = str(train.work / "dumps")
     _run("score.py", os.path.join(train.data, "splits", "val.jsonl"), "--checkpoint", ckpt, "--workers", "0",
@@ -187,8 +191,8 @@ def _score_val(train, ckpt):
 
 
 @pytest.mark.timeout(1200)
-def test_postfit_final_seed_end_to_end(tiny_train):
-    """Phase 5 on the tiny checkpoint (LAYA-05, LAYA-08): a 2-epoch selection run's two epoch exports, scored on val,
+def test_postfit_final_seed_end_to_end(tiny_train: Any) -> None:
+    """The Laya val selection on the tiny checkpoint: a 2-epoch selection run's two epoch exports, scored on val,
     give a postfit record (one-LR grid); a --postfit final seed on final_train trains the chosen recipe and epoch,
     serves the record's T bit for bit, records the binding, and its own (in-sample) val dump is refused by postfit."""
     manifest = os.path.join(tiny_train.data, "splits.json")
@@ -231,8 +235,8 @@ def test_postfit_final_seed_end_to_end(tiny_train):
 
 
 @pytest.mark.timeout(600)
-def test_stop_after_epoch_keeps_the_selection_trajectory(tiny_train, cpu_run):
-    """RESEARCH A3: --stop-after-epoch 1 of the --epochs 2 schedule is the selection run's epoch 1 (the cosine T_max and
+def test_stop_after_epoch_keeps_the_selection_trajectory(tiny_train: Any, cpu_run: str) -> None:
+    """--stop-after-epoch 1 of the --epochs 2 schedule is the selection run's epoch 1 (the cosine T_max and
     the sigma anneal keep --epochs), so on cpu its final weights are byte for byte cpu_run's exports/epoch-001."""
     stopped = tiny_train("ckpt_stop1", "--epochs", "2", "--stop-after-epoch", "1")
     rid = runs.read_record(cpu_run)["run_id"]

@@ -1,10 +1,11 @@
-"""The Laya adapter contract (D-15): a laya version or private-signature change fails here, not silently in training.
+"""The Laya adapter contract: a laya version or private-signature change fails here, not silently in training.
 
 (a) laya.__version__ must be exactly pilot.laya_adapter.LAYA_VERSION; (b) every wrapped laya symbol keeps the
 inspect.signature string in SIGNATURES; (c) an offline tiny-model round trip (items -> encode -> collate -> forward ->
 losses -> save -> public laya.load -> noul logits) still runs, and the adapter's logit route reproduces the public
-predict_batch probabilities; (d) no tracked .py file names laya's item-level calibration (LAYA-05: the temperature is
-fitted on val dumps by pilot.postfit; la.fit_temperature_map is its test oracle in tests/test_postfit.py).
+predict_batch probabilities; (d) no tracked .py file names laya's item-level calibration (the temperature is fitted
+on val dumps by pilot.postfit; la.fit_temperature_map is its test oracle in tests/test_postfit.py); (e) no tracked .py
+file but the adapter uses laya's private API.
 
 SIGNATURES is the laya 0.4.6 snapshot. Pins move only with `make lock`; re-snapshot only after reading laya's changelog.
 """
@@ -16,6 +17,8 @@ import subprocess
 import sys
 import types
 import warnings
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -75,13 +78,13 @@ AUTOCAST_WRITERS = ("tests/test_laya_adapter.py",)
 
 
 @pytest.fixture(scope="module")
-def tiny_agent(tmp_path_factory):
+def tiny_agent(tmp_path_factory: pytest.TempPathFactory) -> Any:
     import laya
     path = tiny_checkpoint(tmp_path_factory.mktemp("tiny") / "c", temperature=1.3)
     return laya.load(path, device="cpu")
 
 
-def test_laya_version_is_pinned(monkeypatch):
+def test_laya_version_is_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
     import laya
     la.check_version()
     for bad in ("0.4.60", "0.4.6.post1", "0.4.5"):
@@ -90,7 +93,7 @@ def test_laya_version_is_pinned(monkeypatch):
             la.check_version()
 
 
-def test_wrapped_signatures_match_snapshot():
+def test_wrapped_signatures_match_snapshot() -> None:
     have = la.wrapped()
     assert set(have) == set(SIGNATURES), sorted(set(have) ^ set(SIGNATURES))
     diff = ["%s\n  have %s\n  want %s" % (n, inspect.signature(have[n]), SIGNATURES[n])
@@ -99,7 +102,7 @@ def test_wrapped_signatures_match_snapshot():
                       + "\n".join(diff))
 
 
-def _rows():
+def _rows() -> list[dict[str, Any]]:
     tags = TAGS[:3]
     return [{"state": "Kartım kayboldu", "uid": "u0", "questions": {t: QUESTIONS[t] for t in tags},
              "expected": {tags[0]: True, tags[1]: False, tags[2]: False}},
@@ -107,7 +110,7 @@ def _rows():
              "expected": {tags[0]: False, tags[1]: False, tags[2]: True}}]
 
 
-def test_training_round_trip_on_tiny_model(tmp_path):
+def test_training_round_trip_on_tiny_model(tmp_path: Path) -> None:
     import torch
     model, tok, cfg = la.load_checkpoint(tiny_checkpoint(tmp_path / "base"))
     rows = _rows()
@@ -132,10 +135,10 @@ def test_training_round_trip_on_tiny_model(tmp_path):
     assert la.read_jsonl(str(path)) == rows
 
 
-def test_items_per_question_counts_items_by_their_intents_instruction(tmp_path):
-    """FEW-01 (D-04): items_per_question maps each laya item to its tag by the exact INTENTS instruction of its
-    question, over all 48 tags: unmasked rows give one item per labelled question, a deleted (masked) key gives none,
-    and an item whose instruction is not one of the 48 is refused."""
+def test_items_per_question_counts_items_by_their_intents_instruction(tmp_path: Path) -> None:
+    """The few-shot masking proof's counter: items_per_question maps each laya item to its tag by the exact INTENTS
+    instruction of its question, over all 48 tags: unmasked rows give one item per labelled question, a deleted
+    (masked) key gives none, and an item whose instruction is not one of the 48 is refused."""
     from intents import INTENTS
     _model, tok, _cfg = la.load_checkpoint(tiny_checkpoint(tmp_path / "base"))
     rows = _rows()
@@ -154,7 +157,7 @@ def test_items_per_question_counts_items_by_their_intents_instruction(tmp_path):
         la.items_per_question([{"k": 2}])
 
 
-def test_noul_logits_match_predict_batch(tiny_agent):
+def test_noul_logits_match_predict_batch(tiny_agent: Any) -> None:
     texts = ["Kartım kayboldu 0", "Evet.", "x"]
     m = la.noul_logits(tiny_agent, texts, QUESTIONS)
     assert m.dtype == np.float32 and m.shape == (3, 48)
@@ -166,7 +169,7 @@ def test_noul_logits_match_predict_batch(tiny_agent):
     assert np.allclose(p, want, atol=1e-4, rtol=0), float(np.abs(p - want).max())
 
 
-def test_noul_logits_empty_single_and_order(tiny_agent):
+def test_noul_logits_empty_single_and_order(tiny_agent: Any) -> None:
     empty = la.noul_logits(tiny_agent, [], QUESTIONS)
     assert empty.shape == (0, 48) and empty.dtype == np.float32
     assert la.noul_logits(tiny_agent, ["Evet."], QUESTIONS).shape == (1, 48)
@@ -175,7 +178,7 @@ def test_noul_logits_empty_single_and_order(tiny_agent):
     assert np.allclose(ab, ba[::-1], atol=1e-6, rtol=0)
 
 
-def test_force_fp32_turns_autocast_off(tmp_path, tiny_agent):
+def test_force_fp32_turns_autocast_off(tmp_path: Path, tiny_agent: Any) -> None:
     """force_fp32 returns the load-time state and leaves an fp32 agent with autocast off whose margins equal those
     of an agent that was never switched (tiny_agent, cpu fp32 since load)."""
     import laya
@@ -192,8 +195,8 @@ def test_force_fp32_turns_autocast_off(tmp_path, tiny_agent):
     assert la.force_fp32(agent) == {"amp_enabled": False, "dtype": "torch.float32"}
 
 
-def test_noul_logits_refuses_bad_records(tiny_agent, monkeypatch):
-    def fake(recs):
+def test_noul_logits_refuses_bad_records(tiny_agent: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake(recs: list[Any]) -> types.SimpleNamespace:
         return types.SimpleNamespace(records_from_labeled=lambda agent, pairs: recs)
     good = (2, np.array([0.0, 1.0], dtype=np.float32), [0.0, 1.0], 2)
     monkeypatch.setattr(la, "_lcal", lambda: fake([good] * 47))
@@ -205,13 +208,13 @@ def test_noul_logits_refuses_bad_records(tiny_agent, monkeypatch):
             la.noul_logits(tiny_agent, ["Evet."], QUESTIONS)
 
 
-# ---- D-13/D-14: no private laya use outside the adapter (tests included, no exceptions) ----
+# ---- no private laya use outside the adapter (tests included, no exceptions) ----
 
-def _private(name):
+def _private(name: str) -> bool:
     return any(name == m or name.startswith(m + ".") for m in PRIVATE)
 
 
-def _private_laya_uses(path, label=None, autocast_ok=False):
+def _private_laya_uses(path: str, label: str | None = None, autocast_ok: bool = False) -> list[str]:
     """"path:line what" for every private laya import (any form), laya.<private> attribute chain, dynamic import of a
     private module, DecisionModel internal / logit-route attribute, or write to an agent's autocast switch or dtype
     (`x.amp_enabled = ...`, `setattr(x, "dtype", ...)`; reads are fine; autocast_ok skips only these writes). Strings
@@ -253,7 +256,7 @@ def _private_laya_uses(path, label=None, autocast_ok=False):
     return bad
 
 
-def test_guard_no_private_laya_use_outside_adapter():
+def test_guard_no_private_laya_use_outside_adapter() -> None:
     out = subprocess.run(["git", "ls-files", "*.py"], cwd=REPO, capture_output=True, text=True, check=True).stdout
     files = [f for f in out.split() if f != ADAPTER]
     assert ADAPTER in out.split() and {"ray_train.py", "mps_spike.py", "tests/test_spike_unit.py"} <= set(files)
@@ -261,11 +264,12 @@ def test_guard_no_private_laya_use_outside_adapter():
     assert not bad, "private laya use outside %s (route it through the adapter):\n%s" % (ADAPTER, "\n".join(bad))
 
 
-# laya's item-level calibration split, records and report, and the train-message holdout that fed them (LAYA-05)
+# laya's item-level calibration split, records and report, and the train-message holdout that fed them (all removed:
+# the temperature is fitted on message-level val dumps by pilot.postfit)
 ITEM_CALIBRATION = ("split_calibration", "calibration_records", "calibration_report", "holdout_messages")
 
 
-def _item_calibration_uses(path, label=None):
+def _item_calibration_uses(path: str, label: str | None = None) -> list[str]:
     """"path:line name" for every Name, Attribute, function definition or import alias named in ITEM_CALIBRATION;
     string constants are not code, so a test may still name them."""
     with open(path, encoding="utf-8") as f:
@@ -285,12 +289,12 @@ def _item_calibration_uses(path, label=None):
     return bad
 
 
-def test_no_item_level_calibration_anywhere(tmp_path):
+def test_no_item_level_calibration_anywhere(tmp_path: Path) -> None:
     out = subprocess.run(["git", "ls-files", "*.py"], cwd=REPO, capture_output=True, text=True, check=True).stdout
     files = out.split()
     assert ADAPTER in files and "ray_train.py" in files
     bad = [b for f in files for b in _item_calibration_uses(os.path.join(REPO, f), f)]
-    assert not bad, "item-level calibration is gone (LAYA-05; T comes from pilot.postfit):\n%s" % "\n".join(bad)
+    assert not bad, "item-level calibration is gone (T comes from pilot.postfit):\n%s" % "\n".join(bad)
     assert not set(ITEM_CALIBRATION) & set(dir(la))
     p = tmp_path / "bad.py"                                  # the guard sees every form
     p.write_text("from laya.train import split_calibration\n"
@@ -303,7 +307,7 @@ def test_no_item_level_calibration_anywhere(tmp_path):
     assert found == set(ITEM_CALIBRATION), found
 
 
-def test_guard_catches_every_form(tmp_path):
+def test_guard_catches_every_form(tmp_path: Path) -> None:
     p = tmp_path / "bad.py"
     p.write_text("import laya.train\n"
                  "import laya.common as c\n"
@@ -337,14 +341,14 @@ def test_guard_catches_every_form(tmp_path):
     assert _private_laya_uses(str(q)) == []
 
 
-def test_laya_internals_covered():
+def test_laya_internals_covered() -> None:
     import mps_spike
     missing = [n for n in mps_spike.LAYA_INTERNALS
                if n not in la.COVERS or not callable(getattr(la, la.COVERS[n], None))]
     assert not missing, missing
 
 
-def test_adapter_import_is_torch_free():
+def test_adapter_import_is_torch_free() -> None:
     code = ("import sys, pilot.laya_adapter, mps_spike\n"
             "print(sorted(m for m in ('torch', 'ray', 'laya.train', 'laya.common', 'laya.calibrate', 'laya.agent') "
             "if m in sys.modules))")
@@ -360,8 +364,8 @@ def test_adapter_import_is_torch_free():
     {"tokenizer_class": "PreTrainedTokenizerFast", "extra_special_tokens": {"extra_0": "<a>"}, "backend": "x"},
     {"tokenizer_class": "BertTokenizer", "do_lower_case": False},
 ])
-def test_the_tokenizer_config_mirror_matches_laya(tmp_path, tcfg):
-    """04-REVIEW IN-05: a local identity binds tokenizer_config.json by pilot.weights.normalized_tokenizer_config, a
+def test_the_tokenizer_config_mirror_matches_laya(tmp_path: Path, tcfg: dict[str, Any]) -> None:
+    """A local identity binds tokenizer_config.json by pilot.weights.normalized_tokenizer_config, a
     mirror of the rewrite laya.load makes; it must equal what laya writes, and laya's output must be a fixed point."""
     from pilot import weights
     path = tmp_path / "tokenizer" / "tokenizer_config.json"
@@ -376,8 +380,8 @@ def test_the_tokenizer_config_mirror_matches_laya(tmp_path, tcfg):
 
 
 @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
-def test_a_tokenizer_config_rewrite_laya_could_not_make_is_refused(tmp_path):
-    """04-REVIEW IN-01: laya only warns when it cannot rewrite tokenizer_config.json (here a read-only tokenizer/) and
+def test_a_tokenizer_config_rewrite_laya_could_not_make_is_refused(tmp_path: Path) -> None:
+    """laya only warns when it cannot rewrite tokenizer_config.json (here a read-only tokenizer/) and
     loads the raw file. pilot.weights.check_tokenizer_config_rewritten, which ray_train's worker runs after
     la.load_checkpoint and score.load_agent after laya.load, refuses that file, and passes once the rewrite is made."""
     from pilot import weights
