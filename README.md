@@ -4,6 +4,9 @@ Fine-tune and evaluate [Laya](https://github.com/NandhaKishorM/laya) `laya-multi
 Turkish banking split of [Multi3NLU++](https://huggingface.co/datasets/uoe-nlp/multi3-nlu)
 (CC-BY 4.0), using Ray Train for distributed training and Ray Data for distributed evaluation.
 
+**Recommendation:** the go/no-go recommendation, rendered mechanically from the frozen verdict with every caveat,
+is in [Recommendation (Phase 10)](#recommendation-phase-10).
+
 ## Task framing
 
 Multi3NLU++ is **multi-label**: each message carries 0–6 of 48 compositional intent tags
@@ -1719,6 +1722,54 @@ Criterion (d)'s few-shot path reads the mean over draws of Laya - BERTurk at k =
 - AP is threshold-free and T-invariant: the primary metric uses raw T = 1 and no θ; only the secondary F1 numbers use the masked base's val θ.
 - The support-set and replay uid lists live in protocol.json only; this record names each draw by its digest.
 <!-- fewshot:end -->
+
+## Recommendation (Phase 10)
+
+Phase 10 states the go/no-go recommendation and its caveats. This prose holds no number of its own: every number in
+this section comes from the generated block below, and a test fails if the block is edited by hand or goes stale.
+
+- **The recommendation is the verdict.** It is the frozen protocol's mechanical verdict, rendered from
+  `results/final/verdict.json` by `report.py --recommendation` after the protocol and the verdict record are checked;
+  no human judgement is written into the repo. The verdict is INCONCLUSIVE, which counts as NO-GO and means collect
+  bank data, so the recommendation reads NO-GO; collect bank data.
+- **Audit and override.** Humans can audit this recommendation and override it outside the repo, from the records the
+  block names: `protocol.json`, `results/final/verdict.json`, `results/fewshot/fewshot.json`, and the dumps under
+  `results/dumps/` that every report and the verdict rebuild from.
+- **Why INCONCLUSIVE.** Criterion (a), non-inferiority, is inconclusive at this test size: the interval of the
+  micro-F1 delta is too wide to pass or fail it. The frozen rule order reads (a) before (d), so the few-shot edge in
+  (d) cannot change the verdict.
+- **Caveats.** None of them is softened by the verdict:
+  - Multi3NLU++ Turkish is translated data, not customer messages: a small dataset and a single split, with no bank
+    data.
+  - The runs used laptop hardware: one Apple M4 laptop with unified memory, trained and scored on MPS; the block names
+    the memory and the scorer device.
+  - The no-intent test set is small, so every no-intent false-positive rate is uncertain; its size is in the block.
+  - Each model's val settings (epoch, T and θ) were chosen on val and carried over to the final_train retrains; θ is
+    transferred and never re-selected, and the seed-averaged systems use each record's θ.
+  - The rule order is frozen: the rule for an inconclusive criterion (a) fires before any rule that reads (d), and the
+    alternative GO fires before an (a) FAIL (08-REVIEW IN-08); changing either needs a new protocol.
+  - BERTurk's new-tag micro-F1 is zero at its masked base's val θ, chosen over all columns, because its untrained
+    held-out classifier rows push that θ up. The few-shot record adds a post hoc variant at the θ of the trained
+    columns only, descriptive and not a decision input; average precision, the primary metric, needs no θ.
+  - The few-shot runs have epoch parity, not step parity; Laya trains on sampled negatives against BERTurk's full label
+    rows; a continued Laya run starts from its fp16-rounded masked base; no fallback was used.
+  - The bootstrap intervals are descriptive; latency is reported, not gated; the human bank-name review is deferred to
+    the milestone end.
+
+Regenerate with `python report.py --recommendation results/final/verdict.json` (a test fails if it differs).
+
+<!-- recommendation:start -->
+### Recommendation (mechanical, from the frozen verdict)
+
+**Recommendation: NO-GO; collect bank data**
+
+- Verdict: INCONCLUSIVE, by rule 4: (a) INCONCLUSIVE -> INCONCLUSIVE (counts as NO-GO; collect bank data).
+- Statuses: (a) INCONCLUSIVE; (b) PASS; (c) REPORTED (not gated); (d) PASS; alternative GO NOT MET.
+- Records: results/final/verdict.json sha256 `a409aff73b46`, protocol.json sha256 `0d337d2019f9`, few-shot record results/fewshot/fewshot.json sha256 `2eac0da66a2a`. The verdict is computed mechanically by the frozen rule; humans can audit and override this recommendation from these records.
+- Test split: n = 413 (15 no-intent).
+- Final seeds: retrained on final_train, banking folds 0-15, with each model's epoch, T and θ carried over from its val selection.
+- Hardware: arm64, 16 GiB unified memory (results/spike/mps_spike.json); test and HOTELS scored on mps (protocol.json scoring).
+<!-- recommendation:end -->
 
 ## Results (Phase 3: baselines and zero-shot, full test split)
 

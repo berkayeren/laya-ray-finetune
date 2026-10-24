@@ -22,6 +22,7 @@ usage: from pilot import memo
 """
 import json
 import os
+import re
 
 import pilot.data
 import pilot.verdict
@@ -34,6 +35,32 @@ SPIKE_RECORD = "results/spike/mps_spike.json"
 SPIKE_FIX = "restore it with `git checkout -- %s`" % SPIKE_RECORD
 PENDING_FEWSHOT = {"status": pilot.verdict.PENDING, "phase": 9}
 GIB = 2 ** 30
+# a number token: digits with an optional sign and decimal part, not glued to a letter, digit or underscore ("fp16",
+# "neg8" and "v2" are not numbers; "k = 10", "+65.87" and DEC-01's "01" are)
+NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?\d+(?:\.\d+)?(?![A-Za-z0-9_])")
+# the D-08 caveats as digit-free keys: each is stated by a CAVEATS bullet and by the README Recommendation prose
+CAVEAT_KEYS = ("translated", "small dataset", "single split", "laptop hardware", "no-intent test set", "carried over",
+               "rule order", "never re-selected", "new-tag micro-F1", "post hoc", "epoch parity", "sampled negatives",
+               "fp16", "no fallback", "descriptive", "reported, not gated", "bank-name review")
+# the caveats in the order the memo (10-02) prints them; no number: the sizes and settings live in the records
+CAVEATS = (
+    "Data: Multi3NLU++ Turkish is translated data, a small dataset and a single split; no bank data was used.",
+    "Hardware: laptop hardware, one Apple M4 laptop with unified memory, trained and scored on MPS in fp32.",
+    "No-intent: the no-intent test set is small, so every no-intent false-positive rate is uncertain; its size is on "
+    "the test split line.",
+    "Settings carried over: each model's epoch, T and θ were chosen on val by one selection run and carried over to "
+    "the final_train retrains; the seed-averaged systems use that θ, transferred and never re-selected.",
+    "Rule order: the frozen rule order reads criterion (a) before (d), so a few-shot edge cannot change an "
+    "INCONCLUSIVE verdict, and the alternative GO fires before an (a) FAIL; changing either needs a new protocol.",
+    "Few-shot: BERTurk's new-tag micro-F1 is zero at its masked base's val θ chosen over all columns, because its "
+    "untrained held-out rows push that θ up; results/fewshot/fewshot.json adds a post hoc variant at the θ of the "
+    "trained columns only, descriptive and not a decision input; average precision needs no θ and is the primary "
+    "metric.",
+    "Training parity: epoch parity, not step parity; Laya trains on sampled negatives against BERTurk's full label "
+    "rows; a continued Laya run starts from its fp16-rounded masked base; no fallback was used.",
+    "Scope: the bootstrap intervals are descriptive; latency is reported, not gated; the human bank-name review is "
+    "deferred to the milestone end.",
+)
 
 
 def recommendation(v):
