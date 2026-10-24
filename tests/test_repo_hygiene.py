@@ -33,8 +33,9 @@ and only results/latency/(laya|berturk)-(mps|cpu).json and results/latency/laten
 per-seed "state" is the checked {device, dtype, amp_enabled} dict, the one "state" value the message-text key check
 allows (CHECKED_STATE_KEYS); a string or any other "state" is still a finding. The frozen protocol.json (08-10) is
 required to be tracked and gets the text check, with no key named state or text at all. The published Phase 8
-verdict under results/final/ (plan 08-12) gets the sidecar check too, and only verdict.json, reports/<id>-test.json and
-confidence/<id>-(test.json|test.svg|hotels_probe.json) may be tracked there (FINAL_PATH_RE). The Phase 9 records
+verdict under results/final/ (plan 08-12) gets the sidecar check too, and only verdict.json, reports/<id>-test.json,
+confidence/<id>-(test.json|test.svg|hotels_probe.json) and the Phase 10 decision memo memo.md (plan 10-02, at the top
+level of results/final/) may be tracked there (FINAL_PATH_RE). The Phase 9 records
 under results/fewshot/ (D-10: the D-08 projection record, the runs manifest and the few-shot results record) get the
 sidecar check too, only projection.json, runs.json and fewshot.json may be tracked there (FEWSHOT_PATH_RE), and no
 string in them may be a bank_ or hotel_ uid (uid_problems): the frozen support-set uid lists live in protocol.json
@@ -70,8 +71,8 @@ CONFIDENCE_PATH_RE = re.compile(r"^results/confidence/[^/]+-val\.(json|svg)$")
 # Phase 7 latency (EVAL-06): one report per (system, device) of the final seeds, and their markdown
 LATENCY_PATH_RE = re.compile(r"^results/latency/((laya|berturk)-(mps|cpu)\.json|latency\.md)$")
 # Phase 8 (08-12): the verdict record, the per-seed test reports and the test/HOTELS confidence records (a test record
-# with its reliability SVG; a HOTELS record has no diagram)
-FINAL_PATH_RE = re.compile(r"^results/final/(verdict\.json|reports/[^/]+-test\.json|"
+# with its reliability SVG; a HOTELS record has no diagram); Phase 10 (10-02): the decision memo memo.md
+FINAL_PATH_RE = re.compile(r"^results/final/(verdict\.json|memo\.md|reports/[^/]+-test\.json|"
                            r"confidence/[^/]+-(test\.(json|svg)|hotels_probe\.json))$")
 # Phase 9 (D-10): the D-08 projection record, the few-shot runs manifest and the few-shot results record
 FEWSHOT_PATH_RE = re.compile(r"^results/fewshot/(projection|runs|fewshot)\.json$")
@@ -399,7 +400,7 @@ def test_only_final_files_under_results_final():
     files = tracked("results/final/")
     assert "results/final/verdict.json" in files, "results/final/verdict.json is not tracked"
     bad = [f for f in files if not FINAL_PATH_RE.match(f)]
-    assert bad == [], ("only results/final/verdict.json, reports/<id>-test.json and "
+    assert bad == [], ("only results/final/verdict.json, memo.md, reports/<id>-test.json and "
                        "confidence/<id>-(test.json|test.svg|hotels_probe.json) may be tracked: %s" % bad)
 
 
@@ -413,6 +414,8 @@ def test_only_final_files_under_results_final():
     ("results/final/reports/x-val.json", False),
     ("results/final/confidence/x-val.json", False),
     ("results/final/notes.md", False),
+    ("results/final/memo.md", True),
+    ("results/final/sub/memo.md", False),
     ("results/final/sub/verdict.json", False),
 ])
 def test_final_path_pin_flags_planted_paths(rel, ok):

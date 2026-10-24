@@ -222,7 +222,8 @@ def test_recommendation_refuses_a_go_render_that_disagrees(monkeypatch):
 # ---- Task 3: the README "## Recommendation (Phase 10)" section (number-free prose, every D-08 caveat, the block) ----
 
 PHASE10_HEADING = "## Recommendation (Phase 10)"
-PHASE10_PROSE = ("mechanical", "frozen", "INCONCLUSIVE", "NO-GO", "collect bank data", "audit", "override")
+PHASE10_PROSE = ("mechanical", "frozen", "INCONCLUSIVE", "NO-GO", "collect bank data", "audit", "override",
+                 "results/final/memo.md", "make memo")
 REC_START, REC_END = "<!-- recommendation:start -->", "<!-- recommendation:end -->"
 FEWSHOT_END = "<!-- fewshot:end -->"
 PHASE3_HEADING = "## Results (Phase 3: baselines and zero-shot, full test split)"
@@ -358,3 +359,137 @@ def test_makefile_memo_target():
     assert phony and "memo" in phony.group(1).split(), "memo is not in .PHONY"
     assert MEMO_HEADER in text.split("\n"), "the Makefile header has no `make memo` line"
     assert "memo.md" not in "\n".join(recipe(text, "final-reports")), "final-reports writes no memo (10-RESEARCH)"
+
+
+# ---- 10-02 Task 2: the memo writes no number of its own, fits one page, is bound to the verdict's records ----
+
+DECIMAL_RE = re.compile(r"[-+]?\d+\.\d+")
+POINTS_RE = re.compile(r"[-+]?\d+(?:\.\d+)? points")
+
+
+def renders():
+    """{source: text} of the five renders the memo may copy lines from, built here exactly as report.memo_inputs
+    builds them (the few-shot record the verdict binds, results/final/confidence, results/latency)."""
+    import pilot.fewshot_report
+    import pilot.latency
+    v, _ = committed()
+    rec, sha = pilot.fewshot_report.read_record(os.path.join(REPO_ROOT, v["fewshot"]["record"]["path"]))
+    assert sha == v["fewshot"]["record"]["sha256"]
+    paths = report.table_inputs([os.path.join(REPO_ROOT, "results", "final", "confidence")])
+    reports = []
+    for p in paths:
+        with open(p, encoding="utf-8") as f:
+            reports.append(json.load(f))
+    assert report.confidence_svg_dir(paths) == "results/final/confidence"
+    return {"go": V.render_go(v), "table": V.render_final_table(v), "fewshot": pilot.fewshot_report.render_markdown(rec),
+            "confidence": report.render_confidence(reports, svg_dir=report.confidence_svg_dir(paths)),
+            "latency": pilot.latency.render_markdown(pilot.latency.load_reports(
+                os.path.join(REPO_ROOT, "results", "latency")))}
+
+
+def test_memo_numbers_are_render_lines():
+    src = renders()
+    assert tuple(src) == memo.MEMO_SOURCES
+    v, _ = committed()
+    text = memo.render_memo(v, src["fewshot"], src["confidence"], src["latency"])
+    with open(MEMO, encoding="utf-8") as f:
+        assert f.read() == text
+    render_lines = {l for t in src.values() for l in t.split("\n")}
+    numbered = 0
+    for line in text.split("\n"):
+        if memo.NUMBER_RE.search(line):
+            numbered += 1
+            assert line in render_lines, "the memo line %r holds a number and is not a line of a generated render" % line
+        else:
+            assert not memo.NUMBER_RE.search(line)
+        if line not in render_lines:
+            hits = [m.group(0) for m in memo.NUMBER_RE.finditer(line)]
+            assert hits == [], "the memo's own line %r holds numbers %r" % (line, hits)
+    assert numbered >= 12, "the memo should carry the GO rows and the results rows, not %d numbered lines" % numbered
+    gated = src["go"] + src["table"]
+    decimals, points = set(DECIMAL_RE.findall(gated)), set(POINTS_RE.findall(gated))
+    got_dec, got_pts = DECIMAL_RE.findall(text), POINTS_RE.findall(text)
+    assert got_dec and got_pts, "the memo carries no decimal or points value"
+    assert "+65.87 points" in got_pts and "0.826" in got_dec          # the few-shot (d) row, a seed-averaged row
+    assert [t for t in got_dec if t not in decimals] == [], "memo decimals outside the GO block and results table"
+    assert [t for t in got_pts if t not in points] == [], "memo points values outside the GO block and results table"
+
+
+def test_memo_fits_one_page(monkeypatch):
+    text = memo_text()
+    assert memo.MEMO_MAX_LINES == 60
+    n = len(text.splitlines())
+    assert n <= memo.MEMO_MAX_LINES, "the memo is %d lines, more than one page" % n
+    v, _ = committed()
+    inputs = report.memo_inputs(v)
+    monkeypatch.setattr(memo, "CAVEATS", memo.CAVEATS + ("an extra caveat",) * (memo.MEMO_MAX_LINES - n))
+    assert len(memo.render_memo(v, *inputs).splitlines()) == memo.MEMO_MAX_LINES      # the cap itself is one page
+    monkeypatch.setattr(memo, "CAVEATS", memo.CAVEATS + ("one caveat too many",))
+    with pytest.raises(SystemExit, match="one page: %d lines, at most %d" % (memo.MEMO_MAX_LINES + 1,
+                                                                          memo.MEMO_MAX_LINES)):
+        memo.render_memo(v, *inputs)
+
+
+def test_memo_module_holds_no_number_literal():
+    import ast
+    with open(memo.__file__, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    floats = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, float)]
+    assert floats == [], "pilot/memo.py holds float literals %r; every memo number comes from a render" % floats
+    own = (memo.MEMO_TITLE, memo.MEMO_GENERATED, memo.MEMO_OVERRIDE, memo.MEMO_AUDIT, memo.MEMO_REBUILD)
+    for value in own + memo.MEMO_HEADINGS:
+        assert not memo.NUMBER_RE.search(value), "the memo text %r holds a number" % value
+
+
+def test_memo_states_the_recommendation_and_caveats():
+    v, _ = committed()
+    text = memo_text()
+    lines = text.split("\n")
+    assert "**Recommendation: %s**" % memo.recommendation(v) in lines
+    rule = "- Rule %d: %s" % (v["verdict"]["rule"], V.VERDICT_RULES[v["verdict"]["rule"] - 1])
+    assert rule in lines and rule in V.render_go(v).split("\n")
+    assert lines.index("**Recommendation: %s**" % memo.recommendation(v)) < lines.index(rule)
+    for c in memo.CAVEATS:
+        assert "- " + c in lines, "the memo drops the caveat %r" % c
+    for want in (memo.MEMO_OVERRIDE, memo.MEMO_AUDIT, memo.MEMO_REBUILD):
+        assert want in lines
+    at = [lines.index(h) for h in memo.MEMO_HEADINGS]
+    assert at == sorted(at) and all(lines[i - 1] == "" for i in at), "the memo headings are out of order"
+    assert [l for l in lines if l.startswith("## ")] == list(memo.MEMO_HEADINGS)
+    for want in ("- Protocol: ", "- Split test: ", "| criterion | status | numbers |", "| alternative GO",
+                 "| system | run | micro-F1 | macro-F1 | exact match | top-1 |", "- Few-shot path (Phase ",
+                 "Criterion (d)'s few-shot path reads", "The test no-intent set holds",
+                 "Latency is reported, not gated:"):
+        assert sum(l.startswith(want) for l in lines) == 1, "the memo must hold one line starting %r" % want
+
+
+def test_memo_inputs_refuse_an_unbound_fewshot_record():
+    v, _ = committed()
+    inputs = report.memo_inputs(v)
+    bad = copy.deepcopy(v)
+    bad["fewshot"]["record"]["sha256"] = "0" * 64
+    with pytest.raises(SystemExit) as info:
+        report.memo_inputs(bad)
+    msg = str(info.value)
+    assert v["fewshot"]["record"]["sha256"] in msg and "0" * 64 in msg and "make fewshot-reports" in msg
+    for path in ("../results/fewshot/fewshot.json", os.path.join(REPO_ROOT, "results", "fewshot", "fewshot.json")):
+        moved = copy.deepcopy(v)
+        moved["fewshot"]["record"]["path"] = path
+        with pytest.raises(SystemExit, match="repo-relative"):
+            report.memo_inputs(moved)
+    pending = copy.deepcopy(v)
+    pending["fewshot"] = {"status": "PENDING", "phase": 9}
+    with pytest.raises(SystemExit):
+        report.memo_inputs(pending)
+    with pytest.raises(SystemExit, match="PENDING"):
+        memo.render_memo(pending, *inputs)
+    p = planted(V.PASS, V.PASS, V.PENDING, V.NOT_MET)
+    with pytest.raises(SystemExit, match="provisional"):
+        memo.render_memo(p, *inputs)
+
+
+def test_memo_holds_no_text_or_paths():
+    text = memo_text()
+    assert "bank_" not in text and "hotel_" not in text, "the memo holds a message uid"
+    assert os.path.expanduser("~") not in text, "the memo holds a local home path"
+    assert REPO_ROOT not in text and os.path.realpath(REPO_ROOT) not in text, "the memo holds an absolute repo path"

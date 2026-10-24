@@ -381,7 +381,7 @@ def test_latency_wording_states_the_seed_order_limit():
     for name, text in texts.items():
         assert SEED_ORDER_LIMIT in " ".join(text.split()), "%s must say %r" % (name, SEED_ORDER_LIMIT)
     for rel in ("pilot/latency.py", "latency.py", "README.md", "CLAUDE.md", ".claude/CLAUDE.md",
-                "results/latency/latency.md"):
+                "results/latency/latency.md", "results/final/memo.md"):
         path = os.path.join(REPO_ROOT, rel)
         if not os.path.exists(path):
             continue
