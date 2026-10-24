@@ -35,7 +35,8 @@ any command a missing record or dump, naming its path and the step that makes it
 but the local data step, `make data`, run only when the local split files are absent), then report_step rebuilds
 every report from the committed dumps (REBUILD: fixed argv tuples, no score.py, training script, `latency.py
 --system`, --force or scoring target), rewrites the README's generated blocks from their renders (README_BLOCKS,
-rewrite_blocks) and proves the tree unchanged: `git status --porcelain` over CHECKED must be empty before (else the
+rewrite_blocks) and proves the tree unchanged: `git status --porcelain` over CHECKED (results/, README.md,
+protocol.json, and the Makefile and runner sources that decide what runs) must be empty before (else the
 run is refused, so a difference is always the rebuild's) and after (else the run fails naming every differing path),
 with a sha256 snapshot of CHECKED in place of git when root is not a git work tree. In full mode after steps ran, the
 report step compares a file git HEAD tracks with HEAD's bytes (an already dirty file fails) and a file HEAD does not
@@ -504,7 +505,10 @@ def render_plan(rows, pin):
 
 # ---- eval-only (D-05, D-06): rebuild every report from the committed dumps, no training, no scoring ----
 
-CHECKED = ("results/", "README.md", "protocol.json")       # the audit record a rebuild must leave byte for byte
+# the audit record a rebuild must leave byte for byte, plus what decides the commands eval-only runs: the Makefile
+# (every REBUILD make target's recipe, and the run ids makefile_vars reads) and the runner itself (10-REVIEW WR-04),
+# so an uncommitted edit to any of them is refused before any command
+CHECKED = ("results/", "README.md", "protocol.json", "Makefile", "reproduce.py", "pilot/reproduce.py")
 REBUILD = (
     ("make", "baseline-reports"),
     ("make", "laya-postfit"),
@@ -702,8 +706,8 @@ def report_step(root=REPO_ROOT, run=run_command, blocks=render_blocks, precheck=
     else:
         how = ("git status lists only %d untracked file(s), the outputs of the steps that ran, each unchanged by the "
                "rebuild" % len(after))
-    out("eval-only done: %d rebuild commands and %d README blocks left results/, README.md and protocol.json "
-        "byte-identical to the committed ones (%s)" % (len(REBUILD), len(renders), how))
+    out("eval-only done: %d rebuild commands and %d README blocks left %s byte-identical to the committed ones (%s)"
+        % (len(REBUILD), len(renders), ", ".join(CHECKED), how))
 
 
 VERIFY_LINE = "verify-checkpoints (reported, not gated): "

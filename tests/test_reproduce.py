@@ -247,7 +247,7 @@ def test_eval_only_runs_no_model():
         with pytest.raises(SystemExit):
             rp.command_argv(bad)
     assert rp.MODES == ("full", "eval-only")
-    assert rp.CHECKED == ("results/", "README.md", "protocol.json")
+    assert rp.CHECKED == ("results/", "README.md", "protocol.json", "Makefile", "reproduce.py", "pilot/reproduce.py")
 
 
 def test_readme_blocks_cover_every_marker():
@@ -450,6 +450,31 @@ def test_eval_only_fails_naming_a_rebuilt_file_that_differs(repo, tmp_path):
         rp.report_step(repo, run=run, blocks=no_blocks, out=lambda s: None)
     assert calls == []
     _rebuild_case(nogit, False)
+
+
+def test_eval_only_refuses_an_edited_makefile_or_runner(repo):
+    """WR-04: the Makefile decides every make target eval-only runs and the run ids it reads, and the runner decides
+    the rest; an uncommitted edit to either is refused before any command."""
+    for rel in ("Makefile", "reproduce.py", "pilot/reproduce.py"):
+        p = os.path.join(repo, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as f:
+            f.write(b"committed\n")
+    git_in(repo, "add", "-A")
+    git_in(repo, "commit", "-q", "-m", "sources")
+    for rel in ("Makefile", "reproduce.py", "pilot/reproduce.py"):
+        p = os.path.join(repo, rel)
+        with open(p, "wb") as f:
+            f.write(b"final-reports:\n\tpython score.py data/splits/test.jsonl --force\n")
+        run, calls = fake_run()
+        msg = _stop(lambda: rp.report_step(repo, run=run, blocks=no_blocks, out=lambda s: None))
+        assert msg.startswith("eval-only compares every rebuilt file with the committed one, but these already "
+                              "differ: %s;" % rel), msg
+        assert calls == []
+        git_in(repo, "checkout", "--", rel)
+    run, calls = fake_run()
+    rp.report_step(repo, run=run, blocks=no_blocks, out=lambda s: None)
+    assert calls == list(rp.REBUILD)
 
 
 def test_report_step_after_steps_compares_with_git_head(repo):
