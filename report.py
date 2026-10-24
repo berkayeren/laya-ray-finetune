@@ -140,6 +140,11 @@ mean_delta_at_least: the path is MET or NOT MET, (d) PASS or FAIL, the provision
 fewshot block holds the path's status, k, mean delta, draws, the record's path and sha256, the mode and the fallback
 disclosure. Without --fewshot the verdict is the Phase 8 one byte for byte (the few-shot path PENDING). --fewshot is
 refused with any other mode.
+--recommendation VERDICT_JSON (Phase 10, REP-04, D-07) prints pilot.memo.render_recommendation of a saved record (the
+README recommendation block): the same bytes are hashed and parsed, then pilot.protocol.require_frozen and
+pilot.verdict.check_record run before the render, as for --go-block. The recommendation is pilot.memo.RECOMMENDATION of
+the verdict field (INCONCLUSIVE -> NO-GO; collect bank data), never a judgement; a provisional verdict or one whose
+few-shot path of (d) is PENDING is refused.
 The Phase 3 results table (--table) and COMPARE_THETA_RULE stay as they are: the committed comparison reports embed
 them and rebuild byte for byte; the frozen seed-averaged θ rule lives in protocol.json.
 
@@ -154,6 +159,7 @@ usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.js
        python report.py --verdict [--fewshot results/fewshot/fewshot.json] [--out results/final/verdict.json]
        python report.py --final-table results/final/verdict.json [--out table.md]
        python report.py --go-block results/final/verdict.json [--out go.md]
+       python report.py --recommendation results/final/verdict.json [--out rec.md]
 """
 import argparse
 import json
@@ -161,6 +167,7 @@ import os
 
 import pilot.fewshot                                        # numpy-free: read_runs (the few-shot runs manifest)
 import pilot.fewshot_report                                 # numpy only: read_record, primary (09-08)
+import pilot.memo                                           # stdlib, pilot.verdict and pilot.data: REP-04's render
 import pilot.protocol                                       # stdlib only at import: require_frozen, prior_floors
 import pilot.verdict
 from pilot import data, dumps, metrics                     # data.DEFAULT_MANIFEST: the committed one, at call time
@@ -1489,13 +1496,16 @@ def main(argv=None):
                     help="markdown of REP-02's final results table of a saved verdict/1 record")
     ap.add_argument("--go-block", metavar="VERDICT_JSON", default=None,
                     help="markdown of REP-03's mechanical GO block of a saved verdict/1 record")
+    ap.add_argument("--recommendation", metavar="VERDICT_JSON", default=None,
+                    help="markdown of REP-04's recommendation, the mechanical mapping of a saved final verdict/1 "
+                         "record (pilot.memo.render_recommendation)")
     a = ap.parse_args(argv)
     modes = (a.run_dir, a.compare, a.table, a.confidence, a.confidence_table, a.verdict or None, a.final_table,
-             a.go_block)
+             a.go_block, a.recommendation)
     if sum(x is not None for x in modes) != 1:
         ap.error("give exactly one of RUN_DIR, --compare A_DIRS B_DIRS, --table PATH [PATH ...], "
-                 "--confidence RUN_DIR, --confidence-table PATH [PATH ...], --verdict, --final-table VERDICT_JSON "
-                 "or --go-block VERDICT_JSON")
+                 "--confidence RUN_DIR, --confidence-table PATH [PATH ...], --verdict, --final-table VERDICT_JSON, "
+                 "--go-block VERDICT_JSON or --recommendation VERDICT_JSON")
     if a.postfit is not None and a.confidence is None and a.run_dir is None:
         ap.error("--postfit applies only to RUN_DIR or --confidence")
     if a.fewshot is not None and not a.verdict:
@@ -1520,6 +1530,21 @@ def main(argv=None):
         proto, pin = pilot.protocol.require_frozen()        # 08-REVIEW WR-03: render only the frozen protocol's
         pilot.verdict.check_record(v, proto, pin)            # verdict, every status recomputed from its numbers
         text = pilot.verdict.render_final_table(v) if a.final_table is not None else pilot.verdict.render_go(v)
+    elif a.recommendation is not None:
+        path = a.recommendation
+        if not os.path.isfile(path):
+            raise SystemExit("%s not found; write the verdict with report.py --verdict --fewshot "
+                             "results/fewshot/fewshot.json --out PATH" % path)
+        with open(path, "rb") as f:
+            raw = f.read()                                  # hash and parse the same bytes (no re-read window)
+        sha = sha256_bytes(raw)
+        try:
+            v = json.loads(raw.decode("utf-8"))
+        except ValueError as e:
+            raise SystemExit("verdict record %s is not valid JSON (%s); restore it with git" % (path, e))
+        proto, pin = pilot.protocol.require_frozen()        # REP-04: only the frozen protocol's verdict, every status
+        pilot.verdict.check_record(v, proto, pin)            # recomputed from its own numbers (08-REVIEW WR-03)
+        text = pilot.memo.render_recommendation(v, repo_relpath(path), sha, pilot.memo.facts(v, proto))
     if text is not None:
         print(text, end="")
         if a.out:

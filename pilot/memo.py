@@ -1,0 +1,135 @@
+"""The recommendation (REP-04) and the decision memo (REP-05) of Phase 10: renders of the frozen verdict, no judgement.
+
+The go/no-go recommendation is a mapping of the verdict/1 record's verdict field (D-07): GO -> GO, NO-GO -> NO-GO,
+INCONCLUSIVE -> NO-GO; collect bank data, which is pilot.verdict.INCONCLUSIVE_MEANS without its "counts as ". Nothing
+here decides, re-derives or overrides a status: every status and the verdict are computed by pilot.verdict from the
+record's own numbers at the frozen thresholds, and the caller (report.py --recommendation) runs
+pilot.protocol.require_frozen and pilot.verdict.check_record before any render, so a hand-edited record is refused,
+never rendered. A provisional verdict and a verdict whose few-shot path of (d) is still PENDING are refused: they are
+not final, and a recommendation is only ever the final verdict's mapping. Humans can audit and override the
+recommendation outside the repo, from the records the block names; no override is written into the repo.
+
+The block's numbers are read from the records (facts): the test split's size and its no-intent count from the
+verdict's split block, the final_train folds from pilot.data.SPLITS, the machine and its memory from the spike
+record's meta.platform, the scorer device from protocol.json's scoring block. The module holds no threshold and no
+float literal (a test walks its AST), and imports the stdlib, pilot.verdict and pilot.data only, so report.py stays
+numpy only.
+
+usage: from pilot import memo
+       memo.recommendation(v)                                   # "NO-GO; collect bank data" for the committed verdict
+       text = memo.render_recommendation(v, "results/final/verdict.json", sha256, memo.facts(v, protocol))
+       python report.py --recommendation results/final/verdict.json [--out rec.md]
+"""
+import json
+import os
+
+import pilot.data
+import pilot.verdict
+from pilot.data import REPO_ROOT
+
+RECOMMENDATION = {pilot.verdict.GO: "GO", pilot.verdict.NO_GO: "NO-GO",
+                  pilot.verdict.INCONCLUSIVE: "NO-GO; collect bank data"}
+RECOMMENDATION_HEADING = "### Recommendation (mechanical, from the frozen verdict)"
+SPIKE_RECORD = "results/spike/mps_spike.json"
+SPIKE_FIX = "restore it with `git checkout -- %s`" % SPIKE_RECORD
+PENDING_FEWSHOT = {"status": pilot.verdict.PENDING, "phase": 9}
+GIB = 2 ** 30
+
+
+def recommendation(v):
+    """The recommendation of a final verdict/1 record: RECOMMENDATION[v["verdict"]["verdict"]]; SystemExit for another
+    schema, a provisional verdict, a few-shot path of (d) still PENDING or an unknown verdict word."""
+    fix = pilot.verdict.FEWSHOT_FIX
+    schema = v.get("schema") if isinstance(v, dict) else type(v).__name__
+    if schema != pilot.verdict.VERDICT_SCHEMA:
+        raise SystemExit("not a %s record (schema %r); %s" % (pilot.verdict.VERDICT_SCHEMA, schema, fix))
+    dec = v.get("verdict") if isinstance(v.get("verdict"), dict) else {}
+    if dec.get("provisional") is not False:
+        raise SystemExit("the verdict is provisional (%r); a recommendation is only the final verdict's mapping, %s"
+                         % (dec.get("verdict"), fix))
+    if v.get("fewshot") == PENDING_FEWSHOT:
+        raise SystemExit("the verdict's few-shot path of (d) is PENDING; a recommendation needs the Phase 9 few-shot "
+                         "record, %s" % fix)
+    word = dec.get("verdict")
+    if not isinstance(word, str) or word not in RECOMMENDATION:
+        raise SystemExit("the verdict %r is not one of %s; %s" % (word, ", ".join(RECOMMENDATION), fix))
+    return RECOMMENDATION[word]
+
+
+def facts(v, protocol, root=REPO_ROOT):
+    """The block's record facts: {n, n_no_intent} of the verdict's split block, the final_train folds as "first-last"
+    (pilot.data.SPLITS, one contiguous range), the machine and its memory in whole GiB (SPIKE_RECORD meta.platform) and
+    the scorer device (protocol.json scoring); SystemExit for anything missing or malformed."""
+    sp = v.get("split") or {}
+    n, n_no = sp.get("n"), sp.get("n_no_intent")
+    if not all(isinstance(x, int) and not isinstance(x, bool) for x in (n, n_no)):
+        raise SystemExit("the verdict's split block has no integer n and n_no_intent; %s" % pilot.verdict.FEWSHOT_FIX)
+    final = [s for s in pilot.data.SPLITS if s.get("name") == "final_train"]
+    folds = final[0].get("folds") if len(final) == 1 else None
+    if not folds or list(folds) != list(range(folds[0], folds[-1] + 1)):
+        raise SystemExit("pilot.data.SPLITS final_train folds %r are not one contiguous range" % (folds,))
+    path = os.path.join(root, SPIKE_RECORD)
+    try:
+        with open(path, encoding="utf-8") as f:
+            plat = json.load(f)["meta"]["platform"]
+        machine, mem = plat["machine"], plat["total_memory_bytes"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise SystemExit("%s holds no meta.platform machine and total_memory_bytes (%s: %s); %s"
+                         % (SPIKE_RECORD, type(e).__name__, e, SPIKE_FIX))
+    if not isinstance(machine, str) or not machine or not isinstance(mem, int) or isinstance(mem, bool) \
+            or mem <= 0 or mem % GIB:
+        raise SystemExit("%s meta.platform reads machine %r, total_memory_bytes %r, not a whole number of GiB; %s"
+                         % (SPIKE_RECORD, machine, mem, SPIKE_FIX))
+    device = (protocol.get("scoring") or {}).get("device") if isinstance(protocol, dict) else None
+    if not isinstance(device, str) or not device:
+        raise SystemExit("protocol.json has no scoring device; restore it with `git checkout -- protocol.json`")
+    return {"n": n, "n_no_intent": n_no, "folds": "%d-%d" % (folds[0], folds[-1]), "machine": machine,
+            "memory_gib": mem // GIB, "device": device}
+
+
+def _one(lines, test, what):
+    hits = [l for l in lines if test(l)]
+    if len(hits) != 1:
+        raise SystemExit("the GO render holds %d %s lines, not exactly one; the verdict disagrees with its own GO "
+                         "block, %s" % (len(hits), what, pilot.verdict.FEWSHOT_FIX))
+    return hits[0]
+
+
+def render_recommendation(v, verdict_path, verdict_sha256, facts):
+    """The README recommendation block (markdown, level-3 heading) of a final verdict/1 record: the recommendation
+    (recommendation(v)), the verdict and the frozen rule line that fired (VERDICT_RULES verbatim), the GO render's
+    Statuses line, the records with their sha256 prefixes (verdict_path is repo-relative), and the record facts
+    (facts(v, protocol)). Refused unless pilot.verdict.render_go(v) holds exactly one "**Verdict: X**" line for v's
+    verdict and one Statuses line, and v's verdict block carries its criteria's statuses."""
+    rec = recommendation(v)
+    dec, crit = v["verdict"], v.get("criteria") or {}
+    want = {k: (crit.get(k) or {}).get("status") for k in ("a", "b", "d", "alternative_go")}
+    if dec.get("statuses") != want:
+        raise SystemExit("the verdict block's statuses %r are not its criteria's %r; the record was edited, %s"
+                         % (dec.get("statuses"), want, pilot.verdict.FEWSHOT_FIX))
+    rule = dec.get("rule")
+    if not isinstance(rule, int) or isinstance(rule, bool) or not 1 <= rule <= len(pilot.verdict.VERDICT_RULES):
+        raise SystemExit("the verdict's rule %r is not one rule of pilot.verdict.VERDICT_RULES; %s"
+                         % (rule, pilot.verdict.FEWSHOT_FIX))
+    lines = pilot.verdict.render_go(v).split("\n")
+    _one(lines, lambda l: l.startswith("**Verdict: "), "**Verdict: ...**")
+    _one(lines, lambda l: l == "**Verdict: %s**" % dec["verdict"], "**Verdict: %s**" % dec["verdict"])
+    statuses = _one(lines, lambda l: l.startswith("Statuses: "), "Statuses")
+    record = (v.get("fewshot") or {}).get("record") or {}
+    if not isinstance(record.get("path"), str) or not isinstance(record.get("sha256"), str):
+        raise SystemExit("the verdict's few-shot block names no record path and sha256; %s"
+                         % pilot.verdict.FEWSHOT_FIX)
+    out = [RECOMMENDATION_HEADING, "",
+           "**Recommendation: %s**" % rec, "",
+           "- Verdict: %s, by rule %d: %s." % (dec["verdict"], rule, pilot.verdict.VERDICT_RULES[rule - 1]),
+           "- " + statuses,
+           "- Records: %s sha256 `%s`, protocol.json sha256 `%s`, few-shot record %s sha256 `%s`. The verdict is "
+           "computed mechanically by the frozen rule; humans can audit and override this recommendation from these "
+           "records." % (verdict_path, verdict_sha256[:12], v["protocol"]["sha256"][:12], record["path"],
+                         record["sha256"][:12]),
+           "- Test split: n = %d (%d no-intent)." % (facts["n"], facts["n_no_intent"]),
+           "- Final seeds: retrained on final_train, banking folds %s, with each model's epoch, T and θ carried over "
+           "from its val selection." % facts["folds"],
+           "- Hardware: %s, %d GiB unified memory (%s); test and HOTELS scored on %s (protocol.json scoring)." % (
+               facts["machine"], facts["memory_gib"], SPIKE_RECORD, facts["device"])]
+    return "\n".join(out) + "\n"
