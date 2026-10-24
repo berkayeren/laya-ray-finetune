@@ -1016,9 +1016,10 @@ def _builders(cmds):
 
 @pytest.fixture
 def registry(tmp_path, monkeypatch):
-    """A tmp git repo (protocol.json, the Makefile, results/{a,b,g}.txt committed) under a synthetic registry: a
-    (model), b (model-free), g (gated, trained by a: GATE_PRODUCERS {"g": ("a",)}) and report. Returns (root, the
-    committed bytes, set_commands)."""
+    """A tmp git repo (protocol.json and the Makefile committed; git HEAD holds no output, the from-scratch form of
+    D-04, so a todo step is never a deleted committed record) under a synthetic registry: a (model), b (model-free), g
+    (gated, trained by a: GATE_PRODUCERS {"g": ("a",)}) and report, each step's evidence results/<name>.txt checked
+    against its recorded bytes (the registry's protocol pin). Returns (root, the recorded bytes, set_commands)."""
     import shutil
     _git_env(monkeypatch)
     root = tmp_path / "reg"
@@ -1026,14 +1027,19 @@ def registry(tmp_path, monkeypatch):
     for rel in ("protocol.json", "Makefile"):
         shutil.copyfile(os.path.join(REPO_ROOT, rel), root / rel)
     committed = {n: ("%s committed\n" % n).encode() for n in "abg"}
-    for n, data in committed.items():
-        (root / "results" / ("%s.txt" % n)).write_bytes(data)
     git_in(root, "init", "-q")
     git_in(root, "add", "-A")
     git_in(root, "commit", "-q", "-m", "init")
 
+    def pinned(n):
+        def check(path):
+            with open(path, "rb") as f:
+                if f.read() != committed[n]:
+                    raise SystemExit("results/%s.txt is not the recorded bytes" % n)
+        return check
+
     def ev(n):
-        return lambda r, proto, pin, manifest: [rp._file(r, "results/%s.txt" % n, proto)]
+        return lambda r, proto, pin, manifest: [rp._file(r, "results/%s.txt" % n, proto, pinned(n))]
     steps = [{"name": "a", "model": True, "gated": False, "evidence": ev("a"), "fix": "restore a"},
              {"name": "b", "model": False, "gated": False, "evidence": ev("b"), "fix": "restore b"},
              {"name": "g", "model": True, "gated": True, "evidence": ev("g"), "fix": "restore g"},
@@ -1096,7 +1102,6 @@ def _stop(fn):
 
 def test_full_mode_runs_todo_steps_in_order_after_the_disclosure(registry):
     root, committed, _ = registry
-    _delete(root, "a", "b", "g")
     r = Recorder(committed)
     r.full(root)
     assert r.of("run") == [("a.py",), ("b.py",), ("g.py",)] and r.of("capture") == []
@@ -1107,12 +1112,11 @@ def test_full_mode_runs_todo_steps_in_order_after_the_disclosure(registry):
     assert r.events.index(("out", rp.DISCLOSURE)) < first_run
     assert [l for l in outs if l.startswith("run: ")] == ["run: python a.py", "run: python b.py", "run: python g.py"]
     assert r.events[-1] == ("report", False)
-    assert rp.tree_changes(root) == []                  # every output equals the committed bytes
+    assert rp.tree_changes(root) == ["results/a.txt", "results/b.txt", "results/g.txt"]   # untracked outputs
 
 
 def test_full_mode_stops_at_a_failing_command(registry):
     root, committed, set_commands = registry
-    _delete(root, "a", "b", "g")
     r = Recorder(committed, rc={"b": 1})
     msg = _stop(lambda: r.full(root))
     assert msg.startswith("step b: `python b.py` exited 1; a protocol gate refusal printed above is final (D-04)"), msg
@@ -1128,10 +1132,9 @@ def test_full_mode_stops_at_a_failing_command(registry):
 
 def test_full_mode_stops_at_the_first_divergence(registry):
     root, committed, _ = registry
-    _delete(root, "a", "b", "g")
     r = Recorder(committed, bad={"a"})
     msg = _stop(lambda: r.full(root))
-    assert msg.startswith("step a ran, but results/a.txt differs from the bytes git HEAD holds for it; "), msg
+    assert msg.startswith("step a ran, but results/a.txt is not the recorded bytes; "), msg
     assert "(D-04)" in msg and "git checkout -- results/" in msg and "protocol gate" in msg
     assert r.of("run") == [("a.py",)] and r.of("report") == []                     # b and g never ran
     os.remove(os.path.join(root, "results", "a.txt"))     # a step that leaves its evidence missing stops too
@@ -1142,14 +1145,42 @@ def test_full_mode_stops_at_the_first_divergence(registry):
     assert r.of("run") == [("a.py",)]
 
 
+def write(root, committed, *names):
+    for n in names:
+        with open(os.path.join(root, "results", "%s.txt" % n), "wb") as f:
+            f.write(committed[n])
+
+
 def test_gated_step_never_reruns_without_its_training(registry):
     root, committed, _ = registry
-    _delete(root, "g")                                    # a and b done (committed), g todo
+    write(root, committed, "a", "b")                      # a and b done (their outputs present), g todo
     r = Recorder(committed)
     msg = _stop(lambda: r.full(root))
     assert msg.startswith("g has no committed gated dumps while the steps that train its checkpoints are done"), msg
     assert "exactly-once" in msg and "never rescored" in msg and "git checkout -- results/dumps/" in msg
     assert r.events == []                                 # refused before any command, any output and the report
+
+
+def test_full_mode_never_redoes_a_record_git_head_holds(registry):
+    """WR-03 (D-03, fail closed): a todo step whose evidence git HEAD holds (deleted from the working tree) is refused
+    before any command, pointing at `git checkout -- PATH`; for a gated step the refusal says its dumps are scored
+    exactly once, even though the steps that train its checkpoints would run first."""
+    root, committed, _ = registry
+    write(root, committed, "a", "b", "g")
+    git_in(root, "add", "results")
+    git_in(root, "commit", "-q", "-m", "outputs")
+    _delete(root, "a", "b", "g")                          # every step todo: a record HEAD holds, never work to redo
+    r = Recorder(committed)
+    msg = _stop(lambda: r.full(root))
+    assert msg.startswith("step a is todo, but git HEAD holds 1 of its committed artifacts, missing from the working "
+                          "tree (first results/a.txt): a deleted committed record is never work to redo (D-03)"), msg
+    assert msg.endswith("restore them with `git checkout -- results/a.txt`"), msg
+    assert "exactly-once" not in msg and r.events == []
+    write(root, committed, "a", "b")                      # only the gated step's record deleted
+    msg = _stop(lambda: r.full(root))
+    assert msg.startswith("step g is todo, but git HEAD holds 1 of its committed artifacts"), msg
+    assert "exactly-once audit record and are never rescored" in msg and "`git checkout -- results/g.txt`" in msg
+    assert r.events == []
 
 
 def test_full_mode_refuses_a_dirty_committed_file_before_any_command(registry):
@@ -1159,7 +1190,6 @@ def test_full_mode_refuses_a_dirty_committed_file_before_any_command(registry):
     (open(os.path.join(root, "results", "z.txt"), "wb")).close()
     git_in(root, "add", "results/z.txt")
     git_in(root, "commit", "-q", "-m", "z")
-    _delete(root, "a", "b", "g")
     with open(os.path.join(root, "results", "z.txt"), "wb") as f:
         f.write(b"edited\n")
     r = Recorder(committed)
@@ -1171,7 +1201,6 @@ def test_full_mode_refuses_a_dirty_committed_file_before_any_command(registry):
 
 def test_full_mode_resolves_the_run_id_before_the_exports(registry):
     root, committed, set_commands = registry
-    _delete(root, "a", "b", "g")
     set_commands(a=[("a.py", "--print-run-id"), ("a.py",), ("score.py", "x/%s/epoch-001" % rp.RUN_ID),
                     ("postfit.py", "--prune", "x/%s/epoch-001" % rp.RUN_ID)])
     r = Recorder(committed)
@@ -1391,6 +1420,36 @@ def test_full_mode_names_fewshot_reports_for_a_memo_that_differs(scratch):
     assert msg.startswith("step fewshot-reports ran, but results/final/memo.md differs from the bytes git HEAD holds "
                           "for it; "), msg
     assert runner.calls[-1] == ("make", "memo")
+
+
+def test_full_mode_refuses_a_deleted_committed_tail(scratch):
+    """WR-03: on a tree whose git HEAD holds the whole record, deleting the few-shot tail from the working tree does not
+    make it work to redo (no projection is re-recorded, no base retrained): full mode refuses before any command at
+    the first todo step, naming its path and `git checkout --`; with the gated final-scoring dumps and every later
+    record deleted, the refusal names final-scoring and its exactly-once dumps."""
+    import shutil
+    root = scratch([])
+    for rel in fewshot_tail():
+        shutil.rmtree(os.path.join(root, rel))
+    st = states(rp.plan(root))
+    assert [n for n in D01[13:18] if st[n] != "todo"] == [], st
+    runner = Committed()
+    msg = _stop(lambda: real_full(root, runner))
+    assert msg.startswith("step fewshot-projection is todo, but git HEAD holds 1 of its committed artifacts, missing "
+                          "from the working tree (first results/fewshot/projection.json)"), msg
+    assert msg.endswith("`git checkout -- results/fewshot/projection.json`") and runner.calls == [], msg
+    proto, _ = pilot.protocol.require_frozen()
+    shutil.rmtree(os.path.join(root, "results", "final"))
+    for kind in pilot.protocol.KINDS:
+        for s in pilot.protocol.final_seeds(proto, kind):
+            shutil.rmtree(os.path.join(root, "results", "dumps", s["dump_run_id"]))
+    for ext in ("npz", "json"):
+        os.remove(os.path.join(root, "results", "dumps", pilot.protocol.ZEROSHOT, "hotels_probe." + ext))
+    assert states(rp.plan(root))["final-scoring"] == "todo"
+    msg = _stop(lambda: real_full(root, runner))
+    assert msg.startswith("step final-scoring is todo, but git HEAD holds 26 of its committed artifacts"), msg
+    assert "exactly-once audit record and are never rescored" in msg and "git checkout -- results/dumps/" in msg, msg
+    assert runner.calls == []
 
 
 def test_memo_names_the_one_command_rebuild():

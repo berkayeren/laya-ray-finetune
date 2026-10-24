@@ -236,10 +236,12 @@ finished step: on a clean checkout every step through scoring is done and only t
 from the committed dumps. It never trains and never rescores a checkpoint on test or HOTELS, because the protocol gate
 scores each one exactly once, so the re-scoring of saved checkpoints is met by their saved dumps. It fails on any
 rebuilt file that differs from the committed one, naming the file. `--verify-checkpoints` (`VERIFY_CHECKPOINTS=1`)
-re-hashes the on-disk final seeds against their final manifests: reported, not gated. A from-scratch run (the results
-deleted) prints a disclosure before any training starts: retraining on MPS is not bit-identical, so the run stops at
-the first divergence from the frozen record (the first output that differs from the committed one or from a protocol
-pin) and never weakens the gate.
+re-hashes the on-disk final seeds against their final manifests: reported, not gated. A record that git HEAD holds is
+never redone: a step whose committed artifacts are missing from the working tree is refused before any command
+(restore them with `git checkout -- PATH`), so a gated scoring step is never rerun around its committed dumps. A
+from-scratch run, in a repository whose HEAD does not hold the results, prints a disclosure before any training
+starts: retraining on MPS is not bit-identical, so the run stops at the first divergence from the frozen record (the
+first output that differs from the committed one or from a protocol pin) and never weakens the gate.
 
 `--checkpoint` (score, evaluate) and `--base` (train) accept `multilingual`, which loads the pinned,
 sha256-verified Laya weights, or a local Laya checkpoint dir. Nothing downloads an unpinned

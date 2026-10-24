@@ -19,9 +19,12 @@ or recomputed: a step with none of its artifacts is todo, with all of them verif
 naming the missing paths and the fix; a present artifact that does not verify is refused with its reader's own
 refusal (or the protocol pin mismatch naming both sha256 values) and the `git checkout -- PATH` restore fix; a dump
 whose npz or sidecar alone exists (an orphan) is refused naming both paths; and once a step is todo, a later step
-with any committed artifact is refused naming both steps, so a deleted record is never treated as work to redo. The
-data step is local (data/splits/ and data/audit/ are gitignored, written by `make data`) and exempt from the order
-rule; the report step always runs.
+with any committed artifact is refused naming both steps. Full mode also refuses, before any command, a todo step
+any of whose evidence files git HEAD holds (head_holds): a deleted record is never treated as work to redo, whether
+or not a later step is done, and a gated scoring step (final-scoring, fewshot-scoring) is never rescored around its
+committed dumps; the fix is `git checkout -- PATH`. A from-scratch run therefore needs a repository whose HEAD does
+not hold the outputs it makes (D-04). The data step is local (data/splits/ and data/audit/ are gitignored, written by
+`make data`) and exempt from the order rule; the report step always runs.
 
 Torch-free: the stdlib, pilot.protocol and pilot.data at import time; numpy, scipy and the record readers are imported
 inside the evidence functions, so computing the plan of a tree never imports torch, transformers, laya or Ray.
@@ -69,8 +72,9 @@ writes (LATER_OUTPUT: the bases' slots are recorded in the runs.json that fewsho
 verified with fewshot-continued), plus the deferred items of earlier steps whose file it writes. An artifact that is
 missing, fails its reader, differs from its protocol.json pin or differs from the bytes git HEAD holds for it
 (committed_bytes) stops the run with the D-04 reason, naming the step that wrote it. A gated scoring step
-(GATE_PRODUCERS) runs only when the steps that train its checkpoints ran in the same invocation; otherwise it is
-refused before any command, because the gated dumps are the exactly-once audit record. No command passes --force.
+(GATE_PRODUCERS) runs only when the steps that train its checkpoints ran in the same invocation, and never when git
+HEAD holds its dumps (the D-03 refusal above); otherwise it is refused before any command, because the gated dumps
+are the exactly-once audit record. No command passes --force.
 On a finished tree every step through fewshot-reports is done, so only the report regenerates.
 
 usage:
@@ -801,7 +805,9 @@ DISCLOSURE = (
     "protocol gate (score.py require_admitted) admits on test and HOTELS only the protocol's pinned final seeds, and "
     "the latency reports are protocol.json inputs that a re-timing never reproduces. The runner therefore stops at the "
     "first step whose output differs from the committed record or a protocol pin, naming the path; it never weakens "
-    "the gate and never reruns a gated scoring step. `git checkout -- results/` restores the audit record. "
+    "the gate and never reruns a gated scoring step. A record that git HEAD holds is never redone: a step whose "
+    "committed artifacts are missing from the working tree is refused before any command, so a from-scratch run "
+    "needs a repository whose HEAD does not hold the results. `git checkout -- results/` restores the audit record. "
     "ray_train.py resumes an existing ray_results/<run_id>/ and berturk_train.py refuses an existing "
     "berturk_runs/<run_id>/, so remove both before a from-scratch run.")
 STORAGE = {"laya": "ray_results", "berturk": "berturk_runs"}
@@ -1157,6 +1163,27 @@ def committed_bytes(root, rel):
     return r.stdout if r is not None and r.returncode == 0 else None
 
 
+def head_holds(root, rel):
+    """True when git HEAD tracks the repo-relative file rel in root (root the top of a work tree), without reading
+    the blob; False without git, outside a work tree's top, without a HEAD or for a path HEAD does not hold as a file."""
+    top = _git(root, "rev-parse", "--show-toplevel")
+    if top is None or top.returncode != 0:
+        return False
+    if os.path.realpath(top.stdout.decode("utf-8", "surrogateescape").strip()) != os.path.realpath(root):
+        return False
+    r = _git(root, "cat-file", "-t", "HEAD:" + rel)
+    return r is not None and r.returncode == 0 and r.stdout.strip() == b"blob"
+
+
+def _held_refusal(step, held):
+    gated = (" the gated dumps are the exactly-once audit record and are never rescored;" if step.get("gated")
+             else "")
+    return ("step %s is todo, but git HEAD holds %d of its committed artifacts, missing from the working tree (first "
+            "%s): a deleted committed record is never work to redo (D-03), and full mode reruns no step whose "
+            "output HEAD holds;%s restore them with `git checkout -- %s`"
+            % (step["name"], len(held), held[0], gated, " ".join(held)))
+
+
 def _writer(name, item, order):
     """The later step (a name in order, after name) that writes a file of item, or None: the item is the evidence of
     step name, but its committed bytes are that later step's output (LATER_OUTPUT)."""
@@ -1224,13 +1251,22 @@ def _substitute(cmd, rid):
 def run_full(root=REPO_ROOT, run=run_command, capture=capture_command, blocks=render_blocks, report=report_step,
              out=print, verify=False, checkpoint_root=None):
     """Full mode (D-01 to D-04): plan(root) (the 10-03 refusals), then every todo step in STEP_NAMES order, each
-    step's commands evaluated just before it runs, then the report step. A done step is skipped; a todo gated step
-    runs only after the steps that train its checkpoints (GATE_PRODUCERS) ran in this invocation, else it is refused
-    before any command; DISCLOSURE prints once before the first model step; a selection run id (RUN_ID) is resolved
+    step's commands evaluated just before it runs, then the report step. A done step is skipped; a todo step any of
+    whose evidence files git HEAD holds is refused before any command (D-03: a deleted committed record, restored with
+    `git checkout -- PATH`, never rerun); a todo gated step runs only after the steps that train its checkpoints
+    (GATE_PRODUCERS) ran in this invocation, else it is refused before any command; DISCLOSURE prints once before the first model step; a selection run id (RUN_ID) is resolved
     with the step's --print-run-id command; the first non-zero exit stops the run naming the step and the command;
     after_check stops it at the first output that differs from the committed record or a protocol pin."""
     rows = plan(root)
     proto, pin = protocol.require_frozen(os.path.join(root, "protocol.json"))
+    # D-03, fail closed (10-REVIEW WR-03): a todo step whose evidence git HEAD holds is a deleted committed record,
+    # never work to redo; a gated step's dumps are scored once, so its rerun never depends on retraining differing
+    for step, st, items in rows:
+        if st != "todo" or step["name"] in LOCAL + ALWAYS:
+            continue
+        held = [f for it in items for f in it["files"] if head_holds(root, f)]
+        if held:
+            raise SystemExit(_held_refusal(step, held))
     todo = {step["name"] for step, st, _ in rows if st == "todo"}
     for step, st, _ in rows:                          # a gated step is never rerun around its own training
         if st == "todo" and not all(p in todo for p in GATE_PRODUCERS.get(step["name"], ())):

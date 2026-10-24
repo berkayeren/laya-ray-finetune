@@ -29,7 +29,10 @@ val selection, final training, evaluation, few-shot, report. It skips every step
 artifacts prove done, so on a finished tree only the report step (the eval-only rebuild above) runs. A todo step's
 commands run in order after the D-04 disclosure; the run stops at the first failing command (a protocol gate refusal
 is final) or at the first output that differs from the committed record or a protocol pin, and a gated scoring step
-runs only after the training steps that make its checkpoints ran in the same invocation.
+runs only after the training steps that make its checkpoints ran in the same invocation. A todo step whose committed
+artifacts git HEAD holds (deleted from the working tree) is refused before any command: a committed record is
+restored with `git checkout -- PATH`, never redone, so a from-scratch run needs a repository whose HEAD does not hold
+the results.
 
 usage:
     python reproduce.py                                # = make reproduce PYTHON=.venv/bin/python (--mode full)
