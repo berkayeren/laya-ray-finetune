@@ -276,3 +276,202 @@ def test_makefile_report_target():
     assert phony and "report" in phony.group(1).split(), "report is not in .PHONY"
     assert re.search(r"^#   make report  eval-only: .*fails on any rebuilt file that differs$", text, re.M)
     assert "final-reports" in phony.group(1).split()
+
+
+# ---- eval-only fail paths (tmp git repos and synthetic trees; the committed tree is never touched) ----
+
+def _git_env(monkeypatch):
+    """No global or system git config (commit.gpgsign, core.hooksPath, excludes) reaches a temp repo."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
+def git_in(root, *args):
+    return subprocess.run(("git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c",
+                           "commit.gpgsign=false", "-c", "core.hooksPath=%s" % os.devnull) + args, cwd=root,
+                          check=True, capture_output=True)
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    """A tmp git repo with one committed results/x.json, README.md and protocol.json."""
+    _git_env(monkeypatch)
+    root = tmp_path / "repo"
+    (root / "results").mkdir(parents=True)
+    (root / "results" / "x.json").write_bytes(b'{"a": 1}\n')
+    (root / "README.md").write_bytes(b"# r\n")
+    (root / "protocol.json").write_bytes(b"{}\n")
+    git_in(root, "init", "-q")
+    git_in(root, "add", "-A")
+    git_in(root, "commit", "-q", "-m", "init")
+    return str(root)
+
+
+def fake_run(write=None):
+    """A run() that records each command and, on the first one, writes `write` ({rel: bytes}) under root."""
+    calls = []
+
+    def run(cmd, root):
+        if write and not calls:
+            for rel, data in write.items():
+                with open(os.path.join(root, rel), "wb") as f:
+                    f.write(data)
+        calls.append(cmd)
+        return 0
+    return run, calls
+
+
+def no_blocks(root):
+    return []
+
+
+def test_readme_rewriter_refuses_bad_markers():
+    good = "a\n<!-- x:start -->\nold\n<!-- x:end -->\nb\n"
+    assert rp.rewrite_blocks(good, [("x", "new\n")]) == "a\n<!-- x:start -->\nnew\n<!-- x:end -->\nb\n"
+    assert rp.rewrite_blocks(good, [("x", "old\n")]) == good           # every body already its render: unchanged
+    bad = {"missing end": "<!-- x:start -->\nold\n",
+           "duplicated start": "<!-- x:start -->\n<!-- x:start -->\nold\n<!-- x:end -->\n",
+           "reversed pair": "<!-- x:end -->\nold\n<!-- x:start -->\n"}
+    for case, text in bad.items():
+        with pytest.raises(SystemExit) as e:
+            rp.rewrite_blocks(text, [("x", "new\n")])
+        msg = str(e.value.code)
+        assert "<!-- x:start -->" in msg and "<!-- x:end -->" in msg, (case, msg)
+        assert "git checkout -- README.md" in msg and "\n" not in msg, (case, msg)
+
+
+def test_tree_changes_names_each_changed_path(repo, tmp_path):
+    assert rp.tree_changes(repo) == []
+    with open(os.path.join(repo, "results", "x.json"), "ab") as f:
+        f.write(b" ")
+    with open(os.path.join(repo, "results", "new.json"), "wb") as f:
+        f.write(b"{}\n")
+    os.makedirs(os.path.join(repo, "other"))
+    with open(os.path.join(repo, "other", "y.txt"), "wb") as f:         # outside CHECKED: never named
+        f.write(b"y\n")
+    assert rp.tree_changes(repo) == ["results/new.json", "results/x.json"]
+    os.remove(os.path.join(repo, "README.md"))
+    assert rp.tree_changes(repo) == ["README.md", "results/new.json", "results/x.json"]
+    assert rp.tree_changes(os.path.join(repo, "results")) is None      # not the top of the work tree
+    plain = tmp_path / "plain"
+    (plain / "results").mkdir(parents=True)
+    (plain / "results" / "x.json").write_bytes(b'{"a": 1}\n')
+    (plain / "README.md").write_bytes(b"# r\n")
+    assert rp.tree_changes(str(plain)) is None
+    snap = rp.snapshot(str(plain))
+    assert sorted(snap) == ["README.md", "results/x.json"]
+    (plain / "results" / "x.json").write_bytes(b'{"a": 2}\n')
+    assert rp.snapshot(str(plain)) != snap and rp._snapshot_diff(snap, rp.snapshot(str(plain))) == ["results/x.json"]
+
+
+def test_eval_only_refuses_a_dirty_tree_before_any_command(repo):
+    with open(os.path.join(repo, "README.md"), "ab") as f:
+        f.write(b"edited\n")
+    run, calls = fake_run()
+    with pytest.raises(SystemExit) as e:
+        rp.report_step(repo, run=run, blocks=no_blocks, out=lambda s: None)
+    msg = str(e.value.code)
+    assert calls == [], calls
+    assert msg.startswith("eval-only compares every rebuilt file with the committed one, but these already differ: "
+                          "README.md;"), msg
+    assert "\n" not in msg
+
+
+def _rebuild_case(root, with_git):
+    with open(os.path.join(root, "results", "x.json"), "rb") as f:
+        committed = f.read()
+    run, calls = fake_run({"results/x.json": committed})                    # identical bytes: green
+    lines = []
+    rp.report_step(root, run=run, blocks=no_blocks, out=lines.append)
+    assert calls == list(rp.REBUILD)
+    assert [l for l in lines if l.startswith("eval-only: ")] == ["eval-only: " + " ".join(c) for c in rp.REBUILD]
+    assert lines[-1].startswith("eval-only done: ")
+    assert ("git status clean" if with_git else "sha256 snapshot unchanged") in lines[-1]
+    changed = bytearray(committed)
+    changed[2] ^= 0x01
+    run, calls = fake_run({"results/x.json": bytes(changed)})               # one byte changed: red, naming it
+    with pytest.raises(SystemExit) as e:
+        rp.report_step(root, run=run, blocks=no_blocks, out=lambda s: None)
+    msg = str(e.value.code)
+    assert msg.startswith("eval-only rebuilt 1 file(s) that differ from the committed ones: results/x.json;"), msg
+    assert "git checkout -- PATH" in msg and "\n" not in msg
+    assert calls == list(rp.REBUILD)
+
+
+def test_eval_only_fails_naming_a_rebuilt_file_that_differs(repo, tmp_path):
+    import shutil
+    nogit = str(tmp_path / "nogit")                     # the snapshot fallback: the same tree without .git
+    shutil.copytree(repo, nogit, ignore=shutil.ignore_patterns(".git"))
+    assert rp.tree_changes(nogit) is None
+    _rebuild_case(repo, True)
+    run, calls = fake_run()                             # the differing file is left: the next run is refused up front
+    with pytest.raises(SystemExit):
+        rp.report_step(repo, run=run, blocks=no_blocks, out=lambda s: None)
+    assert calls == []
+    _rebuild_case(nogit, False)
+
+
+def test_eval_only_names_the_step_of_a_missing_artifact(tree):
+    import json
+    import shutil
+    os.rename(os.path.join(tree, "results", "postfit", "laya.json"), os.path.join(tree, "laya.json.saved"))
+    run, calls = fake_run()
+    with pytest.raises(SystemExit) as e:
+        rp.eval_only(tree, run=run, blocks=no_blocks, out=lambda s: None)
+    msg = str(e.value.code)
+    assert "results/postfit/laya.json" in msg and "laya-postfit" in msg and "git checkout --" in msg, msg
+    assert calls == [] and "\n" not in msg
+    os.rename(os.path.join(tree, "laya.json.saved"), os.path.join(tree, "results", "postfit", "laya.json"))
+    with open(os.path.join(tree, "results", "fewshot", "runs.json"), encoding="utf-8") as f:
+        ids = {e["dump_run_id"] for e in json.load(f)["entries"]}
+    shutil.rmtree(os.path.join(tree, "results", "fewshot"))           # every step from fewshot-projection onward
+    for rid in ids:
+        shutil.rmtree(os.path.join(tree, "results", "dumps", rid))
+    run, calls = fake_run()
+    with pytest.raises(SystemExit) as e:
+        rp.eval_only(tree, run=run, blocks=no_blocks, out=lambda s: None)
+    msg = str(e.value.code)
+    assert msg == ("eval-only never trains or scores: results/fewshot/projection.json is missing; it is made by step "
+                   "fewshot-projection; restore the committed record with `git checkout -- "
+                   "results/fewshot/projection.json`"), msg
+    assert calls == []                                  # the data step (todo in this tree) never ran either
+
+
+def _need_data():
+    import glob
+    if not glob.glob(os.path.join(REPO_ROOT, "data", "splits", "*.jsonl")):
+        pytest.fail("data/splits/ is empty; run `make data` first")
+
+
+@pytest.mark.data
+def test_eval_only_end_to_end(tmp_path, monkeypatch):
+    """A fresh copy of the working tree (every tracked file, plus the local data/splits/ and data/audit/), committed
+    in a new repo: reproduce.py --mode eval-only exits 0, runs all 9 rebuild commands and leaves the copy clean."""
+    import shutil
+    _need_data()
+    _git_env(monkeypatch)
+    copy = tmp_path / "copy"
+    tracked = subprocess.run(["git", "ls-files", "-z"], cwd=REPO_ROOT, check=True, capture_output=True).stdout
+    files = [p.decode("utf-8") for p in tracked.split(b"\0") if p]
+    for rel in files:
+        dst = copy / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(os.path.join(REPO_ROOT, rel), dst, follow_symlinks=False)
+    for d in ("splits", "audit"):
+        shutil.copytree(os.path.join(REPO_ROOT, "data", d), copy / "data" / d)
+    git_in(copy, "init", "-q")
+    subprocess.run(("git", "add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"), cwd=copy, input=tracked,
+                   check=True, capture_output=True)
+    git_in(copy, "commit", "-q", "-m", "copy")
+    assert rp.tree_changes(str(copy)) == []
+    out = subprocess.run([sys.executable, "reproduce.py", "--mode", "eval-only"], cwd=copy, capture_output=True,
+                         text=True, timeout=600)
+    assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
+    lines = out.stdout.splitlines()
+    assert lines[0] == "reproduce in " + sys.executable
+    assert [l for l in lines if l.startswith("eval-only: ")] == ["eval-only: " + " ".join(c) for c in rp.REBUILD]
+    assert "README blocks: 11 rendered, README.md unchanged" in lines
+    assert lines[-1].startswith("eval-only done: ") and "git status clean" in lines[-1]
+    st = subprocess.run(["git", "status", "--porcelain", "--", "results/", "README.md", "protocol.json"], cwd=copy,
+                        check=True, capture_output=True, text=True)
+    assert st.stdout == ""
