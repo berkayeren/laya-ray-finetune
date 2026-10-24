@@ -1,6 +1,6 @@
 """The shared scoring path end to end on the synthetic snapshot: score.py (baseline -> dump) and report.py (dump ->
 metrics), with no model, torch or Ray. Covers the dump contract (pilot.dumps), the role gate, the --n subset policy,
-the train-only baseline source, and report.py's refusal of every tampered dump (D-04).
+the train-only baseline source, and report.py's refusal of every tampered dump.
 """
 import ast
 import io
@@ -9,6 +9,9 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any, NoReturn
 
 import numpy as np
 import pytest
@@ -16,7 +19,7 @@ import pytest
 import pilot.data
 import report
 import score
-from conftest import prepared, prepared_with_line_separators
+from conftest import SyntheticRaw, prepared, prepared_with_line_separators
 from intents import INTENTS
 from pilot import dumps
 
@@ -26,18 +29,18 @@ REPO = pilot.data.REPO_ROOT
 TIMEOUT = 300
 
 
-def _split_uids(path):
+def _split_uids(path: str) -> list[str]:
     with open(path, "rb") as f:
         return [r["uid"] for r in pilot.data.parse_jsonl(f.read())]
 
 
 @pytest.fixture
-def snap(tmp_path, synthetic_raw):
+def snap(tmp_path: Path, synthetic_raw: SyntheticRaw) -> tuple[str, str]:
     """(out_dir, manifest_path) of the synthetic snapshot prepared under tmp_path."""
     return prepared(tmp_path, synthetic_raw)
 
 
-def test_baseline_dump_round_trips_to_report(tmp_path, snap):
+def test_baseline_dump_round_trips_to_report(tmp_path: Path, snap: tuple[str, str]) -> None:
     out_dir, manifest = snap
     test_jsonl = os.path.join(out_dir, "splits", "test.jsonl")
     run_dir, split = score.main([test_jsonl, "--model", "prior", "--manifest", manifest,
@@ -55,13 +58,13 @@ def test_baseline_dump_round_trips_to_report(tmp_path, snap):
     assert row["n"] == 7 and row["n_no_intent"] == 1
 
 
-def _run(*args):
+def _run(*args: str) -> subprocess.CompletedProcess[str]:
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     return subprocess.run([sys.executable] + list(args), cwd=REPO, env=env, capture_output=True, text=True,
                           timeout=TIMEOUT)
 
 
-def test_cli_round_trip(tmp_path, snap):
+def test_cli_round_trip(tmp_path: Path, snap: tuple[str, str]) -> None:
     out_dir, manifest = snap
     r = _run("score.py", os.path.join(out_dir, "splits", "test.jsonl"), "--model", "majority",
              "--manifest", manifest, "--out-root", str(tmp_path / "dumps"))
@@ -79,7 +82,7 @@ def test_cli_round_trip(tmp_path, snap):
 # --- score.py refusals -------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name", ["selection_train", "final_train", "hotels_probe"])
-def test_score_refuses_non_eval_roles(tmp_path, snap, name):
+def test_score_refuses_non_eval_roles(tmp_path: Path, snap: tuple[str, str], name: str) -> None:
     out_dir, manifest = snap
     with pytest.raises(SystemExit, match="role"):
         score.main([os.path.join(out_dir, "splits", "%s.jsonl" % name), "--model", "prior", "--manifest", manifest,
@@ -87,7 +90,7 @@ def test_score_refuses_non_eval_roles(tmp_path, snap, name):
     assert not (tmp_path / "dumps").exists()
 
 
-def test_score_refuses_tampered_split(tmp_path, snap):
+def test_score_refuses_tampered_split(tmp_path: Path, snap: tuple[str, str]) -> None:
     out_dir, manifest = snap
     path = os.path.join(out_dir, "splits", "test.jsonl")
     with open(path, "ab") as f:
@@ -97,7 +100,7 @@ def test_score_refuses_tampered_split(tmp_path, snap):
 
 
 @pytest.mark.parametrize("n", ["0", "-5"])
-def test_score_refuses_non_positive_n(snap, capsys, n):
+def test_score_refuses_non_positive_n(snap: tuple[str, str], capsys: pytest.CaptureFixture[str], n: str) -> None:
     out_dir, manifest = snap
     with pytest.raises(SystemExit) as e:
         score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--model", "prior", "--manifest", manifest,
@@ -106,7 +109,8 @@ def test_score_refuses_non_positive_n(snap, capsys, n):
     assert "--n must be a positive" in capsys.readouterr().err
 
 
-def test_empty_split_is_refused_before_writing(tmp_path, snap, monkeypatch):
+def test_empty_split_is_refused_before_writing(tmp_path: Path, snap: tuple[str, str],
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
     out_dir, manifest = snap
     monkeypatch.setattr(score, "parse_jsonl", lambda raw: [])
     with pytest.raises(SystemExit, match="no messages to score"):
@@ -115,7 +119,7 @@ def test_empty_split_is_refused_before_writing(tmp_path, snap, monkeypatch):
     assert not (tmp_path / "dumps").exists()
 
 
-def _good_logits(n=2):
+def _good_logits(n: int = 2) -> np.ndarray:
     return np.zeros((n, 48), dtype=np.float32)
 
 
@@ -125,7 +129,7 @@ def _good_logits(n=2):
     (np.where(np.eye(2, 48, dtype=bool), np.nan, 0).astype(np.float32), ["a", "b"]),   # a nan
     (_good_logits(), ["a", "a"]),                                           # duplicate uids
 ], ids=["zero_rows", "float64", "nan", "duplicate_uids"])
-def test_write_dump_refuses_malformed(tmp_path, logits, uids):
+def test_write_dump_refuses_malformed(tmp_path: Path, logits: np.ndarray, uids: list[str]) -> None:
     run_dir = tmp_path / "run"
     with pytest.raises(SystemExit, match="malformed"):
         dumps.write_dump(str(run_dir), "test", logits, uids, {"run_id": "run"})
@@ -134,7 +138,7 @@ def test_write_dump_refuses_malformed(tmp_path, logits, uids):
 
 # --- the --n subset policy ---------------------------------------------------------------------------------------
 
-def test_single_message_subset_round_trips(tmp_path, snap):
+def test_single_message_subset_round_trips(tmp_path: Path, snap: tuple[str, str]) -> None:
     out_dir, manifest = snap
     run_dir, split = score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--model", "majority",
                                  "--manifest", manifest, "--n", "1", "--out-root", str(tmp_path / "sub")])
@@ -144,7 +148,7 @@ def test_single_message_subset_round_trips(tmp_path, snap):
     assert rep["subset"] is True and rep["variants"]["shipped"]["rows"]["0.5"]["n"] == 1
 
 
-def test_subset_never_under_results_dumps(snap):
+def test_subset_never_under_results_dumps(snap: tuple[str, str]) -> None:
     out_dir, manifest = snap
     test_jsonl = os.path.join(out_dir, "splits", "test.jsonl")
     with pytest.raises(SystemExit, match="never go under results/dumps"):
@@ -164,9 +168,9 @@ def test_subset_never_under_results_dumps(snap):
         shutil.rmtree(os.path.dirname(run_dir))
 
 
-# --- the committed audit dumps are replaced only on purpose (03-REVIEW WR-03, IN-04) -------------------------------
+# --- the committed audit dumps are replaced only on purpose ------------------------------------------------------
 
-def test_existing_dump_is_not_overwritten_without_force(tmp_path, snap):
+def test_existing_dump_is_not_overwritten_without_force(tmp_path: Path, snap: tuple[str, str]) -> None:
     out_dir, manifest = snap
     args = [os.path.join(out_dir, "splits", "test.jsonl"), "--model", "prior", "--manifest", manifest,
             "--out-root", str(tmp_path / "dumps")]
@@ -182,7 +186,8 @@ def test_existing_dump_is_not_overwritten_without_force(tmp_path, snap):
     assert logits.shape == (7, 48) and side["n_subset"] is None
 
 
-def test_force_refusal_comes_before_any_model_load(tmp_path, snap, monkeypatch):
+def test_force_refusal_comes_before_any_model_load(tmp_path: Path, snap: tuple[str, str],
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
     from pilot.weights import identity
     from tiny_laya import tiny_checkpoint
     out_dir, manifest = snap
@@ -191,7 +196,7 @@ def test_force_refusal_comes_before_any_model_load(tmp_path, snap, monkeypatch):
     run_dir.mkdir(parents=True)
     (run_dir / "test.json").write_text("{}", encoding="utf-8")     # an existing dump, even a partial one, blocks
 
-    def no_load(*a, **k):
+    def no_load(*a: Any, **k: Any) -> NoReturn:
         raise AssertionError("loaded a model before the overwrite check")
     monkeypatch.setattr(score, "load_agent", no_load)
     monkeypatch.setattr(score, "resolve_checkpoint", no_load)
@@ -202,7 +207,7 @@ def test_force_refusal_comes_before_any_model_load(tmp_path, snap, monkeypatch):
     assert "ray" not in sys.modules or not sys.modules["ray"].is_initialized()
 
 
-def test_out_of_repo_dump_prints_its_real_path(snap, capsys):
+def test_out_of_repo_dump_prints_its_real_path(snap: tuple[str, str], capsys: pytest.CaptureFixture[str]) -> None:
     out_dir, manifest = snap
     run_dir, split = score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--model", "prior",
                                  "--manifest", manifest, "--n", "1"])
@@ -215,14 +220,14 @@ def test_out_of_repo_dump_prints_its_real_path(snap, capsys):
         shutil.rmtree(os.path.dirname(run_dir))
 
 
-def test_evaluate_defaults_to_a_temp_out_root(tmp_path, monkeypatch):
+def test_evaluate_defaults_to_a_temp_out_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import tempfile
     import evaluate
     calls = []
 
-    def fake_score(argv, roles=None):
+    def fake_score(argv: list[str], roles: Sequence[str] | None = None) -> tuple[str, str]:
         calls.append(list(argv))
-        assert roles == ("test", "val")                     # evaluate.py never scores hotels_probe (08-07)
+        assert roles == ("test", "val")                     # evaluate.py never scores hotels_probe
         return str(tmp_path / "run"), "test"
     monkeypatch.setattr(score, "main", fake_score)
     monkeypatch.setattr(report, "run_report", lambda *a, **k: {})
@@ -240,7 +245,7 @@ def test_evaluate_defaults_to_a_temp_out_root(tmp_path, monkeypatch):
     assert argv[argv.index("--out-root") + 1] == str(tmp_path / "given")
 
 
-def test_makefile_baselines_pass_force():
+def test_makefile_baselines_pass_force() -> None:
     with open(os.path.join(REPO, "Makefile"), encoding="utf-8") as f:
         lines = f.read().split("\n")
     start = lines.index("baselines:") + 1
@@ -256,7 +261,7 @@ def test_makefile_baselines_pass_force():
 # --- baselines come from the matching train split only -----------------------------------------------------------
 
 @pytest.mark.parametrize("role,source", [("test", "final_train"), ("val", "selection_train")])
-def test_baseline_counts_come_from_matching_train_split(snap, role, source):
+def test_baseline_counts_come_from_matching_train_split(snap: tuple[str, str], role: str, source: str) -> None:
     out_dir, manifest = snap
     path = os.path.join(out_dir, "splits", "%s.jsonl" % source)
     with open(path, "rb") as f:
@@ -271,7 +276,7 @@ def test_baseline_counts_come_from_matching_train_split(snap, role, source):
     assert any(not any(r["expected"].values()) for r in rows)
 
 
-def test_train_counts_refuses_tampered_train_split(snap):
+def test_train_counts_refuses_tampered_train_split(snap: tuple[str, str]) -> None:
     out_dir, manifest = snap
     with open(os.path.join(out_dir, "splits", "final_train.jsonl"), "ab") as f:
         f.write(b"\n")
@@ -279,7 +284,7 @@ def test_train_counts_refuses_tampered_train_split(snap):
         score.train_counts(manifest, "test")
 
 
-def test_majority_tie_goes_to_earlier_intent(tmp_path, snap):
+def test_majority_tie_goes_to_earlier_intent(tmp_path: Path, snap: tuple[str, str]) -> None:
     out_dir, manifest = snap
     _, _, counts, _ = score.train_counts(manifest, "test")
     assert counts["card"] == counts["lost_stolen"] == max(counts.values())   # the synthetic tie
@@ -292,7 +297,7 @@ def test_majority_tie_goes_to_earlier_intent(tmp_path, snap):
     assert (logits[:, 3] == hi).all() and (logits[:, 33] == -hi).all() and (logits.argmax(axis=1) == 3).all()
 
 
-def test_prior_zero_count_tag_is_clipped():
+def test_prior_zero_count_tag_is_clipped() -> None:
     counts = dict.fromkeys(INTENTS, 0)
     counts["card"] = 3
     row = score.baseline_logits("prior", counts, 4)
@@ -302,7 +307,7 @@ def test_prior_zero_count_tag_is_clipped():
     assert row[3] == np.float32(np.log(0.75) - np.log1p(-0.75))
 
 
-def test_line_separator_messages_stay_one_row(tmp_path, synthetic_raw):
+def test_line_separator_messages_stay_one_row(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, manifest = prepared_with_line_separators(tmp_path, synthetic_raw)
     run_dir, split = score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--model", "prior",
                                  "--manifest", manifest, "--out-root", str(tmp_path / "dumps")])
@@ -310,9 +315,9 @@ def test_line_separator_messages_stay_one_row(tmp_path, synthetic_raw):
     assert logits.shape[0] == len(uids) == entry["n_messages"] and "bank_sep_2" in uids
 
 
-# --- val-selected θ: chosen on the same run's full val dump only (EVAL-02, D-11, D-12) ----------------------------
+# --- val-selected θ: chosen on the same run's full val dump only ------------------------------------------------
 
-def _score_both(snap, root, model="prior"):
+def _score_both(snap: tuple[str, str], root: Path, model: str = "prior") -> tuple[str, str]:
     out_dir, manifest = snap
     for name in ("val", "test"):
         score.main([os.path.join(out_dir, "splits", "%s.jsonl" % name), "--model", model, "--manifest", manifest,
@@ -320,7 +325,7 @@ def _score_both(snap, root, model="prior"):
     return os.path.join(str(root), model), manifest
 
 
-def test_report_selects_theta_on_val_and_discloses_it(tmp_path, snap):
+def test_report_selects_theta_on_val_and_discloses_it(tmp_path: Path, snap: tuple[str, str]) -> None:
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     rep = report.run_report(run_dir, "test", manifest)
     assert set(rep["variants"]) == {"shipped", "raw"} and rep["headline"] == "shipped"
@@ -339,13 +344,13 @@ def test_report_selects_theta_on_val_and_discloses_it(tmp_path, snap):
         assert row["n"] == v["rows"]["0.5"]["n"]
 
 
-def test_report_on_val_marks_theta_in_sample(tmp_path, snap):
+def test_report_on_val_marks_theta_in_sample(tmp_path: Path, snap: tuple[str, str]) -> None:
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     rep = report.run_report(run_dir, "val", manifest)
     assert all(v["rows"]["val_selected"]["in_sample"] is True for v in rep["variants"].values())
 
 
-def test_report_without_val_dump(tmp_path, good_run):
+def test_report_without_val_dump(tmp_path: Path, good_run: tuple[str, str]) -> None:
     run_dir, manifest = good_run
     rep = report.run_report(run_dir, "test", manifest)
     assert rep["theta_source"] is None
@@ -354,7 +359,7 @@ def test_report_without_val_dump(tmp_path, good_run):
         assert v["rows"]["0.5"]["n"] == 7
 
 
-def test_report_refuses_subset_val_dump(tmp_path, snap):
+def test_report_refuses_subset_val_dump(tmp_path: Path, snap: tuple[str, str]) -> None:
     out_dir, manifest = snap
     root = tmp_path / "dumps"
     score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--model", "prior", "--manifest", manifest,
@@ -365,7 +370,7 @@ def test_report_refuses_subset_val_dump(tmp_path, snap):
         report.run_report(str(root / "prior"), "test", manifest)
 
 
-def test_theta_never_reads_test(tmp_path, snap):
+def test_theta_never_reads_test(tmp_path: Path, snap: tuple[str, str]) -> None:
     """Two runs with identical val dumps and different test probabilities get the same θ."""
     a, manifest = _score_both(snap, tmp_path / "a")
     b, _ = _score_both(snap, tmp_path / "b")
@@ -381,7 +386,7 @@ def test_theta_never_reads_test(tmp_path, snap):
         assert ra["variants"][v]["rows"]["0.5"] != rb["variants"][v]["rows"]["0.5"]
 
 
-# --- θ comes only from a val dump of the same checkpoint, temperature and scorer (03-REVIEW WR-01) ------------------
+# --- θ comes only from a val dump of the same checkpoint, temperature and scorer ---------------------------------
 
 SOURCE_EDITS = {
     "kind": ("system.kind", "another-system"),
@@ -394,15 +399,15 @@ SOURCE_EDITS = {
 }
 
 
-def _set_key(dotted, value):
-    def fn(side):
+def _set_key(dotted: str, value: object) -> Callable[[dict[str, Any]], None]:
+    def fn(side: dict[str, Any]) -> None:
         head, key = dotted.split(".")
         side.setdefault(head, {})[key] = value
     return fn
 
 
 @pytest.mark.parametrize("case", sorted(SOURCE_EDITS))
-def test_report_refuses_val_and_split_from_different_sources(tmp_path, snap, case):
+def test_report_refuses_val_and_split_from_different_sources(tmp_path: Path, snap: tuple[str, str], case: str) -> None:
     dotted, value = SOURCE_EDITS[case]
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     _edit_sidecar(run_dir, _set_key(dotted, value))        # the test dump now claims another source than val
@@ -411,7 +416,7 @@ def test_report_refuses_val_and_split_from_different_sources(tmp_path, snap, cas
     assert dotted in str(e.value.code) and "val dump" in str(e.value.code), e.value.code
 
 
-def _rename_checkpoint(run_dir, ident):
+def _rename_checkpoint(run_dir: str, ident: dict[str, Any]) -> None:
     for name, ckpt in (("val", "runs/ckpt"), ("test", "runs/ckpt-renamed")):
         path = os.path.join(run_dir, "%s.json" % name)
         with open(path, encoding="utf-8") as f:
@@ -421,8 +426,8 @@ def _rename_checkpoint(run_dir, ident):
             json.dump(side, f)
 
 
-def test_a_moved_checkpoint_with_the_same_identity_is_the_same_source(tmp_path, snap):
-    """04-REVIEW IN-12, IN-05: the path counts only when no checkpoint_identity binds every file laya.load reads
+def test_a_moved_checkpoint_with_the_same_identity_is_the_same_source(tmp_path: Path, snap: tuple[str, str]) -> None:
+    """The path counts only when no checkpoint_identity binds every file laya.load reads
     (weights, config, tokenizer/ and encoder/); then a change in any of them is a change of the identity."""
     files = {"encoder/config.json": "e" * 64, "tokenizer/tokenizer.json": "f" * 64,
              "tokenizer/tokenizer_config.json#normalized": "0" * 64}
@@ -437,20 +442,20 @@ def test_a_moved_checkpoint_with_the_same_identity_is_the_same_source(tmp_path, 
         _edit_sidecar(run_dir, _set_key("system.checkpoint_identity", changed))
         with pytest.raises(SystemExit, match=r"system\.checkpoint_identity"):
             report.run_report(run_dir, "test", manifest)
-    # an identity from before IN-05 binds weights and config only: a renamed dir is still refused on the path
+    # an identity without files_sha256 binds weights and config only: a renamed dir is still refused on the path
     _rename_checkpoint(run_dir, {"local": True, "model_sha256": "a" * 64, "config_sha256": "b" * 64})
     with pytest.raises(SystemExit, match=r"system\.checkpoint "):
         report.run_report(run_dir, "test", manifest)
     assert report.binds_every_file({"revision": "7b928d82", "model_sha256": "a" * 64})
     assert not report.binds_every_file(None) and not report.binds_every_file({"local": True})
-    # 04-REVIEW WR-02: a local identity without tokenizer/ or encoder/ does not bind what laya.load reads
+    # a local identity without tokenizer/ or encoder/ does not bind what laya.load reads
     assert report.binds_every_file(ident)
     for rel in dumps.LOCAL_REQUIRED_FILES:
         assert not report.binds_every_file(dict(ident, files_sha256={k: v for k, v in files.items() if k != rel}))
     assert not report.binds_every_file(dict(ident, files_sha256={}))
 
 
-def test_compare_refuses_mixed_sources(tmp_path, snap):
+def test_compare_refuses_mixed_sources(tmp_path: Path, snap: tuple[str, str]) -> None:
     a, manifest = _score_both(snap, tmp_path / "a")
     b, _ = _score_both(snap, tmp_path / "b", model="majority")
     _edit_sidecar(a, _set_key("scorer.device", "mps"))
@@ -460,7 +465,7 @@ def test_compare_refuses_mixed_sources(tmp_path, snap):
         report.compare([b], [a], "test", manifest, B=50, seed=0)
 
 
-def test_baseline_source_may_differ_between_val_and_test(tmp_path, snap):
+def test_baseline_source_may_differ_between_val_and_test(tmp_path: Path, snap: tuple[str, str]) -> None:
     """A baseline's val and test dumps come from different training splits by design (TRAINED_ON)."""
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     sources = {s: dumps.load_dump(run_dir, s, manifest)[2]["system"]["baseline_source"]["split"]
@@ -471,14 +476,14 @@ def test_baseline_source_may_differ_between_val_and_test(tmp_path, snap):
     assert report.compare([run_dir], [run_dir], "test", manifest, B=50, seed=0)["n"] == 7
 
 
-def test_local_run_id_includes_the_config_hash():
+def test_local_run_id_includes_the_config_hash() -> None:
     from pilot import pins
     from pilot.weights import identity
     files = {"encoder/config.json": "c" * 64}
     rid = dumps.run_id("laya", {"local": True, "model_sha256": "a" * 64, "config_sha256": "b" * 64,
                                 "files_sha256": files})
     assert rid == "laya-" + "a" * 12 + "-" + "b" * 8 + "-" + dumps.files_digest(files)[:8]
-    # 04-REVIEW IN-05: tokenizer/ and encoder/ name the run too
+    # tokenizer/ and encoder/ name the run too
     assert dumps.run_id("laya", {"local": True, "model_sha256": "a" * 64, "config_sha256": "b" * 64,
                                  "files_sha256": {"encoder/config.json": "d" * 64}}) != rid
     with pytest.raises(SystemExit, match="files_sha256"):
@@ -492,9 +497,9 @@ def test_local_run_id_includes_the_config_hash():
             dumps.run_id("laya", ident)
 
 
-# --- a --n subset val dump reported on val: θ 0.5 rows, no θ source (03-REVIEW WR-04) ------------------------------
+# --- a --n subset val dump reported on val: θ 0.5 rows, no θ source -----------------------------------------------
 
-def test_val_subset_report_has_no_theta_source(tmp_path, snap):
+def test_val_subset_report_has_no_theta_source(tmp_path: Path, snap: tuple[str, str]) -> None:
     out_dir, manifest = snap
     run_dir, split = score.main([os.path.join(out_dir, "splits", "val.jsonl"), "--model", "prior",
                                  "--manifest", manifest, "--n", "2", "--out-root", str(tmp_path / "sub")])
@@ -506,9 +511,9 @@ def test_val_subset_report_has_no_theta_source(tmp_path, snap):
     assert report.SUBSET_VAL_REASON == "val dump is a --n subset; θ is selected only on a full val dump"
 
 
-# --- report.py refuses every tampered dump (D-04) ----------------------------------------------------------------
+# --- report.py refuses every tampered dump -----------------------------------------------------------------------
 
-def _rewrite_npz(run_dir, **arrays):
+def _rewrite_npz(run_dir: str, **arrays: np.ndarray) -> None:
     """Rewrite run_dir/test.npz from `arrays` (pickling allowed, as a tamperer could) and fix dump_sha256."""
     buf = io.BytesIO()
     np.savez(buf, **arrays)
@@ -518,7 +523,7 @@ def _rewrite_npz(run_dir, **arrays):
     _edit_sidecar(run_dir, lambda s: s.update(dump_sha256=pilot.data.sha256_bytes(data)))
 
 
-def _edit_sidecar(run_dir, fn):
+def _edit_sidecar(run_dir: str, fn: Callable[[dict[str, Any]], object]) -> None:
     path = os.path.join(run_dir, "test.json")
     with open(path, encoding="utf-8") as f:
         side = json.load(f)
@@ -527,7 +532,7 @@ def _edit_sidecar(run_dir, fn):
         json.dump(side, f)
 
 
-def _flip_byte(run_dir):
+def _flip_byte(run_dir: str) -> None:
     path = os.path.join(run_dir, "test.npz")
     with open(path, "rb") as f:
         data = bytearray(f.read())
@@ -536,14 +541,14 @@ def _flip_byte(run_dir):
         f.write(bytes(data))
 
 
-def _arrays(run_dir):
+def _arrays(run_dir: str) -> tuple[np.ndarray, np.ndarray]:
     z = np.load(os.path.join(run_dir, "test.npz"), allow_pickle=False)
     return z["logits"], z["uids"]
 
 
-def _truncate_zip(run_dir):
+def _truncate_zip(run_dir: str) -> None:
     """Cut the npz to half its bytes (the zip's central directory is lost) and rewrite dump_sha256 to match, so only
-    the npz parser can catch it (03-REVIEW IN-03)."""
+    the npz parser can catch it."""
     path = os.path.join(run_dir, "test.npz")
     with open(path, "rb") as f:
         data = f.read()
@@ -568,21 +573,21 @@ TAMPER = {
 
 
 @pytest.fixture
-def good_run(tmp_path, snap):
+def good_run(tmp_path: Path, snap: tuple[str, str]) -> tuple[str, str]:
     out_dir, manifest = snap
     run_dir, _ = score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--model", "prior",
                              "--manifest", manifest, "--out-root", str(tmp_path / "dumps")])
     return run_dir, manifest
 
 
-def _copy_run(run_dir, tmp_path, name=None):
+def _copy_run(run_dir: str, tmp_path: Path, name: str = None) -> str:
     dst = str(tmp_path / "bad" / (name or os.path.basename(run_dir)))
     shutil.copytree(run_dir, dst)
     return dst
 
 
 @pytest.mark.parametrize("case", sorted(TAMPER))
-def test_report_refuses_tampered_dump(tmp_path, good_run, case):
+def test_report_refuses_tampered_dump(tmp_path: Path, good_run: tuple[str, str], case: str) -> None:
     run_dir, manifest = good_run
     bad = _copy_run(run_dir, tmp_path)
     report.run_report(bad, "test", manifest)                # the untouched copy verifies
@@ -592,19 +597,19 @@ def test_report_refuses_tampered_dump(tmp_path, good_run, case):
     assert "score.py" in str(e.value.code)                  # a "<what>; rescore with score.py" refusal
     if case == "pickled_uids":
         assert "pickled" in str(e.value.code) and "allow_pickle" in str(e.value.code)
-    if case == "truncated_zip":                             # one line naming the exception, no traceback (IN-03)
+    if case == "truncated_zip":                             # one line naming the exception, no traceback
         assert "cannot be read" in str(e.value.code) and "BadZipFile" in str(e.value.code)
         assert "pickled" not in str(e.value.code) and "\n" not in str(e.value.code)
 
 
-def test_report_refuses_renamed_run_dir(tmp_path, good_run):
+def test_report_refuses_renamed_run_dir(tmp_path: Path, good_run: tuple[str, str]) -> None:
     run_dir, manifest = good_run
     bad = _copy_run(run_dir, tmp_path, name="majority")
     with pytest.raises(SystemExit, match="run_id"):
         report.run_report(bad, "test", manifest)
 
 
-def test_report_refuses_missing_dump(tmp_path, snap):
+def test_report_refuses_missing_dump(tmp_path: Path, snap: tuple[str, str]) -> None:
     _, manifest = snap
     with pytest.raises(SystemExit, match="not found"):
         report.run_report(str(tmp_path / "nothing" / "prior"), "test", manifest)
@@ -612,7 +617,7 @@ def test_report_refuses_missing_dump(tmp_path, snap):
 
 # --- guards: torch-free, no system-specific branch ---------------------------------------------------------------
 
-def test_import_is_torch_free():
+def test_import_is_torch_free() -> None:
     code = ("import sys, report, score, pilot.metrics, pilot.dumps; "
             "print(sorted(m for m in ('torch', 'ray', 'laya') if m in sys.modules))")
     r = _run("-c", code)
@@ -620,11 +625,11 @@ def test_import_is_torch_free():
     assert r.stdout.strip() == "[]", r.stdout
 
 
-def test_metrics_code_has_no_system_branch():
+def test_metrics_code_has_no_system_branch() -> None:
     hits = []
     for rel in ("pilot/metrics.py", "report.py"):
         with open(os.path.join(REPO, rel), encoding="utf-8") as f:
             tree = ast.parse(f.read(), filename=rel)
         hits += ["%s:%d %r" % (rel, n.lineno, n.value) for n in ast.walk(tree)
                  if isinstance(n, ast.Constant) and n.value in ("majority", "prior", "laya")]
-    assert hits == [], "system-specific constants in metric code (D-10): %s" % hits
+    assert hits == [], "system-specific constants in metric code: %s" % hits

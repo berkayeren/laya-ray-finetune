@@ -1,4 +1,4 @@
-"""Offline guards for the pinned weights path (ENV-02): fetch refusal paths, pickle-free download patterns, and no
+"""Offline guards for the pinned weights path: fetch refusal paths, pickle-free download patterns, and no
 unpinned load call anywhere in the repo. snapshot_download is monkeypatched with fake snapshot dirs; nothing here
 touches the network.
 """
@@ -10,6 +10,8 @@ import os
 import subprocess
 import sys
 import types
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,7 +25,8 @@ REPO = pilot.data.REPO_ROOT
 PICKLE_NAMES = ["pytorch_model.bin", "tf_model.h5", "flax_model.msgpack", "multilingual/pytorch_model.bin"]
 
 
-def fake_snapshot(tmp_path, pin, name=None, skip=None, corrupt=None):
+def fake_snapshot(tmp_path: Path, pin: dict[str, Any], name: str | None = None, skip: str | None = None,
+                  corrupt: str | None = None) -> tuple[str, dict[str, Any]]:
     """Write tmp_path/snapshots/<name or SHA>[/subfolder]/<pinned files>; return (root, pin with matching digests)."""
     root = tmp_path / "snapshots" / (name or pin["revision"])
     d = root / pin["subfolder"] if pin["subfolder"] else root
@@ -39,38 +42,39 @@ def fake_snapshot(tmp_path, pin, name=None, skip=None, corrupt=None):
     return str(root), dict(pin, sha256=digests)
 
 
-def patch_download(monkeypatch, result):
+def patch_download(monkeypatch: pytest.MonkeyPatch, result: object) -> list[dict[str, Any]]:
     calls = []
 
-    def fake(repo, revision=None, allow_patterns=None, dry_run=False):
+    def fake(repo: str, revision: str | None = None, allow_patterns: list[str] | None = None,
+             dry_run: bool = False) -> object:
         calls.append({"repo": repo, "revision": revision, "allow_patterns": allow_patterns, "dry_run": dry_run})
         return result
     monkeypatch.setattr(pilot.weights, "snapshot_download", fake)
     return calls
 
 
-def test_fetch_refuses_snapshot_not_at_pinned_revision(tmp_path, monkeypatch):
+def test_fetch_refuses_snapshot_not_at_pinned_revision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root, pin = fake_snapshot(tmp_path, pins.LAYA, name="0" * 40)
     patch_download(monkeypatch, root)
     with pytest.raises(SystemExit, match="resolved to revision"):
         pilot.weights.fetch(pin)
 
 
-def test_fetch_refuses_digest_mismatch(tmp_path, monkeypatch):
+def test_fetch_refuses_digest_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root, pin = fake_snapshot(tmp_path, pins.LAYA, corrupt="model.safetensors")
     patch_download(monkeypatch, root)
     with pytest.raises(SystemExit, match="sha256"):
         pilot.weights.fetch(pin)
 
 
-def test_fetch_refuses_missing_pinned_file(tmp_path, monkeypatch):
+def test_fetch_refuses_missing_pinned_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root, pin = fake_snapshot(tmp_path, pins.LAYA, skip="tokenizer/tokenizer.json")
     patch_download(monkeypatch, root)
     with pytest.raises(SystemExit, match="missing"):
         pilot.weights.fetch(pin)
 
 
-def test_fetch_returns_subfolder_for_laya(tmp_path, monkeypatch):
+def test_fetch_returns_subfolder_for_laya(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root, pin = fake_snapshot(tmp_path, pins.LAYA)
     calls = patch_download(monkeypatch, root)
     assert pilot.weights.fetch(pin) == os.path.join(root, "multilingual")
@@ -78,13 +82,13 @@ def test_fetch_returns_subfolder_for_laya(tmp_path, monkeypatch):
                       "allow_patterns": pins.LAYA["allow_patterns"], "dry_run": False}]
 
 
-def test_fetch_returns_root_for_berturk(tmp_path, monkeypatch):
+def test_fetch_returns_root_for_berturk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root, pin = fake_snapshot(tmp_path, pins.BERTURK)
     patch_download(monkeypatch, root)
     assert pilot.weights.fetch(pin) == root
 
 
-def test_check_revision_refuses_other_commit(monkeypatch):
+def test_check_revision_refuses_other_commit(monkeypatch: pytest.MonkeyPatch) -> None:
     sha = pins.LAYA["revision"]
     infos = [types.SimpleNamespace(commit_hash=sha, filename="multilingual/model.safetensors"),
              types.SimpleNamespace(commit_hash="f" * 40, filename="multilingual/rl_agent_config.json")]
@@ -93,13 +97,13 @@ def test_check_revision_refuses_other_commit(monkeypatch):
         pilot.weights.check_revision(pins.LAYA)
 
 
-def test_check_revision_refuses_empty_listing(monkeypatch):
+def test_check_revision_refuses_empty_listing(monkeypatch: pytest.MonkeyPatch) -> None:
     patch_download(monkeypatch, [])
     with pytest.raises(SystemExit):
         pilot.weights.check_revision(pins.LAYA)
 
 
-def test_check_revision_counts_matching_files(monkeypatch):
+def test_check_revision_counts_matching_files(monkeypatch: pytest.MonkeyPatch) -> None:
     sha = pins.BERTURK["revision"]
     infos = [types.SimpleNamespace(commit_hash=sha, filename=f) for f in pins.BERTURK["allow_patterns"]]
     calls = patch_download(monkeypatch, infos)
@@ -108,12 +112,12 @@ def test_check_revision_counts_matching_files(monkeypatch):
 
 
 @pytest.mark.parametrize("pin", [pins.LAYA, pins.BERTURK], ids=["laya", "berturk"])
-def test_allow_patterns_never_match_pickle_tf_or_flax(pin):
+def test_allow_patterns_never_match_pickle_tf_or_flax(pin: dict[str, Any]) -> None:
     hits = [(p, n) for p in pin["allow_patterns"] for n in PICKLE_NAMES if fnmatch.fnmatch(n, p)]
     assert not hits, hits
 
 
-def test_laya_digests_skip_tokenizer_config():
+def test_laya_digests_skip_tokenizer_config() -> None:
     # laya may rewrite tokenizer/tokenizer_config.json in the snapshot, so a digest on it would be fragile
     assert not [k for k in pins.LAYA["sha256"] if k.endswith("tokenizer_config.json")]
 
@@ -122,7 +126,7 @@ LOADERS = ("load", "load_checkpoint", "resolve_checkpoint_dir")
 HUB_DOWNLOADS = ("snapshot_download", "hf_hub_download")
 
 
-def _unpinned_calls(path, in_pilot=False):
+def _unpinned_calls(path: str, in_pilot: bool = False) -> list[str]:
     """Weight loads that could bypass pilot.weights.fetch. Outside pilot/: any from-import of a loader or hub download,
     any bare-name load/load_checkpoint call (an aliased from-import), any hub download call. Everywhere: a loader
     called on a string literal (a hub id), a from_pretrained called on a string literal (a hub id; BERTurk loads go
@@ -158,7 +162,7 @@ def _unpinned_calls(path, in_pilot=False):
     return bad
 
 
-def test_no_unpinned_load_call_in_repo():
+def test_no_unpinned_load_call_in_repo() -> None:
     out = subprocess.run(["git", "ls-files", "*.py"], cwd=REPO, capture_output=True, text=True, check=True).stdout
     files = [f for f in out.split() if not f.startswith("tests/")]
     assert "score.py" in files and "evaluate.py" in files and "ray_train.py" in files and "pilot/weights.py" in files
@@ -166,7 +170,7 @@ def test_no_unpinned_load_call_in_repo():
     assert not bad, "unpinned weight loads:\n" + "\n".join(bad)
 
 
-def test_ast_guard_catches_unpinned_calls(tmp_path):
+def test_ast_guard_catches_unpinned_calls(tmp_path: Path) -> None:
     p = tmp_path / "x.py"
     p.write_text('import laya\nfrom laya import train as lt\nlaya.load("convaiinnovations/laya")\n'
                  'lt.resolve_checkpoint_dir("multilingual")\n'
@@ -192,7 +196,7 @@ def test_ast_guard_catches_unpinned_calls(tmp_path):
     assert len(_unpinned_calls(str(q), in_pilot=True)) == 1
 
 
-def test_resolve_checkpoint_refuses_non_dir_without_importing_laya():
+def test_resolve_checkpoint_refuses_non_dir_without_importing_laya() -> None:
     code = ("import sys, score\n"
             "try:\n    score.resolve_checkpoint('not-a-dir')\n"
             "except SystemExit as e:\n    print('REFUSED', e)\n"
@@ -203,7 +207,7 @@ def test_resolve_checkpoint_refuses_non_dir_without_importing_laya():
     assert "LAYA_NOT_IMPORTED" in r.stdout, r.stdout
 
 
-def test_identity_of_the_pinned_checkpoint_is_the_pin():
+def test_identity_of_the_pinned_checkpoint_is_the_pin() -> None:
     got = pilot.weights.identity("multilingual")
     assert got["revision"] == pins.LAYA["revision"] and got["model_sha256"] == pins.LAYA["sha256"]["model.safetensors"]
 
@@ -211,7 +215,7 @@ def test_identity_of_the_pinned_checkpoint_is_the_pin():
 TOKENIZER_CONFIG = b'{"tokenizer_class": "PreTrainedTokenizerFast"}'           # already as laya.load leaves it
 
 
-def _components(d):
+def _components(d: Path) -> None:
     """Write the tokenizer/ and encoder/ files every local checkpoint must hold (dumps.LOCAL_REQUIRED_FILES)."""
     (d / "tokenizer").mkdir()
     (d / "encoder").mkdir()
@@ -219,19 +223,19 @@ def _components(d):
     (d / "encoder" / "config.json").write_bytes(b"{}")
 
 
-def test_identity_of_a_local_checkpoint_hashes_its_files(tmp_path):
+def test_identity_of_a_local_checkpoint_hashes_its_files(tmp_path: Path) -> None:
     (tmp_path / "model.safetensors").write_bytes(b"weights")
     got = pilot.weights.identity(str(tmp_path))
     assert got == {"local": True, "model_sha256": hashlib.sha256(b"weights").hexdigest(), "config_sha256": None,
                    "files_sha256": {}}
-    # identity only hashes; a load of a dir without tokenizer/ and encoder/ is refused (04-REVIEW WR-02)
+    # identity only hashes; a load of a dir without tokenizer/ and encoder/ is refused (laya would read them unpinned)
     (tmp_path / "rl_agent_config.json").write_bytes(b"{}")
     with pytest.raises(SystemExit, match="lacks encoder/config.json, tokenizer/tokenizer_config.json .*Hub"):
         pilot.weights.checkpoint_digests(str(tmp_path), pilot.weights.identity(str(tmp_path)))
 
 
-def test_identity_binds_the_tokenizer_and_encoder_files(tmp_path):
-    """04-REVIEW IN-05: every file laya.load reads is in a local identity; tokenizer_config.json, which laya rewrites
+def test_identity_binds_the_tokenizer_and_encoder_files(tmp_path: Path) -> None:
+    """Every file laya.load reads is in a local identity; tokenizer_config.json, which laya rewrites
     on the first load, by its normalized JSON, so the identity before and after that rewrite is the same."""
     (tmp_path / "model.safetensors").write_bytes(b"weights")
     (tmp_path / "rl_agent_config.json").write_bytes(b"{}")
@@ -269,7 +273,7 @@ def test_identity_binds_the_tokenizer_and_encoder_files(tmp_path):
         pilot.weights.verify_files(str(tmp_path), digests, "checkpoint")
 
 
-def test_repo_relpath_never_returns_a_local_path(tmp_path, monkeypatch):
+def test_repo_relpath_never_returns_a_local_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert pilot.data.repo_relpath(pilot.data.DEFAULT_MANIFEST) == "data/splits.json"
     assert pilot.data.repo_relpath(str(tmp_path / "x.json")) == "<outside-repo>/x.json"
     assert pilot.data.repo_relpath(str(tmp_path / "ckpt") + os.sep) == "<outside-repo>/ckpt"
@@ -279,13 +283,13 @@ def test_repo_relpath_never_returns_a_local_path(tmp_path, monkeypatch):
     assert pilot.data.repo_relpath("./ckpt") == "ckpt"
 
 
-def _assert_no_local_path(obj, tmp_path):
+def _assert_no_local_path(obj: object, tmp_path: Path) -> None:
     text = json.dumps(obj, ensure_ascii=False)
     for p in {str(tmp_path), os.path.realpath(str(tmp_path)), os.path.expanduser("~"), REPO}:
         assert p not in text, (p, text)
 
 
-def test_score_sidecar_carries_no_local_path(tmp_path):
+def test_score_sidecar_carries_no_local_path(tmp_path: Path) -> None:
     import score
     ckpt = tmp_path / "ckpts" / "run1"
     ckpt.mkdir(parents=True)
@@ -306,7 +310,7 @@ def test_score_sidecar_carries_no_local_path(tmp_path):
     assert score.laya_system("multilingual", pilot.weights.identity("multilingual"))["checkpoint"] == "multilingual"
 
 
-def test_ray_train_checkpoint_provenance_carries_no_local_path(tmp_path):
+def test_ray_train_checkpoint_provenance_carries_no_local_path(tmp_path: Path) -> None:
     ray_train = pytest.importorskip("ray_train")
     base = tmp_path / "base"
     base.mkdir()
@@ -319,7 +323,8 @@ def test_ray_train_checkpoint_provenance_carries_no_local_path(tmp_path):
     assert prov["manifest"] == "<outside-repo>/splits.json" and prov["base"]["local"] is True
 
 
-def test_resolve_checkpoint_runs_the_pinned_fetch_on_the_driver(tmp_path, monkeypatch):
+def test_resolve_checkpoint_runs_the_pinned_fetch_on_the_driver(tmp_path: Path,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
     import score
     root, pin = fake_snapshot(tmp_path, pins.LAYA)
     patch_download(monkeypatch, root)
@@ -333,7 +338,7 @@ def test_resolve_checkpoint_runs_the_pinned_fetch_on_the_driver(tmp_path, monkey
         score.resolve_checkpoint("multilingual")
 
 
-def test_checkpoint_digests_bind_a_local_load_to_its_recorded_identity(tmp_path):
+def test_checkpoint_digests_bind_a_local_load_to_its_recorded_identity(tmp_path: Path) -> None:
     (tmp_path / "model.safetensors").write_bytes(b"weights")
     (tmp_path / "rl_agent_config.json").write_bytes(b"{}")
     _components(tmp_path)
@@ -343,10 +348,10 @@ def test_checkpoint_digests_bind_a_local_load_to_its_recorded_identity(tmp_path)
         "model.safetensors": hashlib.sha256(b"weights").hexdigest(),
         "rl_agent_config.json": hashlib.sha256(b"{}").hexdigest(),
         "encoder/config.json": hashlib.sha256(b"{}").hexdigest(), pilot.weights.NORMALIZED_KEY: normalized}
-    with pytest.raises(SystemExit, match="files_sha256"):               # an identity from before IN-05
+    with pytest.raises(SystemExit, match="files_sha256"):               # an identity without files_sha256
         pilot.weights.checkpoint_digests(str(tmp_path), {k: v for k, v in ident.items() if k != "files_sha256"})
     assert pilot.weights.checkpoint_digests("multilingual", None) == pins.LAYA["sha256"]
-    # 04-REVIEW WR-02: an empty or partial files_sha256 is refused (laya.load would read the rest from the Hub)
+    # an empty or partial files_sha256 is refused (laya.load would read the rest from the Hub)
     for drop in (list(ident["files_sha256"]), ["encoder/config.json"], [pilot.weights.NORMALIZED_KEY]):
         partial = dict(ident, files_sha256={k: v for k, v in ident["files_sha256"].items() if k not in drop})
         shown = ["tokenizer/tokenizer_config.json" if k == pilot.weights.NORMALIZED_KEY else k for k in sorted(drop)]
@@ -362,8 +367,8 @@ def test_checkpoint_digests_bind_a_local_load_to_its_recorded_identity(tmp_path)
         pilot.weights.checkpoint_digests(str(tmp_path), pilot.weights.identity(str(tmp_path)))
 
 
-def test_check_tokenizer_config_rewritten_refuses_a_file_laya_left_unnormalized(tmp_path):
-    """04-REVIEW IN-01: after a load the file must be its own normalized view (laya rewrote it, or it needed none)."""
+def test_check_tokenizer_config_rewritten_refuses_a_file_laya_left_unnormalized(tmp_path: Path) -> None:
+    """After a load the file must be its own normalized view (laya rewrote it, or it needed none)."""
     check = pilot.weights.check_tokenizer_config_rewritten
     check(str(tmp_path), "checkpoint")                                     # no file: checkpoint_digests' refusal
     (tmp_path / "tokenizer").mkdir()
@@ -382,8 +387,8 @@ def test_check_tokenizer_config_rewritten_refuses_a_file_laya_left_unnormalized(
 
 
 @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
-def test_check_tokenizer_config_rewritable_predicts_a_rewrite_laya_cannot_make(tmp_path):
-    """04-REVIEW CR-01: before any load, refuse a file laya would have to rewrite in a read-only tokenizer/, or one
+def test_check_tokenizer_config_rewritable_predicts_a_rewrite_laya_cannot_make(tmp_path: Path) -> None:
+    """Before any load, refuse a file laya would have to rewrite in a read-only tokenizer/, or one
     that is not a JSON object; a normalized file (no rewrite needed) or a writable tokenizer/ passes."""
     check = pilot.weights.check_tokenizer_config_rewritable
     check(str(tmp_path), "checkpoint")                                     # no file: checkpoint_digests' refusal
@@ -416,8 +421,8 @@ def test_check_tokenizer_config_rewritable_predicts_a_rewrite_laya_cannot_make(t
 
 
 @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
-def test_resolve_checkpoint_refuses_a_read_only_tokenizer_dir_before_any_load(tmp_path):
-    """04-REVIEW CR-01: score.resolve_checkpoint runs check_tokenizer_config_rewritable on the driver, so the refusal
+def test_resolve_checkpoint_refuses_a_read_only_tokenizer_dir_before_any_load(tmp_path: Path) -> None:
+    """score.resolve_checkpoint runs check_tokenizer_config_rewritable on the driver, so the refusal
     is the real message before laya is imported or Ray starts, never a Ray Data actor death."""
     import score
     (tmp_path / "model.safetensors").write_bytes(b"weights")
@@ -434,7 +439,7 @@ def test_resolve_checkpoint_refuses_a_read_only_tokenizer_dir_before_any_load(tm
     assert score.resolve_checkpoint(str(tmp_path))[0] == str(tmp_path)    # writable: laya can rewrite it on load
 
 
-def test_score_load_is_refused_when_the_checkpoint_changed_after_its_identity(tmp_path):
+def test_score_load_is_refused_when_the_checkpoint_changed_after_its_identity(tmp_path: Path) -> None:
     import score
     (tmp_path / "model.safetensors").write_bytes(b"weights")
     (tmp_path / "rl_agent_config.json").write_bytes(b"{}")
@@ -446,7 +451,7 @@ def test_score_load_is_refused_when_the_checkpoint_changed_after_its_identity(tm
         score.load_agent(model_dir, "cpu", expected)
 
 
-def test_verify_files_refuses_a_changed_base(tmp_path):
+def test_verify_files_refuses_a_changed_base(tmp_path: Path) -> None:
     (tmp_path / "model.safetensors").write_bytes(b"weights")
     digests = {"model.safetensors": hashlib.sha256(b"weights").hexdigest()}
     pilot.weights.verify_files(str(tmp_path), digests, "base checkpoint")

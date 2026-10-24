@@ -1,17 +1,17 @@
-"""Score one system on one registered split into a logit dump (EVAL-01): the only place a model runs.
+"""Score one system on one registered split into a logit dump: the only place a model runs.
 
 score.py turns a system into results/dumps/<run_id>/<split>.npz + <split>.json (pilot.dumps); report.py turns dumps
-into metrics with numpy alone (D-05). Systems (--model, default laya):
+into metrics with numpy alone. Systems (--model, default laya):
 - laya: a Laya checkpoint (--checkpoint multilingual, the default, = zero-shot; or a local checkpoint dir). The driver
   resolves it before laya is imported or Ray starts (multilingual: the pinned, digest-verified fetch; a dir: bound to
   the digests of its recorded pilot.weights.identity), then checks the pinned laya version (la.check_version). Every
-  load is the public laya.load(model_dir, device=..., expected_sha256=...) (D-16); the raw noul margins and the
-  temperature laya.load serves come only through pilot.laya_adapter (la.noul_logits, la.noul_temperature; D-02,
-  D-11). Scoring is fp32 on every device (D-06): laya 0.4.6 autocasts to fp16 on mps (every 48-question message)
-  and to fp16/bf16 on cuda, and to bf16 on cpu under LAYA_CPU_AMP, so after the load la.force_fp32 turns autocast
-  off and the sidecar records laya's load-time default (laya_default_amp, laya_default_dtype). check_agent then
-  refuses an agent on another device, in another dtype than float32, with autocast on, or after a laya GPU-to-CPU
-  out-of-memory fallback, and runs again after every scored batch; it reads the agent, not the environment.
+  load is the public laya.load(model_dir, device=..., expected_sha256=...); the raw noul margins and the temperature
+  laya.load serves come only through pilot.laya_adapter (la.noul_logits, la.noul_temperature). Scoring is fp32 on
+  every device: laya 0.4.6 autocasts to fp16 on mps (every 48-question message) and to fp16/bf16 on cuda, and to bf16
+  on cpu under LAYA_CPU_AMP, so after the load la.force_fp32 turns autocast off and the sidecar records laya's
+  load-time default (laya_default_amp, laya_default_dtype). check_agent then refuses an agent on another device, in
+  another dtype than float32, with autocast on, or after a laya GPU-to-CPU out-of-memory fallback, and runs again
+  after every scored batch; it reads the agent, not the environment.
   run_id: laya-zeroshot-<revision[:8]> for the pinned checkpoint, laya-<model_sha256[:12]>-<config_sha256[:8]>-<files
   digest[:8]> for a local one (weights, config, tokenizer/ and encoder/: pilot.weights.identity, so checkpoints that
   differ in any file laya.load reads never share a dump dir).
@@ -20,27 +20,27 @@ into metrics with numpy alone (D-05). Systems (--model, default laya):
   available. --workers 0 scores in-process; --workers N > 0 scores with N Ray Data actors (one checkpoint load each,
   --cpus-per-worker CPUs and torch threads each, about 2.6 GB each). Ray Data's actor fault tolerance stays on: an
   actor killed mid-split (the OOM killer, a crash, `ray stop`) is restarted and its batch retried. Ray counts a
-  SystemExit in an actor as its worker exiting and so restarts it forever too, which hung the run on a refusal
-  (04-REVIEW CR-01); inside Ray the Predictor therefore re-raises a refusal (SystemExit) in its constructor or a
-  batch as a plain RuntimeError marked REFUSAL, which Ray never retries, and the driver turns it back into the same
-  one-line refusal with no dump (04-REVIEW WR-01). Both paths run the same Predictor, and Ray's rows, which come back
-  in any order, are reassembled by uid into split-file order (a duplicate, missing or unexpected uid is refused).
+  SystemExit in an actor as its worker exiting and so restarts it forever too, which would hang the run on a
+  refusal; inside Ray the Predictor therefore re-raises a refusal (SystemExit) in its constructor or a batch as a
+  plain RuntimeError marked REFUSAL, which Ray never retries, and the driver turns it back into the same one-line
+  refusal with no dump. Both paths run the same Predictor, and Ray's rows, which come back in any order, are
+  reassembled by uid into split-file order (a duplicate, missing or unexpected uid is refused).
   --gpus-per-worker is the Ray actors' GPU resource (cuda).
 - berturk: a BERTurk checkpoint written by berturk_train.py (--checkpoint DIR: an epoch export or a final seed holding
   pilot.berturk.CHECKPOINT_FILES), scored in-process only (--workers 0; seconds for a split) by score_berturk. Every
   BERTurk checkpoint is fine-tuned, so on test or HOTELS it goes through the protocol gate below (role test or
   ood_probe under any manifest, or committed test or hotels_probe content), before any hashing, checkpoint file read
-  or model load. It then checks the five files, names the
-  dump by pilot.berturk.dump_run_id (berturk-<model sha256[:12]>-<berturk_train.json sha256[:8]>-<digest of
-  config.json and the tokenizer files[:8]>), refuses an existing dump, reads config.json and berturk_train.json from
-  the bytes the identity hashed, and refuses a config.json whose labels are not the 48 INTENTS tags in INTENTS order
-  (pilot.berturk.check_label_order) or a tokenizer that lowercases (check_cased). Right before the load every file is
-  verified against its digest (pilot.weights.verify_files); the tokenizer and BertForSequenceClassification load from
-  the checkpoint dir with local_files_only and fp32, and check_bert refuses parameters off the device or not float32,
-  or autocast on, after the load and after every batch. That load is load_bert, which latency.py shares, so the
-  latency harness times the checkpoint exactly as it is scored. The logits are the classifier's raw logits (P =
-  sigmoid(logit / T)); the shipped T is berturk_train.json's temperature (1.0 for an export); seed and training come
-  from that record (pilot.berturk.training_block, the keys pilot.postfit reads).
+  or model load. It then checks the five files, names the dump by pilot.berturk.dump_run_id (berturk-<model
+  sha256[:12]>-<berturk_train.json sha256[:8]>-<digest of config.json and the tokenizer files[:8]>), refuses an
+  existing dump, reads config.json and berturk_train.json from the bytes the identity hashed, and refuses a
+  config.json whose labels are not the 48 INTENTS tags in INTENTS order (pilot.berturk.check_label_order) or a
+  tokenizer that lowercases (check_cased). Right before the load every file is verified against its digest
+  (pilot.weights.verify_files); the tokenizer and BertForSequenceClassification load from the checkpoint dir with
+  local_files_only and fp32, and check_bert refuses parameters off the device or not float32, or autocast on, after
+  the load and after every batch. That load is load_bert, which latency.py shares, so the latency harness times the
+  checkpoint exactly as it is scored. The logits are the classifier's raw logits (P = sigmoid(logit / T)); the shipped
+  T is berturk_train.json's temperature (1.0 for an export); seed and training come from that record
+  (pilot.berturk.training_block, the keys pilot.postfit reads).
 - prior: p_t = messages carrying tag t / all messages, no-intent rows counted, in the training split the scored
   role's models are trained on (pilot.data.TRAINED_ON: final_train for test, selection_train for val)
 - majority: p = 1 on the most frequent tag of that training split (ties -> the earlier INTENTS tag), 0 elsewhere
@@ -51,58 +51,56 @@ The input must be a split registered in the manifest with a matching sha256 and 
 SCORE_ROLES: test, val and ood_probe; train splits are refused before any work). hotels_probe (role ood_probe) is open
 to --model laya and berturk only: majority and prior are refused on it naming the role, since pilot.data.TRAINED_ON
 has no HOTELS training source, and evaluate.py passes roles ("test", "val"), so it still refuses hotels_probe before
-any load. A full dump keeps split-file order. --n scores a fixed random subset
-(shuffled with seed 0, as evaluate.py did) for debugging only: a subset dump never lands under results/dumps (refused
-there; without --out-root it goes to a fresh temp dir) and its sidecar records n_subset.
+any load. A full dump keeps split-file order. --n scores a fixed random subset (shuffled with seed 0) for debugging
+only: a subset dump never lands under results/dumps (refused there; without --out-root it goes to a fresh temp dir)
+and its sidecar records n_subset.
 
-An existing dump is never replaced by default (03-REVIEW WR-03): results/dumps is the committed audit record, so a dump
-whose <run_id>/<split>.npz or .json already exists under the chosen root is refused, before any checkpoint fetch,
-model load or Ray start, unless --force is passed (`make baselines` passes it). The run id is computed from hashes
-alone (pilot.weights.identity) for that check. A dump written outside the repo prints its absolute path on the console
-(03-REVIEW IN-04) so a --n or temp dump can be found; sidecars and reports still record only repo-relative paths.
+An existing dump is never replaced by default: results/dumps is the committed audit record, so a dump whose
+<run_id>/<split>.npz or .json already exists under the chosen root is refused, before any checkpoint fetch, model load
+or Ray start, unless --force is passed (`make baselines` passes it). The run id is computed from hashes alone
+(pilot.weights.identity) for that check. A dump written outside the repo prints its absolute path on the console so a
+--n or temp dump can be found; sidecars and reports still record only repo-relative paths.
 
-Seed and training provenance (03-REVIEW WR-05): every sidecar has `seed` and `training`. For a ray_train.py checkpoint
-(an epoch export or a final; rl_agent_config.json holds training.ray_train) training_block reads the config bytes
-the run id hashed and records the training seed (canonical seed) and a training block: the train run id, split, epoch,
-epoch schedule, stop_after_epoch, encoder and head LR, neg seed, rung, fallback, weaker, per-epoch training loss,
-calibrated, the postfit sha256, the canonical run config and config_sha256_sans_seed (pilot.dumps.training_digest:
-the canonical config without seed and neg_seed, plus the epoch). report.py --compare averages one side's run dirs only
-when they are distinct seeds of one recipe by that digest. The pinned zero-shot checkpoint, a local checkpoint without
+Seed and training provenance: every sidecar has `seed` and `training`. For a ray_train.py checkpoint (an epoch export
+or a final; rl_agent_config.json holds training.ray_train) training_block reads the config bytes the run id hashed
+and records the training seed (canonical seed) and a training block: the train run id, split, epoch, epoch schedule,
+stop_after_epoch, encoder and head LR, neg seed, rung, fallback, weaker, per-epoch training loss, calibrated, the
+postfit sha256, the canonical run config and config_sha256_sans_seed (pilot.dumps.training_digest: the canonical
+config without seed and neg_seed, plus the epoch). report.py --compare averages one side's run dirs only when they
+are distinct seeds of one recipe by that digest. The pinned zero-shot checkpoint, a local checkpoint without
 training.ray_train and the baselines record seed None and training None.
 
-The protocol gate (Phase 8; REP-01, ROADMAP Phase 8 criteria 1 and 4) replaced the Phase 5 Laya and Phase 6 BERTurk
-test interlocks (refuse_finetuned_test, refuse_berturk_test). It triggers (gate_trigger) on the content they keyed on,
-extended to HOTELS, computed on every parsed row before --n: a local Laya checkpoint (any but the pinned
-'multilingual'; keyed on the identity, never on the checkpoint's own fine_tuned claim, 08-REVIEW WR-02) on a split
-with role test or ood_probe under the committed manifest, any BERTurk checkpoint on a split with role test or
-ood_probe under any manifest, and either on a split of any role and manifest whose sha256 or uids_sha256 is the
-committed test or hotels_probe entry's, or that holds any (uid, message) pair of the committed test.jsonl or
-hotels_probe.jsonl (pilot.data.holds_committed; 05-REVIEW CR-02, 06-REVIEW CR-01), so a byte-different manifest copy
-cannot turn it off (and it fails closed while those files are missing, pilot.data.require_committed_files, 08-REVIEW
-WR-01). A uid alone is not the key: the synthetic splits of the
-tests reuse the uid scheme with other messages, so the CPU smoke test stays outside it. A triggered run is refused,
-before any checkpoint hashing, fetch, model load or Ray start (protocol_gate), unless every one of these holds:
+The protocol gate keeps every fine-tuned checkpoint off test and HOTELS except the ones the frozen protocol.json
+admits. It triggers (gate_trigger) on content, computed on every parsed row before --n: a local Laya checkpoint (any
+but the pinned 'multilingual'; keyed on the identity, never on the checkpoint's own fine_tuned claim) on a split with
+role test or ood_probe under the committed manifest, any BERTurk checkpoint on a split with role test or ood_probe
+under any manifest, and either on a split of any role and manifest whose sha256 or uids_sha256 is the committed test
+or hotels_probe entry's, or that holds any (uid, message) pair of the committed test.jsonl or hotels_probe.jsonl
+(pilot.data.holds_committed), so a byte-different manifest copy cannot turn it off (and it fails closed while those
+files are missing, pilot.data.require_committed_files). A uid alone is not the key: the synthetic splits of the tests
+reuse the uid scheme with other messages, so the CPU smoke test stays outside it. A triggered run is refused, before
+any checkpoint hashing, fetch, model load or Ray start (protocol_gate), unless every one of these holds:
 pilot.protocol.require_frozen passes (protocol.json exists and its bytes hash to the pin, so a missing, unpinned or
 changed protocol stops it); no --n; no --force; no --out-root other than results/dumps; the manifest is the committed
 one and pilot.protocol.gated_split names the split; --device and --workers are the protocol's scoring device and
 workers (mps, 0). After the identity is hashed, and still before any file is parsed or a model loads, the dump run id
 must be admitted (require_admitted): one of the protocol's final seeds of that system (pilot.protocol.
-final_seed_allowed), on test or HOTELS, or (Phase 9, D-09) a few-shot checkpoint of that system listed in the committed
-allow-list results/fewshot/runs.json, on test only. pilot.fewshot.admitted reads and checks that file at the call
-(pilot.fewshot.check_runs: this protocol's pin, the recorded D-08 mode, one entry per base seed and per (draw, k), the
-frozen draw digests and the base pairing, the masking proofs); a dump run id hashes the weights, the config or record
-and the tokenizer files, so a retrained or edited checkpoint is not listed. The listed entry is then re-derived from
-the checkpoint being scored, by the function `fewshot.py --runs-manifest` built it with (fewshot.entry_of, from the
-record bytes the identity hashed, before any model loads), and must equal it but for checkpoint_name (09-REVIEW
-WR-01), so a well-formed entry whose dump_run_id was swapped for another checkpoint's is refused. A selection export,
-a retrained or an edited checkpoint, an unlisted few-shot checkpoint, a listed one on HOTELS (fewshot.rules.test_admission) and any run
-under a runs manifest of another protocol never reach test or HOTELS. Once means once: an existing gated dump is
-refused (and --force with it), and an npz an interrupted gated run left without its sidecar is refused naming the
-recovery (load_dump never read it: delete it and rerun the one command). An admitted dump's sidecar carries
-protocol_sha256, the pin, and an admitted few-shot dump's also fewshot_runs_sha256, the sha256 of the runs manifest
-that listed it; every other dump (val, a masked base on val included, zero-shot Laya, the baselines) has no such key
-and is scored exactly as before. Every gate refusal is one line starting GATE that names the checkpoint, the
-split, the trigger and the fix.
+final_seed_allowed), on test or HOTELS, or a few-shot checkpoint of that system listed in the committed allow-list
+results/fewshot/runs.json, on test only. pilot.fewshot.admitted reads and checks that file at the call
+(pilot.fewshot.check_runs: this protocol's pin, the recorded compute mode, one entry per base seed and per (draw, k),
+the frozen draw digests and the base pairing, the masking proofs); a dump run id hashes the weights, the config or
+record and the tokenizer files, so a retrained or edited checkpoint is not listed. The listed entry is then
+re-derived from the checkpoint being scored, by the function `fewshot.py --runs-manifest` built it with
+(fewshot.entry_of, from the record bytes the identity hashed, before any model loads), and must equal it but for
+checkpoint_name, so a well-formed entry whose dump_run_id was swapped for another checkpoint's is refused. A selection
+export, a retrained or an edited checkpoint, an unlisted few-shot checkpoint, a listed one on HOTELS
+(fewshot.rules.test_admission) and any run under a runs manifest of another protocol never reach test or HOTELS. Once
+means once: an existing gated dump is refused (and --force with it), and an npz an interrupted gated run left without
+its sidecar is refused naming the recovery (load_dump never read it: delete it and rerun the one command). An
+admitted dump's sidecar carries protocol_sha256, the pin, and an admitted few-shot dump's also fewshot_runs_sha256,
+the sha256 of the runs manifest that listed it; every other dump (val, a masked base on val included, zero-shot Laya,
+the baselines) has no such key. Every gate refusal is one line starting GATE that names the checkpoint, the split,
+the trigger and the fix.
 
 Module-level imports stay torch-, Ray- and laya-free.
 
@@ -119,6 +117,8 @@ import os
 import random
 import tempfile
 import time
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -134,15 +134,15 @@ TAGS = list(INTENTS)
 BATCH = 16                                                  # messages per scoring call (laya runs one per forward)
 BATCHING = "one message per forward (laya.calibrate.records_from_labeled via pilot.laya_adapter)"
 TEMPERATURE_SOURCE = "laya.load (clamped noul:2 temperature, what the public API serves)"
-REFUSAL = "score.py refusal: "                              # marks a scoring actor's SystemExit (04-REVIEW WR-01)
+REFUSAL = "score.py refusal: "                              # marks a scoring actor's SystemExit (actor_error)
 EXIT_DETAIL = "Worker exit detail: "                        # ray 2.59: precedes why a dead actor's worker exited
-GATE = "protocol gate (Phase 8): "                          # the prefix of every protocol gate refusal
+GATE = "protocol gate: "                                    # the prefix of every protocol gate refusal
 SCORE_ROLES = ("test", "val", "ood_probe")                  # the roles score.py scores (main's default `roles`)
 GATED_ROLES = ("test", "ood_probe")                         # a fine-tuned model on these goes through the gate
 GATED_WHAT = {"final": "final seed", "fewshot": "listed few-shot checkpoint (results/fewshot/runs.json)"}
 
 
-def train_counts(manifest_path, role):
+def train_counts(manifest_path: str, role: str) -> tuple[str, dict[str, Any], dict[str, int], int]:
     """(train split name, its manifest entry, {tag: messages carrying it} in INTENTS order, number of messages).
 
     The split is TRAINED_ON[role], verified with role train; no-intent rows count in the message total.
@@ -168,7 +168,7 @@ def train_counts(manifest_path, role):
     return name, e, counts, len(rows)
 
 
-def baseline_logits(kind, counts, n, eps=dumps.CLIP_EPS):
+def baseline_logits(kind: str, counts: dict[str, int], n: int, eps: float = dumps.CLIP_EPS) -> np.ndarray:
     """float32 [48] logit row of the prior or majority baseline (INTENTS order, T = 1)."""
     if kind == "prior":
         p = np.array([counts[t] for t in TAGS], dtype=np.float64) / n
@@ -181,7 +181,7 @@ def baseline_logits(kind, counts, n, eps=dumps.CLIP_EPS):
     return (np.log(p) - np.log1p(-p)).astype(np.float32)
 
 
-def sidecar_base(entry, split_name, manifest_path, n_subset):
+def sidecar_base(entry: dict[str, Any], split_name: str, manifest_path: str, n_subset: int | None) -> dict[str, Any]:
     """Provenance shared by every dump: split, manifest, question and tag-order hashes. Never a local path."""
     return {"split": {"name": split_name, "path": entry["path"], "role": entry["role"], "sha256": entry["sha256"],
                       "uids_sha256": entry["uids_sha256"], "n_messages": entry["n_messages"]},
@@ -192,9 +192,9 @@ def sidecar_base(entry, split_name, manifest_path, n_subset):
             "subset_seed": SUBSET_SEED}
 
 
-def check_checkpoint_arg(checkpoint):
+def check_checkpoint_arg(checkpoint: str) -> None:
     """SystemExit unless --checkpoint is 'multilingual' or a dir holding an rl_agent_config.json that is valid JSON
-    (05-REVIEW IN-06: a corrupt config is a refusal naming the file, not a traceback); no hashing or fetch."""
+    (a corrupt config is a refusal naming the file, not a traceback); no hashing or fetch."""
     if checkpoint == "multilingual":
         return
     path = os.path.join(checkpoint, "rl_agent_config.json")
@@ -208,21 +208,21 @@ def check_checkpoint_arg(checkpoint):
                          "wrote" % (_shown(path), e))
 
 
-def gate_trigger(model, checkpoint, entry, manifest_path, cases=()):
+def gate_trigger(model: str, checkpoint: str, entry: dict[str, Any], manifest_path: str,
+                 cases: Sequence[dict[str, Any]] = ()) -> str | None:
     """Why the protocol gate applies to this run (the text of the refusal), or None for an ungated run.
 
-    The trigger is the content the Phase 5 and Phase 6 test interlocks keyed on, extended to HOTELS (05-REVIEW CR-02,
-    06-REVIEW CR-01): a local Laya checkpoint on a split with role test or ood_probe under the committed manifest; any
+    The trigger: a local Laya checkpoint on a split with role test or ood_probe under the committed manifest; any
     BERTurk checkpoint (every one is fine-tuned) on a split with role test or ood_probe under any manifest; and for
     both, a split of any role and manifest holding committed test or hotels_probe content (pilot.data.holds_committed:
     the committed entry's sha256 or uids_sha256, or any (uid, message) pair of `cases`, every parsed row). Every local
     Laya checkpoint counts as fine-tuned, keyed on the identity (not 'multilingual'), never on what its
-    rl_agent_config.json says about itself (fine_tuned, training.ray_train), which an edit could remove (08-REVIEW
-    WR-02); this is the repository rule of tests/test_results.py (_finetuned: a Laya identity without the pinned
-    revision). Majority, prior and the pinned zero-shot Laya are never gated. The content check fails closed
-    (pilot.data.require_committed_files, 08-REVIEW WR-01): under a non-committed manifest of the pinned dataset it
-    refuses while the committed test.jsonl or hotels_probe.jsonl is missing, since the pair key would then be empty
-    and a relabelled or row-dropped copy of their content would pass ungated. No hashing, fetch or model load."""
+    rl_agent_config.json says about itself (fine_tuned, training.ray_train), which an edit could remove; this is the
+    repository rule of tests/test_results.py (_finetuned: a Laya identity without the pinned revision). Majority,
+    prior and the pinned zero-shot Laya are never gated. The content check fails closed
+    (pilot.data.require_committed_files): under a non-committed manifest of the pinned dataset it refuses while the
+    committed test.jsonl or hotels_probe.jsonl is missing, since the pair key would then be empty and a relabelled or
+    row-dropped copy of their content would pass ungated. No hashing, fetch or model load."""
     if model == "laya":
         if checkpoint == "multilingual":
             return None                                      # the pinned zero-shot reference, never gated
@@ -240,15 +240,16 @@ def gate_trigger(model, checkpoint, entry, manifest_path, cases=()):
     return None
 
 
-def _gate_head(kind, checkpoint, entry, trigger):
+def _gate_head(kind: str, checkpoint: str, entry: dict[str, Any], trigger: str) -> str:
     """The opening of every gate refusal: GATE, the checkpoint, the split and the trigger."""
     return GATE + "%s is a fine-tuned %s checkpoint and %s %s; " % (_shown(checkpoint), kind, entry["path"], trigger)
 
 
-def protocol_gate(a, kind, checkpoint, entry, manifest_path, device, trigger):
+def protocol_gate(a: argparse.Namespace, kind: str, checkpoint: str, entry: dict[str, Any], manifest_path: str,
+                  device: str, trigger: str) -> tuple[dict[str, Any], str, str]:
     """(protocol dict, its pinned sha256, the gated split name) of a triggered run (gate_trigger); SystemExit, one line
     starting GATE, unless every condition of the frozen protocol's scoring block holds, checked in this order before
-    any checkpoint hashing, fetch, model load or Ray start (REP-01, ROADMAP Phase 8 criteria 1 and 4):
+    any checkpoint hashing, fetch, model load or Ray start:
     pilot.protocol.require_frozen passes (protocol.json exists, its bytes hash to the pin); no --n; no --force; no
     --out-root other than results/dumps (dumps.DUMP_ROOT); the manifest is the committed data/splits.json and the
     protocol names the split (pilot.protocol.gated_split: its sha256 and uids_sha256); the device and worker count
@@ -283,8 +284,8 @@ def protocol_gate(a, kind, checkpoint, entry, manifest_path, device, trigger):
 REDERIVE_IGNORED = ("checkpoint_name",)
 
 
-def rederive_entry(checkpoint, proto, pin, listed, head):
-    """None when the few-shot checkpoint `checkpoint` re-derives the runs-manifest entry `listed` (09-REVIEW WR-01):
+def rederive_entry(checkpoint: str | None, proto: dict[str, Any], pin: str, listed: dict[str, Any], head: str) -> None:
+    """None when the few-shot checkpoint `checkpoint` re-derives the runs-manifest entry `listed`:
     fewshot.entry_of, the function `fewshot.py --runs-manifest` builds each entry with, run on the checkpoint being
     scored (its own record, binding and masking proof, read from the bytes its identity hashed; no model load), must
     give `listed` but for REDERIVE_IGNORED, after a JSON round trip. SystemExit (head + the reason) when the checkpoint
@@ -307,14 +308,15 @@ def rederive_entry(checkpoint, proto, pin, listed, head):
                                                                                  ", ".join(diff)))
 
 
-def require_admitted(proto, pin, kind, rid, split, head, checkpoint=None):
+def require_admitted(proto: dict[str, Any], pin: str, kind: str, rid: str, split: str, head: str,
+                     checkpoint: str | None = None) -> tuple[str, str | None]:
     """("final", None) for a protocol final seed, ("fewshot", runs manifest sha256) for a few-shot checkpoint the
     committed allow-list lists on test; SystemExit (head + the reason) otherwise. Runs after the identity is hashed
-    and before any model loads (D-09); a few-shot checkpoint's own record is read only from the bytes its identity
-    hashed, to re-derive its listed entry (rederive_entry, 09-REVIEW WR-01).
+    and before any model loads; a few-shot checkpoint's own record is read only from the bytes its identity hashed,
+    to re-derive its listed entry (rederive_entry).
 
-    A final seed is the dump run id `rid` among the protocol's final seeds of system `kind` (Phase 8,
-    pilot.protocol.final_seed_allowed), admitted on test and HOTELS exactly as before. A few-shot checkpoint is `rid`
+    A final seed is the dump run id `rid` among the protocol's final seeds of system `kind`
+    (pilot.protocol.final_seed_allowed), admitted on test and HOTELS. A few-shot checkpoint is `rid`
     listed for `kind` in results/fewshot/runs.json, which pilot.fewshot.admitted reads and checks (pilot.fewshot.
     check_runs: this pin, the recorded mode, the frozen draws and pairing, the masking proofs) at this call; it is
     scored on test only (the frozen fewshot.rules.test_admission), never on HOTELS, and only when `checkpoint`
@@ -341,8 +343,8 @@ def require_admitted(proto, pin, kind, rid, split, head, checkpoint=None):
                      % (rid, kind, ", ".join(map(str, ids)) or "none", kind))
 
 
-def training_block(checkpoint, ident):
-    """(seed, training) of the sidecar (03-REVIEW WR-05): the training seed and provenance of a ray_train.py checkpoint.
+def training_block(checkpoint: str, ident: dict[str, Any]) -> tuple[int | None, dict[str, Any] | None]:
+    """(seed, training) of the sidecar: the training seed and provenance of a ray_train.py checkpoint.
 
     (None, None) for 'multilingual' (no network access), and for a local checkpoint whose rl_agent_config.json has no
     training.ray_train block. The config is read once as bytes and parsed only when their sha256 is ident's
@@ -380,14 +382,14 @@ def training_block(checkpoint, ident):
         "canonical": canon, "config_sha256_sans_seed": dumps.training_digest(canon, epoch)}
 
 
-def resolve_checkpoint(checkpoint, ident=None):
+def resolve_checkpoint(checkpoint: str, ident: dict[str, Any] | None = None) -> tuple[str, dict[str, str]]:
     """On the driver, before Ray starts: (local checkpoint dir, {file: sha256} that laya.load must verify).
 
-    'multilingual' = the pinned hub weights, fetched and digest-checked here (ENV-02); anything else must be a local
+    'multilingual' = the pinned hub weights, fetched and digest-checked here; anything else must be a local
     checkpoint dir, bound to the digests in its recorded identity (ident, default identity(checkpoint)). Refusals and
     digest mismatches surface here as the real message, not as a Ray actor death; that includes a tokenizer config
-    laya would have to rewrite in a read-only tokenizer/ (pilot.weights.check_tokenizer_config_rewritable, 04-REVIEW
-    CR-01; load_agent's post-load check is the backstop). laya is not imported here.
+    laya would have to rewrite in a read-only tokenizer/ (pilot.weights.check_tokenizer_config_rewritable;
+    load_agent's post-load check is the backstop). laya is not imported here.
     """
     from pilot.weights import check_tokenizer_config_rewritable, checkpoint_digests, fetch, identity
     check_checkpoint_arg(checkpoint)
@@ -401,11 +403,11 @@ def resolve_checkpoint(checkpoint, ident=None):
     return model_dir, digests
 
 
-def load_agent(model_dir, device, expected_sha256):
+def load_agent(model_dir: str, device: str, expected_sha256: dict[str, str]) -> Any:
     """laya.load of a dir resolved by resolve_checkpoint; laya re-checks expected_sha256 before parsing any weight.
     The normalized tokenizer-config digest (pilot.weights.NORMALIZED_KEY, a local checkpoint's; laya rewrites that
     file on load) is checked here first, laya.load gets the raw-file digests; a rewrite laya could not make (it only
-    warns) is refused after the load (pilot.weights.check_tokenizer_config_rewritten; 04-REVIEW IN-01)."""
+    warns) is refused after the load (pilot.weights.check_tokenizer_config_rewritten)."""
     import laya
     from pilot.weights import NORMALIZED_KEY, check_tokenizer_config_rewritten, laya_digests, verify_files
     if NORMALIZED_KEY in expected_sha256:
@@ -415,10 +417,10 @@ def load_agent(model_dir, device, expected_sha256):
     return agent
 
 
-def check_agent(agent, device):
+def check_agent(agent: Any, device: str) -> dict[str, Any]:
     """The agent's {device, dtype, amp_enabled}; SystemExit unless it runs where and how scoring requires.
 
-    Scoring is fp32 with autocast off on every device (D-06; 03-REVIEW WR-02): laya's own default is fp16 on mps,
+    Scoring is fp32 with autocast off on every device: laya's own default is fp16 on mps,
     fp16/bf16 on cuda and bf16 on cpu under LAYA_CPU_AMP, so the Predictor calls la.force_fp32 first. Reads the agent's
     state, not the environment, and runs after the load and after every scored batch: laya's _infer retries a GPU
     out-of-memory forward on CPU and moves back afterwards, so a nonzero cpu_fallback_count is refused as well.
@@ -427,7 +429,7 @@ def check_agent(agent, device):
     if kind != device:
         raise SystemExit("laya loaded on %s, requested %s; check --device and the visible devices" % (kind, device))
     if str(agent.dtype) != "torch.float32" or agent.amp_enabled is not False:
-        raise SystemExit("laya runs %s with autocast %s on %s; scoring is fp32 (D-06)"
+        raise SystemExit("laya runs %s with autocast %s on %s; scoring is fp32"
                          % (agent.dtype, agent.amp_enabled, kind))
     fell = getattr(agent, "cpu_fallback_count", 0)
     if fell:
@@ -437,36 +439,37 @@ def check_agent(agent, device):
     return {"device": str(kind), "dtype": str(agent.dtype), "amp_enabled": bool(agent.amp_enabled)}
 
 
-def laya_system(checkpoint, ident):
+def laya_system(checkpoint: str, ident: dict[str, Any]) -> dict[str, Any]:
     """The sidecar's system block for a Laya checkpoint: repo-relative path (or 'multilingual') and its identity."""
     return {"kind": "laya", "checkpoint": "multilingual" if checkpoint == "multilingual" else repo_relpath(checkpoint),
             "checkpoint_identity": ident, "baseline_source": None, "clip_eps": None}
 
 
-def _shown(path):
-    """Console form of a written path: repo-relative inside the repo, else absolute (IN-04: a temp dump stays
-    findable). Console only; sidecars and reports keep repo_relpath."""
+def _shown(path: str) -> str:
+    """Console form of a written path: repo-relative inside the repo, else absolute (so a temp dump stays findable).
+    Console only; sidecars and reports keep repo_relpath."""
     rel = repo_relpath(path)
     return os.path.abspath(path) if rel.startswith("<outside-repo>/") else rel
 
 
-def _under(path, root):
+def _under(path: str, root: str) -> bool:
+    """True when `path` is `root` or lies under it, both resolved through symlinks."""
     path, root = os.path.realpath(path), os.path.realpath(root)
     return path == root or path.startswith(root + os.sep)
 
 
-def actor_error(e):
+def actor_error(e: SystemExit) -> RuntimeError:
     """A SystemExit raised in a Ray Data scoring actor, as a plain RuntimeError whose message is REFUSAL + its own.
 
     Ray counts a SystemExit in an actor as its worker exiting, and Ray Data's default (max_restarts -1, kept so an actor
     killed by the OOM killer or a crash is restarted and its batch retried) restarts that actor forever, so a refusal
-    hung the run (04-REVIEW CR-01). Ray neither restarts an actor whose constructor raised an exception nor retries a
-    task that raised one, so this ends the run; score_laya finds the message again with refusal (04-REVIEW WR-01).
+    would hang the run. Ray neither restarts an actor whose constructor raised an exception nor retries a task that
+    raised one, so this ends the run; score_laya finds the message again with refusal.
     """
     return RuntimeError(REFUSAL + str(e.code).replace("\n", " "))
 
 
-def refusal(text):
+def refusal(text: object) -> str | None:
     """The message after the first REFUSAL in a Ray error's text (a scoring actor's refusal), else None."""
     for line in str(text).splitlines():
         if REFUSAL in line:
@@ -484,7 +487,8 @@ class Predictor:
     Ray ends the run instead of restarting the actor forever; in-process it stays a SystemExit.
     """
 
-    def __init__(self, model_dir, device, expected_sha256, threads, in_ray=False):
+    def __init__(self, model_dir: str, device: str, expected_sha256: dict[str, str], threads: int,
+                 in_ray: bool = False) -> None:
         self.in_ray = in_ray
         try:
             import laya
@@ -504,7 +508,8 @@ class Predictor:
                 raise
             raise actor_error(e) from None
 
-    def __call__(self, batch):
+    def __call__(self, batch: dict[str, np.ndarray]) -> dict[str, Any]:
+        """One batch (columns uid, text) -> columns uid, logits, temperature, agent_state, infer_secs."""
         try:
             texts = [str(t) for t in batch["text"]]
             t = time.perf_counter()                         # scoring only: load/digest time is not per-message cost
@@ -520,7 +525,7 @@ class Predictor:
                 "agent_state": [self.state] * b, "infer_secs": [dt / b] * b}
 
 
-def assemble(rows, uids):
+def assemble(rows: Iterable[dict[str, Any]], uids: list[str]) -> np.ndarray:
     """float32 [len(uids), 48] logits of scored rows put back in `uids` order; SystemExit on a duplicate, missing or
     unexpected uid, so no row is silently dropped, merged or invented (Ray returns rows in any order)."""
     by_uid = {}
@@ -538,7 +543,7 @@ def assemble(rows, uids):
     return np.stack([np.asarray(by_uid[u], dtype=np.float32) for u in uids]).astype(np.float32, copy=False)
 
 
-def error_text(e):
+def error_text(e: BaseException | None) -> str:
     """The text of an exception and of every exception in its cause/context chain (Ray Data wraps the actor's)."""
     seen, out = set(), []
     while e is not None and id(e) not in seen:
@@ -548,7 +553,7 @@ def error_text(e):
     return "\n".join(out)
 
 
-def actor_exit(text):
+def actor_exit(text: object) -> str:
     """Why a Ray Data actor died, from its failure text: Ray's worker exit detail (after EXIT_DETAIL), else the
     text's last non-empty line."""
     for line in str(text).splitlines():
@@ -558,12 +563,13 @@ def actor_exit(text):
     return lines[-1] if lines else str(text)
 
 
-def _rows(out):
+def _rows(out: dict[str, Any]) -> list[dict[str, Any]]:
     """Predictor output (one batch, columns) -> one dict per row, the shape Ray Data's take_all returns."""
     return [{k: out[k][i] for k in out} for i in range(len(out["uid"]))]
 
 
-def score_laya(a, checkpoint, cases, device, ident):
+def score_laya(a: argparse.Namespace, checkpoint: str, cases: list[dict[str, Any]], device: str,
+               ident: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
     """(float32 [n, 48] margins in `cases` order, sidecar fields) of a Laya checkpoint on `device` (resolved by main);
     driver-side checks first. ident is main's pilot.weights.identity(checkpoint): the scored bytes are bound to it
     (laya.load digests) and it names the run."""
@@ -587,7 +593,7 @@ def score_laya(a, checkpoint, cases, device, ident):
         import ray
         ray.init(ignore_reinit_error=True, log_to_driver=False)
         # Ray Data's default actor fault tolerance (max_restarts -1) restarts an actor killed mid-split and retries
-        # its batch; in_ray turns a refusal into actor_error, which Ray does not retry (04-REVIEW CR-01, WR-01)
+        # its batch; in_ray turns a refusal into actor_error, which Ray does not retry
         ds = ray.data.from_items([{"uid": c["uid"], "text": c["state"]} for c in cases]).map_batches(
             Predictor, fn_constructor_args=(model_dir, device, expected, a.cpus_per_worker, True),
             compute=ray.data.ActorPoolStrategy(size=a.workers), num_cpus=a.cpus_per_worker,
@@ -619,7 +625,7 @@ def score_laya(a, checkpoint, cases, device, ident):
     return logits, fields
 
 
-def _bound_bytes(path, sha256):
+def _bound_bytes(path: str, sha256: str) -> bytes:
     """The bytes of `path`, refused unless their sha256 is the one the checkpoint identity recorded."""
     with open(path, "rb") as f:
         raw = f.read()
@@ -628,7 +634,7 @@ def _bound_bytes(path, sha256):
     return raw
 
 
-def check_berturk(checkpoint, ident):
+def check_berturk(checkpoint: str, ident: dict[str, Any]) -> dict[str, Any]:
     """The parsed berturk_train.json of a BERTurk checkpoint, after refusing a config.json that does not score the 48
     INTENTS tags in INTENTS order or a lowercasing tokenizer; every file is read from the bytes ident hashed."""
     for name, sha, check in (("config.json", ident["config_sha256"], berturk.check_label_order),
@@ -643,7 +649,7 @@ def check_berturk(checkpoint, ident):
     return berturk.read_record(checkpoint, ident)
 
 
-def check_bert(model, device):
+def check_bert(model: Any, device: str) -> dict[str, Any]:
     """{device, dtype, amp_enabled} of a BERTurk model; SystemExit unless every parameter is float32 on `device` and
     autocast is off there (fp32 scoring on every device, as for Laya). Runs after the load and after every batch."""
     import torch
@@ -653,12 +659,12 @@ def check_bert(model, device):
         raise SystemExit("BERTurk parameters on %s, requested %s; check --device and the visible devices"
                          % (", ".join(sorted(have)), device))
     if dtypes != {"torch.float32"} or torch.is_autocast_enabled(device):
-        raise SystemExit("BERTurk runs %s with autocast %s on %s; scoring is fp32 (D-06)"
+        raise SystemExit("BERTurk runs %s with autocast %s on %s; scoring is fp32"
                          % (", ".join(sorted(dtypes)), torch.is_autocast_enabled(device), device))
     return {"device": device, "dtype": "torch.float32", "amp_enabled": False}
 
 
-def load_bert(checkpoint, ident, device, threads):
+def load_bert(checkpoint: str, ident: dict[str, Any], device: str, threads: int) -> tuple[Any, Any, dict[str, Any]]:
     """(tokenizer, model, checked state) of a BERTurk checkpoint on `device`, the one loader of score_berturk and
     latency.py: every file is verified against ident (its five digests) right before the load, mps or cuda must be
     available, torch runs `threads` threads, and the tokenizer and BertForSequenceClassification load from the dir with
@@ -684,7 +690,8 @@ def load_bert(checkpoint, ident, device, threads):
     return tok, model, check_bert(model, device)
 
 
-def score_berturk(a, checkpoint, cases, device, ident, rec):
+def score_berturk(a: argparse.Namespace, checkpoint: str, cases: list[dict[str, Any]], device: str,
+                  ident: dict[str, Any], rec: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
     """(float32 [n, 48] logits in `cases` order, sidecar fields) of a BERTurk checkpoint, in-process on `device`.
     Every file is verified against ident right before the load (load_bert); batches of BATCH messages in split-file
     order, padded to the longest, truncated at the record's max_len."""
@@ -716,7 +723,7 @@ def score_berturk(a, checkpoint, cases, device, ident, rec):
     return logits, fields
 
 
-def main(argv=None, roles=None):
+def main(argv: list[str] | None = None, roles: Sequence[str] | None = None) -> tuple[str, str]:
     """Score one system on one split (argv: the CLI flags); returns (run dir, split name). roles: the split roles
     admitted (default SCORE_ROLES; evaluate.py passes ("test", "val"), so it never scores hotels_probe)."""
     ap = argparse.ArgumentParser(description="score a system on a val/test split into a logit dump")
@@ -776,7 +783,7 @@ def main(argv=None, roles=None):
     checkpoint = a.checkpoint or "multilingual"
     if a.model == "laya":
         check_checkpoint_arg(checkpoint)
-    # the protocol gate (Phase 8): keyed on every parsed row, before --n, hashing, fetch, file read, load or Ray
+    # the protocol gate: keyed on every parsed row, before --n, hashing, fetch, file read, load or Ray
     trigger = gate_trigger(a.model, checkpoint, entry, a.manifest, cases)
     gate = protocol_gate(a, a.model, checkpoint, entry, a.manifest, device, trigger) if trigger else None
     if a.n is not None:
@@ -787,7 +794,7 @@ def main(argv=None, roles=None):
     uids = [c["uid"] for c in cases]
     n_subset = None if a.n is None else len(cases)
 
-    # the run id from hashes alone, so an existing dump is refused before any fetch, model load or Ray start (WR-03)
+    # the run id from hashes alone, so an existing dump is refused before any fetch, model load or Ray start
     if a.model == "laya":
         from pilot.weights import identity
         ident = identity(checkpoint)
@@ -803,7 +810,7 @@ def main(argv=None, roles=None):
     if gate:                                                 # the hashed identity in an allow-list, before any load
         admission = require_admitted(gate[0], gate[1], a.model, rid, gate[2], head, checkpoint)
     if a.model == "laya":
-        seed, training = training_block(checkpoint, ident)   # WR-05: the training seed and recipe, bound by ident
+        seed, training = training_block(checkpoint, ident)   # the training seed and recipe, bound by ident
     if a.n is None:
         root = a.out_root or dumps.DUMP_ROOT
     else:
@@ -847,7 +854,7 @@ def main(argv=None, roles=None):
                   "timing": {"seconds": time.time() - t0}}
     if gate:
         fields = dict(fields, protocol_sha256=gate[1])       # admitted by the protocol gate: bound to its pin
-        if admission[0] == "fewshot":                        # and to the allow-list that listed it (D-09)
+        if admission[0] == "fewshot":                        # and to the allow-list that listed it
             fields = dict(fields, fewshot_runs_sha256=admission[1])
     sidecar = dict(sidecar_base(entry, split_name, a.manifest, n_subset), **fields)
     path = dumps.write_dump(run_dir, split_name, logits, uids, sidecar)

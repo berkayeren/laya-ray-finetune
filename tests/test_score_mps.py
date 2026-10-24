@@ -5,19 +5,22 @@ Needs Apple MPS: `pytest -m mps tests/test_score_mps.py` (excluded from `make te
 """
 import json
 import os
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 
 import score
-from conftest import prepared
+from conftest import SyntheticRaw, prepared
 from tiny_laya import tiny_checkpoint
 
 pytestmark = pytest.mark.mps
 
 
 @pytest.fixture
-def tiny(tmp_path, synthetic_raw):
+def tiny(tmp_path: Path, synthetic_raw: SyntheticRaw) -> Iterator[tuple[str, str, str]]:
     """(val split path, manifest path, tiny checkpoint dir); torch's thread count is restored afterwards."""
     import torch
     threads = torch.get_num_threads()
@@ -26,7 +29,8 @@ def tiny(tmp_path, synthetic_raw):
     torch.set_num_threads(threads)
 
 
-def _score(split, manifest, ckpt, device, root):
+def _score(split: str, manifest: str, ckpt: str, device: str,
+           root: Path) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     run_dir, name = score.main([split, "--model", "laya", "--checkpoint", ckpt, "--device", device, "--workers", "0",
                                 "--manifest", manifest, "--out-root", str(root)])
     z = np.load(os.path.join(run_dir, name + ".npz"), allow_pickle=False)
@@ -35,7 +39,7 @@ def _score(split, manifest, ckpt, device, root):
 
 
 @pytest.mark.timeout(600)
-def test_mps_dump_is_fp32_and_matches_cpu(tmp_path, tiny):
+def test_mps_dump_is_fp32_and_matches_cpu(tmp_path: Path, tiny: tuple[str, str, str]) -> None:
     import torch
     if not torch.backends.mps.is_available():
         pytest.fail("the mps marker needs Apple MPS; run it on the M4, or deselect it with -m 'not mps'")

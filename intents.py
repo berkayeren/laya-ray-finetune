@@ -1,7 +1,8 @@
 """Multi3NLU++ banking intent tags, each phrased as a yes/no question.
 
-QUESTIONS is defined only here; data prep (pilot/data.py) and evaluate.py import it. The question text is the
-model input, so changing any wording means regenerating the data (refreezing data/splits.json) and the baselines.
+QUESTIONS is defined only here; data prep (pilot/data.py), score.py and latency.py import it (a test fails on a second
+definition). The question text is the model input, so changing any wording means regenerating the data (data/splits.json
+records questions_sha256) and rescoring the baselines.
 """
 
 INTENTS = {

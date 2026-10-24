@@ -20,7 +20,7 @@ by default; --no-include-no-intent leaves banking ones out (1,384 / 201 / 1,585 
 keeps all 1,009) and records
 options.include_no_intent=false in the manifest. The committed data/splits.json records the default, so write the
 flag-off variant to a different --out dir (prepare refuses to overwrite a differing manifest).
-There is no prepare-time negative sampling: neg-K sampling happens at train time, per run seed (Phase 4).
+There is no prepare-time negative sampling: neg-K sampling happens at train time, per run seed (ray_train.py --neg).
 If OUT/splits.json already exists and the freshly built manifest differs, nothing is written; --rewrite-manifest
 intentionally refreezes it (and invalidates downstream work).
 
@@ -31,7 +31,8 @@ import argparse
 from pilot import data, pins
 
 
-def main():
+def main() -> None:
+    """Parse the CLI flags, fetch (or read) the pinned raw folds and write the splits and the manifest."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", default=None,
                     help="local snapshot root holding turkish/banking/foldN.json and turkish/hotels/foldN.json; "

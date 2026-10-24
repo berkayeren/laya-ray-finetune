@@ -1,34 +1,33 @@
-"""The committed Phase 3 results stay consistent with each other and with the README (D-03, D-08, T-03-29, T-03-30).
+"""The committed results stay consistent with each other and with the README.
 
 - the README results block (between the results-table markers) equals report.render_table of the tracked
   results/reports/*.json in sorted path order, so README numbers cannot be edited by hand or go stale
-- every tracked run dir under results/dumps follows the Phase 8 protocol (dir_problems; every present dump verified
-  with pilot.dumps.load_dump against the committed manifest, offline: load_dump reads no split file), true before and
-  after the 08-11 scoring run (08-RESEARCH Pitfall 1):
+- every tracked run dir under results/dumps follows the frozen protocol's results rule (dir_problems; every present dump
+  verified with pilot.dumps.load_dump against the committed manifest, offline: load_dump reads no split file), true
+  before and after the final scoring run:
   - a final seed's dir (its run id is a dump_run_id in results/postfit/{laya,berturk}-final.json, FINAL_DIRS) holds
     no val dump and only test and hotels_probe dumps, each with its sidecar, full (no subset), of the manifest's system
     kind, and carrying protocol_sha256 == pilot.protocol.PROTOCOL_SHA256, which must be set once any such dump exists
     (final_dir_problems; nothing is tracked there before the scoring run);
   - every other fine-tuned dir (_finetuned: system.kind laya with no pinned revision, or any system.kind berturk:
-    the selection candidates) holds its val dump only, never test or HOTELS (ROADMAP Phase 5 criterion 4, Phase 6
-    criterion 4);
+    the selection candidates) holds its val dump only, never test or HOTELS;
   - majority and prior hold val and test only;
   - the zero-shot dir (ZERO_SHOT) holds val and test and may add one ungated hotels_probe dump, the reference row
-    (08-RESEARCH A15: no protocol_sha256);
-  - Phase 9 (D-09, D-10): once results/fewshot/runs.json is tracked, every dump run id it lists is a few-shot dir,
-    checked against its entry (fewshot_dirs: pilot.fewshot.read_runs of the tracked manifest under the frozen pin,
-    i.e. check_runs under read_mode; {} while it is untracked, before 09-11). A masked base's dir holds at most its
-    ungated val dump (no protocol_sha256, no fewshot_runs_sha256) and its gated test dump; a continued run's dir at
-    most its gated test dump; a gated dump carries protocol_sha256 == the pin and fewshot_runs_sha256 == the
-    committed manifest's sha256; never a HOTELS dump; each present split complete (npz and sidecar) and full; system
-    kind, training run id and seed equal the entry's (fewshot_dir_problems). A fine-tuned dump whose training
-    canonical carries a fewshot binding in a dir the manifest does not list is a problem;
+    (no protocol_sha256);
+  - few-shot dirs: once results/fewshot/runs.json is tracked, every dump run id it lists is a few-shot dir, checked
+    against its entry (fewshot_dirs: pilot.fewshot.read_runs of the tracked manifest under the frozen pin, i.e.
+    check_runs under read_mode; {} while it is untracked). A masked base's dir holds at most its ungated val dump (no
+    protocol_sha256, no fewshot_runs_sha256) and its gated test dump; a continued run's dir at most its gated test
+    dump; a gated dump carries protocol_sha256 == the pin and fewshot_runs_sha256 == the committed manifest's sha256;
+    never a HOTELS dump; each present split complete (npz and sidecar) and full; system kind, training run id and seed
+    equal the entry's (fewshot_dir_problems). A fine-tuned dump whose training canonical carries a fewshot binding in a
+    dir the manifest does not list is a problem;
   - no dump outside a final seed's or a listed few-shot dir carries protocol_sha256 or fewshot_runs_sha256.
   Every predicate is proven on planted cases: final_dir_problems and fewshot_dir_problems on planted sidecars, and
   dir_problems on a planted post-scoring tree of synthetic dumps (a final seed's dir with the four gated files, a
   selection candidate's dir with a HOTELS dump, the zero-shot dir with an ungated one, the listed few-shot base and
   continued dirs of a planted runs manifest, an unlisted few-shot dump). The rule is state-agnostic: the same code
-  passes on today's tree (no runs.json, no few-shot dump) and on the tree after 09-11's scoring
+  passes on a tree without runs.json or any few-shot dump and on the tree after the few-shot scoring
 - the zero-shot run id in the Makefile (LAYA_ZS) is the one score.py derives from the pinned Laya identity
 - the three single-system reports (majority, prior, zero-shot Laya) are full-test, not subset, with both temperature
   variants and a disclosed θ source
@@ -41,6 +40,10 @@ import os
 import re
 import subprocess
 import sys
+import types
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -48,6 +51,7 @@ import pytest
 import pilot.data
 import report
 import score
+from conftest import SyntheticRaw
 from fewshot_synthetic import plant_fewshot_dumps, plant_rules, plant_runs, synthetic_protocol
 from pilot import dumps, fewshot, protocol
 from pilot.data import DEFAULT_MANIFEST, sha256_file
@@ -63,13 +67,13 @@ SYSTEMS = ("majority", "prior", "laya-zeroshot-7b928d82")
 ZERO_SHOT = "laya-zeroshot-7b928d82"
 GATED_FILES = ("test.npz", "test.json", "hotels_probe.npz", "hotels_probe.json")
 FEWSHOT_RUNS = "results/fewshot/runs.json"           # pilot.fewshot.RUNS_PATH, repo-relative
-# the files a listed few-shot dir may hold, per stage (D-09): a masked base its ungated val and gated test dump, a
+# the files a listed few-shot dir may hold, per stage: a masked base its ungated val and gated test dump, a
 # continued run its gated test dump; never HOTELS (fewshot.rules.test_admission)
 FEWSHOT_FILES = {"base": ("val.npz", "val.json", "test.npz", "test.json"), "continued": ("test.npz", "test.json")}
 GATE_KEYS = ("protocol_sha256", "fewshot_runs_sha256")
 
 
-def _final_dirs():
+def _final_dirs() -> dict[str, tuple[str, int]]:
     """{dump_run_id: (kind, seed)} of every final seed in the committed final manifests."""
     out = {}
     for kind in ("laya", "berturk"):
@@ -82,14 +86,14 @@ def _final_dirs():
 FINAL_DIRS = _final_dirs()
 
 
-def tracked(*pathspec):
+def tracked(*pathspec: str) -> list[str]:
     """Tracked paths via git ls-files (never a directory walk, which would see untracked scratch reports)."""
     out = subprocess.run(["git", "ls-files", "-z", "--", *pathspec], cwd=REPO_ROOT, check=True,
                          capture_output=True, text=True, encoding="utf-8")
     return [f for f in out.stdout.split("\0") if f]
 
 
-def committed_reports():
+def committed_reports() -> list[tuple[str, Any]]:
     """[(repo-relative path, parsed JSON)] of the tracked reports, in sorted path order (the --table order)."""
     rels = sorted(f for f in tracked("results/reports/") if f.endswith(".json"))
     out = []
@@ -99,11 +103,11 @@ def committed_reports():
     return out
 
 
-def run_dirs():
+def run_dirs() -> list[str]:
     return sorted({f.split("/")[2] for f in tracked("results/dumps/")})
 
 
-def test_readme_table_matches_committed_reports():
+def test_readme_table_matches_committed_reports() -> None:
     with open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8") as f:
         text = f.read()
     assert text.count(START) == 1 and text.count(END) == 1, "README needs exactly one results-table block"
@@ -114,16 +118,16 @@ def test_readme_table_matches_committed_reports():
         "README results table differs from `report.py --table results/reports`; paste the generated table"
 
 
-def _finetuned(side):
+def _finetuned(side: dict[str, Any]) -> bool:
     """A dump of a local (fine-tuned) checkpoint: Laya without the pinned revision, or any BERTurk checkpoint."""
     system = side.get("system") or {}
     ident = system.get("checkpoint_identity") or {}
     return (system.get("kind") == "laya" and not ident.get("revision")) or system.get("kind") == "berturk"
 
 
-def test_finetuned_rule_covers_berturk():
+def test_finetuned_rule_covers_berturk() -> None:
     # planted sidecars: the baselines and the pinned zero-shot Laya keep their test dumps; every fine-tuned one may not
-    def side(kind, ident):
+    def side(kind: str, ident: dict[str, Any] | None) -> dict[str, Any]:
         return {"system": {"kind": kind, "checkpoint_identity": ident}}
     assert _finetuned(side("majority", None)) is False
     assert _finetuned(side("prior", None)) is False
@@ -133,11 +137,11 @@ def test_finetuned_rule_covers_berturk():
     assert _finetuned({}) is False
 
 
-def fewshot_runs(path=None):
+def fewshot_runs(path: str | None = None) -> tuple[dict[str, dict[str, Any]], str | None]:
     """({dump_run_id: entry}, runs sha256) of the tracked few-shot runs manifest (pilot.fewshot.RUNS_PATH, or `path`),
     read through pilot.fewshot.read_runs under pilot.protocol.require_frozen()'s pin (check_runs under read_mode, and
-    the D-08 record's bytes); ({}, None) while it is untracked (git ls-files, never the working tree: before 09-11
-    commits it). A tracked manifest that read_runs refuses, or that is missing on disk, raises SystemExit."""
+    the compute decision record's bytes); ({}, None) while it is untracked (git ls-files, never the working tree). A
+    tracked manifest that read_runs refuses, or that is missing on disk, raises SystemExit."""
     path = fewshot.RUNS_PATH if path is None else path
     if not tracked(os.path.relpath(path, REPO_ROOT)):
         return {}, None
@@ -148,19 +152,20 @@ def fewshot_runs(path=None):
     return {e["dump_run_id"]: e for e in runs["entries"]}, sha
 
 
-def fewshot_dirs(path=None):
+def fewshot_dirs(path: str | None = None) -> dict[str, dict[str, Any]]:
     """{dump_run_id: runs-manifest entry} of the tracked few-shot runs manifest; {} while it is untracked."""
     return fewshot_runs(path)[0]
 
 
-def _fewshot_bound(side):
-    """True when a dump sidecar's training canonical config carries a fewshot binding (a Phase 9 run)."""
+def _fewshot_bound(side: dict[str, Any]) -> bool:
+    """True when a dump sidecar's training canonical config carries a fewshot binding (a few-shot run)."""
     tr = side.get("training") if isinstance(side, dict) else None
     canon = tr.get("canonical") if isinstance(tr, dict) else None
     return isinstance(canon, dict) and "fewshot" in canon
 
 
-def fewshot_dir_problems(rid, names, sidecars, entry, pin, runs_sha256):
+def fewshot_dir_problems(rid: str, names: Iterable[str], sidecars: dict[str, dict[str, Any]], entry: dict[str, Any],
+                         pin: str | None, runs_sha256: str | None) -> list[str]:
     """Problems of the listed few-shot dump dir `rid` holding the tracked file names `names`, with `sidecars` {split:
     parsed sidecar} of its present dumps, against its runs-manifest `entry`, the protocol pin `pin` and the runs
     manifest's sha256 `runs_sha256` (module docstring): a base holds at most its ungated val and gated test dump, a
@@ -218,7 +223,8 @@ def fewshot_dir_problems(rid, names, sidecars, entry, pin, runs_sha256):
     return out
 
 
-def final_dir_problems(rid, names, sidecars, pin):
+def final_dir_problems(rid: str, names: Iterable[str], sidecars: dict[str, dict[str, Any]],
+                       pin: str | None) -> list[str]:
     """Problems of a final seed's dump dir `rid` holding the tracked file names `names`, with `sidecars` {split:
     parsed sidecar} of its present test and hotels_probe dumps, under the protocol pin `pin` (None while unfrozen):
     only the four GATED_FILES, each dump with its sidecar, never a val dump (a final seed's val is in-sample), and every
@@ -248,17 +254,18 @@ def final_dir_problems(rid, names, sidecars, pin):
     return out
 
 
-def dir_problems(root, rid, names, manifest=DEFAULT_MANIFEST, pin=None, final_dirs=None, fewshot_dirs=None,
-                 runs_sha256=None):
-    """Problems of the dump dir root/rid holding the file names `names` under the Phase 8 and Phase 9 results rule
-    (module docstring); every present dump is verified with pilot.dumps.load_dump against `manifest`. `fewshot_dirs`
-    ({dump_run_id: entry}) and `runs_sha256` default to fewshot_runs() of the tracked manifest."""
+def dir_problems(root: str, rid: str, names: Iterable[str], manifest: str = DEFAULT_MANIFEST, pin: str | None = None,
+                 final_dirs: dict[str, tuple[str, int]] | None = None,
+                 fewshot_dirs: dict[str, dict[str, Any]] | None = None, runs_sha256: str | None = None) -> list[str]:
+    """Problems of the dump dir root/rid holding the file names `names` under the results rule (module docstring);
+    every present dump is verified with pilot.dumps.load_dump against `manifest`. `fewshot_dirs` ({dump_run_id:
+    entry}) and `runs_sha256` default to fewshot_runs() of the tracked manifest."""
     final_dirs = FINAL_DIRS if final_dirs is None else final_dirs
     if fewshot_dirs is None:
         fewshot_dirs, runs_sha256 = fewshot_runs()
     names, d, out = set(names), os.path.join(root, rid), []
 
-    def load(split):
+    def load(split: str) -> dict[str, Any] | None:
         try:
             logits, uids, side, _ = dumps.load_dump(d, split, manifest)
         except SystemExit as e:
@@ -325,7 +332,7 @@ def dir_problems(root, rid, names, manifest=DEFAULT_MANIFEST, pin=None, final_di
     return out
 
 
-def test_committed_dumps_follow_the_protocol():
+def test_committed_dumps_follow_the_protocol() -> None:
     ids = run_dirs()
     assert set(SYSTEMS) <= set(ids), "missing committed dumps for %s" % sorted(set(SYSTEMS) - set(ids))
     assert len(FINAL_DIRS) == 6 and {k for k, _ in FINAL_DIRS.values()} == {"laya", "berturk"}
@@ -337,14 +344,14 @@ def test_committed_dumps_follow_the_protocol():
     assert problems == [], "\n".join(problems)
 
 
-def test_makefile_run_id_matches():
+def test_makefile_run_id_matches() -> None:
     with open(os.path.join(REPO_ROOT, "Makefile"), encoding="utf-8") as f:
         m = re.search(r"^LAYA_ZS := (\S+)$", f.read(), re.M)
     assert m, "Makefile has no LAYA_ZS := line"
     assert m.group(1) == dumps.run_id("laya", identity("multilingual"))
 
 
-def test_reports_cover_three_systems():
+def test_reports_cover_three_systems() -> None:
     by_id = {r["run_id"]: r for _, r in committed_reports() if "variants" in r}
     assert sorted(by_id) == sorted(SYSTEMS)
     for rid, r in by_id.items():
@@ -358,7 +365,7 @@ def test_reports_cover_three_systems():
 
 
 @pytest.mark.data
-def test_reports_reproduce_from_dumps():
+def test_reports_reproduce_from_dumps() -> None:
     if not glob.glob(os.path.join(REPO_ROOT, "data", "splits", "*.jsonl")):
         pytest.fail("data/splits/ is empty; run `make data` first")
     reports = committed_reports()
@@ -374,11 +381,11 @@ def test_reports_reproduce_from_dumps():
         assert json.loads(json.dumps(got, ensure_ascii=False)) == committed, "%s does not reproduce" % rel
 
 
-def test_final_dir_rule_flags_planted_cases():
+def test_final_dir_rule_flags_planted_cases() -> None:
     pin, rid = "a" * 64, "laya-final-dir"
     gated = ("test.npz", "test.json", "hotels_probe.npz", "hotels_probe.json")
 
-    def side(**kw):
+    def side(**kw: Any) -> dict[str, Any]:
         return dict({"run_id": rid, "n_subset": None, "protocol_sha256": pin}, **kw)
     both = {"test": side(), "hotels_probe": side()}
     assert final_dir_problems(rid, gated, both, pin) == []
@@ -399,7 +406,8 @@ def test_final_dir_rule_flags_planted_cases():
         assert got and any(word in g for g in got), (name, got)
 
 
-def _plant(snap, root, rid, split, kind, pin=None, training=None):
+def _plant(snap: tuple[str, str], root: str | Path, rid: str, split: str, kind: str, pin: str | None = None,
+           training: dict[str, Any] | None = None) -> None:
     """A synthetic full dump of `split` in root/rid (score.sidecar_base of the synthetic manifest), of a pinned Laya
     (kind "zeroshot"), a local Laya or BERTurk checkpoint, or a baseline; pin stamps protocol_sha256, `training` sets
     the sidecar's training block."""
@@ -419,7 +427,8 @@ def _plant(snap, root, rid, split, kind, pin=None, training=None):
     dumps.write_dump(os.path.join(str(root), rid), split, logits, uids, side)
 
 
-def _planted_runs(tmp_path, synthetic_raw, monkeypatch):
+def _planted_runs(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                  monkeypatch: pytest.MonkeyPatch) -> tuple[types.SimpleNamespace, str, dict[str, dict[str, Any]], str]:
     """The synthetic frozen protocol (one draw, k 1 and 2, base seed 0) and its planted runs manifest: (ns, path,
     {dump_run_id: entry}, runs sha256)."""
     ns = synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, rules=plant_rules((0,)))
@@ -428,8 +437,8 @@ def _planted_runs(tmp_path, synthetic_raw, monkeypatch):
     return ns, path, {e["dump_run_id"]: e for e in runs["entries"]}, sha
 
 
-def test_fewshot_dirs_follow_the_tracked_runs_manifest():
-    # state-agnostic: {} until 09-11 commits results/fewshot/runs.json, then every listed dump run id
+def test_fewshot_dirs_follow_the_tracked_runs_manifest() -> None:
+    # state-agnostic: {} while results/fewshot/runs.json is untracked, then every listed dump run id
     dirs, sha = fewshot_runs()
     if not tracked(FEWSHOT_RUNS):
         assert (dirs, sha) == ({}, None), "results/fewshot/runs.json is untracked, yet few-shot dirs were read"
@@ -439,7 +448,9 @@ def test_fewshot_dirs_follow_the_tracked_runs_manifest():
     assert fewshot_dirs() == dirs
 
 
-def test_fewshot_dirs_read_a_tracked_planted_manifest(tmp_path, synthetic_raw, monkeypatch, capsys):
+def test_fewshot_dirs_read_a_tracked_planted_manifest(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                      monkeypatch: pytest.MonkeyPatch,
+                                                      capsys: pytest.CaptureFixture[str]) -> None:
     ns, path, want, sha = _planted_runs(tmp_path, synthetic_raw, monkeypatch)
     capsys.readouterr()
     monkeypatch.setattr(sys.modules[__name__], "tracked", lambda *spec: [])
@@ -456,13 +467,13 @@ def test_fewshot_dirs_read_a_tracked_planted_manifest(tmp_path, synthetic_raw, m
         fewshot_runs(path)
 
 
-def test_fewshot_dir_rule_flags_planted_cases():
+def test_fewshot_dir_rule_flags_planted_cases() -> None:
     pin, runs_sha = "a" * 64, "b" * 64
     base = {"kind": "laya", "stage": "base", "seed": 0, "train_run_id": "laya-train-base-s0"}
     cont = {"kind": "berturk", "stage": "continued", "seed": 0, "train_run_id": "berturk-train-d0-k1"}
     pairs = {s: (s + ".npz", s + ".json") for s in ("val", "test", "hotels_probe")}
 
-    def side(entry, split, **kw):
+    def side(entry: dict[str, Any], split: str, **kw: Any) -> dict[str, Any]:
         out = {"run_id": "rid", "n_subset": None, "system": {"kind": entry["kind"]}, "seed": entry["seed"],
                "training": {"run_id": entry["train_run_id"], "split": "selection_train"}}
         if split != "val":
@@ -470,7 +481,8 @@ def test_fewshot_dir_rule_flags_planted_cases():
         out.update(kw)
         return out
 
-    def check(entry, splits, sides=None):
+    def check(entry: dict[str, Any], splits: Iterable[str],
+              sides: dict[str, dict[str, Any]] | None = None) -> list[str]:
         names = [n for s in splits for n in pairs[s]]
         sides = dict({s: side(entry, s) for s in splits}, **(sides or {}))
         return fewshot_dir_problems("rid", names, sides, entry, pin, runs_sha)
@@ -509,14 +521,16 @@ def test_fewshot_dir_rule_flags_planted_cases():
     assert got and any("PROTOCOL_SHA256" in g for g in got), got
 
 
-def test_dir_rule_on_a_planted_post_scoring_tree(tmp_path, synthetic_raw, monkeypatch, capsys):
+def test_dir_rule_on_a_planted_post_scoring_tree(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                 monkeypatch: pytest.MonkeyPatch,
+                                                 capsys: pytest.CaptureFixture[str]) -> None:
     ns, _, fdirs, runs_sha = _planted_runs(tmp_path, synthetic_raw, monkeypatch)
     snap = (ns.out_dir, ns.manifest)
     capsys.readouterr()
     pin, root = ns.pin, tmp_path / "dumps"
     final = {"laya-final-s0": ("laya", 0), "berturk-final-s0": ("berturk", 0)}
 
-    def problems(rid, p=pin):
+    def problems(rid: str, p: str | None = pin) -> list[str]:
         names = sorted(os.listdir(os.path.join(str(root), rid)))
         return dir_problems(str(root), rid, names, snap[1], p, final, fdirs, runs_sha)
 
@@ -541,7 +555,7 @@ def test_dir_rule_on_a_planted_post_scoring_tree(tmp_path, synthetic_raw, monkey
     assert any("test" in x for x in problems("berturk-sel"))        # never test either, gated or not
     for split in ("val", "test", "hotels_probe"):
         _plant(snap, root, ZERO_SHOT, split, "zeroshot")
-    assert problems(ZERO_SHOT) == []                                # the ungated HOTELS reference row (A15)
+    assert problems(ZERO_SHOT) == []                                # the ungated HOTELS reference row
     _plant(snap, root, ZERO_SHOT, "hotels_probe", "zeroshot", pin)
     assert any("protocol_sha256" in x for x in problems(ZERO_SHOT))
     for split in ("val", "test"):
@@ -550,7 +564,7 @@ def test_dir_rule_on_a_planted_post_scoring_tree(tmp_path, synthetic_raw, monkey
     _plant(snap, root, "prior", "hotels_probe", "prior")
     assert any("hotels_probe" in x for x in problems("prior"))      # the baselines never reach HOTELS
 
-    # Phase 9 (D-09, D-10): every listed few-shot dir after 09-11's scoring: bases val + gated test, continued test
+    # every listed few-shot dir after the few-shot scoring: bases val + gated test, continued test
     plant_fewshot_dumps(ns, {"entries": list(fdirs.values())}, runs_sha, str(root))
     for rid, e in sorted(fdirs.items()):
         want = ["test.json", "test.npz"] + (["val.json", "val.npz"] if e["stage"] == "base" else [])

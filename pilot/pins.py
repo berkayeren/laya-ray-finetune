@@ -1,7 +1,7 @@
 """Every pinned revision and digest the pilot trusts (dataset, raw folds, model weights, OOD tag subset).
 
-Values were verified against the Hugging Face API and by hashing downloaded files (see Phase 1 research,
-"Verified Ground Truth"). Change a value here only together with a deliberate refreeze of data/splits.json.
+Values were verified against the Hugging Face API and by hashing the downloaded files. Change a value here only
+together with a deliberate refreeze of data/splits.json.
 """
 
 DATASET_REPO = "uoe-nlp/multi3-nlu"

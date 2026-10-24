@@ -7,6 +7,9 @@ import json
 import os
 import sys
 import types
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any, NoReturn
 
 import numpy as np
 import pytest
@@ -14,7 +17,7 @@ import pytest
 import pilot.data
 import report
 import score
-from conftest import prepared
+from conftest import SyntheticRaw, prepared
 from intents import QUESTIONS
 from pilot import dumps
 from pilot import laya_adapter as la
@@ -27,7 +30,7 @@ TINY_T = 1.3
 
 
 @pytest.fixture
-def tiny(tmp_path, synthetic_raw):
+def tiny(tmp_path: Path, synthetic_raw: SyntheticRaw) -> Iterator[tuple[str, str, str]]:
     """(out_dir, manifest_path, checkpoint dir) of the synthetic snapshot and a tiny checkpoint with T = 1.3.
 
     Scoring sets torch's process-wide thread count; it is restored so later tests keep the session's setting.
@@ -39,14 +42,14 @@ def tiny(tmp_path, synthetic_raw):
     torch.set_num_threads(threads)
 
 
-def _split_cases(path):
+def _split_cases(path: str) -> list[dict[str, Any]]:
     with open(path, "rb") as f:
         return pilot.data.parse_jsonl(f.read())
 
 
 @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
-def test_a_tokenizer_config_laya_could_not_rewrite_is_refused(tiny):
-    """04-REVIEW IN-01: on a read-only tokenizer/ laya.load only warns and loads the un-normalized config, which the
+def test_a_tokenizer_config_laya_could_not_rewrite_is_refused(tiny: tuple[str, str, str]) -> None:
+    """On a read-only tokenizer/ laya.load only warns and loads the un-normalized config, which the
     identity (bound by the normalized view) does not tell apart from the rewritten one; score.load_agent refuses."""
     import warnings
     _, _, ckpt = tiny
@@ -63,17 +66,18 @@ def test_a_tokenizer_config_laya_could_not_rewrite_is_refused(tiny):
     finally:
         os.chmod(tok_dir, 0o755)
     score.load_agent(model_dir, "cpu", expected)                     # writable: laya rewrites it and the load passes
-    assert identity(ckpt) == before                                  # the rewrite keeps the identity (IN-05)
+    assert identity(ckpt) == before                                  # the rewrite keeps the identity
 
 
 @pytest.mark.timeout(60)
 @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
-def test_score_with_ray_actors_refuses_a_read_only_tokenizer_dir_before_ray(tmp_path, tiny, monkeypatch):
-    """04-REVIEW CR-01: with --workers 1 (the default) the IN-01 refusal used to come from the Ray Data actor's
-    constructor, which Ray restarted forever. The driver now refuses a rewrite laya cannot make before ray.init."""
+def test_score_with_ray_actors_refuses_a_read_only_tokenizer_dir_before_ray(tmp_path: Path, tiny: tuple[str, str, str],
+                                                                            monkeypatch: pytest.MonkeyPatch) -> None:
+    """With --workers 1 (the default) a refusal in the Ray Data actor's constructor would make Ray restart the actor
+    forever, so the driver refuses a tokenizer-config rewrite laya cannot make before ray.init."""
     import ray
 
-    def no_ray(*a, **kw):
+    def no_ray(*a: Any, **kw: Any) -> NoReturn:
         raise AssertionError("ray.init reached; the read-only tokenizer/ must be refused first")
     out_dir, manifest, ckpt = tiny
     test_jsonl = os.path.join(out_dir, "splits", "test.jsonl")
@@ -90,7 +94,7 @@ def test_score_with_ray_actors_refuses_a_read_only_tokenizer_dir_before_ray(tmp_
     assert not (tmp_path / "dumps").exists()
 
 
-def test_tiny_checkpoint_round_trips_through_score_and_report(tmp_path, tiny):
+def test_tiny_checkpoint_round_trips_through_score_and_report(tmp_path: Path, tiny: tuple[str, str, str]) -> None:
     import laya
     out_dir, manifest, ckpt = tiny
     test_jsonl = os.path.join(out_dir, "splits", "test.jsonl")
@@ -98,7 +102,7 @@ def test_tiny_checkpoint_round_trips_through_score_and_report(tmp_path, tiny):
     run_dir, split = score.main([test_jsonl, "--model", "laya", "--checkpoint", ckpt, "--workers", "0",
                                  "--manifest", manifest, "--out-root", str(tmp_path / "dumps")])
     ident = identity(ckpt)
-    assert ident == before                  # laya's tokenizer_config.json rewrite on load keeps it (04-REVIEW IN-05)
+    assert ident == before                  # laya's tokenizer_config.json rewrite on load keeps it
     assert sorted(ident["files_sha256"]) == ["encoder/config.json", "tokenizer/tokenizer.json",
                                              "tokenizer/tokenizer_config.json#normalized"]
     assert os.path.basename(run_dir) == "laya-%s-%s-%s" % (ident["model_sha256"][:12], ident["config_sha256"][:8],
@@ -125,12 +129,12 @@ def test_tiny_checkpoint_round_trips_through_score_and_report(tmp_path, tiny):
     assert shipped["temperature"] == TINY_T and shipped["rows"]["0.5"]["n"] == 7
 
 
-# --- seed and training provenance in the sidecar (03-REVIEW WR-05) --------------------------------------------------
+# --- seed and training provenance in the sidecar -------------------------------------------------------------------
 
 TRAIN_CANON = {"split": "selection_train", "seed": 3, "neg_seed": 3, "epochs": 4, "encoder_lr": 3e-05, "head_lr": 0.0001}
 
 
-def _as_trained(src, dst, epoch=2, **canon):
+def _as_trained(src: str, dst: Path, epoch: int = 2, **canon: Any) -> str:
     """Copy the tiny checkpoint to dst and give it a ray_train.py training block (canonical TRAIN_CANON + canon)."""
     import shutil
     shutil.copytree(src, dst)
@@ -148,7 +152,7 @@ def _as_trained(src, dst, epoch=2, **canon):
     return str(dst)
 
 
-def _score_val(tiny, ckpt, root):
+def _score_val(tiny: tuple[str, str, str], ckpt: str, root: Path) -> tuple[str, dict[str, Any]]:
     out_dir, manifest, _ = tiny
     run_dir, _ = score.main([os.path.join(out_dir, "splits", "val.jsonl"), "--checkpoint", ckpt, "--workers", "0",
                              "--manifest", manifest, "--out-root", str(root)])
@@ -156,7 +160,7 @@ def _score_val(tiny, ckpt, root):
         return run_dir, json.load(f)
 
 
-def test_sidecar_records_the_training_seed_and_config(tmp_path, tiny):
+def test_sidecar_records_the_training_seed_and_config(tmp_path: Path, tiny: tuple[str, str, str]) -> None:
     ckpt = _as_trained(tiny[2], tmp_path / "s3")
     run_dir, side = _score_val(tiny, ckpt, tmp_path / "dumps")
     assert side["seed"] == 3
@@ -180,7 +184,7 @@ def test_sidecar_records_the_training_seed_and_config(tmp_path, tiny):
     assert dumps.training_digest(dict(TRAIN_CANON, seed=9, neg_seed=7), 2) == t["config_sha256_sans_seed"]
 
 
-def test_training_block_is_none_without_a_ray_train_config(tmp_path, tiny):
+def test_training_block_is_none_without_a_ray_train_config(tmp_path: Path, tiny: tuple[str, str, str]) -> None:
     _, _, ckpt = tiny
     assert score.training_block(ckpt, identity(ckpt)) == (None, None)
     assert score.training_block("multilingual", None) == (None, None)       # no fetch, no identity needed
@@ -188,7 +192,7 @@ def test_training_block_is_none_without_a_ray_train_config(tmp_path, tiny):
     assert side["seed"] is None and side["training"] is None
 
 
-def test_training_block_refuses_a_config_changed_after_hashing(tmp_path, tiny):
+def test_training_block_refuses_a_config_changed_after_hashing(tmp_path: Path, tiny: tuple[str, str, str]) -> None:
     ckpt = _as_trained(tiny[2], tmp_path / "s3")
     ident = identity(ckpt)
     assert score.training_block(ckpt, ident)[0] == 3
@@ -202,9 +206,9 @@ def test_training_block_refuses_a_config_changed_after_hashing(tmp_path, tiny):
         score.training_block(ckpt, ident)
 
 
-def test_check_checkpoint_arg_refuses_an_invalid_config(tmp_path):
-    """05-REVIEW IN-06: a corrupt rl_agent_config.json is a refusal naming the file, not a traceback (checked with the
-    --checkpoint argument since 08-REVIEW WR-02 keyed the gate on the identity, not on the config's contents)."""
+def test_check_checkpoint_arg_refuses_an_invalid_config(tmp_path: Path) -> None:
+    """A corrupt rl_agent_config.json is a refusal naming the file, not a traceback (checked with the --checkpoint
+    argument: the protocol gate keys on the identity, never on the config's contents)."""
     (tmp_path / "rl_agent_config.json").write_text("{not json", encoding="utf-8")
     with pytest.raises(SystemExit, match="rl_agent_config.json is not valid JSON"):
         score.check_checkpoint_arg(str(tmp_path))
@@ -212,11 +216,11 @@ def test_check_checkpoint_arg_refuses_an_invalid_config(tmp_path):
 
 # --- Ray reassembly and the Predictor actor (one code path for in-process and Ray scoring) -------------------------
 
-def _rows(*uids):
+def _rows(*uids: str) -> list[dict[str, Any]]:
     return [{"uid": u, "logits": np.full(48, float(ord(u[-1])), dtype=np.float32)} for u in uids]
 
 
-def test_assemble_reorders_by_uid():
+def test_assemble_reorders_by_uid() -> None:
     got = score.assemble(_rows("c", "a", "b"), ["a", "b", "c"])
     assert got.dtype == np.float32 and got.shape == (3, 48)
     assert list(got[:, 0]) == [float(ord("a")), float(ord("b")), float(ord("c"))]
@@ -227,12 +231,12 @@ def test_assemble_reorders_by_uid():
     (_rows("a"), ["a", "b"], "uid b was not scored"),
     (_rows("a", "b", "x"), ["a", "b"], "unexpected uid x"),
 ], ids=["dup", "missing", "extra"])
-def test_assemble_refuses_duplicate_missing_and_extra(rows, uids, match):
+def test_assemble_refuses_duplicate_missing_and_extra(rows: list[dict[str, Any]], uids: list[str], match: str) -> None:
     with pytest.raises(SystemExit, match=match):
         score.assemble(rows, uids)
 
 
-def test_predictor_returns_logits_and_state(tiny):
+def test_predictor_returns_logits_and_state(tiny: tuple[str, str, str]) -> None:
     out_dir, _, ckpt = tiny
     model_dir, expected = score.resolve_checkpoint(ckpt)
     p = score.Predictor(model_dir, "cpu", expected, 1)
@@ -253,15 +257,15 @@ def test_predictor_returns_logits_and_state(tiny):
 
 # --- refusals: agent state, arguments, checkpoint -------------------------------------------------------------------
 
-def _agent(device, dtype="torch.float32", amp=False, **kw):
+def _agent(device: str, dtype: str = "torch.float32", amp: bool = False, **kw: Any) -> types.SimpleNamespace:
     return types.SimpleNamespace(device=types.SimpleNamespace(type=device), dtype=dtype, amp_enabled=amp, **kw)
 
 
 @pytest.mark.parametrize("agent,device,match", [
-    (_agent("cpu", "torch.bfloat16"), "cpu", r"torch.bfloat16 with autocast False on cpu; scoring is fp32 \(D-06\)"),
-    (_agent("cpu", amp=True), "cpu", r"laya runs torch.float32 with autocast True on cpu; scoring is fp32 \(D-06\)"),
+    (_agent("cpu", "torch.bfloat16"), "cpu", r"torch.bfloat16 with autocast False on cpu; scoring is fp32$"),
+    (_agent("cpu", amp=True), "cpu", r"laya runs torch.float32 with autocast True on cpu; scoring is fp32$"),
     (_agent("mps", "torch.float16", True), "mps", r"runs torch.float16 with autocast True on mps; scoring is fp32"),
-    (_agent("mps", amp=True), "mps", r"autocast True on mps; scoring is fp32 \(D-06\)"),
+    (_agent("mps", amp=True), "mps", r"autocast True on mps; scoring is fp32$"),
     (_agent("cuda", "torch.float16", True), "cuda", r"runs torch.float16 with autocast True on cuda; scoring is fp32"),
     (_agent("cuda", "torch.bfloat16", False), "cuda", r"torch.bfloat16 with autocast False on cuda; scoring is fp32"),
     (_agent("cpu"), "cuda", "laya loaded on cpu, requested cuda"),
@@ -270,18 +274,19 @@ def _agent(device, dtype="torch.float32", amp=False, **kw):
      r"fell back from mps to CPU 1 time\(s\) mid-run \(MPS backend out of memory\)"),
 ], ids=["cpu_bf16", "cpu_amp_on", "mps_fp16_amp", "mps_amp_on", "cuda_fp16_amp", "cuda_bf16", "cpu_for_cuda",
         "cpu_for_mps", "oom_fallback"])
-def test_check_agent_refuses(agent, device, match):
+def test_check_agent_refuses(agent: Any, device: str, match: str) -> None:
     with pytest.raises(SystemExit, match=match):
         score.check_agent(agent, device)
 
 
 @pytest.mark.parametrize("device", ["cpu", "mps", "cuda"])
-def test_check_agent_passes_fp32_and_returns_its_state(device):
+def test_check_agent_passes_fp32_and_returns_its_state(device: str) -> None:
     assert score.check_agent(_agent(device, cpu_fallback_count=0), device) == {
         "device": device, "dtype": "torch.float32", "amp_enabled": False}
 
 
-def test_predictor_rechecks_the_agent_after_every_batch(tiny, monkeypatch):
+def test_predictor_rechecks_the_agent_after_every_batch(tiny: tuple[str, str, str],
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
     """laya's _infer can demote the agent mid-run (GPU OOM -> CPU); the batch that saw it is refused, not dumped."""
     out_dir, _, ckpt = tiny
     model_dir, expected = score.resolve_checkpoint(ckpt)
@@ -291,7 +296,7 @@ def test_predictor_rechecks_the_agent_after_every_batch(tiny, monkeypatch):
     p(batch)
     real = la.noul_logits
 
-    def demoting(agent, texts, questions):
+    def demoting(agent: Any, texts: list[str], questions: dict[str, Any]) -> np.ndarray:
         out = real(agent, texts, questions)
         setattr(agent, "cpu_fallback_count", 1)             # what laya's OOM retry leaves behind
         return out
@@ -310,7 +315,8 @@ def test_predictor_rechecks_the_agent_after_every_batch(tiny, monkeypatch):
     (["--device", "mps"], "--device mps scores in-process: use --workers 0"),          # --workers defaults to 1
     (["--device", "tpu"], "invalid choice"),
 ], ids=["prior", "majority", "cpu_gpu", "mps_gpu", "cuda_no_gpu", "mps_ray", "mps_default_workers", "unknown"])
-def test_device_conflicts_are_argument_errors(tmp_path, synthetic_raw, capsys, args, match):
+def test_device_conflicts_are_argument_errors(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                              capsys: pytest.CaptureFixture[str], args: list[str], match: str) -> None:
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     with pytest.raises(SystemExit) as e:
         score.main([os.path.join(out_dir, "splits", "test.jsonl"), *args, "--manifest", manifest,
@@ -324,13 +330,14 @@ def test_device_conflicts_are_argument_errors(tmp_path, synthetic_raw, capsys, a
     (["--device", "cuda", "--gpus-per-worker", "1"], "cuda"), (["--device", "mps", "--workers", "0"], "mps"),
     (["--device", "cpu"], "cpu"),
 ], ids=["default_cpu", "gpu_implies_cuda", "cuda_inprocess", "cuda_ray", "mps_inprocess", "explicit_cpu"])
-def test_device_resolution(tmp_path, synthetic_raw, monkeypatch, args, want):
+def test_device_resolution(tmp_path: Path, synthetic_raw: SyntheticRaw, monkeypatch: pytest.MonkeyPatch,
+                           args: list[str], want: str) -> None:
     """Omitting --device keeps today's behaviour (cuda iff --gpus-per-worker > 0); the resolved device reaches
     score_laya, which is stubbed so no model loads."""
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     seen = []
 
-    def stop(a, checkpoint, cases, device, ident):
+    def stop(a: Any, checkpoint: str, cases: list[dict[str, Any]], device: str, ident: Any) -> NoReturn:
         seen.append(device)
         raise SystemExit("stub")
     monkeypatch.setattr(score, "score_laya", stop)
@@ -340,7 +347,8 @@ def test_device_resolution(tmp_path, synthetic_raw, monkeypatch, args, want):
     assert seen == [want]
 
 
-def test_mps_unavailable_is_refused_before_any_load(tmp_path, tiny, monkeypatch):
+def test_mps_unavailable_is_refused_before_any_load(tmp_path: Path, tiny: tuple[str, str, str],
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
     import torch
     out_dir, manifest, ckpt = tiny
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
@@ -352,7 +360,8 @@ def test_mps_unavailable_is_refused_before_any_load(tmp_path, tiny, monkeypatch)
     assert not (tmp_path / "dumps").exists()
 
 
-def test_baseline_with_checkpoint_is_an_argument_error(tmp_path, synthetic_raw, capsys):
+def test_baseline_with_checkpoint_is_an_argument_error(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                       capsys: pytest.CaptureFixture[str]) -> None:
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     with pytest.raises(SystemExit) as e:
         score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--model", "prior", "--checkpoint", "x",
@@ -361,7 +370,8 @@ def test_baseline_with_checkpoint_is_an_argument_error(tmp_path, synthetic_raw, 
     assert not (tmp_path / "dumps").exists()
 
 
-def test_score_refuses_missing_checkpoint_before_ray(tmp_path, synthetic_raw, monkeypatch):
+def test_score_refuses_missing_checkpoint_before_ray(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     monkeypatch.chdir(tmp_path)                             # a stray ray_results/ would land in the cwd
     with pytest.raises(SystemExit) as e:

@@ -1,45 +1,57 @@
-"""Duplicate and uid audit of the raw Multi3NLU++ rows (DATA-04): report only, never a fix.
+"""Duplicate and uid audit of the raw Multi3NLU++ rows: report only, never a fix.
 
-Normalization (D-11): NFC, then the Turkish capitals I->ı and İ->i, then lowercase, every Unicode punctuation
+Normalization: NFC, then the Turkish capitals I->ı and İ->i, then lowercase, every Unicode punctuation
 character (category P*) replaced by a space, whitespace collapsed. A near-duplicate is exactly an equal normalized
 text; there is no fuzzy threshold. Generic case-folding is never used: plain lower() turns İ into i + combining dot,
 and the Turkish mapping turns Latin acronyms into dotless forms (PIN -> pın), so acronym case variants such as
 "PIN" vs "pin" are not merged. audit.md discloses this.
 
-Policy: cross-split duplicates are reported and the splits stay as published (D-12); the flag lists in
-dup_flags.json let a later phase report a dedup sensitivity row. Identical normalized text with conflicting labels
-is listed with both label sets and never fails (D-13). Duplicate uids hard-fail prep in pilot.data before this runs
-(D-14); the audit repeats the uid count as evidence.
+Policy: cross-split duplicates are reported and the splits stay as published; the flag lists in dup_flags.json are
+there for a dedup sensitivity check. Identical normalized text with conflicting labels is listed with both label sets
+and never fails. Duplicate uids hard-fail prep in pilot.data before this runs; the audit repeats the uid count as
+evidence.
 
 Partitions for the cross-split measure (the disjoint banking splits selection_train, val, test) and the dup-flag
 pairs (val vs selection_train, test vs final_train) are passed in by pilot.data.audit_layout(), derived from
 pilot.data.SPLITS, so fold boundaries live in one place. Every group and uid list is sorted so the output bytes are
 deterministic. Stdlib only.
+
+The texts this module writes into audit.json and audit.md (NORMALIZATION, render_markdown) keep their original
+decision labels ("DATA-04", "D-11" to "D-14", short names for the rules above) because data/splits.json pins the audit
+bytes; changing a word there means a deliberate refreeze of the splits.
 """
 import unicodedata
+from collections.abc import Callable, Iterable
+from typing import Any
 
-NORMALIZATION = "D-11: NFC, I->ı and İ->i, lowercase, punctuation->space, collapsed whitespace"
+NORMALIZATION = "D-11: NFC, I->ı and İ->i, lowercase, punctuation->space, collapsed whitespace"   # pinned bytes
 _TR_UPPER = str.maketrans({"I": "ı", "İ": "i"})
 
 
-def normalize_tr(text):
+def normalize_tr(text: str) -> str:
+    """`text` under the Turkish normalization of the module docstring (NORMALIZATION)."""
     s = unicodedata.normalize("NFC", text).translate(_TR_UPPER).lower()
     s = "".join(" " if unicodedata.category(c).startswith("P") else c for c in s)
     return " ".join(s.split())
 
 
-def _exact(text):
+def _exact(text: str) -> str:
+    """The identity key: exact-text duplicates."""
     return text
 
 
-def partition(fold, partitions):
+def partition(fold: int, partitions: Iterable[tuple[str, tuple[int, ...]]]) -> str:
+    """The name of the partition holding `fold`; ValueError when none does."""
     for name, folds in partitions:
         if fold in folds:
             return name
     raise ValueError("fold %r outside every audit partition" % (fold,))
 
 
-def _groups(rows, key, partitions):
+def _groups(rows: list[dict[str, Any]], key: Callable[[str], str],
+            partitions: Iterable[tuple[str, tuple[int, ...]]]) -> dict[str, Any]:
+    """Duplicate groups of `rows` under `key` (two or more rows with one key), sorted, with their counts: rows,
+    groups spanning more than one partition, groups with conflicting label sets."""
     by = {}
     for r in rows:
         by.setdefault(key(r["text"]), []).append(r)
@@ -57,11 +69,12 @@ def _groups(rows, key, partitions):
     groups.sort(key=lambda g: (g["text"], g["uids"][0]))
     return {"n_groups": len(groups), "n_rows": sum(len(g["uids"]) for g in groups),
             "n_cross_split_groups": sum(len(g["partitions"]) > 1 for g in groups),
-            "n_conflicting_groups": sum(len(g["label_sets"]) > 1 for g in groups),   # D-13: reported, never raised
+            "n_conflicting_groups": sum(len(g["label_sets"]) > 1 for g in groups),   # reported, never raised
             "groups": groups}
 
 
-def _flags(rows, key, flag_pairs):
+def _flags(rows: list[dict[str, Any]], key: Callable[[str], str],
+           flag_pairs: Iterable[tuple[str, tuple[int, ...], str, tuple[int, ...]]]) -> dict[str, list[str]]:
     """{"<eval>_in_<train>": uids of eval-split rows whose text occurs in the train split} for each flag pair."""
     out = {}
     for ev, ev_folds, tr, tr_folds in flag_pairs:
@@ -70,14 +83,17 @@ def _flags(rows, key, flag_pairs):
     return out
 
 
-def build_audit(banking_rows, hotel_rows, partitions, flag_pairs, flag_rows=None):
+def build_audit(banking_rows: list[dict[str, Any]], hotel_rows: list[dict[str, Any]],
+                partitions: Iterable[tuple[str, tuple[int, ...]]],
+                flag_pairs: Iterable[tuple[str, tuple[int, ...], str, tuple[int, ...]]],
+                flag_rows: list[dict[str, Any]] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     """Raw rows ({"uid", "text", "gold", "fold", ...}) -> (audit dict, dup_flags dict). Pure; nothing is dropped.
 
     partitions: ((name, folds), ...) disjoint; flag_pairs: ((eval name, eval folds, train name, train folds), ...);
     both from pilot.data.audit_layout().
 
     The audit describes every raw row. The dup flags are computed over flag_rows (default: banking_rows), the banking
-    rows actually written to the splits, so a later dedup row never names a uid that is not in any split.
+    rows actually written to the splits, so a dedup check never names a uid that is not in any split.
     """
     seen = {}
     for r in list(banking_rows) + list(hotel_rows):
@@ -97,7 +113,8 @@ def build_audit(banking_rows, hotel_rows, partitions, flag_pairs, flag_rows=None
     return audit, flags
 
 
-def render_markdown(audit, flags):
+def render_markdown(audit: dict[str, Any], flags: dict[str, Any]) -> str:
+    """audit.md from the audit and dup_flags dicts (its bytes are pinned in data/splits.json)."""
     u, h = audit["uids"], audit["hotels_in_banking"]
     lines = [
         "# Data audit (DATA-04)",

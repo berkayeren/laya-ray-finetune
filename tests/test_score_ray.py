@@ -2,7 +2,7 @@
 
 Ray returns rows in any order; score.assemble puts them back in split-file order by uid, so both dumps hold the same
 uids in the same order and logits within 1e-5 (thread counts differ between the two paths). Ray Data's actor fault
-tolerance stays on (04-REVIEW WR-01): an actor killed once mid-split is restarted and the dump completes, while a
+tolerance stays on: an actor killed once mid-split is restarted and the dump completes, while a
 refusal (SystemExit) in an actor's constructor or batch ends the run promptly with its own one line and no dump.
 
 Runs in `make test` (ray marker, CPU only, no weights or data).
@@ -11,12 +11,14 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any, NoReturn
 
 import numpy as np
 import pytest
 
 import score
-from conftest import prepared
+from conftest import SyntheticRaw, prepared
 from pilot.data import parse_jsonl
 from tiny_laya import tiny_checkpoint
 
@@ -26,7 +28,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 @pytest.mark.timeout(600)
-def test_ray_and_inprocess_dumps_agree(tmp_path, synthetic_raw):
+def test_ray_and_inprocess_dumps_agree(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     ckpt = tiny_checkpoint(tmp_path / "ckpt", temperature=1.3)
     test_jsonl = os.path.join(out_dir, "splits", "test.jsonl")
@@ -52,7 +54,7 @@ def test_ray_and_inprocess_dumps_agree(tmp_path, synthetic_raw):
 
 
 # The driver-side preflight (pilot.weights.check_tokenizer_config_rewritable) is switched off so the refusal is raised
-# where it used to hang: in the Ray Data actor's constructor (score.load_agent's post-load backstop).
+# where it would hang without actor_error: in the Ray Data actor's constructor (score.load_agent's post-load backstop).
 BYPASS = """import sys
 import pilot.weights
 pilot.weights.check_tokenizer_config_rewritable = lambda d, what: None
@@ -63,11 +65,11 @@ score.main(sys.argv[1:])
 
 @pytest.mark.timeout(240)
 @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
-def test_a_refusal_in_a_scoring_actor_ends_the_run(tmp_path, synthetic_raw):
-    """04-REVIEW CR-01, WR-01: Ray Data restarts an actor whose worker exits forever (its default max_restarts -1,
-    kept for transient deaths), so a SystemExit in score.Predictor's constructor (here the IN-01 backstop on a
-    read-only tokenizer/) hung `score.py --workers 1` (the default). The Predictor raises it in Ray as a plain
-    exception, so the run ends promptly with the refusal's own one line and writes no dump."""
+def test_a_refusal_in_a_scoring_actor_ends_the_run(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
+    """Ray Data restarts an actor whose worker exits forever (its default max_restarts -1, kept for transient deaths),
+    so a SystemExit in score.Predictor's constructor (here the post-load tokenizer-config backstop on a read-only
+    tokenizer/) would hang `score.py --workers 1` (the default). The Predictor raises it in Ray as a plain exception,
+    so the run ends promptly with the refusal's own one line and writes no dump."""
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     ckpt = tiny_checkpoint(tmp_path / "ckpt")                 # a fresh save: laya must rewrite its tokenizer config
     tok_dir = os.path.join(ckpt, "tokenizer")
@@ -102,8 +104,8 @@ score.main(sys.argv[1:])
 
 
 @pytest.mark.timeout(240)
-def test_a_refusal_after_a_scoring_actors_batch_ends_the_run(tmp_path, synthetic_raw):
-    """04-REVIEW WR-01: a SystemExit in score.Predictor.__call__ inside Ray (check_agent) ends the run promptly with
+def test_a_refusal_after_a_scoring_actors_batch_ends_the_run(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
+    """A SystemExit in score.Predictor.__call__ inside Ray (check_agent) ends the run promptly with
     its own one line and no dump, as one in the constructor does."""
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     ckpt = tiny_checkpoint(tmp_path / "ckpt")
@@ -136,9 +138,10 @@ score.main(sys.argv[2:])
 
 
 @pytest.mark.timeout(300)
-def test_a_scoring_actor_killed_once_is_restarted_and_the_run_completes(tmp_path, synthetic_raw):
-    """04-REVIEW WR-01: score_laya keeps Ray Data's actor fault tolerance, so an actor killed mid-split is restarted,
-    its batch retried, and the dump is complete (with max_restarts 0 the run died on the first kill)."""
+def test_a_scoring_actor_killed_once_is_restarted_and_the_run_completes(tmp_path: Path,
+                                                                        synthetic_raw: SyntheticRaw) -> None:
+    """score_laya keeps Ray Data's actor fault tolerance, so an actor killed mid-split is restarted, its batch
+    retried, and the dump is complete (with max_restarts 0 the run would die on the first kill)."""
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     ckpt = tiny_checkpoint(tmp_path / "ckpt")
     test_jsonl = os.path.join(out_dir, "splits", "test.jsonl")
@@ -156,10 +159,10 @@ def test_a_scoring_actor_killed_once_is_restarted_and_the_run_completes(tmp_path
     assert list(np.load(run_dir / "test.npz", allow_pickle=False)["uids"]) == want
 
 
-def test_a_refusal_is_raised_in_ray_as_a_plain_exception_and_unwrapped(monkeypatch):
-    """04-REVIEW WR-01: in Ray the Predictor turns a SystemExit (constructor or batch) into actor_error, a plain
+def test_a_refusal_is_raised_in_ray_as_a_plain_exception_and_unwrapped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In Ray the Predictor turns a SystemExit (constructor or batch) into actor_error, a plain
     RuntimeError marked REFUSAL; in-process it stays a SystemExit. refusal finds the message in Ray's error text."""
-    def refuse(*args):
+    def refuse(*args: Any) -> NoReturn:
         raise SystemExit("checkpoint: refused; fix it")
     monkeypatch.setattr(score, "load_agent", refuse)
     with pytest.raises(SystemExit, match="^checkpoint: refused; fix it$"):
@@ -184,7 +187,7 @@ def test_a_refusal_is_raised_in_ray_as_a_plain_exception_and_unwrapped(monkeypat
     assert score.refusal(score.error_text(outer)) == "x; fix"
 
 
-def test_actor_exit_reads_rays_worker_exit_detail():
+def test_actor_exit_reads_rays_worker_exit_detail() -> None:
     text = ("The actor died unexpectedly before finishing this task.\n\tclass_name: MapWorker(MapBatches(Predictor))\n"
             "The actor is dead because its worker process has died. Worker exit type: SYSTEM_ERROR Worker exit "
             "detail: Worker unexpectedly exits with a connection error code 2. End of file.")

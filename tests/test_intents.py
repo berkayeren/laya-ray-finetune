@@ -1,4 +1,4 @@
-"""Single question source (DATA-03): QUESTIONS is the model input, so it must have one definition and match the data.
+"""Single question source: QUESTIONS is the model input, so it must have one definition and match the data.
 
 QUESTIONS is assigned at module level only in intents.py, pilot/data.py and score.py import it from there, its
 shape is {tag: {type: noul, instructions: INTENTS[tag]}} in INTENTS order, and the frozen data/splits.json records the
@@ -8,6 +8,7 @@ import ast
 import json
 import os
 import subprocess
+from collections.abc import Iterator
 
 import pytest
 
@@ -20,7 +21,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMPORTERS = ("pilot/data.py", "score.py")
 
 
-def tracked_py_files():
+def tracked_py_files() -> list[str]:
     """Tracked *.py files via git ls-files (never a directory walk, which would descend into .venv)."""
     out = subprocess.run(["git", "ls-files", "*.py"], cwd=REPO_ROOT, check=True, capture_output=True, text=True)
     files = [f for f in out.stdout.splitlines() if f]
@@ -28,12 +29,12 @@ def tracked_py_files():
     return files
 
 
-def _parse(rel):
+def _parse(rel: str) -> ast.Module:
     with open(os.path.join(REPO_ROOT, rel), encoding="utf-8") as f:
         return ast.parse(f.read(), filename=rel)
 
 
-def _target_names(target):
+def _target_names(target: ast.expr) -> Iterator[str]:
     if isinstance(target, ast.Name):
         yield target.id
     elif isinstance(target, (ast.Tuple, ast.List)):
@@ -43,7 +44,7 @@ def _target_names(target):
         yield from _target_names(target.value)
 
 
-def _module_level_statements(body):
+def _module_level_statements(body: list[ast.stmt]) -> Iterator[ast.stmt]:
     """Statements executed at module level, including inside if/try/with/for blocks but not def/class bodies."""
     for node in body:
         yield node
@@ -55,7 +56,7 @@ def _module_level_statements(body):
             yield from _module_level_statements(handler.body)
 
 
-def module_level_assignments(tree, name):
+def module_level_assignments(tree: ast.Module, name: str) -> list[int]:
     hits = []
     for node in _module_level_statements(tree.body):
         if isinstance(node, ast.Assign):
@@ -69,7 +70,7 @@ def module_level_assignments(tree, name):
     return hits
 
 
-def test_questions_defined_only_in_intents():
+def test_questions_defined_only_in_intents() -> None:
     found = {}
     for rel in tracked_py_files():
         lines = module_level_assignments(_parse(rel), "QUESTIONS")
@@ -80,20 +81,20 @@ def test_questions_defined_only_in_intents():
 
 
 @pytest.mark.parametrize("rel", IMPORTERS)
-def test_consumers_import_questions_from_intents(rel):
+def test_consumers_import_questions_from_intents(rel: str) -> None:
     imported = [node for node in ast.walk(_parse(rel)) if isinstance(node, ast.ImportFrom)
                 and node.module == "intents" and any(a.name == "QUESTIONS" for a in node.names)]
-    assert imported, "%s must use `from intents import ... QUESTIONS` (single question source, DATA-03)" % rel
+    assert imported, "%s must use `from intents import ... QUESTIONS` (single question source)" % rel
 
 
-def test_questions_shape_matches_intents():
+def test_questions_shape_matches_intents() -> None:
     assert len(INTENTS) == 48
     assert list(QUESTIONS) == list(INTENTS)
     bad = {tag: q for tag, q in QUESTIONS.items() if q != {"type": "noul", "instructions": INTENTS[tag]}}
     assert not bad, "QUESTIONS entries not equal to {type: noul, instructions: INTENTS[tag]}: %r" % bad
 
 
-def test_frozen_manifest_matches_current_questions():
+def test_frozen_manifest_matches_current_questions() -> None:
     with open(pilot.data.DEFAULT_MANIFEST, encoding="utf-8") as f:
         frozen = json.load(f)["questions_sha256"]
     current = pilot.data.questions_sha256()

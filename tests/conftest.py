@@ -5,18 +5,23 @@ conflicting labels, a hotels text equal to a banking text, optional duplicate ui
 import hashlib
 import json
 import os
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 import pilot.data
+# the synthetic_raw fixture: synthetic_raw(dup_uid=None) -> (snapshot root, {raw fold relpath: sha256})
+SyntheticRaw = Callable[..., tuple[str, dict[str, str]]]
 
 
-def _sha256(path):
+def _sha256(path: str) -> str:
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def make_raw(root, dup_uid=None):
+def make_raw(root: str, dup_uid: str | None = None) -> tuple[str, dict[str, str]]:
     """Write turkish/{banking,hotels}/fold{0..19}.json under root; return (root, {relpath: sha256}) for all 40."""
     folds = {}
     for i in range(20):
@@ -56,7 +61,7 @@ def make_raw(root, dup_uid=None):
     return root, raw_sha256
 
 
-def add_raw_row(root, raw_sha256, domain, fold, row):
+def add_raw_row(root: str, raw_sha256: dict[str, str], domain: str, fold: int, row: dict[str, Any]) -> None:
     """Append `row` to a synthetic raw fold and update its pinned sha256 in place."""
     rel = "turkish/%s/fold%d.json" % (domain, fold)
     path = os.path.join(root, rel)
@@ -68,11 +73,11 @@ def add_raw_row(root, raw_sha256, domain, fold, row):
     raw_sha256[rel] = _sha256(path)
 
 
-# Unicode line separators that str.splitlines() splits on but a text-mode file (and JSONL) does not (WR-13)
+# Unicode line separators that str.splitlines() splits on but a text-mode file (and JSONL) does not
 LINE_SEPARATOR_TEXTS = ("Kartım\u2028kayboldu", "Kartım\x85bloke", "Hesap\u2029kapat")
 
 
-def prepared_with_line_separators(tmp_path, synthetic_raw):
+def prepared_with_line_separators(tmp_path: Path, synthetic_raw: SyntheticRaw) -> tuple[str, str]:
     """prepare() over the synthetic snapshot plus banking rows whose text holds U+2028 / U+0085 / U+2029."""
     root, raw_sha256 = synthetic_raw()
     for i, (fold, text) in enumerate(zip((4, 12, 17), LINE_SEPARATOR_TEXTS)):   # train, train, test folds
@@ -83,14 +88,14 @@ def prepared_with_line_separators(tmp_path, synthetic_raw):
 
 
 @pytest.fixture
-def synthetic_raw(tmp_path):
+def synthetic_raw(tmp_path: Path) -> SyntheticRaw:
     """Callable bound to tmp_path / "raw": synthetic_raw(dup_uid=None) -> (root, raw_sha256)."""
-    def make(dup_uid=None):
+    def make(dup_uid: str | None = None) -> tuple[str, dict[str, str]]:
         return make_raw(str(tmp_path / "raw"), dup_uid=dup_uid)
     return make
 
 
-def prepared(tmp_path, synthetic_raw, name="data"):
+def prepared(tmp_path: Path, synthetic_raw: SyntheticRaw, name: str = "data") -> tuple[str, str]:
     """Run pilot.data.prepare on the synthetic snapshot into tmp_path / name; return (out_dir, manifest_path)."""
     root, raw_sha256 = synthetic_raw()
     out_dir = str(tmp_path / name)

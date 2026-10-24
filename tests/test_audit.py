@@ -1,37 +1,39 @@
-"""Duplicate audit (DATA-04): D-11 Turkish normalization, exact/normalized groups, conflicting labels (D-13),
-dup flags (D-12), report-only guarantee, determinism and hash verification of the audit outputs.
+"""Duplicate audit: Turkish normalization, exact/normalized groups, conflicting labels, dup flags, the report-only
+guarantee, determinism and hash verification of the audit outputs.
 """
 import json
 import os
 import shutil
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 import pilot.data
 from pilot.audit import build_audit, normalize_tr, render_markdown
-from conftest import add_raw_row, prepared
+from conftest import SyntheticRaw, add_raw_row, prepared
 
 pytestmark = pytest.mark.unit
 
 AUDIT_RELS = ("audit/audit.json", "audit/audit.md", "audit/dup_flags.json")
 
 
-def _raw_rows(root):
+def _raw_rows(root: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     banking = [r for i in range(20) for r in pilot.data.load_fold(root, "banking", i)]
     hotels = [r for i in range(20) for r in pilot.data.load_fold(root, "hotels", i)]
     return banking, hotels
 
 
-def _load(out_dir, rel):
+def _load(out_dir: str, rel: str) -> Any:
     with open(os.path.join(out_dir, rel), encoding="utf-8") as f:
         return json.load(f)
 
 
-def _group(section, uids):
+def _group(section: dict[str, Any], uids: list[str]) -> dict[str, Any] | None:
     return next((g for g in section["groups"] if g["uids"] == sorted(uids)), None)
 
 
-def test_normalize_tr_turkish_casing_punctuation_whitespace():
+def test_normalize_tr_turkish_casing_punctuation_whitespace() -> None:
     assert normalize_tr("İSTANBUL IŞIK") == "istanbul ışık"
     assert normalize_tr("İyi akşamlar") == "iyi akşamlar"
     assert normalize_tr("Evet.") == "evet"
@@ -40,18 +42,18 @@ def test_normalize_tr_turkish_casing_punctuation_whitespace():
     assert normalize_tr("$100 ve %5") == "$100 ve 5"                       # symbols (S*) stay, punctuation goes
 
 
-def test_normalize_tr_applies_nfc_before_the_dotted_capital_mapping():
+def test_normalize_tr_applies_nfc_before_the_dotted_capital_mapping() -> None:
     decomposed = "İptal"                                             # I + combining dot above
     assert decomposed != "İptal" and normalize_tr(decomposed) == "iptal" == normalize_tr("İptal")
 
 
-def test_normalize_tr_does_not_merge_acronym_case_variants():
-    # documented D-11 behaviour: the Turkish mapping makes PIN dotless, so it differs from lowercase pin
+def test_normalize_tr_does_not_merge_acronym_case_variants() -> None:
+    # documented behaviour: the Turkish mapping makes PIN dotless, so it differs from lowercase pin
     assert normalize_tr("PIN kodumu") == "pın kodumu"
     assert normalize_tr("PIN kodumu") != normalize_tr("pin kodumu")
 
 
-def test_synthetic_groups_exact_vs_normalized(tmp_path, synthetic_raw):
+def test_synthetic_groups_exact_vs_normalized(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     audit, _ = build_audit(*_raw_rows(synthetic_raw()[0]), **pilot.data.audit_layout())
     norm = {g["text"]: g for g in audit["normalized"]["groups"]}
     assert norm["evet"]["uids"] == ["bank_0_1", "bank_16_1"]
@@ -64,8 +66,8 @@ def test_synthetic_groups_exact_vs_normalized(tmp_path, synthetic_raw):
     assert audit["uids"] == {"n_rows": 51, "n_unique": 51, "duplicates": []}
 
 
-def test_conflicting_labels_are_listed_and_never_fail(tmp_path, synthetic_raw):
-    out_dir, _ = prepared(tmp_path, synthetic_raw)                         # D-13: prepare does not raise
+def test_conflicting_labels_are_listed_and_never_fail(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
+    out_dir, _ = prepared(tmp_path, synthetic_raw)                         # conflicting labels: prepare does not raise
     audit = _load(out_dir, "audit/audit.json")
     g = next(g for g in audit["normalized"]["groups"] if g["text"] == "cari hesap")
     assert g["uids"] == ["bank_2_1", "bank_9_1"]
@@ -78,7 +80,7 @@ def test_conflicting_labels_are_listed_and_never_fail(tmp_path, synthetic_raw):
     assert "reported only" in md and "acronym" in md.lower()
 
 
-def test_dup_flags_and_hotels_in_banking(tmp_path, synthetic_raw):
+def test_dup_flags_and_hotels_in_banking(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, _ = prepared(tmp_path, synthetic_raw)
     flags = _load(out_dir, "audit/dup_flags.json")
     assert flags["normalized"]["test_in_final_train"] == ["bank_16_1", "bank_17_1"]
@@ -88,7 +90,7 @@ def test_dup_flags_and_hotels_in_banking(tmp_path, synthetic_raw):
     assert audit["hotels_in_banking"] == {"n": 1, "uids": ["hotel_7_1"]}
 
 
-def test_val_flag_uses_selection_train_only():
+def test_val_flag_uses_selection_train_only() -> None:
     rows = [{"uid": "bank_3_0", "text": "Tamam", "gold": [], "fold": 3},
             {"uid": "bank_14_0", "text": "tamam.", "gold": [], "fold": 14},
             {"uid": "bank_15_0", "text": "Peki", "gold": [], "fold": 15},
@@ -99,8 +101,8 @@ def test_val_flag_uses_selection_train_only():
     assert [g["partitions"] for g in audit["normalized"]["groups"]] == [["test", "val"], ["selection_train", "val"]]
 
 
-def test_report_only_splits_keep_every_raw_row(tmp_path, synthetic_raw):
-    # D-12: duplicates and conflicting rows stay in their published splits, in raw fold order
+def test_report_only_splits_keep_every_raw_row(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
+    # report only: duplicates and conflicting rows stay in their published splits, in raw fold order
     out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
     root = str(tmp_path / "raw")
     with open(manifest_path, encoding="utf-8") as f:
@@ -116,7 +118,7 @@ def test_report_only_splits_keep_every_raw_row(tmp_path, synthetic_raw):
             assert uid in {json.loads(l)["uid"] for l in f}
 
 
-def test_audit_outputs_are_byte_identical_across_builds(tmp_path, synthetic_raw):
+def test_audit_outputs_are_byte_identical_across_builds(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     a, _ = prepared(tmp_path, synthetic_raw, name="a")
     b, _ = prepared(tmp_path, synthetic_raw, name="b")
     for rel in AUDIT_RELS + ("splits.json",):
@@ -124,12 +126,12 @@ def test_audit_outputs_are_byte_identical_across_builds(tmp_path, synthetic_raw)
             assert fa.read() == fb.read(), rel
 
 
-def test_render_markdown_is_pure(tmp_path, synthetic_raw):
+def test_render_markdown_is_pure(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     audit, flags = build_audit(*_raw_rows(synthetic_raw()[0]), **pilot.data.audit_layout())
     assert render_markdown(audit, flags) == render_markdown(json.loads(json.dumps(audit)), flags)
 
 
-def test_manifest_registers_audit_files_and_verifier_accepts_them(tmp_path, synthetic_raw):
+def test_manifest_registers_audit_files_and_verifier_accepts_them(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
     with open(manifest_path, encoding="utf-8") as f:
         m = json.load(f)
@@ -139,7 +141,7 @@ def test_manifest_registers_audit_files_and_verifier_accepts_them(tmp_path, synt
         assert pilot.data.verify_audit_file(os.path.join(out_dir, rel), manifest_path=manifest_path)["path"] == rel
 
 
-def test_verify_audit_file_refuses_tampered_and_unregistered(tmp_path, synthetic_raw):
+def test_verify_audit_file_refuses_tampered_and_unregistered(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
     path = os.path.join(out_dir, "audit", "dup_flags.json")
     copy = os.path.join(out_dir, "audit", "dup_flags_copy.json")
@@ -157,7 +159,7 @@ def test_verify_audit_file_refuses_tampered_and_unregistered(tmp_path, synthetic
         pilot.data.verify_audit_file(path, manifest_path=manifest_path)
 
 
-def test_verify_audit_file_refuses_unsafe_manifest_path(tmp_path, synthetic_raw):
+def test_verify_audit_file_refuses_unsafe_manifest_path(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
     with open(manifest_path, encoding="utf-8") as f:
         m = json.load(f)
@@ -169,7 +171,8 @@ def test_verify_audit_file_refuses_unsafe_manifest_path(tmp_path, synthetic_raw)
 
 
 @pytest.mark.parametrize("include_no_intent", [True, False], ids=["default", "no_intent_off"])
-def test_dup_flags_name_only_uids_that_are_in_the_splits(tmp_path, synthetic_raw, include_no_intent):
+def test_dup_flags_name_only_uids_that_are_in_the_splits(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                         include_no_intent: bool) -> None:
     root, raw_sha256 = synthetic_raw()
     # a no-intent test row whose text is in final_train: flagged by default, absent from every split when off
     add_raw_row(root, raw_sha256, "banking", 19, {"uid": "bank_19_9", "text": "Kartım kayboldu 0"})
@@ -186,7 +189,7 @@ def test_dup_flags_name_only_uids_that_are_in_the_splits(tmp_path, synthetic_raw
     assert "bank_19_9" in json.dumps(_load(out_dir, "audit/audit.json"))   # the audit still reports every raw row
 
 
-def test_audit_layout_is_derived_from_splits():
+def test_audit_layout_is_derived_from_splits() -> None:
     layout = pilot.data.audit_layout()
     assert layout["partitions"] == (("selection_train", tuple(range(14))), ("val", (14, 15)),
                                     ("test", (16, 17, 18, 19)))

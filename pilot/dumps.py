@@ -1,29 +1,29 @@
-"""The per-message logit dump: the one record every metric of every system is computed from (EVAL-01).
+"""The per-message logit dump: the one record every metric of every system is computed from.
 
 A dump is results/dumps/<run_id>/<split>.npz plus a JSON sidecar <split>.json next to it.
 - The npz holds exactly two arrays: `logits`, float32 [n, 48] with columns in INTENTS order, and `uids`, a numpy
-  unicode array. Values are never rounded (D-01); rounding happens only when a number is displayed.
-- Logits, not probabilities, are stored (D-02): P(tag) = sigmoid(logit / T), so one inference pass serves the shipped
+  unicode array. Values are never rounded; rounding happens only when a number is displayed.
+- Logits, not probabilities, are stored: P(tag) = sigmoid(logit / T), so one inference pass serves the shipped
   temperature, T = 1 and any later val-fitted temperature without rescoring. Baselines store clipped logits, T = 1.
 - Rows of a full dump stay in split-file order, so sha256 of the newline-joined uids equals the manifest's
   uids_sha256 and proves complete, in-order coverage without reading any message text.
 - The sidecar records provenance (split path/role/sha256, questions_sha256, the INTENTS-order hash, system identity,
   seed, run_id) and dump_sha256, the sha256 of the npz bytes. It holds repo-relative paths and hashes only. A dump of
   a ray_train.py checkpoint also records its training seed and a training block whose config_sha256_sans_seed
-  (training_digest) is shared by the seeds of one recipe (03-REVIEW WR-05).
+  (training_digest) is shared by the seeds of one recipe.
 
-load_dump is the only reader and hard-fails (SystemExit, no override; D-04) on any mismatch: npz bytes vs
+load_dump is the only reader and hard-fails (SystemExit, no override) on any mismatch: npz bytes vs
 dump_sha256, other keys, dtypes or shapes, a pickled array (numpy loads use allow_pickle=False, because a pickled
 array in a committed file would run arbitrary code), a split, questions or tag order that no longer matches the
 manifest and code, a run dir renamed away from its run_id, or a full dump whose uids are not the split's.
 read_gold returns the verified split's gold labels in dump-row order; it reads only the `expected` field.
 
-A dump of the out-of-domain probe (hotels_probe, role ood_probe; EVAL-05) is readable too (READ_ROLES), with every
+A dump of the out-of-domain probe (hotels_probe, role ood_probe) is readable too (READ_ROLES), with every
 check above. Its gold is valid on the manifest's ood_scoring_tags only (the banking-only tags, all of them negative on
 every HOTELS message), so gold_valid_tags names those columns and every 48-tag metric refuses the dump
 (report.run_report, report.compare); only report.py --confidence turns it into the out-of-domain false-positive rate.
 score.py writes one for --model laya or berturk only (majority and prior have no HOTELS training source), a fine-tuned
-checkpoint only through its protocol gate (Phase 8: a final seed of the frozen protocol, once; protocol_sha256 in the
+checkpoint only through its protocol gate (a final seed of the frozen protocol, once; protocol_sha256 in the
 sidecar).
 
 Numpy and stdlib only: no torch, Ray or laya.
@@ -35,6 +35,8 @@ import io
 import json
 import os
 import zipfile
+from collections.abc import Iterable
+from typing import Any, NoReturn
 
 import numpy as np
 
@@ -57,12 +59,12 @@ READ_ROLES = EVAL_ROLES + ("ood_probe",)
 OOD_GOLD = "ood_scoring_tags"                               # the manifest entry's gold_valid_tags value on hotels_probe
 
 
-def intents_order_sha256():
+def intents_order_sha256() -> str:
     """sha256 of the INTENTS tag order (the dump's column order)."""
     return sha256_bytes(json.dumps(TAGS, ensure_ascii=False).encode("utf-8"))
 
 
-def uids_sha256(uids):
+def uids_sha256(uids: Iterable[str]) -> str:
     """sha256 of the newline-joined uids: the same bytes pilot.data hashes into the manifest's uids_sha256."""
     return sha256_bytes("\n".join(uids).encode("utf-8"))
 
@@ -70,11 +72,11 @@ def uids_sha256(uids):
 # the files_sha256 keys every local checkpoint identity must hold (pilot.weights.checkpoint_digests refuses one without
 # them, report.binds_every_file does not count it as bound): without tokenizer/tokenizer_config.json or
 # encoder/config.json laya 0.4.6 reads the tokenizer or the encoder config from the Hub by the config's encoder name,
-# unpinned (04-REVIEW WR-02). The tokenizer config is bound by its normalized JSON (pilot.weights.NORMALIZED_KEY).
+# unpinned. The tokenizer config is bound by its normalized JSON (pilot.weights.NORMALIZED_KEY).
 LOCAL_REQUIRED_FILES = ("encoder/config.json", "tokenizer/tokenizer_config.json#normalized")
 
 
-def files_digest(files_sha256):
+def files_digest(files_sha256: dict[str, str]) -> str:
     """sha256 of the sorted, compact JSON of a local identity's files_sha256 (tokenizer/ and encoder/ digests)."""
     blob = json.dumps(files_sha256, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -84,8 +86,8 @@ def files_digest(files_sha256):
 SEED_KEYS = ("seed", "neg_seed")
 
 
-def training_digest(canonical, epoch):
-    """config_sha256_sans_seed of a ray_train.py checkpoint (03-REVIEW WR-05): the sha256 of the compact, sorted JSON
+def training_digest(canonical: dict[str, Any], epoch: int | None) -> str:
+    """config_sha256_sans_seed of a ray_train.py checkpoint: the sha256 of the compact, sorted JSON
     of its canonical run config without SEED_KEYS, plus the checkpoint's epoch. Two seeds of one recipe share it; any
     other hyperparameter, the training split or the epoch changes it, so report.py --compare averages only seeds."""
     blob = json.dumps({"canonical": {k: v for k, v in canonical.items() if k not in SEED_KEYS}, "epoch": epoch},
@@ -93,12 +95,12 @@ def training_digest(canonical, epoch):
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def run_id(kind, ident=None):
+def run_id(kind: str, ident: dict[str, Any] | None = None) -> str:
     """Stable, config-derived run id: majority, prior, laya-zeroshot-<revision[:8]> (the pinned checkpoint) or
     laya-<model_sha256[:12]>-<config_sha256[:8]>-<files_digest(files_sha256)[:8]> (a local checkpoint: weights,
     rl_agent_config.json, which carries the served temperature, max_len and calibration, and tokenizer/ and encoder/,
-    so two checkpoints that differ in any file laya.load reads never share a dump dir; 03-REVIEW WR-01, 04-REVIEW
-    IN-05). SystemExit on a local identity without config_sha256 or files_sha256."""
+    so two checkpoints that differ in any file laya.load reads never share a dump dir). SystemExit on a local identity
+    without config_sha256 or files_sha256. A BERTurk checkpoint's dump run id is pilot.berturk.dump_run_id."""
     if kind in ("majority", "prior"):
         return kind
     if kind == "laya" and isinstance(ident, dict):
@@ -116,12 +118,15 @@ def run_id(kind, ident=None):
     raise SystemExit("unknown system %r; expected majority, prior or laya" % (kind,))
 
 
-def _sidecar_bytes(sidecar):
+def _sidecar_bytes(sidecar: dict[str, Any]) -> bytes:
+    """The sidecar's file bytes: indent 2, sorted keys, ensure_ascii False, one trailing newline."""
     return (json.dumps(sidecar, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def write_dump(run_dir, split_name, logits, uids, sidecar):
-    """Write run_dir/<split>.npz then run_dir/<split>.json (last, so a sidecar only describes a complete npz)."""
+def write_dump(run_dir: str, split_name: str, logits: np.ndarray, uids: Iterable[str], sidecar: dict[str, Any]) -> str:
+    """Write run_dir/<split>.npz then run_dir/<split>.json (last, so a sidecar only describes a complete npz); returns
+    the npz path. SystemExit on malformed logits or uids (non-float32, wrong shape, non-finite, empty or repeated
+    uids). The sidecar gains schema_version and dump_sha256."""
     uids = list(uids)
     reason = None
     if not isinstance(logits, np.ndarray) or logits.dtype != np.float32:
@@ -149,15 +154,17 @@ def write_dump(run_dir, split_name, logits, uids, sidecar):
     return path
 
 
-def load_dump(run_dir, split_name, manifest_path=DEFAULT_MANIFEST):
-    """(logits, uids, sidecar, manifest entry) of a verified dump; SystemExit on any mismatch (D-04)."""
+def load_dump(run_dir: str, split_name: str,
+              manifest_path: str = DEFAULT_MANIFEST) -> tuple[np.ndarray, list[str], dict[str, Any], dict[str, Any]]:
+    """(logits, uids, sidecar, manifest entry) of a verified dump; SystemExit on any mismatch."""
     npz = os.path.join(run_dir, split_name + ".npz")
     side_path = os.path.join(run_dir, split_name + ".json")
     for p in (npz, side_path):
         if not os.path.isfile(p):
             raise SystemExit("%s not found; run score.py to write the dump" % p)
 
-    def refuse(what):
+    def refuse(what: str) -> NoReturn:
+        """SystemExit naming the npz and the mismatch."""
         raise SystemExit("%s: %s; rescore with score.py" % (npz, what))
 
     try:
@@ -186,7 +193,7 @@ def load_dump(run_dir, split_name, manifest_path=DEFAULT_MANIFEST):
         if keys != set(DUMP_KEYS):
             refuse("npz keys %s, expected exactly %s" % (sorted(keys), list(DUMP_KEYS)))
         logits, uids = z["logits"], z["uids"]
-    except (ValueError, OSError, EOFError, zipfile.BadZipFile) as e:   # 03-REVIEW IN-03: one line, never a traceback
+    except (ValueError, OSError, EOFError, zipfile.BadZipFile) as e:   # one line, never a traceback
         text = " ".join(str(e).split())
         if isinstance(e, ValueError) and "allow_pickle" in text:
             refuse("the npz holds a pickled array (object dtype); refusing (%s)" % text)
@@ -230,7 +237,7 @@ def load_dump(run_dir, split_name, manifest_path=DEFAULT_MANIFEST):
     return logits, uids, side, entry
 
 
-def read_gold(entry, manifest_path, uids):
+def read_gold(entry: dict[str, Any], manifest_path: str, uids: list[str]) -> np.ndarray:
     """bool [len(uids), 48] gold labels of the verified split, in dump-row order (only `expected` is read)."""
     path = os.path.join(os.path.dirname(os.path.realpath(manifest_path)), entry["path"])
     if not os.path.isfile(path):
@@ -247,7 +254,7 @@ def read_gold(entry, manifest_path, uids):
                                                                                                        len(TAGS))
 
 
-def gold_valid_tags(entry, manifest_path=DEFAULT_MANIFEST):
+def gold_valid_tags(entry: dict[str, Any], manifest_path: str = DEFAULT_MANIFEST) -> list[str]:
     """The tags whose gold is valid on the split of manifest `entry`, in INTENTS order: all 48 for a banking split (no
     gold_valid_tags key), the manifest's ood_scoring_tags for hotels_probe (gold_valid_tags "ood_scoring_tags": the
     banking-only tags, the only columns an out-of-domain false positive is counted on). SystemExit on any other

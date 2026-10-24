@@ -1,12 +1,14 @@
 """Real-data checks against the pinned Multi3NLU++ download (data marker; network on the first run only).
 
-The pinned snapshot must verify against all 40 raw fold hashes, give the research split counts with and without
+The pinned snapshot must verify against all 40 raw fold hashes, give the documented split counts with and without
 no-intent rows, produce the 1,009-message HOTELS probe with the 22 banking-only scoring tags and 3,080 unique raw uids,
-report the research duplicate audit numbers and flag lists (DATA-04), and a fresh prepare into a tmp dir must
-reproduce the committed data/splits.json byte for byte.
+report the known duplicate audit numbers and flag lists, and a fresh prepare into a tmp dir must reproduce the
+committed data/splits.json byte for byte.
 """
 import json
 import os
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,23 +21,23 @@ SPLIT_NAMES = ("selection_train", "val", "final_train", "test")
 
 
 @pytest.fixture(scope="module")
-def raw_root():
+def raw_root() -> str:
     return pilot.data.fetch_raw()
 
 
 @pytest.fixture(scope="module")
-def default_run(raw_root, tmp_path_factory):
+def default_run(raw_root: str, tmp_path_factory: pytest.TempPathFactory) -> tuple[str, dict[str, Any]]:
     out_dir = str(tmp_path_factory.mktemp("real_default"))
     return out_dir, pilot.data.prepare(raw_root, out_dir, pins.RAW_SHA256, ood_tags=pins.OOD_SCORING_TAGS)
 
 
-def test_pinned_snapshot_verifies_all_raw_hashes(raw_root):
+def test_pinned_snapshot_verifies_all_raw_hashes(raw_root: str) -> None:
     assert os.path.basename(os.path.realpath(raw_root)) == pins.DATASET_REVISION
     assert len(pins.RAW_SHA256) == 40
     pilot.data.verify_raw(raw_root, pins.RAW_SHA256)
 
 
-def test_real_counts_with_no_intent_rows(default_run):
+def test_real_counts_with_no_intent_rows(default_run: tuple[str, dict[str, Any]]) -> None:
     _, m = default_run
     s = m["splits"]
     assert [s[k]["n_messages"] for k in SPLIT_NAMES] == [1450, 208, 1658, 413]
@@ -43,7 +45,7 @@ def test_real_counts_with_no_intent_rows(default_run):
     assert m["options"]["include_no_intent"] is True
 
 
-def test_real_counts_without_no_intent_rows(raw_root, tmp_path):
+def test_real_counts_without_no_intent_rows(raw_root: str, tmp_path: Path) -> None:
     m = pilot.data.prepare(raw_root, str(tmp_path / "off"), pins.RAW_SHA256, include_no_intent=False,
                            ood_tags=pins.OOD_SCORING_TAGS)
     s = m["splits"]
@@ -53,7 +55,7 @@ def test_real_counts_without_no_intent_rows(raw_root, tmp_path):
     assert m["options"]["include_no_intent"] is False
 
 
-def test_fresh_prepare_reproduces_committed_manifest(default_run):
+def test_fresh_prepare_reproduces_committed_manifest(default_run: tuple[str, dict[str, Any]]) -> None:
     out_dir, _ = default_run
     with open(os.path.join(out_dir, "splits.json"), "rb") as f:
         fresh = f.read()
@@ -62,10 +64,10 @@ def test_fresh_prepare_reproduces_committed_manifest(default_run):
     assert fresh == committed
 
 
-def test_real_test_split_is_disjoint_from_training(default_run):
+def test_real_test_split_is_disjoint_from_training(default_run: tuple[str, dict[str, Any]]) -> None:
     out_dir, _ = default_run
 
-    def uids(name):
+    def uids(name: str) -> list[str]:
         with open(os.path.join(out_dir, "splits", "%s.jsonl" % name), encoding="utf-8") as f:
             return [json.loads(l)["uid"] for l in f]
 
@@ -74,7 +76,7 @@ def test_real_test_split_is_disjoint_from_training(default_run):
     assert uids("final_train") == uids("selection_train") + uids("val")
 
 
-def test_real_hotels_probe(default_run):
+def test_real_hotels_probe(default_run: tuple[str, dict[str, Any]]) -> None:
     out_dir, m = default_run
     e = m["splits"]["hotels_probe"]
     assert (e["n_messages"], e["n_no_intent"], e["role"]) == (1009, 274, "ood_probe")
@@ -97,13 +99,13 @@ NORMALIZED_TEST_FLAGS = ["bank_16_85", "bank_16_88", "bank_17_80", "bank_17_85",
 NORMALIZED_VAL_FLAGS = ["bank_14_16", "bank_14_75", "bank_14_81", "bank_14_85"]
 
 
-def test_real_audit_numbers_and_flags(default_run):
+def test_real_audit_numbers_and_flags(default_run: tuple[str, dict[str, Any]]) -> None:
     out_dir, m = default_run
     manifest_path = os.path.join(out_dir, "splits.json")
     for e in m["audit"].values():
         pilot.data.verify_audit_file(os.path.join(out_dir, e["path"]), manifest_path=manifest_path)
 
-    def load(rel):
+    def load(rel: str) -> Any:
         with open(os.path.join(out_dir, rel), encoding="utf-8") as f:
             return json.load(f)
 

@@ -1,15 +1,18 @@
-"""Split contract of pilot.data on the synthetic snapshot: the no-intent flag (D-10), fold mapping, leakage
-disjointness, row schema, ordering, one row per raw message (D-12), determinism and raw-hash refusal (D-01).
+"""Split contract of pilot.data on the synthetic snapshot: the no-intent flag, fold mapping, leakage disjointness,
+row schema, ordering, one row per raw message (nothing deduplicated), determinism and raw-hash refusal.
 
 Every test works in tmp_path; the repo's data/ is never touched.
 """
 import json
 import os
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 import pilot.data
-from conftest import prepared
+from conftest import SyntheticRaw, prepared
 from intents import INTENTS, QUESTIONS
 
 pytestmark = pytest.mark.unit
@@ -18,34 +21,34 @@ SPLIT_NAMES = ("selection_train", "val", "final_train", "test")
 NO_INTENT_UIDS = {"bank_3_1": "selection_train", "bank_15_1": "val", "bank_18_1": "test"}
 
 
-def _split(out_dir, name):
+def _split(out_dir: str, name: str) -> str:
     return os.path.join(out_dir, "splits", "%s.jsonl" % name)
 
 
-def _read(path):
+def _read(path: str) -> bytes:
     with open(path, "rb") as f:
         return f.read()
 
 
-def _rows(out_dir, name):
+def _rows(out_dir: str, name: str) -> list[dict[str, Any]]:
     with open(_split(out_dir, name), encoding="utf-8") as f:
         return [json.loads(l) for l in f]
 
 
-def _uids(out_dir, name):
+def _uids(out_dir: str, name: str) -> list[str]:
     return [r["uid"] for r in _rows(out_dir, name)]
 
 
-def _manifest(manifest_path):
+def _manifest(manifest_path: str) -> dict[str, Any]:
     with open(manifest_path, encoding="utf-8") as f:
         return json.load(f)
 
 
-def _fold(uid):
+def _fold(uid: str) -> int:
     return int(uid.split("_")[1])
 
 
-def _edit_fold(root, raw_sha256, rel, edit):
+def _edit_fold(root: str, raw_sha256: dict[str, str], rel: str, edit: Callable[[list[dict[str, Any]]], object]) -> None:
     """Rewrite one raw fold with edit(rows) and re-pin its sha256 so only the edit is under test."""
     path = os.path.join(root, rel)
     with open(path, encoding="utf-8") as f:
@@ -56,9 +59,9 @@ def _edit_fold(root, raw_sha256, rel, edit):
     raw_sha256[rel] = pilot.data.sha256_file(path)
 
 
-# --- no-intent flag (D-10, DATA-01) ---------------------------------------------------------------------------
+# --- no-intent flag ---------------------------------------------------------------------------------------------
 
-def test_no_intent_rows_kept_by_default_as_all_negative(tmp_path, synthetic_raw):
+def test_no_intent_rows_kept_by_default_as_all_negative(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
     for uid, split in NO_INTENT_UIDS.items():
         by_uid = {r["uid"]: r for r in _rows(out_dir, split)}
@@ -69,7 +72,7 @@ def test_no_intent_rows_kept_by_default_as_all_negative(tmp_path, synthetic_raw)
     assert _manifest(manifest_path)["options"]["include_no_intent"] is True
 
 
-def test_no_intent_flag_off_drops_exactly_those_rows(tmp_path, synthetic_raw):
+def test_no_intent_flag_off_drops_exactly_those_rows(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     on_dir, _ = prepared(tmp_path, synthetic_raw, name="on")
     root, raw_sha256 = synthetic_raw()
     off_dir = str(tmp_path / "off")
@@ -84,10 +87,10 @@ def test_no_intent_flag_off_drops_exactly_those_rows(tmp_path, synthetic_raw):
     assert _manifest(os.path.join(off_dir, "splits.json"))["options"]["include_no_intent"] is False
 
 
-def test_no_intent_null_and_empty_list_behave_like_absent_key(tmp_path, synthetic_raw):
+def test_no_intent_null_and_empty_list_behave_like_absent_key(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     root, raw_sha256 = synthetic_raw()
 
-    def add(rows):
+    def add(rows: list[dict[str, Any]]) -> None:
         rows.append({"uid": "bank_6_1", "text": "Tamamdır", "intents": None, "lang": "tr"})
         rows.append({"uid": "bank_6_2", "text": "Peki o zaman", "intents": [], "lang": "tr"})
 
@@ -104,7 +107,7 @@ def test_no_intent_null_and_empty_list_behave_like_absent_key(tmp_path, syntheti
 
 
 @pytest.mark.parametrize("text", ["", 7, None], ids=["empty", "int", "null"])
-def test_no_intent_edge_bad_text_hard_fails(tmp_path, synthetic_raw, text):
+def test_no_intent_edge_bad_text_hard_fails(tmp_path: Path, synthetic_raw: SyntheticRaw, text: object) -> None:
     root, raw_sha256 = synthetic_raw()
     _edit_fold(root, raw_sha256, "turkish/banking/fold4.json",
                lambda rows: rows.append({"uid": "bank_4_9", "text": text, "lang": "tr"}))
@@ -113,7 +116,7 @@ def test_no_intent_edge_bad_text_hard_fails(tmp_path, synthetic_raw, text):
     assert not os.path.exists(str(tmp_path / "data"))
 
 
-def test_no_intent_edge_unknown_banking_tag_hard_fails(tmp_path, synthetic_raw):
+def test_no_intent_edge_unknown_banking_tag_hard_fails(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     root, raw_sha256 = synthetic_raw()
     _edit_fold(root, raw_sha256, "turkish/banking/fold11.json",
                lambda rows: rows.append({"uid": "bank_11_9", "text": "Kripto almak istiyorum",
@@ -123,9 +126,9 @@ def test_no_intent_edge_unknown_banking_tag_hard_fails(tmp_path, synthetic_raw):
     assert not os.path.exists(str(tmp_path / "data"))
 
 
-# --- fold mapping and leakage (DATA-02) -----------------------------------------------------------------------
+# --- fold mapping and leakage ----------------------------------------------------------------------------------
 
-def test_fold_mapping_is_exact(tmp_path, synthetic_raw):
+def test_fold_mapping_is_exact(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
     want = {"selection_train": set(range(14)), "val": {14, 15}, "final_train": set(range(16)),
             "test": {16, 17, 18, 19}}
@@ -139,14 +142,14 @@ def test_fold_mapping_is_exact(tmp_path, synthetic_raw):
         "selection_train": "train", "val": "val", "final_train": "train", "test": "test"}
 
 
-def test_final_train_is_selection_train_then_val(tmp_path, synthetic_raw):
+def test_final_train_is_selection_train_then_val(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, _ = prepared(tmp_path, synthetic_raw)
     assert _uids(out_dir, "final_train") == _uids(out_dir, "selection_train") + _uids(out_dir, "val")
     assert _read(_split(out_dir, "final_train")) == _read(_split(out_dir, "selection_train")) + _read(
         _split(out_dir, "val"))
 
 
-def test_test_and_val_uids_are_disjoint_from_their_training_splits(tmp_path, synthetic_raw):
+def test_test_and_val_uids_are_disjoint_from_their_training_splits(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, _ = prepared(tmp_path, synthetic_raw)
     assert not set(_uids(out_dir, "test")) & set(_uids(out_dir, "final_train"))
     assert not set(_uids(out_dir, "val")) & set(_uids(out_dir, "selection_train"))
@@ -155,7 +158,7 @@ def test_test_and_val_uids_are_disjoint_from_their_training_splits(tmp_path, syn
         assert len(uids) == len(set(uids)), name
 
 
-def test_hotels_rows_never_enter_banking_splits(tmp_path, synthetic_raw):
+def test_hotels_rows_never_enter_banking_splits(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, _ = prepared(tmp_path, synthetic_raw)
     for name in SPLIT_NAMES:
         assert not [u for u in _uids(out_dir, name) if not u.startswith("bank_")], name
@@ -165,7 +168,7 @@ def test_hotels_rows_never_enter_banking_splits(tmp_path, synthetic_raw):
 
 # --- row schema, ordering, one row per message ----------------------------------------------------------------
 
-def test_row_schema_and_intents_order(tmp_path, synthetic_raw):
+def test_row_schema_and_intents_order(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, _ = prepared(tmp_path, synthetic_raw)
     for name in SPLIT_NAMES:
         with open(_split(out_dir, name), encoding="utf-8") as f:
@@ -183,7 +186,7 @@ def test_row_schema_and_intents_order(tmp_path, synthetic_raw):
         k for k in INTENTS if k in ("account", "current")]
 
 
-def test_rows_follow_fold_then_in_fold_order(tmp_path, synthetic_raw):
+def test_rows_follow_fold_then_in_fold_order(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     root, raw_sha256 = synthetic_raw()
     # shuffle the in-fold order of one fold so "sorted by uid" and "original order" disagree
     _edit_fold(root, raw_sha256, "turkish/banking/fold2.json", lambda rows: rows.reverse())
@@ -199,7 +202,7 @@ def test_rows_follow_fold_then_in_fold_order(tmp_path, synthetic_raw):
         assert _uids(out_dir, name) == [u for i in rng for u in folds[i]], name
 
 
-def test_one_row_per_raw_message_nothing_merged(tmp_path, synthetic_raw):
+def test_one_row_per_raw_message_nothing_merged(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     root, raw_sha256 = synthetic_raw()
     _edit_fold(root, raw_sha256, "turkish/banking/fold1.json",       # exact duplicate text inside one split
                lambda rows: rows.append({"uid": "bank_1_1", "text": "Kartım kayboldu 1",
@@ -215,15 +218,15 @@ def test_one_row_per_raw_message_nothing_merged(tmp_path, synthetic_raw):
         assert m["splits"][name]["n_messages"] == len(_uids(out_dir, name)) == want, name
     states = {name: [r["state"] for r in _rows(out_dir, name)] for name in SPLIT_NAMES}
     assert states["selection_train"].count("Kartım kayboldu 1") == 2
-    assert "Evet." in states["selection_train"] and "evet" in states["test"]          # D-11 near-dup, both kept
+    assert "Evet." in states["selection_train"] and "evet" in states["test"]          # normalized near-dup, both kept
     assert "İptal etmek istiyorum" in states["selection_train"] and "iptal etmek istiyorum" in states["test"]
     assert "cari hesap" in states["selection_train"] and "Cari hesap." in states["selection_train"]
 
 
-# --- determinism and raw-hash refusal (D-01) ------------------------------------------------------------------
+# --- determinism and raw-hash refusal ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("include_no_intent", [True, False], ids=["default", "no_intent_off"])
-def test_two_runs_give_identical_bytes(tmp_path, synthetic_raw, include_no_intent):
+def test_two_runs_give_identical_bytes(tmp_path: Path, synthetic_raw: SyntheticRaw, include_no_intent: bool) -> None:
     root, raw_sha256 = synthetic_raw()
     a, b = str(tmp_path / "a"), str(tmp_path / "b")
     pilot.data.prepare(root, a, raw_sha256, include_no_intent=include_no_intent)
@@ -233,7 +236,7 @@ def test_two_runs_give_identical_bytes(tmp_path, synthetic_raw, include_no_inten
         assert _read(_split(a, name)) == _read(_split(b, name)), name
 
 
-def test_one_byte_raw_change_hard_fails_before_any_output(tmp_path, synthetic_raw):
+def test_one_byte_raw_change_hard_fails_before_any_output(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     root, raw_sha256 = synthetic_raw()                      # raw_sha256 stays the OLD pin, as with --data-dir
     rel = "turkish/banking/fold12.json"
     path = os.path.join(root, rel)
@@ -251,7 +254,7 @@ def test_one_byte_raw_change_hard_fails_before_any_output(tmp_path, synthetic_ra
     assert not [p for p in out_dir.rglob("*") if p.is_file()]
 
 
-def test_flag_off_refuses_to_overwrite_a_default_manifest(tmp_path, synthetic_raw):
+def test_flag_off_refuses_to_overwrite_a_default_manifest(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
     before = {p: _read(p) for p in [manifest_path] + [_split(out_dir, n) for n in SPLIT_NAMES]}
     root, raw_sha256 = synthetic_raw()
@@ -260,14 +263,15 @@ def test_flag_off_refuses_to_overwrite_a_default_manifest(tmp_path, synthetic_ra
     assert {p: _read(p) for p in before} == before
 
 
-# --- HOTELS out-of-domain probe (DATA-05, D-08, D-09) ---------------------------------------------------------
+# --- HOTELS out-of-domain probe ---------------------------------------------------------------------------------
 
-def _raw_uids(root, domain, fold):
+def _raw_uids(root: str, domain: str, fold: int) -> list[str]:
     with open(os.path.join(root, "turkish", domain, "fold%d.json" % fold), encoding="utf-8") as f:
         return [r["uid"] for r in json.load(f)]
 
 
-def test_hotels_probe_holds_every_raw_hotel_row_all_false_in_fold_order(tmp_path, synthetic_raw):
+def test_hotels_probe_holds_every_raw_hotel_row_all_false_in_fold_order(tmp_path: Path,
+                                                                        synthetic_raw: SyntheticRaw) -> None:
     root, raw_sha256 = synthetic_raw()
     # reverse one hotel fold so "original in-fold order" and "sorted by uid" disagree
     _edit_fold(root, raw_sha256, "turkish/hotels/fold7.json", lambda rows: rows.reverse())
@@ -288,7 +292,7 @@ def test_hotels_probe_holds_every_raw_hotel_row_all_false_in_fold_order(tmp_path
                                         manifest_path=os.path.join(out_dir, "splits.json")) == e
 
 
-def test_hotels_probe_ignores_the_no_intent_flag(tmp_path, synthetic_raw):
+def test_hotels_probe_ignores_the_no_intent_flag(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     on_dir, _ = prepared(tmp_path, synthetic_raw, name="on")
     root, raw_sha256 = synthetic_raw()
     off_dir = str(tmp_path / "off")
@@ -298,13 +302,14 @@ def test_hotels_probe_ignores_the_no_intent_flag(tmp_path, synthetic_raw):
     assert (m["splits"]["hotels_probe"]["n_messages"], m["splits"]["hotels_probe"]["n_no_intent"]) == (22, 1)
 
 
-def test_hotels_text_equal_to_banking_text_stays_in_both(tmp_path, synthetic_raw):
+def test_hotels_text_equal_to_banking_text_stays_in_both(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     out_dir, _ = prepared(tmp_path, synthetic_raw)
     assert [r["uid"] for r in _rows(out_dir, "hotels_probe") if r["state"] == "Evet."] == ["hotel_7_1"]
     assert [r["uid"] for r in _rows(out_dir, "selection_train") if r["state"] == "Evet."] == ["bank_0_1"]
 
 
-def test_hotels_probe_uids_disjoint_from_banking_and_refused_for_training(tmp_path, synthetic_raw):
+def test_hotels_probe_uids_disjoint_from_banking_and_refused_for_training(tmp_path: Path,
+                                                                          synthetic_raw: SyntheticRaw) -> None:
     out_dir, manifest_path = prepared(tmp_path, synthetic_raw)
     probe = set(_uids(out_dir, "hotels_probe"))
     assert probe and all(u.startswith("hotel_") for u in probe)
@@ -314,7 +319,7 @@ def test_hotels_probe_uids_disjoint_from_banking_and_refused_for_training(tmp_pa
         pilot.data.verify_split_file(_split(out_dir, "hotels_probe"), manifest_path=manifest_path, roles=("train",))
 
 
-def test_hotels_ood_scoring_tags_rederived_and_drift_refused(tmp_path, synthetic_raw):
+def test_hotels_ood_scoring_tags_rederived_and_drift_refused(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     root, raw_sha256 = synthetic_raw()
     derived = sorted(set(INTENTS) - {"affirm"})                          # synthetic hotel tags: booking, affirm
     m = pilot.data.prepare(root, str(tmp_path / "a"), raw_sha256)
@@ -326,15 +331,15 @@ def test_hotels_ood_scoring_tags_rederived_and_drift_refused(tmp_path, synthetic
     assert not os.path.exists(str(tmp_path / "c"))
 
 
-# --- uid uniqueness across banking + HOTELS (D-14) ------------------------------------------------------------
+# --- uid uniqueness across banking + HOTELS ---------------------------------------------------------------------
 
-def _assert_nothing_written(out_dir):
+def _assert_nothing_written(out_dir: str) -> None:
     written = [os.path.join(d, f) for d, _, fs in os.walk(out_dir) for f in fs]
     assert not os.path.exists(os.path.join(out_dir, "splits.json"))
     assert not [p for p in written if p.endswith(".jsonl")], written
 
 
-def test_duplicate_uid_within_banking_hard_fails_before_any_write(tmp_path, synthetic_raw):
+def test_duplicate_uid_within_banking_hard_fails_before_any_write(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     root, raw_sha256 = synthetic_raw(dup_uid="within")
     out_dir = str(tmp_path / "data")
     os.makedirs(out_dir)
@@ -343,7 +348,8 @@ def test_duplicate_uid_within_banking_hard_fails_before_any_write(tmp_path, synt
     _assert_nothing_written(out_dir)
 
 
-def test_duplicate_uid_across_banking_and_hotels_hard_fails_before_any_write(tmp_path, synthetic_raw):
+def test_duplicate_uid_across_banking_and_hotels_hard_fails_before_any_write(tmp_path: Path,
+                                                                             synthetic_raw: SyntheticRaw) -> None:
     root, raw_sha256 = synthetic_raw(dup_uid="cross")
     out_dir = str(tmp_path / "data")
     os.makedirs(out_dir)
@@ -352,7 +358,7 @@ def test_duplicate_uid_across_banking_and_hotels_hard_fails_before_any_write(tmp
     _assert_nothing_written(out_dir)
 
 
-def test_uid_check_counts_each_raw_message_once(tmp_path, synthetic_raw):
+def test_uid_check_counts_each_raw_message_once(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     _, manifest_path = prepared(tmp_path, synthetic_raw)
     # 20 + 9 banking rows, 20 + 2 hotel rows; the overlapping derived splits are not double-counted
     assert _manifest(manifest_path)["uid_check"] == {"n_rows": 51, "n_unique": 51}

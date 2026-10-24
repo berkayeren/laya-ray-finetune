@@ -13,8 +13,8 @@ outside score.py's protocol gate, --n 0 or negative, and a --checkpoint that is 
 pinned, sha256-verified hub weights) nor a local Laya checkpoint dir, and an existing dump without --force.
 
 The dump lands under --out-root/RUN_ID. Without --out-root that is a fresh temp dir (printed on the console), so
-evaluate.py never writes the committed results/dumps unless asked (03-REVIEW WR-03): replacing a committed dump takes
---out-root results/dumps --force. --n scores a debug subset (never under results/dumps). --device (cpu, mps or cuda)
+evaluate.py never writes the committed results/dumps unless asked: replacing a committed dump takes --out-root
+results/dumps --force. --n scores a debug subset (never under results/dumps). --device (cpu, mps or cuda)
 and --force are forwarded to score.py only when given. The report's val-selected θ needs a full val dump in the same
 run dir: score val into a dir first and pass that dir as --out-root; otherwise that row is null with a reason.
 
@@ -29,13 +29,16 @@ import argparse
 import json
 import os
 import tempfile
+from typing import Any
 
 import report
 import score
 from pilot.data import DEFAULT_MANIFEST, write_atomic
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> dict[str, Any]:
+    """Score the split with score.main (--model laya, roles test and val), print report.run_report of the dump and
+    return it; --out also writes the report JSON."""
     ap = argparse.ArgumentParser(description="score a Laya checkpoint on a val/test split and print its report")
     ap.add_argument("split_jsonl")
     ap.add_argument("--checkpoint", default="multilingual",

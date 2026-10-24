@@ -1,11 +1,11 @@
 """score.py --model berturk refuses every wrong input before a model load and writes the sidecar postfit and report
-read (BASE-02; ROADMAP Phase 6 criteria 2 and 4).
+read.
 
-Refusals, each before transformers loads anything and without a dump: a split with role test (before the checkpoint
-is hashed), the hotels_probe split (role gate), a config.json that does not score INTENTS in order as a multi-label
-classifier, a checkpoint missing any of the five files, a berturk_train.json changed after its identity was taken, an
-existing dump without --force, and the argument errors (--workers other than 0, no --checkpoint, --checkpoint
-multilingual). check_bert refuses a float16 model, a model on another device and autocast, after the load and after
+Refusals, each before transformers loads anything and without a dump: a split with role test or ood_probe (the
+protocol gate, before the checkpoint is hashed), a split holding the committed test content under a manifest copy, a
+config.json that does not score INTENTS in order as a multi-label classifier, a checkpoint missing any of the five
+files, a berturk_train.json changed after its identity was taken, an existing dump without --force, and the argument
+errors (--workers other than 0, no --checkpoint, --checkpoint multilingual). check_bert refuses a float16 model, a model on another device and autocast, after the load and after
 every batch. report.binds_every_file accepts a complete BERTurk identity, so a moved checkpoint dir stays the same
 source.
 
@@ -17,6 +17,9 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import Any, NoReturn
 
 import numpy as np
 import pytest
@@ -37,7 +40,7 @@ TIMEOUT = 600
 
 
 @pytest.fixture(scope="module")
-def built(tmp_path_factory):
+def built(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str, str]:
     """(splits dir, manifest path, a 1-epoch CPU export of the tiny base), built once for the module."""
     tmp = tmp_path_factory.mktemp("berturk_score")
     root, raw_sha256 = make_raw(str(tmp / "raw"))
@@ -59,7 +62,7 @@ def built(tmp_path_factory):
 
 
 @pytest.fixture
-def ckpt(built, tmp_path):
+def ckpt(built: tuple[str, str, str], tmp_path: Path) -> str:
     """A private copy of the module's export (tests edit or delete its files)."""
     dst = str(tmp_path / "epoch-001")
     shutil.copytree(built[2], dst)
@@ -67,7 +70,7 @@ def ckpt(built, tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _threads():
+def _threads() -> Iterator[None]:
     import torch
     n = torch.get_num_threads()
     yield
@@ -75,28 +78,28 @@ def _threads():
 
 
 @pytest.fixture
-def no_load(monkeypatch):
+def no_load(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail the test if transformers loads a tokenizer or model (a refusal must come before any load)."""
     import transformers
 
-    def boom(*a, **k):
+    def boom(*a: Any, **k: Any) -> NoReturn:
         raise AssertionError("a model or tokenizer was loaded before the refusal")
     monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", boom)
     monkeypatch.setattr(transformers.BertForSequenceClassification, "from_pretrained", boom)
 
 
-def _score(built, ckpt, root, split="val", *extra):
+def _score(built: tuple[str, str, str], ckpt: str, root: Path, split: str = "val", *extra: str) -> tuple[str, str]:
     splits, manifest, _ = built
     return score.main([os.path.join(splits, split + ".jsonl"), "--model", "berturk", "--checkpoint", ckpt,
                        "--workers", "0", "--manifest", manifest, "--out-root", str(root)] + list(extra))
 
 
-def _no_dump(root):
+def _no_dump(root: Path) -> bool:
     """True when nothing was written under root (no run dir, no npz, no sidecar)."""
     return not os.path.exists(str(root)) or not any(files for _, _, files in os.walk(str(root)))
 
 
-def _edit_json(path, change):
+def _edit_json(path: str, change: Callable[[Any], object]) -> None:
     with open(path, encoding="utf-8") as f:
         obj = json.load(f)
     change(obj)
@@ -106,17 +109,18 @@ def _edit_json(path, change):
 
 # ---- refusals ----
 
-def test_berturk_test_role_refused_before_hashing(built, ckpt, tmp_path, monkeypatch, no_load):
-    def hashed(*a, **k):
+def test_berturk_test_role_refused_before_hashing(built: tuple[str, str, str], ckpt: str, tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch, no_load: None) -> None:
+    def hashed(*a: Any, **k: Any) -> NoReturn:
         raise AssertionError("the BERTurk checkpoint was hashed before the test-role refusal")
     monkeypatch.setattr(berturk, "identity", hashed)
     monkeypatch.setattr(berturk, "require_files", hashed)
-    with pytest.raises(SystemExit, match="Phase 8"):
+    with pytest.raises(SystemExit, match="^protocol gate: "):
         _score(built, ckpt, tmp_path / "dumps", "test")
     assert _no_dump(tmp_path / "dumps")
 
 
-def _relabelled(built, dst, lines):
+def _relabelled(built: tuple[str, str, str], dst: Path, lines: list[bytes]) -> tuple[str, str]:
     """A manifest copy under dst whose val entry registers `lines` (raw JSONL lines) as splits/val.jsonl; every other
     split keeps its bytes. Returns (val path, manifest path)."""
     splits, manifest, _ = built
@@ -133,9 +137,10 @@ def _relabelled(built, dst, lines):
     return str(dst / "splits" / "val.jsonl"), str(dst / "splits.json")
 
 
-def test_berturk_interlock_is_keyed_on_the_test_content(built, ckpt, tmp_path, monkeypatch, no_load):
-    """06-REVIEW CR-01: a manifest copy that registers the committed test bytes (or a part of them) as val is refused
-    before any load, as for Laya (05-REVIEW CR-02). The module's synthetic data stands in for the committed split."""
+def test_berturk_gate_is_keyed_on_the_test_content(built: tuple[str, str, str], ckpt: str, tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch, no_load: None) -> None:
+    """A manifest copy that registers the committed test bytes (or a part of them) as val is refused before any load,
+    as for Laya. The module's synthetic data stands in for the committed split."""
     splits, manifest, _ = built
     monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", manifest)
     with open(os.path.join(splits, "test.jsonl"), "rb") as f:
@@ -149,7 +154,8 @@ def test_berturk_interlock_is_keyed_on_the_test_content(built, ckpt, tmp_path, m
         assert _no_dump(tmp_path / "dumps")
 
 
-def test_berturk_val_under_a_manifest_copy_still_scores(built, ckpt, tmp_path, monkeypatch):
+def test_berturk_val_under_a_manifest_copy_still_scores(built: tuple[str, str, str], ckpt: str, tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
     """The content key leaves val alone: the module's val bytes under a byte-different manifest copy score."""
     splits, manifest, _ = built
     monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", manifest)
@@ -162,28 +168,29 @@ def test_berturk_val_under_a_manifest_copy_still_scores(built, ckpt, tmp_path, m
     assert os.path.isfile(os.path.join(run_dir, "val.npz"))
 
 
-def test_berturk_ood_probe_refused(built, ckpt, tmp_path, no_load):
+def test_berturk_ood_probe_refused(built: tuple[str, str, str], ckpt: str, tmp_path: Path, no_load: None) -> None:
     with pytest.raises(SystemExit, match="role ood_probe"):
         _score(built, ckpt, tmp_path / "dumps", "hotels_probe")
     assert _no_dump(tmp_path / "dumps")
 
 
-def _swap_id2label(cfg):
+def _swap_id2label(cfg: dict[str, Any]) -> None:
     cfg["id2label"]["0"], cfg["id2label"]["1"] = cfg["id2label"]["1"], cfg["id2label"]["0"]
 
 
-def _swap_label2id(cfg):
+def _swap_label2id(cfg: dict[str, Any]) -> None:
     a, b = berturk.TAGS[0], berturk.TAGS[1]
     cfg["label2id"][a], cfg["label2id"][b] = cfg["label2id"][b], cfg["label2id"][a]
 
 
-def _single_label(cfg):
+def _single_label(cfg: dict[str, Any]) -> None:
     cfg["problem_type"] = "single_label_classification"
 
 
 @pytest.mark.parametrize("change", [_swap_id2label, _swap_label2id, _single_label],
                          ids=["id2label", "label2id", "problem_type"])
-def test_berturk_permuted_label_order_refused_before_load(built, ckpt, tmp_path, no_load, change):
+def test_berturk_permuted_label_order_refused_before_load(built: tuple[str, str, str], ckpt: str, tmp_path: Path,
+                                                          no_load: None, change: Callable[[Any], object]) -> None:
     _edit_json(os.path.join(ckpt, "config.json"), change)
     with pytest.raises(SystemExit, match="INTENTS order"):
         _score(built, ckpt, tmp_path / "dumps")
@@ -191,7 +198,8 @@ def test_berturk_permuted_label_order_refused_before_load(built, ckpt, tmp_path,
 
 
 @pytest.mark.parametrize("name", berturk.CHECKPOINT_FILES)
-def test_berturk_missing_file_refused(built, ckpt, tmp_path, no_load, name):
+def test_berturk_missing_file_refused(built: tuple[str, str, str], ckpt: str, tmp_path: Path, no_load: None,
+                                      name: str) -> None:
     os.remove(os.path.join(ckpt, name))
     with pytest.raises(SystemExit, match="lacks %s" % name.replace(".", r"\.")):
         _score(built, ckpt, tmp_path / "dumps")
@@ -201,7 +209,8 @@ def test_berturk_missing_file_refused(built, ckpt, tmp_path, no_load, name):
 @pytest.mark.parametrize("args", [["--checkpoint", "CKPT", "--workers", "1"], ["--checkpoint", "CKPT"],
                                   ["--workers", "0"], ["--checkpoint", "multilingual", "--workers", "0"]],
                          ids=["workers-1", "workers-default", "no-checkpoint", "multilingual"])
-def test_berturk_argument_errors(built, ckpt, tmp_path, no_load, args, capsys):
+def test_berturk_argument_errors(built: tuple[str, str, str], ckpt: str, tmp_path: Path, no_load: None,
+                                 args: list[str], capsys: pytest.CaptureFixture[str]) -> None:
     splits, manifest, _ = built
     argv = [os.path.join(splits, "val.jsonl"), "--model", "berturk", "--manifest", manifest,
             "--out-root", str(tmp_path / "dumps")] + [ckpt if x == "CKPT" else x for x in args]
@@ -212,10 +221,11 @@ def test_berturk_argument_errors(built, ckpt, tmp_path, no_load, args, capsys):
     assert _no_dump(tmp_path / "dumps")
 
 
-def test_berturk_record_changed_after_hash_refused(built, ckpt, tmp_path, monkeypatch, no_load):
+def test_berturk_record_changed_after_hash_refused(built: tuple[str, str, str], ckpt: str, tmp_path: Path,
+                                                   monkeypatch: pytest.MonkeyPatch, no_load: None) -> None:
     real = berturk.identity
 
-    def identity_then_edit(d):
+    def identity_then_edit(d: str) -> dict[str, Any]:
         ident = real(d)
         with open(os.path.join(d, berturk.RECORD), "ab") as f:   # the record changes after its identity was taken
             f.write(b" ")
@@ -226,10 +236,11 @@ def test_berturk_record_changed_after_hash_refused(built, ckpt, tmp_path, monkey
     assert _no_dump(tmp_path / "dumps")
 
 
-def test_berturk_config_changed_after_hash_refused(built, ckpt, tmp_path, monkeypatch, no_load):
+def test_berturk_config_changed_after_hash_refused(built: tuple[str, str, str], ckpt: str, tmp_path: Path,
+                                                   monkeypatch: pytest.MonkeyPatch, no_load: None) -> None:
     real = berturk.identity
 
-    def identity_then_edit(d):
+    def identity_then_edit(d: str) -> dict[str, Any]:
         ident = real(d)
         _edit_json(os.path.join(d, "config.json"), _swap_id2label)
         return ident
@@ -239,7 +250,8 @@ def test_berturk_config_changed_after_hash_refused(built, ckpt, tmp_path, monkey
     assert _no_dump(tmp_path / "dumps")
 
 
-def test_berturk_existing_dump_needs_force(built, ckpt, tmp_path, monkeypatch):
+def test_berturk_existing_dump_needs_force(built: tuple[str, str, str], ckpt: str, tmp_path: Path,
+                                           monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "dumps"
     run_dir, name = _score(built, ckpt, root)
     first = sha256_file(os.path.join(run_dir, name + ".json"))
@@ -247,7 +259,7 @@ def test_berturk_existing_dump_needs_force(built, ckpt, tmp_path, monkeypatch):
     real = transformers.BertForSequenceClassification.from_pretrained.__func__
     loads = []
 
-    def counted(cls, *a, **k):
+    def counted(cls: type, *a: Any, **k: Any) -> Any:
         loads.append(1)
         return real(cls, *a, **k)
     monkeypatch.setattr(transformers.BertForSequenceClassification, "from_pretrained", classmethod(counted))
@@ -261,7 +273,7 @@ def test_berturk_existing_dump_needs_force(built, ckpt, tmp_path, monkeypatch):
 
 # ---- device, dtype and autocast ----
 
-def _tiny_classifier():
+def _tiny_classifier() -> Any:
     import torch
     import transformers
     torch.manual_seed(0)
@@ -271,7 +283,7 @@ def _tiny_classifier():
     return transformers.BertForSequenceClassification(cfg).eval()
 
 
-def test_check_bert_refuses_wrong_dtype_device_or_autocast():
+def test_check_bert_refuses_wrong_dtype_device_or_autocast() -> None:
     import torch
     model = _tiny_classifier()
     assert score.check_bert(model, "cpu") == {"device": "cpu", "dtype": "torch.float32", "amp_enabled": False}
@@ -290,11 +302,12 @@ def test_check_bert_refuses_wrong_dtype_device_or_autocast():
         score.check_bert(mixed, "cpu")
 
 
-def test_check_bert_runs_after_the_load_and_every_batch(built, ckpt, tmp_path, monkeypatch):
+def test_check_bert_runs_after_the_load_and_every_batch(built: tuple[str, str, str], ckpt: str, tmp_path: Path,
+                                                        monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
     real = score.check_bert
 
-    def counted(model, device):
+    def counted(model: Any, device: str) -> Any:
         calls.append(device)
         return real(model, device)
     monkeypatch.setattr(score, "check_bert", counted)
@@ -306,7 +319,7 @@ def test_check_bert_runs_after_the_load_and_every_batch(built, ckpt, tmp_path, m
 
 # ---- the sidecar postfit and report read ----
 
-def _laya_training_keys(tmp_path):
+def _laya_training_keys(tmp_path: Path) -> set[str]:
     """The keys score.training_block writes for a ray_train.py checkpoint (the ones pilot.postfit.candidate reads)."""
     laya = tmp_path / "laya"
     laya.mkdir()
@@ -316,7 +329,7 @@ def _laya_training_keys(tmp_path):
     return set(score.training_block(str(laya), {"config_sha256": sha256_file(str(laya / "rl_agent_config.json"))})[1])
 
 
-def test_berturk_sidecar_matches_the_postfit_contract(built, ckpt, tmp_path):
+def test_berturk_sidecar_matches_the_postfit_contract(built: tuple[str, str, str], ckpt: str, tmp_path: Path) -> None:
     _edit_json(os.path.join(ckpt, berturk.RECORD), lambda r: r.update(temperature=1.3))   # T is read from the record
     with open(os.path.join(ckpt, berturk.RECORD), encoding="utf-8") as f:
         rec = json.load(f)
@@ -337,7 +350,7 @@ def test_berturk_sidecar_matches_the_postfit_contract(built, ckpt, tmp_path):
     assert logits.dtype == np.float32 and logits.shape == (entry["n_messages"], len(INTENTS))
 
 
-def test_report_binds_a_complete_berturk_identity(built, ckpt, tmp_path):
+def test_report_binds_a_complete_berturk_identity(built: tuple[str, str, str], ckpt: str, tmp_path: Path) -> None:
     assert report.BERTURK_FILES == berturk.TOKENIZER_FILES   # report.py is numpy-only: the names are spelled out
     ident = berturk.identity(ckpt)
     assert report.binds_every_file(ident)

@@ -1,15 +1,15 @@
-"""score.py's protocol gate (REP-01; ROADMAP Phase 8 criteria 1 and 4): the one place a model runs opens test and
-HOTELS to the protocol-bound final seeds, once, and to nothing else.
+"""score.py's protocol gate: the one place a model runs opens test and HOTELS to the protocol-bound final seeds, once,
+and test to the listed few-shot checkpoints, once, and to nothing else.
 
-The gate replaced the Phase 5 Laya and Phase 6 BERTurk test interlocks (refuse_finetuned_test, refuse_berturk_test).
-It triggers for a fine-tuned checkpoint on the same content as they did, extended to HOTELS (score.gate_trigger), and
-admits a run only when pilot.protocol.require_frozen passes, no --n, --force or --out-root other than results/dumps is
-given, the manifest is the committed one and names a gated split, the device and worker count are the protocol's, and
-the hashed dump run id is one of the protocol's final seeds of that system or a listed few-shot checkpoint on test
-(score.require_admitted). A listed few-shot checkpoint must re-derive its runs.json entry (score.rederive_entry,
-09-REVIEW WR-01): a well-formed entry swapped to point at a retrained run or at a checkpoint without a Phase 9 binding
-is refused, a byte-identical copy under another dir name is admitted. An admitted dump carries protocol_sha256; an
-existing gated dump, or an npz an interrupted gated run left without its sidecar, is refused.
+The gate triggers for a fine-tuned checkpoint on a test or HOTELS split, or on their committed content under any
+manifest (score.gate_trigger), and admits a run only when pilot.protocol.require_frozen passes, no --n, --force or
+--out-root other than results/dumps is given, the manifest is the committed one and names a gated split, the device
+and worker count are the protocol's, and the hashed dump run id is one of the protocol's final seeds of that system or
+a listed few-shot checkpoint on test (score.require_admitted). A listed few-shot checkpoint must re-derive its
+runs.json entry (score.rederive_entry): a well-formed entry swapped to point at a retrained run or at a checkpoint
+without a few-shot binding is refused, a byte-identical copy under another dir name is admitted. An admitted dump
+carries protocol_sha256; an existing gated dump, or an npz an interrupted gated run left without its sidecar, is
+refused.
 
 Every test runs on the synthetic snapshot with pilot.data.DEFAULT_MANIFEST, pilot.protocol.PROTOCOL_PATH and
 PROTOCOL_SHA256 and pilot.dumps.DUMP_ROOT monkeypatched to temporary stand-ins (fake_protocol writes a minimal
@@ -20,13 +20,17 @@ import json
 import os
 import re
 import shutil
+import types
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import Any, NoReturn
 
 import pytest
 
 import pilot.data
 import pilot.weights
 import score
-from conftest import prepared
+from conftest import SyntheticRaw, prepared
 from pilot import dumps
 from pilot import fewshot as pfs
 from pilot import protocol as pr
@@ -37,7 +41,8 @@ pytestmark = pytest.mark.unit
 TINY_T = 1.3
 
 
-def fake_protocol(path, manifest, systems, device="cpu", workers=0):
+def fake_protocol(path: str | Path, manifest: str, systems: dict[str, list[str]] | None, device: str = "cpu",
+                  workers: int = 0) -> tuple[str, str]:
     """Write a minimal protocol/1 file to `path` and return (path, sha256): every pilot.protocol.REQUIRED_KEYS entry,
     the splits of `manifest` (pilot.protocol.splits_block: the manifest must be the monkeypatched committed one),
     systems {kind: [dump run id, ...]} as final seeds 0, 1, ... and a scoring block on `device` with `workers`."""
@@ -52,7 +57,7 @@ def fake_protocol(path, manifest, systems, device="cpu", workers=0):
     return str(path), pilot.data.sha256_bytes(raw)
 
 
-def finetuned(path, temperature=TINY_T):
+def finetuned(path: str | Path, temperature: float = TINY_T) -> str:
     """A tiny Laya checkpoint marked fine-tuned (rl_agent_config.json fine_tuned true); returns its dir."""
     ckpt = tiny_checkpoint(path, temperature=temperature)
     cfg_path = os.path.join(ckpt, "rl_agent_config.json")
@@ -69,15 +74,15 @@ class Snap:
     dump run id and a temp protocol binding it under systems.laya."""
 
 
-def no_fewshot_runs(monkeypatch, tmp_path):
-    """The Phase 8 benches have no few-shot allow-list: pilot.fewshot.RUNS_PATH points at a temp path that does not
+def no_fewshot_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The final-seed benches have no few-shot allow-list: pilot.fewshot.RUNS_PATH points at a temp path that does not
     exist, so a refused final-seed checkpoint is refused as unlisted, never by a check of the committed
-    results/fewshot/runs.json (written under the real pin, 09-11) against the synthetic protocol."""
+    results/fewshot/runs.json (written under the real pin) against the synthetic protocol."""
     monkeypatch.setattr(pfs, "RUNS_PATH", str(tmp_path / "no-fewshot" / "runs.json"))
 
 
 @pytest.fixture
-def snap(tmp_path, synthetic_raw, monkeypatch):
+def snap(tmp_path: Path, synthetic_raw: SyntheticRaw, monkeypatch: pytest.MonkeyPatch) -> Iterator[Snap]:
     import torch
     threads = torch.get_num_threads()
     s = Snap()
@@ -95,23 +100,24 @@ def snap(tmp_path, synthetic_raw, monkeypatch):
     torch.set_num_threads(threads)
 
 
-def _bind(monkeypatch, s, systems, device, workers):
+def _bind(monkeypatch: pytest.MonkeyPatch, s: Snap, systems: dict[str, list[str]] | None, device: str,
+          workers: int) -> tuple[str, str]:
     path, sha = fake_protocol(s.tmp / "protocol.json", s.manifest, systems or {"laya": [s.rid]}, device, workers)
     monkeypatch.setattr(pr, "PROTOCOL_PATH", path)
     monkeypatch.setattr(pr, "PROTOCOL_SHA256", sha)
     return path, sha
 
 
-def split(s, name):
+def split(s: Snap, name: str) -> str:
     return os.path.join(s.out_dir, "splits", name + ".jsonl")
 
 
-def laya_argv(s, name, *extra, ckpt=None):
+def laya_argv(s: Snap, name: str, *extra: str, ckpt: str | None = None) -> list[str]:
     return [split(s, name), "--model", "laya", "--checkpoint", ckpt or s.ckpt, "--workers", "0", "--device", "cpu",
             "--manifest", s.manifest] + list(extra)
 
 
-def files(root):
+def files(root: str | Path) -> list[str]:
     """Every file under root (relative paths), for 'nothing was written' checks."""
     out = []
     for d, _, names in os.walk(str(root)):
@@ -119,7 +125,7 @@ def files(root):
     return sorted(out)
 
 
-def refused(argv, *needles):
+def refused(argv: list[str], *needles: str) -> str:
     """Run score.main(argv); assert a one-line gate refusal holding every needle; return its text."""
     with pytest.raises(SystemExit) as e:
         score.main(argv)
@@ -131,26 +137,26 @@ def refused(argv, *needles):
     return text
 
 
-def no_identity(monkeypatch):
-    def boom(*a, **k):
+def no_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: Any, **k: Any) -> NoReturn:
         raise AssertionError("the checkpoint was hashed before the gate refused")
     monkeypatch.setattr(pilot.weights, "identity", boom)
 
 
-def no_laya_load(monkeypatch):
-    def boom(*a, **k):
+def no_laya_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: Any, **k: Any) -> NoReturn:
         raise AssertionError("the checkpoint was loaded before the gate refused")
     monkeypatch.setattr(score, "load_agent", boom)
 
 
-def sidecar(run_dir, name):
+def sidecar(run_dir: str, name: str) -> dict[str, Any]:
     with open(os.path.join(run_dir, name + ".json"), encoding="utf-8") as f:
         return json.load(f)
 
 
 # ---- admitted, once ----
 
-def test_gate_admits_a_bound_final_seed_once(snap, monkeypatch):
+def test_gate_admits_a_bound_final_seed_once(snap: Snap, monkeypatch: pytest.MonkeyPatch) -> None:
     run_dir, name = score.main(laya_argv(snap, "test"))
     assert (run_dir, name) == (os.path.join(snap.root, snap.rid), "test")
     assert sidecar(run_dir, "test")["protocol_sha256"] == snap.sha
@@ -168,7 +174,7 @@ def test_gate_admits_a_bound_final_seed_once(snap, monkeypatch):
     assert files(snap.root) == before and not (snap.tmp / "elsewhere").exists()
 
 
-def test_gate_accepts_the_dump_root_spelled_out(snap):
+def test_gate_accepts_the_dump_root_spelled_out(snap: Snap) -> None:
     run_dir, _ = score.main(laya_argv(snap, "test", "--out-root", snap.root))
     assert sidecar(run_dir, "test")["protocol_sha256"] == snap.sha
 
@@ -176,7 +182,8 @@ def test_gate_accepts_the_dump_root_spelled_out(snap):
 # ---- refused before hashing: the protocol itself ----
 
 @pytest.mark.parametrize("how", ["missing", "unpinned", "changed"])
-def test_gate_refuses_without_the_frozen_protocol_before_hashing(snap, monkeypatch, how):
+def test_gate_refuses_without_the_frozen_protocol_before_hashing(snap: Snap, monkeypatch: pytest.MonkeyPatch,
+                                                                 how: str) -> None:
     if how == "missing":
         os.remove(snap.path)
     elif how == "unpinned":
@@ -196,8 +203,9 @@ def test_gate_refuses_without_the_frozen_protocol_before_hashing(snap, monkeypat
     ("mps", 0, [], "device"),
     ("cpu", 0, ["--workers", "2"], "workers"),
 ], ids=["device", "workers"])
-def test_gate_refuses_another_device_or_worker_count_before_hashing(snap, monkeypatch, device, workers, flags,
-                                                                     needle):
+def test_gate_refuses_another_device_or_worker_count_before_hashing(snap: Snap, monkeypatch: pytest.MonkeyPatch,
+                                                                    device: str, workers: int, flags: list[str],
+                                                                    needle: str) -> None:
     snap.bind(device=device, workers=workers)
     no_identity(monkeypatch)
     argv = laya_argv(snap, "test")
@@ -206,7 +214,7 @@ def test_gate_refuses_another_device_or_worker_count_before_hashing(snap, monkey
     assert files(snap.root) == []
 
 
-def test_gate_refuses_a_manifest_copy_of_the_committed_splits(snap, monkeypatch):
+def test_gate_refuses_a_manifest_copy_of_the_committed_splits(snap: Snap, monkeypatch: pytest.MonkeyPatch) -> None:
     """Committed test content under a byte-different manifest triggers the gate (content key) and is refused: only
     the committed manifest admits a gated run."""
     shutil.copytree(os.path.join(snap.out_dir, "splits"), str(snap.tmp / "copy" / "splits"))
@@ -221,7 +229,7 @@ def test_gate_refuses_a_manifest_copy_of_the_committed_splits(snap, monkeypatch)
 
 # ---- refused after hashing, before any load: not a final seed ----
 
-def test_gate_refuses_a_checkpoint_outside_the_final_seeds(snap, monkeypatch):
+def test_gate_refuses_a_checkpoint_outside_the_final_seeds(snap: Snap, monkeypatch: pytest.MonkeyPatch) -> None:
     other = finetuned(snap.tmp / "other", temperature=0.7)
     rid = dumps.run_id("laya", pilot.weights.identity(other))
     assert rid != snap.rid
@@ -231,7 +239,7 @@ def test_gate_refuses_a_checkpoint_outside_the_final_seeds(snap, monkeypatch):
     assert files(snap.root) == []
 
 
-def test_gate_refuses_an_orphan_npz(snap, monkeypatch):
+def test_gate_refuses_an_orphan_npz(snap: Snap, monkeypatch: pytest.MonkeyPatch) -> None:
     os.makedirs(os.path.join(snap.root, snap.rid))
     with open(os.path.join(snap.root, snap.rid, "test.npz"), "wb") as f:
         f.write(b"half")
@@ -242,13 +250,13 @@ def test_gate_refuses_an_orphan_npz(snap, monkeypatch):
 
 # ---- ungated: val, zero-shot, the trigger texts ----
 
-def test_val_of_the_same_checkpoint_is_ungated(snap, monkeypatch):
+def test_val_of_the_same_checkpoint_is_ungated(snap: Snap, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)           # val never consults the protocol
     run_dir, _ = score.main(laya_argv(snap, "val", "--out-root", str(snap.tmp / "val-dumps")))
     assert "protocol_sha256" not in sidecar(run_dir, "val")
 
 
-def _entry_cases(s, name, manifest=None):
+def _entry_cases(s: Snap, name: str, manifest: str | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     path = split(s, name)
     with open(path, "rb") as f:
         raw = f.read()
@@ -256,7 +264,7 @@ def _entry_cases(s, name, manifest=None):
     return entry, pilot.data.parse_jsonl(raw)
 
 
-def test_gate_trigger_texts(snap):
+def test_gate_trigger_texts(snap: Snap) -> None:
     t_entry, t_cases = _entry_cases(snap, "test")
     h_entry, h_cases = _entry_cases(snap, "hotels_probe")
     v_entry, v_cases = _entry_cases(snap, "val")
@@ -279,8 +287,8 @@ def test_gate_trigger_texts(snap):
         "holds committed hotels_probe content"
 
 
-def test_gate_keys_on_the_identity_not_the_checkpoint_claim(snap, monkeypatch):
-    """08-REVIEW WR-02: a local Laya checkpoint whose rl_agent_config.json claims nothing (no fine_tuned, no
+def test_gate_keys_on_the_identity_not_the_checkpoint_claim(snap: Snap, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A local Laya checkpoint whose rl_agent_config.json claims nothing (no fine_tuned, no
     training.ray_train: the keys an edit could strip) is gated on test and HOTELS like any fine-tuned one, and refused
     before any load unless it is a protocol final seed; on val it stays ungated."""
     plain = tiny_checkpoint(snap.tmp / "plain", temperature=TINY_T)
@@ -301,8 +309,8 @@ def test_gate_keys_on_the_identity_not_the_checkpoint_claim(snap, monkeypatch):
     assert files(snap.root) == []
 
 
-def test_gate_trigger_fails_closed_without_the_committed_files(snap):
-    """08-REVIEW WR-01: under a non-committed manifest of the pinned dataset (the same dataset.raw_sha256), a split
+def test_gate_trigger_fails_closed_without_the_committed_files(snap: Snap) -> None:
+    """Under a non-committed manifest of the pinned dataset (the same dataset.raw_sha256), a split
     whose hashes differ from the committed entry's (prepare_data.py --no-include-no-intent --out OTHER drops rows)
     keys only on the (uid, message) pairs of the committed test.jsonl and hotels_probe.jsonl. While either file is
     missing the trigger refuses (pilot.data.require_committed_files) instead of returning None, before any hashing."""
@@ -333,7 +341,8 @@ from test_score_berturk import built, ckpt  # noqa: E402,F401  (pytest fixtures:
 
 
 @pytest.fixture
-def bsnap(built, ckpt, tmp_path, monkeypatch):
+def bsnap(built: tuple[str, str, str], ckpt: str, tmp_path: Path,
+          monkeypatch: pytest.MonkeyPatch) -> Iterator[Snap]:
     """The BERTurk bench: the module's synthetic splits as the committed stand-in, a private export copy, its dump run
     id and a temp protocol binding it under systems.berturk."""
     import torch
@@ -353,12 +362,12 @@ def bsnap(built, ckpt, tmp_path, monkeypatch):
     torch.set_num_threads(threads)
 
 
-def bert_argv(s, name, *extra):
+def bert_argv(s: Snap, name: str, *extra: str) -> list[str]:
     return [split(s, name), "--model", "berturk", "--checkpoint", s.ckpt, "--workers", "0", "--device", "cpu",
             "--manifest", s.manifest] + list(extra)
 
 
-def test_gate_admits_a_bound_berturk_final_seed_once(bsnap):
+def test_gate_admits_a_bound_berturk_final_seed_once(bsnap: Snap) -> None:
     for name in ("test", "hotels_probe"):
         run_dir, got = score.main(bert_argv(bsnap, name))
         assert (run_dir, got) == (os.path.join(bsnap.root, bsnap.rid), name)
@@ -372,11 +381,11 @@ def test_gate_admits_a_bound_berturk_final_seed_once(bsnap):
     assert files(bsnap.root) == before
 
 
-def test_gate_refuses_a_berturk_export_outside_the_final_seeds(bsnap, monkeypatch):
+def test_gate_refuses_a_berturk_export_outside_the_final_seeds(bsnap: Snap, monkeypatch: pytest.MonkeyPatch) -> None:
     other = "berturk-000000000000-00000000-00000000"
     _bind(monkeypatch, bsnap, {"berturk": [other], "laya": [bsnap.rid]}, "cpu", 0)
 
-    def boom(*a, **k):
+    def boom(*a: Any, **k: Any) -> NoReturn:
         raise AssertionError("the BERTurk checkpoint was parsed or loaded before the gate refused")
     monkeypatch.setattr(score, "check_berturk", boom)
     monkeypatch.setattr(score, "load_bert", boom)
@@ -386,11 +395,12 @@ def test_gate_refuses_a_berturk_export_outside_the_final_seeds(bsnap, monkeypatc
     assert files(bsnap.root) == []
 
 
-def test_gate_refuses_berturk_without_the_frozen_protocol_before_hashing(bsnap, monkeypatch):
+def test_gate_refuses_berturk_without_the_frozen_protocol_before_hashing(bsnap: Snap,
+                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
     from pilot import berturk
     monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)
 
-    def boom(*a, **k):
+    def boom(*a: Any, **k: Any) -> NoReturn:
         raise AssertionError("the BERTurk checkpoint was hashed before the gate refused")
     monkeypatch.setattr(berturk, "identity", boom)
     monkeypatch.setattr(berturk, "require_files", boom)
@@ -399,7 +409,7 @@ def test_gate_refuses_berturk_without_the_frozen_protocol_before_hashing(bsnap, 
     assert files(bsnap.root) == []
 
 
-def test_berturk_val_is_ungated(bsnap, monkeypatch):
+def test_berturk_val_is_ungated(bsnap: Snap, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)
     run_dir, _ = score.main(bert_argv(bsnap, "val", "--out-root", str(bsnap.tmp / "val-dumps")))
     assert "protocol_sha256" not in sidecar(run_dir, "val")
@@ -408,7 +418,7 @@ def test_berturk_val_is_ungated(bsnap, monkeypatch):
 # ---- HOTELS: closed to the baselines and to evaluate.py ----
 
 @pytest.mark.parametrize("model", ["majority", "prior"])
-def test_baselines_are_refused_on_hotels_naming_the_role(snap, model):
+def test_baselines_are_refused_on_hotels_naming_the_role(snap: Snap, model: str) -> None:
     with pytest.raises(SystemExit, match="role ood_probe") as e:
         score.main([split(snap, "hotels_probe"), "--model", model, "--manifest", snap.manifest,
                     "--out-root", str(snap.tmp / "b")])
@@ -416,10 +426,10 @@ def test_baselines_are_refused_on_hotels_naming_the_role(snap, model):
     assert not (snap.tmp / "b").exists()
 
 
-def test_evaluate_still_refuses_hotels_before_any_load(snap, monkeypatch):
+def test_evaluate_still_refuses_hotels_before_any_load(snap: Snap, monkeypatch: pytest.MonkeyPatch) -> None:
     import evaluate
 
-    def boom(*a, **k):
+    def boom(*a: Any, **k: Any) -> NoReturn:
         raise AssertionError("evaluate.py reached a checkpoint resolve on hotels_probe")
     monkeypatch.setattr(score, "resolve_checkpoint", boom)
     no_identity(monkeypatch)
@@ -429,10 +439,11 @@ def test_evaluate_still_refuses_hotels_before_any_load(snap, monkeypatch):
     assert not (snap.tmp / "e").exists()
 
 
-# ---- Phase 9: few-shot checkpoints through the runs-manifest allow-list (09-05, D-09) ----
+# ---- few-shot checkpoints through the runs-manifest allow-list ----
 
 @pytest.fixture
-def fsnap(tmp_path, synthetic_raw, monkeypatch):
+def fsnap(tmp_path: Path, synthetic_raw: SyntheticRaw,
+          monkeypatch: pytest.MonkeyPatch) -> Iterator[types.SimpleNamespace]:
     """The few-shot bench: the synthetic frozen protocol with a fewshot block (tests/fewshot_synthetic.bench), a
     planted set, its runs manifest at a temp pilot.fewshot.RUNS_PATH and a temp DUMP_ROOT."""
     import torch
@@ -455,12 +466,12 @@ def fsnap(tmp_path, synthetic_raw, monkeypatch):
     torch.set_num_threads(threads)
 
 
-def fs_argv(ns, name, *extra, ckpt=None):
+def fs_argv(ns: types.SimpleNamespace, name: str, *extra: str, ckpt: str | None = None) -> list[str]:
     return [os.path.join(ns.out_dir, "splits", name + ".jsonl"), "--model", "laya", "--checkpoint", ckpt or ns.cont,
             "--workers", "0", "--device", "cpu", "--manifest", ns.manifest] + list(extra)
 
 
-def rewrite_runs(ns, edit):
+def rewrite_runs(ns: types.SimpleNamespace, edit: Callable[[dict[str, Any]], object]) -> None:
     """Apply edit(runs dict) to the runs manifest on disk."""
     with open(ns.runs_path, encoding="utf-8") as f:
         runs = json.load(f)
@@ -469,14 +480,16 @@ def rewrite_runs(ns, edit):
         json.dump(runs, f)
 
 
-def test_fewshot_gate_refuses_a_listed_checkpoint_on_hotels(fsnap, monkeypatch):
+def test_fewshot_gate_refuses_a_listed_checkpoint_on_hotels(fsnap: types.SimpleNamespace,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
     no_laya_load(monkeypatch)
     text = refused(fs_argv(fsnap, "hotels_probe"), "laya-d0-k2", "test only", "HOTELS is never opened")
     assert "fewshot.rules.test_admission" in text
     assert files(fsnap.root) == []
 
 
-def test_fewshot_gate_refuses_an_unlisted_or_edited_checkpoint(fsnap, monkeypatch):
+def test_fewshot_gate_refuses_an_unlisted_or_edited_checkpoint(fsnap: types.SimpleNamespace,
+                                                               monkeypatch: pytest.MonkeyPatch) -> None:
     """A few-shot checkpoint outside the allow-list (an edited copy of a listed one: its dump run id changes) is
     refused on test, naming results/fewshot/runs.json."""
     edited = str(fsnap.tmp / "edited")
@@ -496,12 +509,13 @@ def test_fewshot_gate_refuses_an_unlisted_or_edited_checkpoint(fsnap, monkeypatc
 
 
 @pytest.mark.parametrize("case", ["other_protocol", "changed_digest", "other_mode", "not_json"])
-def test_fewshot_gate_refuses_a_runs_manifest_it_cannot_check(fsnap, monkeypatch, case):
+def test_fewshot_gate_refuses_a_runs_manifest_it_cannot_check(fsnap: types.SimpleNamespace,
+                                                              monkeypatch: pytest.MonkeyPatch, case: str) -> None:
     if case == "other_protocol":
         rewrite_runs(fsnap, lambda r: r.update(protocol_sha256="f" * 64))
         needles = ("runs.json is refused", "protocol sha256 " + "f" * 64)
     elif case == "changed_digest":
-        def edit(r):
+        def edit(r: dict[str, Any]) -> None:
             for e in r["entries"]:
                 if e["stage"] == "continued":
                     e["digest"] = "0" * 64
@@ -524,14 +538,16 @@ def test_fewshot_gate_refuses_a_runs_manifest_it_cannot_check(fsnap, monkeypatch
     (["--n", "3"], "--n"),
     (["--out-root", "ELSEWHERE"], "--out-root"),
 ], ids=["force", "n", "out_root"])
-def test_fewshot_gate_refuses_force_n_and_out_root(fsnap, monkeypatch, flags, needle):
+def test_fewshot_gate_refuses_force_n_and_out_root(fsnap: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+                                                   flags: list[str], needle: str) -> None:
     flags = [str(fsnap.tmp / "elsewhere") if f == "ELSEWHERE" else f for f in flags]
     no_identity(monkeypatch)
     refused(fs_argv(fsnap, "test", *flags), needle)
     assert files(fsnap.root) == [] and not (fsnap.tmp / "elsewhere").exists()
 
 
-def test_fewshot_gate_refuses_another_device_or_worker_count(fsnap, monkeypatch):
+def test_fewshot_gate_refuses_another_device_or_worker_count(fsnap: types.SimpleNamespace,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
     no_identity(monkeypatch)
     argv = fs_argv(fsnap, "test")
     argv[argv.index("--workers") + 1] = "2"
@@ -539,7 +555,7 @@ def test_fewshot_gate_refuses_another_device_or_worker_count(fsnap, monkeypatch)
     assert files(fsnap.root) == []
 
 
-def test_fewshot_gate_scores_a_listed_checkpoint_once(fsnap):
+def test_fewshot_gate_scores_a_listed_checkpoint_once(fsnap: types.SimpleNamespace) -> None:
     run_dir, _ = score.main(fs_argv(fsnap, "test"))
     side = sidecar(run_dir, "test")
     with open(fsnap.runs_path, "rb") as f:
@@ -550,7 +566,8 @@ def test_fewshot_gate_scores_a_listed_checkpoint_once(fsnap):
     assert files(fsnap.root) == before
 
 
-def _copy_with_config(ns, name, edit=None):
+def _copy_with_config(ns: types.SimpleNamespace, name: str,
+                      edit: Callable[[dict[str, Any]], object] | None = None) -> tuple[str, str]:
     """A copy of the listed continued checkpoint under `name`, its rl_agent_config.json changed by edit(cfg)."""
     dst = str(ns.tmp / name)
     shutil.copytree(ns.cont, dst)
@@ -564,9 +581,9 @@ def _copy_with_config(ns, name, edit=None):
     return dst, dumps.run_id("laya", pilot.weights.identity(dst))
 
 
-def _list_as_the_continued_entry(ns, rid):
+def _list_as_the_continued_entry(ns: types.SimpleNamespace, rid: str) -> None:
     """Swap the listed laya d0-k2 entry's dump_run_id for `rid`: the entry stays well formed (check_runs passes)."""
-    def edit(runs):
+    def edit(runs: dict[str, Any]) -> None:
         for e in runs["entries"]:
             if (e["kind"], e["stage"], e["draw"], e["k"]) == ("laya", "continued", 0, 2):
                 e["dump_run_id"] = rid
@@ -574,11 +591,12 @@ def _list_as_the_continued_entry(ns, rid):
     assert ns.fs.admitted(ns.protocol, ns.pin, "laya", rid) is not None
 
 
-def test_fewshot_gate_refuses_a_swapped_entry_of_a_retrained_run(fsnap, monkeypatch):
-    """09-REVIEW WR-01: a well-formed runs.json entry whose dump_run_id was swapped for another run of the same recipe
+def test_fewshot_gate_refuses_a_swapped_entry_of_a_retrained_run(fsnap: types.SimpleNamespace,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    """A well-formed runs.json entry whose dump_run_id was swapped for another run of the same recipe
     (its own record gives other losses) is refused before any load: the gate re-derives the entry from the checkpoint
     (fewshot.entry_of) and names the keys that differ."""
-    def retrain(cfg):
+    def retrain(cfg: dict[str, Any]) -> None:
         for row in cfg["training"]["ray_train"]["record"]["epochs"]:
             row["loss"] = row["loss"] + 1.0
     ckpt, rid = _copy_with_config(fsnap, "retrained", retrain)
@@ -592,10 +610,11 @@ def test_fewshot_gate_refuses_a_swapped_entry_of_a_retrained_run(fsnap, monkeypa
     assert files(fsnap.root) == []
 
 
-def test_fewshot_gate_refuses_a_swapped_entry_of_a_non_fewshot_checkpoint(fsnap, monkeypatch):
-    """09-REVIEW WR-01: an entry swapped to point at a checkpoint without a Phase 9 binding (here its canonical config
+def test_fewshot_gate_refuses_a_swapped_entry_of_a_non_fewshot_checkpoint(fsnap: types.SimpleNamespace,
+                                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    """An entry swapped to point at a checkpoint without a few-shot binding (here its canonical config
     lost the few-shot binding, as a selection export has none) is refused: the checkpoint re-derives no entry."""
-    def unbind(cfg):
+    def unbind(cfg: dict[str, Any]) -> None:
         cfg["training"]["ray_train"]["canonical"].pop("fewshot")
     ckpt, rid = _copy_with_config(fsnap, "unbound", unbind)
     _list_as_the_continued_entry(fsnap, rid)
@@ -604,7 +623,7 @@ def test_fewshot_gate_refuses_a_swapped_entry_of_a_non_fewshot_checkpoint(fsnap,
     assert files(fsnap.root) == []
 
 
-def test_fewshot_gate_admits_a_listed_checkpoint_under_another_dir_name(fsnap):
+def test_fewshot_gate_admits_a_listed_checkpoint_under_another_dir_name(fsnap: types.SimpleNamespace) -> None:
     """The re-derived entry may differ from the listed one only in checkpoint_name (score.REDERIVE_IGNORED): a
     byte-identical copy has the same dump run id, so it is the listed checkpoint."""
     assert score.REDERIVE_IGNORED == ("checkpoint_name",)
@@ -614,7 +633,8 @@ def test_fewshot_gate_admits_a_listed_checkpoint_under_another_dir_name(fsnap):
     assert os.path.basename(run_dir) == fsnap.rid
 
 
-def test_fewshot_gate_without_a_runs_manifest_refuses_as_in_phase_8(fsnap, monkeypatch):
+def test_fewshot_gate_without_a_runs_manifest_admits_only_final_seeds(fsnap: types.SimpleNamespace,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
     os.remove(fsnap.runs_path)
     assert fsnap.fs.admitted(fsnap.protocol, fsnap.pin, "laya", fsnap.rid) is None
     no_laya_load(monkeypatch)
@@ -623,7 +643,7 @@ def test_fewshot_gate_without_a_runs_manifest_refuses_as_in_phase_8(fsnap, monke
     assert files(fsnap.root) == []
 
 
-def test_fewshot_masked_base_on_val_is_ungated(fsnap):
+def test_fewshot_masked_base_on_val_is_ungated(fsnap: types.SimpleNamespace) -> None:
     run_dir, _ = score.main(fs_argv(fsnap, "val", ckpt=fsnap.ckpts["laya-base-s0"]))
     side = sidecar(run_dir, "val")
     assert "protocol_sha256" not in side and "fewshot_runs_sha256" not in side

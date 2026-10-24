@@ -1,22 +1,27 @@
 """Frozen Multi3NLU++ splits: pinned raw folds -> deterministic Laya JSONL -> sha256 manifest -> shared verifier.
 
 Producer: `prepare()` verifies the 40 raw fold hashes, validates every raw row, hard-fails on any duplicate uid
-across banking + HOTELS (D-14) or on drift of the banking-only OOD tag set, builds every split in memory
-(four banking splits plus the HOTELS out-of-domain probe) and the report-only duplicate audit (pilot.audit, DATA-04)
-under audit/, refuses to overwrite a differing data/splits.json (unless rewrite_manifest), then writes each file
-atomically with splits.json last.
-Consumer: `verify_split_file()` is the only split verifier; evaluate.py and ray_train.py call it right after argument
-parsing and hard-fail (SystemExit) on any mismatch, including a manifest built from other question text, tag order,
+across banking + HOTELS or on drift of the banking-only OOD tag set, builds every split in memory (four banking splits
+plus the HOTELS out-of-domain probe) and the report-only duplicate audit (pilot.audit) under audit/, refuses to
+overwrite a differing data/splits.json (unless rewrite_manifest), then writes each file atomically with splits.json
+last.
+Consumer: `verify_split_file()` is the only split verifier; every script that reads a split (score.py, ray_train.py,
+berturk_train.py, latency.py, fewshot.py, and report.py through pilot.dumps) calls it before parsing and hard-fails
+(SystemExit) on any mismatch, including a manifest built from other question text, tag order,
 schema or dataset pin, or one whose split names, roles, paths, folds or domains differ from SPLITS
 (check_manifest_current); there is no override flag or environment variable. --manifest only selects another
 prepare-written manifest (e.g. the --no-include-no-intent variant), and reports record whether it is the committed one.
-`verify_audit_file()` applies the same rules to the audit outputs (a later dedup sensitivity row reads dup_flags.json).
+`verify_audit_file()` applies the same rules to the audit outputs (dup_flags.json is for a dedup sensitivity check).
+The content checks (holds_committed, require_committed_files, refuse_held_out) key on the committed split files, so a
+manifest copy that relabels held-out bytes cannot train on them or open them to a fine-tuned model.
 
 Stdlib only at import time (huggingface_hub is imported lazily in fetch_raw), so data tests never load torch.
 """
 import hashlib
 import json
 import os
+from collections.abc import Iterable
+from typing import Any
 
 from intents import INTENTS, QUESTIONS
 from pilot import pins
@@ -28,7 +33,7 @@ SCHEMA_VERSION = 1
 MANIFEST_NAME = "splits.json"
 
 # Val = folds 14-15 (model selection); final models retrain on 0-15; test = 16-19 is never trained on.
-# hotels_probe = every Turkish HOTELS message (all 20 folds, D-09), all 48 banking tags false (D-08); its role is
+# hotels_probe = every Turkish HOTELS message (all 20 folds), all 48 banking tags false; its role is
 # never "train", so ray_train.py refuses it. Only the banking-only tags (manifest ood_scoring_tags) are valid gold.
 SPLITS = [
     {"name": "selection_train", "domain": "banking", "folds": list(range(14)), "role": "train"},
@@ -41,7 +46,7 @@ SPLITS = [
 TRAINED_ON = {"val": "selection_train", "test": "final_train"}
 
 
-def audit_layout():
+def audit_layout() -> dict[str, tuple]:
     """Audit partitions and dup-flag pairs derived from SPLITS, the only place fold boundaries are written down.
 
     partitions: the banking splits in SPLITS order that do not overlap an earlier one (selection_train, val, test);
@@ -60,11 +65,13 @@ def audit_layout():
 AUDIT_FILES = {"audit_json": "audit/audit.json", "audit_md": "audit/audit.md", "dup_flags_json": "audit/dup_flags.json"}
 
 
-def _json_bytes(obj):
+def _json_bytes(obj: Any) -> bytes:
+    """JSON file bytes: indent 2, sorted keys, ensure_ascii False, one trailing newline."""
     return (json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def sha256_file(path):
+def sha256_file(path: str) -> str:
+    """Hex sha256 of the file at `path`, read in 1 MiB chunks."""
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -72,11 +79,12 @@ def sha256_file(path):
     return h.hexdigest()
 
 
-def sha256_bytes(data):
+def sha256_bytes(data: bytes) -> str:
+    """Hex sha256 of `data`."""
     return hashlib.sha256(data).hexdigest()
 
 
-def parse_jsonl(raw):
+def parse_jsonl(raw: bytes) -> list[Any]:
     """Rows of JSONL bytes, split on "\n" only (the producer's terminator), stripped, blank and '#' lines skipped.
 
     Same rows as laya.train.read_jsonl (text-mode lines). Never str.splitlines(): it also splits on U+0085, U+2028,
@@ -86,7 +94,7 @@ def parse_jsonl(raw):
     return [json.loads(l) for l in lines if l and not l.startswith("#")]
 
 
-def repo_relpath(path):
+def repo_relpath(path: str) -> str:
     """`path` relative to the repo root, for reports and checkpoints; never a local or cwd-relative path.
 
     Outside the repo only the base name is kept ("<outside-repo>/NAME"); the recorded sha256 is the identity.
@@ -97,11 +105,12 @@ def repo_relpath(path):
     return rel.replace(os.sep, "/")
 
 
-def questions_sha256():
+def questions_sha256() -> str:
+    """sha256 of the sorted JSON of intents.QUESTIONS (the model input), recorded in the manifest and every dump."""
     return sha256_bytes(json.dumps(QUESTIONS, ensure_ascii=False, sort_keys=True).encode("utf-8"))
 
 
-def fetch_raw():
+def fetch_raw() -> str:
     """Download the pinned Turkish banking + hotels folds; return the snapshot root."""
     from huggingface_hub import snapshot_download
     root = snapshot_download(repo_id=pins.DATASET_REPO, repo_type="dataset", revision=pins.DATASET_REVISION,
@@ -112,7 +121,8 @@ def fetch_raw():
     return root
 
 
-def verify_raw(root, raw_sha256):
+def verify_raw(root: str, raw_sha256: dict[str, str]) -> None:
+    """SystemExit unless every pinned raw fold exists under `root` with its pinned sha256."""
     for rel in sorted(raw_sha256):
         path = os.path.join(root, rel)
         if not os.path.isfile(path):
@@ -122,7 +132,9 @@ def verify_raw(root, raw_sha256):
             raise SystemExit("raw fold %s sha256 %s != pinned %s" % (rel, have, raw_sha256[rel]))
 
 
-def load_fold(root, domain, fold):
+def load_fold(root: str, domain: str, fold: int) -> list[dict[str, Any]]:
+    """Validated rows {uid, text, gold, fold, domain} of one raw fold; SystemExit on a malformed row or, for banking,
+    an unknown tag."""
     path = os.path.join(root, "turkish", domain, "fold%d.json" % fold)
     with open(path, encoding="utf-8") as f:
         raw = json.load(f)
@@ -137,7 +149,7 @@ def load_fold(root, domain, fold):
             raise SystemExit("%s fold %d row %d: uid must be a non-empty string, got %r" % (domain, fold, i, uid))
         if not isinstance(text, str) or not text:
             raise SystemExit("%s fold %d uid %s: text must be a non-empty string" % (domain, fold, uid))
-        # no-intent rows OMIT the key in the raw folds; they are kept as all-negative rows (D-10)
+        # no-intent rows OMIT the key in the raw folds; they are kept as all-negative rows (build's include_no_intent)
         if intents is not None and (not isinstance(intents, list) or not all(isinstance(t, str) for t in intents)):
             raise SystemExit("%s fold %d uid %s: intents must be a list of strings, got %r" % (domain, fold, uid, intents))
         gold = sorted(set(intents or []))                    # hotels: hotel tags, kept only for counts/derivation
@@ -149,10 +161,10 @@ def load_fold(root, domain, fold):
     return rows
 
 
-def to_case(row, gold=None):
-    """Laya training schema with all 48 tags labelled (no negative sampling, D-07).
+def to_case(row: dict[str, Any], gold: Iterable[str] | None = None) -> dict[str, Any]:
+    """Laya training schema with all 48 tags labelled (no prepare-time negative sampling).
 
-    gold overrides row["gold"]; HOTELS probe rows pass an empty gold so every banking tag is false (D-08).
+    gold overrides row["gold"]; HOTELS probe rows pass an empty gold so every banking tag is false.
     """
     gold = set(row["gold"] if gold is None else gold)
     return {"state": row["text"], "uid": row["uid"],
@@ -160,10 +172,12 @@ def to_case(row, gold=None):
             "expected": {k: k in gold for k in INTENTS}}
 
 
-def assert_unique_uids(rows):
-    """Hard-fail (D-14) if any uid repeats across the raw banking + HOTELS rows (each raw message once).
+def assert_unique_uids(rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Hard-fail if any uid repeats across the raw banking + HOTELS rows (each raw message once); returns the manifest's
+    uid_check {n_rows, n_unique}.
 
-    uid-keyed consumers (evaluate.py builds dicts by uid) would silently collapse colliding rows. uids are not
+    uid-keyed consumers (score.assemble and pilot.dumps.read_gold build dicts by uid) would silently collapse
+    colliding rows. uids are not
     namespaced: banking uses bank_ and HOTELS uses hotel_ prefixes, so the real data has zero collisions.
     """
     seen = {}
@@ -177,10 +191,11 @@ def assert_unique_uids(rows):
     return {"n_rows": len(rows), "n_unique": len(seen)}
 
 
-def build(root, raw_sha256, include_no_intent=True, ood_tags=None):
+def build(root: str, raw_sha256: dict[str, str], include_no_intent: bool = True,
+          ood_tags: Iterable[str] | None = None) -> tuple[dict[str, bytes], dict[str, Any]]:
     """Verify raw folds, then render every split in memory. Returns ({relpath: bytes}, manifest).
 
-    include_no_intent=False leaves banking rows with no gold tags out of every banking split (D-10); the default
+    include_no_intent=False leaves banking rows with no gold tags out of every banking split; the default
     keeps them as all-negative rows. The choice is recorded as manifest["options"]["include_no_intent"]. HOTELS
     probe rows are never dropped. The banking-only tags (INTENTS minus every HOTELS tag) are re-derived from the
     data; if ood_tags is given (pins.OOD_SCORING_TAGS) and differs, prep hard-fails before anything is written.
@@ -200,7 +215,7 @@ def build(root, raw_sha256, include_no_intent=True, ood_tags=None):
     if ood_tags is not None and sorted(ood_tags) != derived:
         raise SystemExit("banking-only tag set drifted: derived %s, pinned %s" % (derived, sorted(ood_tags)))
     files, entries = {}, {}
-    # D-12/D-13: the audit reads the raw rows and only reports; split membership below never depends on it.
+    # the audit reads the raw rows and only reports; split membership below never depends on it.
     # The dup flags cover only the banking rows the splits keep (no-intent rows drop out with include_no_intent off).
     banking = [r for key in sorted(cache) if key[0] == "banking" for r in cache[key]]
     audit, flags = build_audit(banking, [r for key in sorted(cache) if key[0] == "hotels" for r in cache[key]],
@@ -237,8 +252,8 @@ def build(root, raw_sha256, include_no_intent=True, ood_tags=None):
         "intents_order": list(INTENTS),
         "questions_sha256": questions_sha256(),
         "options": {"include_no_intent": bool(include_no_intent)},
-        "seeds": {"data_prep": None},                       # prep draws no random numbers; neg sampling is per run (Phase 4)
-        "ood_scoring_tags": derived,                        # the only valid gold tags on hotels_probe (Pitfall 3)
+        "seeds": {"data_prep": None},                       # prep draws no random numbers; neg sampling is per run
+        "ood_scoring_tags": derived,                        # the only valid gold tags on hotels_probe
         "uid_check": uid_check,
         "audit": audit_entries,
         "splits": entries,
@@ -246,11 +261,13 @@ def build(root, raw_sha256, include_no_intent=True, ood_tags=None):
     return files, manifest
 
 
-def serialize_manifest(manifest):
+def serialize_manifest(manifest: dict[str, Any]) -> bytes:
+    """The manifest's file bytes (the frozen data/splits.json format)."""
     return _json_bytes(manifest)
 
 
-def write_atomic(path, data):
+def write_atomic(path: str, data: bytes) -> None:
+    """Write `data` to `path` through a per-process temp file, fsync it, rename it over `path` and fsync the dir."""
     # per-process temp name: a concurrent run never truncates the temp file another run is about to rename
     tmp = "%s.%d.tmp" % (path, os.getpid())
     try:
@@ -270,7 +287,10 @@ def write_atomic(path, data):
         os.close(fd)
 
 
-def prepare(raw_root, out_dir, raw_sha256, rewrite_manifest=False, include_no_intent=True, ood_tags=None):
+def prepare(raw_root: str, out_dir: str, raw_sha256: dict[str, str], rewrite_manifest: bool = False,
+            include_no_intent: bool = True, ood_tags: Iterable[str] | None = None) -> dict[str, Any]:
+    """Build every split, refuse to overwrite a differing OUT/splits.json unless rewrite_manifest, write the files
+    atomically (the manifest last), print the counts and return the manifest."""
     files, manifest = build(raw_root, raw_sha256, include_no_intent=include_no_intent, ood_tags=ood_tags)
     manifest_bytes = serialize_manifest(manifest)
     manifest_path = os.path.join(out_dir, MANIFEST_NAME)
@@ -293,11 +313,12 @@ def prepare(raw_root, out_dir, raw_sha256, rewrite_manifest=False, include_no_in
     return manifest
 
 
-def _unsafe(rel):
+def _unsafe(rel: str) -> bool:
+    """True for an absolute manifest path or one with a '..' component."""
     return os.path.isabs(rel) or rel.startswith(("/", "\\")) or ".." in rel.replace("\\", "/").split("/")
 
 
-def check_manifest_current(m, manifest_path):
+def check_manifest_current(m: dict[str, Any], manifest_path: str) -> None:
     """Hard-fail unless manifest `m` was built from the current schema, question text, tag order and dataset pin,
     and registers exactly the SPLITS (role, path, folds, domain) and AUDIT_FILES this code writes.
 
@@ -332,12 +353,12 @@ def check_manifest_current(m, manifest_path):
                          % manifest_path)
 
 
-def manifest_is_committed(manifest_path):
+def manifest_is_committed(manifest_path: str) -> bool:
     """True when `manifest_path` has the bytes of the repo's data/splits.json (reports flag any other manifest)."""
     return os.path.isfile(DEFAULT_MANIFEST) and sha256_file(manifest_path) == sha256_file(DEFAULT_MANIFEST)
 
 
-def committed_content(name):
+def committed_content(name: str) -> tuple[dict[str, Any], set[tuple[Any, Any]]]:
     """(the `name` entry of the repo's data/splits.json, the set of (uid, message) pairs of that committed split file
     under data/). The set is empty when the file is absent (no `make data`); the entry's hashes still key the check."""
     with open(DEFAULT_MANIFEST, encoding="utf-8") as f:
@@ -349,26 +370,25 @@ def committed_content(name):
         return committed, {(c.get("uid"), c.get("state")) for c in parse_jsonl(f.read())}
 
 
-def holds_committed(entry, cases, name):
+def holds_committed(entry: dict[str, Any], cases: Iterable[dict[str, Any]], name: str) -> bool:
     """True when a split (its entry in any manifest, and its parsed rows `cases`) holds the committed `name` split's
     content: its sha256 or uids_sha256 is the committed entry's, or any (uid, message) pair of `cases` is in the
-    committed file. Keyed on the content, never on the manifest bytes or the role (05-REVIEW CR-02, 06-REVIEW CR-01,
-    WR-02). A uid alone is not the key: the tests' synthetic splits reuse the uid scheme with other messages."""
+    committed file. Keyed on the content, never on the manifest bytes or the role. A uid alone is not the key: the
+    tests' synthetic splits reuse the uid scheme with other messages."""
     committed, pairs = committed_content(name)
     return entry.get("sha256") == committed["sha256"] or entry.get("uids_sha256") == committed["uids_sha256"] or \
         any((c.get("uid"), c.get("state")) in pairs for c in cases)
 
 
-def require_committed_files(where, manifest_path, names):
-    """SystemExit when a content check could not key on the (uid, message) pairs (07-09 review WR-02, fail closed):
+def require_committed_files(where: str, manifest_path: str, names: Iterable[str]) -> None:
+    """SystemExit when a content check could not key on the (uid, message) pairs (fail closed):
     holds_committed reads them from the committed data/splits/<name>.jsonl and, when that file is absent, keys only on
     the entry hashes, which a relabel of all rows but one changes. Refused for a non-committed manifest prepared from
     the pinned dataset (its dataset.raw_sha256 is the committed manifest's: a manifest copy, or prepare_data.py --out
     OTHER without `make data`) while any committed `names` file is missing. The committed manifest needs none (its
     splits are the committed bytes); a manifest of another snapshot (the offline suite's synthetic data) keys on the
-    hashes as before. Like the pair key itself (07-09 review IN-01), this catches relabelled bytes, not a forged
-    manifest. Shared by report.py's content checks and score.py's protocol-gate trigger (08-REVIEW WR-01);
-    DEFAULT_MANIFEST is read at call time."""
+    hashes. Like the pair key itself, this catches relabelled bytes, not a forged manifest. Shared by report.py's
+    content checks and score.py's protocol-gate trigger; DEFAULT_MANIFEST is read at call time."""
     if manifest_is_committed(manifest_path):
         return
     with open(manifest_path, encoding="utf-8") as f:
@@ -384,14 +404,14 @@ def require_committed_files(where, manifest_path, names):
                              "data` (or drop --manifest)" % (where, committed["path"], manifest_path))
 
 
-HELD_OUT ={"selection_train": ("val", "test"), "final_train": ("test",)}   # final_train holds the val folds by design
+HELD_OUT = {"selection_train": ("val", "test"), "final_train": ("test",)}   # final_train holds the val folds by design
 
 
-def refuse_held_out(path, entry, cases):
+def refuse_held_out(path: str, entry: dict[str, Any], cases: Iterable[dict[str, Any]]) -> None:
     """SystemExit when a train split (its entry in any manifest, and its parsed rows `cases`) holds committed held-out
     content (holds_committed): committed test content in any train split, and committed val content in
     selection_train too. A manifest copy that registers the val or test bytes as a train split therefore cannot train
-    a model on them (06-REVIEW WR-02). Shared by ray_train.py and berturk_train.py, before any fetch, load or Ray."""
+    a model on them. Shared by ray_train.py and berturk_train.py, before any fetch, load or Ray."""
     name = os.path.splitext(os.path.basename(entry["path"]))[0]
     for held in HELD_OUT.get(name, ("val", "test")):
         if holds_committed(entry, cases, held):
@@ -400,11 +420,11 @@ def refuse_held_out(path, entry, cases):
                              "run `make data`)" % (path, name, held, name))
 
 
-def _registered(path, manifest_path, section, what, data=None):
+def _registered(path: str, manifest_path: str, section: str, what: str, data: bytes | None = None) -> dict[str, Any]:
     """Shared lookup: `path` must be registered under manifest[section] (safe relative paths) with a matching sha256.
 
     data: the bytes the caller already read from `path` and will parse; they are hashed instead of re-reading the
-    file, so what is verified is exactly what is consumed (no verify-then-reread window).
+    file, so what is verified is exactly what is consumed (no verify-then-reread window). Returns the manifest entry.
     """
     if not os.path.isfile(manifest_path):
         raise SystemExit("manifest %s not found; run `make data`" % manifest_path)
@@ -432,13 +452,16 @@ def _registered(path, manifest_path, section, what, data=None):
     return entry
 
 
-def verify_audit_file(path, manifest_path=DEFAULT_MANIFEST):
-    """Hard-fail unless `path` is an audit output (audit.json, audit.md, dup_flags.json) with its registered sha256."""
+def verify_audit_file(path: str, manifest_path: str = DEFAULT_MANIFEST) -> dict[str, Any]:
+    """The manifest entry of `path`; hard-fail unless it is an audit output (audit.json, audit.md, dup_flags.json) with
+    its registered sha256."""
     return _registered(path, manifest_path, "audit", "an audit file")
 
 
-def verify_split_file(path, manifest_path=DEFAULT_MANIFEST, roles=None, data=None):
-    """Hard-fail unless `path` is a split registered in the manifest with a matching sha256 (and allowed role).
+def verify_split_file(path: str, manifest_path: str = DEFAULT_MANIFEST, roles: Iterable[str] | None = None,
+                      data: bytes | None = None) -> dict[str, Any]:
+    """The manifest entry of `path`; hard-fail unless it is a split registered in the manifest with a matching sha256
+    (and, when `roles` is given, one of those roles).
 
     Pass data=<bytes read from path> to verify the exact bytes you are about to parse (see _registered).
     """
