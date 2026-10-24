@@ -10,7 +10,9 @@ What it reads, and nothing else:
   read_gold: a masked base's val dump (ungated: no protocol_sha256, no fewshot_runs_sha256; its θ source, D-05) and every
   entry's test dump (gated: protocol_sha256 the pin, fewshot_runs_sha256 the manifest's sha256). Each sidecar must be of
   the entry's system kind, training run id and seed; every test dump must score one uid order (the draws and models are
-  paired message by message) and be a full dump, and each split must be the frozen protocol's (sha256)
+  paired message by message) and be a full dump, and each split must be the frozen protocol's (sha256); a masked
+  base's val dump must be of its test dump's source (SAME_SOURCE_KEYS: kind, checkpoint identity, shipped T, scorer
+  device, dtype and amp; 09-REVIEW WR-02), as report.py requires of any val θ source
 
 What it computes (D-12; protocol.json rules.primary_metric and rules.secondary_metrics):
 - primary: per new tag the average precision by pilot.metrics.AP_RULE on P = sigmoid(logit) at raw T = 1 on test (AP is
@@ -162,6 +164,30 @@ def load(entry, split, pin, runs_sha256, dump_root=None, manifest_path=None, uid
     return Y, metrics.probabilities(logits, 1.0), uids, side, side["dump_sha256"]
 
 
+# the sidecar keys on which a masked base's val dump (its θ source) and its test dump must agree (09-REVIEW WR-02):
+# report.SAME_SOURCE_KEYS without the checkpoint path, which a local checkpoint_identity binds (report.PATH_KEY; a test
+# keeps the two equal)
+SAME_SOURCE_KEYS = (("system", "kind"), ("system", "checkpoint_identity"), ("temperature", "shipped"),
+                    ("scorer", "device"), ("scorer", "dtype"), ("scorer", "amp_enabled"))
+
+
+def same_source(entry, val_side, test_side):
+    """None when a masked base's val sidecar and test sidecar agree on SAME_SOURCE_KEYS (a missing key reads as None
+    on both sides); SystemExit naming the base and the first key that differs otherwise. The val dump is ungated, so it
+    could be rescored elsewhere (another device or scorer); its θ is applied only to a test dump of the same source,
+    as report.py applies a val θ (report.same_source)."""
+    for path in SAME_SOURCE_KEYS:
+        a, b = val_side, test_side
+        for k in path:
+            a = a.get(k) if isinstance(a, dict) else None
+            b = b.get(k) if isinstance(b, dict) else None
+        if a != b:
+            raise SystemExit("%s: the masked base's val dump (its θ source) and its test dump differ in %s (%r vs %r); "
+                             "its val θ applies only to a test dump of the same source, so rescore the val dump with "
+                             "the test dump's checkpoint, device and precision" % (_what(entry, "val"), ".".join(path),
+                                                                                    a, b))
+
+
 def _sorted_entries(runs):
     return sorted(runs["entries"], key=fewshot.entry_key)
 
@@ -169,14 +195,17 @@ def _sorted_entries(runs):
 def load_all(protocol, pin, runs, runs_sha256, dump_root=None, manifest_path=None):
     """{"Y": {split: gold}, "P": {(split, kind, key): P}, "dumps": {dump_run_id: {split: dump_sha256}}, "split":
     {split: manifest entry}} of every dump the record reads, in entry_key order (so the result does not depend on the
-    order the manifest lists its entries in); every test dump scores one uid order, every val dump one too, and each
-    split is the frozen protocol's (sha256)."""
+    order the manifest lists its entries in); every test dump scores one uid order, every val dump one too, each
+    split is the frozen protocol's (sha256), and each masked base's val and test dumps are of one source
+    (same_source, 09-REVIEW WR-02)."""
     manifest = _manifest(manifest_path)
     out = {"Y": {}, "P": {}, "dumps": {}, "split": {}}
     ref = {}
     for e in _sorted_entries(runs):
+        sides = {}
         for split in (("val", "test") if e["stage"] == "base" else ("test",)):
             Y, P, uids, side, sha = load(e, split, pin, runs_sha256, dump_root, manifest, ref.get(split))
+            sides[split] = side
             if split not in ref:
                 want = ((protocol.get("splits") or {}).get(split) or {}).get("sha256")
                 if side["split"]["sha256"] != want:
@@ -186,6 +215,8 @@ def load_all(protocol, pin, runs, runs_sha256, dump_root=None, manifest_path=Non
                 out["split"][split] = dict(side["split"])
             out["P"][(split, e["kind"], run_key(e))] = P
             out["dumps"].setdefault(e["dump_run_id"], {})[split] = sha
+        if e["stage"] == "base":
+            same_source(e, sides["val"], sides["test"])
     return out
 
 

@@ -37,7 +37,8 @@ and the once-only scoring, 09-12 the few-shot result record and the README block
   carries protocol_sha256 == PROTOCOL_SHA256 and fewshot_runs_sha256 == the sha256 of the committed runs.json, a
   base's val sidecar neither (its ungated θ source, D-05).
 - git order (D-09, T-09-35): runs.json has exactly one commit M, M descends from the protocol.json commit, and every
-  tracked few-shot test dump file was added in a commit C != M with M an ancestor of C (skipped in a shallow clone).
+  tracked few-shot test dump file was added in a commit C != M with M an ancestor of C, and each masked base's val
+  dump file exactly once (09-REVIEW WR-02) (skipped in a shallow clone).
 
 09-12 (D-12, ROADMAP Phase 9 criteria 1, 3, 4):
 - results/fewshot/fewshot.json (fewshot-results/1) is tracked and bound: protocol_sha256 the pin, the runs manifest
@@ -514,6 +515,13 @@ def test_fewshot_dumps_descend_from_the_runs_manifest():
                            capture_output=True)
         assert r.returncode == 0, "%s was added in %s, which does not descend from the runs manifest %s" % (
             path, added[0], manifest[0])
+    # 09-REVIEW WR-02: each masked base's ungated val dump (its θ source) was added exactly once, never re-added
+    vals = ["results/dumps/%s/val.%s" % (e["dump_run_id"], ext) for e in runs["entries"] if e["stage"] == "base"
+            for ext in ("npz", "json")]
+    assert set(vals) <= have, sorted(set(vals) - have)
+    for path in vals:
+        added = git("log", "--diff-filter=A", "--format=%H", "--", path).split()
+        assert len(added) == 1, (path, added)
 
 
 # ---- 09-12: the few-shot results record and the README Phase 9 section (D-12, ROADMAP criteria 1, 3, 4) ----

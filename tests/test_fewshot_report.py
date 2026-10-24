@@ -13,6 +13,8 @@ runs on test gated). No checkpoint and no model.
   and without a runs manifest
 - build_record refuses a test dump of another pin or runs manifest, a val dump carrying protocol_sha256, a missing
   dump, a sidecar of another training run or seed, and test dumps that score different uid orders
+- build_record refuses a masked base's val dump of another source than its test dump (SAME_SOURCE_KEYS, 09-REVIEW
+  WR-02), and SAME_SOURCE_KEYS is report.SAME_SOURCE_KEYS without the checkpoint path
 - theta_trained (09-REVIEW CR-01): labelled post hoc, not frozen, descriptive and not a decision input; each base's
   θ on its trained columns only (an independent grid reading), F1 and forgetting at it; replacing its rule changes no
   other record key; on hand-made arrays, held-out rows near P = 0.5 push the 48-column θ up and not this one
@@ -210,6 +212,46 @@ def test_build_record_refuses_an_unbound_dump(planted, split, changes, needle):
     with pytest.raises(SystemExit) as x:
         fr.build_record(ns.protocol, ns.pin)
     assert needle in str(x.value.code) and e["dump_run_id"] in str(x.value.code)
+
+
+def _changed_val_side(side, path, value):
+    side = json.loads(json.dumps(side))
+    d = side
+    for k in path[:-1]:
+        d = d[k]
+    d[path[-1]] = value
+    return {k: side[k] for k in path[:1]}
+
+
+@pytest.mark.parametrize("path, value", [
+    (("scorer", "device"), "mps"),
+    (("scorer", "dtype"), "float16"),
+    (("scorer", "amp_enabled"), True),
+    (("system", "checkpoint_identity"), {"local": True, "model_sha256": "e" * 64}),
+    (("temperature", "shipped"), 2.0),
+], ids=["device", "dtype", "amp", "identity", "temperature"])
+def test_build_record_refuses_a_base_val_dump_of_another_source(planted, path, value):
+    """09-REVIEW WR-02: a masked base's val dump (its ungated θ source) of another source than its gated test dump
+    (another scorer device, dtype or autocast, another checkpoint identity or shipped T) is refused, naming the key."""
+    from pilot import fewshot_report as fr
+    ns, runs, sha, root = planted
+    e = _entry(runs, "berturk", "base", seed=1)
+    run_dir = os.path.join(root, e["dump_run_id"])
+    with open(os.path.join(run_dir, "val.json"), encoding="utf-8") as f:
+        side = json.load(f)
+    _rewrite_sidecar(run_dir, "val", **_changed_val_side(side, path, value))
+    with pytest.raises(SystemExit) as x:
+        fr.build_record(ns.protocol, ns.pin)
+    text = str(x.value.code)
+    assert "differ in %s" % ".".join(path) in text and e["dump_run_id"] in text and "θ source" in text
+
+
+def test_same_source_keys_are_reports_but_the_path():
+    """fewshot_report.SAME_SOURCE_KEYS is report.SAME_SOURCE_KEYS without report.PATH_KEY (a local identity binds the
+    checkpoint's files, so a moved checkpoint is the same source)."""
+    import report
+    from pilot import fewshot_report as fr
+    assert fr.SAME_SOURCE_KEYS == tuple(k for k in report.SAME_SOURCE_KEYS if k != report.PATH_KEY)
 
 
 def test_build_record_refuses_a_missing_dump(planted):
