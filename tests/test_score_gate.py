@@ -25,6 +25,7 @@ import pilot.weights
 import score
 from conftest import prepared
 from pilot import dumps
+from pilot import fewshot as pfs
 from pilot import protocol as pr
 from tiny_laya import tiny_checkpoint
 
@@ -65,6 +66,13 @@ class Snap:
     dump run id and a temp protocol binding it under systems.laya."""
 
 
+def no_fewshot_runs(monkeypatch, tmp_path):
+    """The Phase 8 benches have no few-shot allow-list: pilot.fewshot.RUNS_PATH points at a temp path that does not
+    exist, so a refused final-seed checkpoint is refused as unlisted, never by a check of the committed
+    results/fewshot/runs.json (written under the real pin, 09-11) against the synthetic protocol."""
+    monkeypatch.setattr(pfs, "RUNS_PATH", str(tmp_path / "no-fewshot" / "runs.json"))
+
+
 @pytest.fixture
 def snap(tmp_path, synthetic_raw, monkeypatch):
     import torch
@@ -74,6 +82,7 @@ def snap(tmp_path, synthetic_raw, monkeypatch):
     monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", s.manifest)
     s.root = str(tmp_path / "dumps")
     monkeypatch.setattr(dumps, "DUMP_ROOT", s.root)
+    no_fewshot_runs(monkeypatch, tmp_path)
     s.ckpt = finetuned(tmp_path / "ckpt")
     s.rid = dumps.run_id("laya", pilot.weights.identity(s.ckpt))
     s.tmp = tmp_path
@@ -333,6 +342,7 @@ def bsnap(built, ckpt, tmp_path, monkeypatch):
     monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", s.manifest)
     s.root = str(tmp_path / "dumps")
     monkeypatch.setattr(dumps, "DUMP_ROOT", s.root)
+    no_fewshot_runs(monkeypatch, tmp_path)
     s.ckpt, s.tmp = ckpt, tmp_path
     s.rid = berturk.dump_run_id(berturk.identity(ckpt))
     s.path, s.sha = _bind(monkeypatch, s, {"berturk": [s.rid]}, "cpu", 0)
