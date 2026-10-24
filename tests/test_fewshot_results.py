@@ -30,6 +30,14 @@ runs manifest, the few-shot result record and the README block.
   its val line (ungated) then its test line (gated), per continued run its test line, each `score.py ... --model
   <kind> --checkpoint $(FEWSHOT_ROOT)/<checkpoint_name> --device mps --workers 0`; no line holds --force, --n or
   --out-root; the header line, `FEWSHOT_ROOT ?= .` and the .PHONY entry exist.
+- every runs.json entry was scored exactly once: a base's dump dir tracks exactly val and test npz + json, a continued
+  run's exactly test npz + json (no HOTELS dump: fewshot.rules.test_admission); every dump verifies
+  (pilot.dumps.load_dump), is full with the protocol split's message count, was scored on mps, fp32, autocast off,
+  in-process, from the entry's checkpoint (base name), with the entry's seed and training run id; every test sidecar
+  carries protocol_sha256 == PROTOCOL_SHA256 and fewshot_runs_sha256 == the sha256 of the committed runs.json, a
+  base's val sidecar neither (its ungated θ source, D-05).
+- git order (D-09, T-09-35): runs.json has exactly one commit M, M descends from the protocol.json commit, and every
+  tracked few-shot test dump file was added in a commit C != M with M an ancestor of C (skipped in a shallow clone).
 Offline except the `data` tests.
 """
 import json
@@ -42,6 +50,7 @@ import pytest
 import fewshot as runner
 from fewshot_synthetic import decision_record, synthetic_protocol, write_decision
 from pilot import compute
+from pilot import dumps
 from pilot import fewshot as fs
 from pilot import protocol as pr
 from pilot.data import REPO_ROOT, sha256_bytes
@@ -404,3 +413,75 @@ def test_makefile_fewshot_scoring_matches_runs():
         words = line.split()
         assert "--force" not in words and "--n" not in words and "--out-root" not in words, line
         assert "hotels_probe" not in line, line
+
+
+FEWSHOT_FILES = {"base": ("test.json", "test.npz", "val.json", "val.npz"), "continued": ("test.json", "test.npz")}
+GATE_KEYS = ("protocol_sha256", "fewshot_runs_sha256")
+
+
+def tracked(*pathspec):
+    return [f for f in git("ls-files", "-z", "--", *pathspec).split("\0") if f]
+
+
+def test_fewshot_scored_exactly_once():
+    proto, pin = frozen()
+    runs, runs_sha, _ = committed_runs()
+    assert runs_sha == sha256_bytes(read_bytes(RUNS))
+    dump_root = os.path.join(REPO_ROOT, "results", "dumps")
+    for e in runs["entries"]:
+        rid, stage = e["dump_run_id"], e["stage"]
+        names = sorted(f.split("/")[3] for f in tracked("results/dumps/%s/" % rid))
+        assert names == sorted(FEWSHOT_FILES[stage]), (rid, names)
+        for split in (("val", "test") if stage == "base" else ("test",)):
+            logits, uids, side, _ = dumps.load_dump(os.path.join(dump_root, rid), split)
+            n = proto["splits"][split]["n_messages"]
+            assert logits.shape == (n, 48) and len(uids) == n, (rid, split, logits.shape)
+            assert side["run_id"] == rid and side["n_subset"] is None, (rid, split)
+            assert side["split"]["name"] == split and side["split"]["n_messages"] == n, (rid, split)
+            sc = side["scorer"]
+            assert (sc["device"], sc["dtype"], sc["amp_enabled"], sc["workers"]) == \
+                ("mps", "torch.float32", False, 0), (rid, split, sc)
+            assert side["system"]["kind"] == e["kind"], (rid, split)
+            assert side["system"]["checkpoint"].rsplit("/", 1)[-1] == e["checkpoint_name"], (rid, split)
+            assert side["seed"] == e["seed"], (rid, split, side["seed"])
+            assert side["training"]["run_id"] == e["train_run_id"], (rid, split)
+            if split == "test":
+                assert side.get("protocol_sha256") == pin == pr.PROTOCOL_SHA256, (rid, split)
+                assert side.get("fewshot_runs_sha256") == runs_sha, (rid, split)
+            else:
+                assert not any(key in side for key in GATE_KEYS), (rid, split, "a base's val dump is ungated")
+    listed = {e["dump_run_id"] for e in runs["entries"]}
+    assert not any("hotels" in f for rid in listed for f in tracked("results/dumps/%s/" % rid))
+
+
+def require_full_history():
+    """Skip in a shallow clone: its grafted HEAD commit reports every file as added there, and merge-base has no
+    history to walk, so the git-order checks need the full history (08-REVIEW WR-05)."""
+    if git("rev-parse", "--is-shallow-repository").strip() == "true":
+        pytest.skip("needs the full git history (git fetch --unshallow)")
+
+
+def test_fewshot_dumps_descend_from_the_runs_manifest():
+    require_full_history()
+    out = git("log", "--format=%H", "--", "results/fewshot/runs.json")
+    manifest = out.split()
+    assert len(manifest) == 1, manifest
+    out = git("log", "--format=%H", "--", "protocol.json")
+    freeze = out.split()
+    assert len(freeze) == 1, freeze
+    r = subprocess.run(["git", "merge-base", "--is-ancestor", freeze[0], manifest[0]], cwd=REPO_ROOT,
+                       capture_output=True)
+    assert r.returncode == 0, "runs.json (%s) does not descend from the protocol freeze %s" % (manifest[0], freeze[0])
+    runs, _, _ = committed_runs()
+    paths = ["results/dumps/%s/test.%s" % (e["dump_run_id"], ext) for e in runs["entries"] for ext in ("npz", "json")]
+    have = set(tracked("results/dumps/"))
+    assert set(paths) <= have, sorted(set(paths) - have)
+    for path in paths:
+        out = git("log", "--diff-filter=A", "--format=%H", "--", path)
+        added = out.split()
+        assert len(added) == 1, (path, added)
+        assert added[0] != manifest[0], "%s was added in the runs-manifest commit" % path
+        r = subprocess.run(["git", "merge-base", "--is-ancestor", manifest[0], added[0]], cwd=REPO_ROOT,
+                           capture_output=True)
+        assert r.returncode == 0, "%s was added in %s, which does not descend from the runs manifest %s" % (
+            path, added[0], manifest[0])

@@ -1,0 +1,132 @@
+{
+  "dump_sha256": "744310749fe3bd8edc596c20fce7f78ef34cc3166ed641460ed8770469a3e4d8",
+  "fewshot_runs_sha256": "4eefd4d939ea56ddd0bca1336768367ff893fded937e099c5446911366ad76f6",
+  "intents_order_sha256": "43c13c0bf2037c49b9d875bf979d46fc67bb672c762b383caf318d2b2e409d4b",
+  "logit": "margin z_true - z_false per tag; P(tag) = sigmoid(logit / T)",
+  "manifest": {
+    "is_committed": true,
+    "path": "data/splits.json",
+    "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103"
+  },
+  "n_subset": null,
+  "protocol_sha256": "0d337d2019f9fcb1874fa0eb23f5f2547312e1675c832f886449d573cef54a8a",
+  "questions_sha256": "2e7255501fdeacd1b25ab62bd07f0e3b0cadec2e4ee0df813ea763c8ff68288d",
+  "run_id": "laya-1ec9b2167867-689cbace-530ef11d",
+  "schema_version": 1,
+  "scorer": {
+    "amp_enabled": false,
+    "batching": "one message per forward (laya.calibrate.records_from_labeled via pilot.laya_adapter)",
+    "device": "mps",
+    "dtype": "torch.float32",
+    "laya_default_amp": true,
+    "laya_default_dtype": "torch.float16",
+    "laya_version": "0.4.6",
+    "numpy_version": "2.5.4",
+    "torch_threads": 2,
+    "torch_version": "2.14.1",
+    "workers": 0
+  },
+  "seed": 2,
+  "split": {
+    "n_messages": 413,
+    "name": "test",
+    "path": "splits/test.jsonl",
+    "role": "test",
+    "sha256": "3abfb1836033c2d9af94ab17dcb386114bb6bf7a0a002b513514160ca37ed171",
+    "uids_sha256": "f0fc53ccb638cda616177cdb5f0580a6545fa6bf9a6686773437dbfa80d0439f"
+  },
+  "subset_seed": 0,
+  "system": {
+    "baseline_source": null,
+    "checkpoint": "ckpt-fewshot-laya-d2-k5",
+    "checkpoint_identity": {
+      "config_sha256": "689cbaceb1011666282c153e4866ee3158ec225bf6bfc9b8fef488f7b9b1da29",
+      "files_sha256": {
+        "encoder/config.json": "81d6856137aeb1d9cfbc1c1776d5b8196eed2e6ff879e894f517a21a580cc9d3",
+        "tokenizer/tokenizer.json": "dbba919c6e5e492bc22beb80abb64e6fcc7e8744dc696e8388b8c977767afa4b",
+        "tokenizer/tokenizer_config.json#normalized": "dd510b68c3448cc0192f934d1f5992a1157f713b7025525ef19f09348e799a45"
+      },
+      "local": true,
+      "model_sha256": "1ec9b2167867564bf018aaa4b13baf36e8a7c58346be61026ea7093e64116f57"
+    },
+    "clip_eps": null,
+    "kind": "laya"
+  },
+  "temperature": {
+    "shipped": 1.0,
+    "source": "laya.load (clamped noul:2 temperature, what the public API serves)"
+  },
+  "timing": {
+    "inference_seconds": 139.00814137392445,
+    "sec_per_msg": 0.3365814561111972,
+    "seconds": 142.2474868297577
+  },
+  "training": {
+    "calibrated": false,
+    "canonical": {
+      "adamw_foreach": false,
+      "adamw_fused": false,
+      "amp": false,
+      "base_config_sha256": "7b1906d56d2f28f0462bc73de64e45049797f22713a35562dbfab9a3e0b1738d",
+      "base_files_sha256": "cc216d59de20e6220ed5ccb7b4edd55591b91737e67a932c1dbebfc0dc679065",
+      "base_model_sha256": "eab4a9af9dba4f6a70e50530a6878b4fe62cc802787a45f5744045dded0e73ae",
+      "clip_grad_norm": 1.0,
+      "data_role": "train",
+      "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+      "device": "mps",
+      "encoder_lr": 2e-05,
+      "epochs": 10,
+      "fewshot": {
+        "base_run_id": "laya-selection_train-neg8-s2-6c99ffd3",
+        "digest": "847dc93d662877582f13d1a7f1d2657c114e887081a6bdbe5daf8e30d7d8ca2d",
+        "draw": 2,
+        "k": 5,
+        "protocol_sha256": "0d337d2019f9fcb1874fa0eb23f5f2547312e1675c832f886449d573cef54a8a",
+        "stage": "continued"
+      },
+      "freeze_embeddings": false,
+      "freeze_encoder": false,
+      "grad_accum": 4,
+      "grad_checkpointing": true,
+      "head_lr": 0.0001,
+      "head_max_len": null,
+      "laya_version": "0.4.6",
+      "loss": "rlcd",
+      "max_len": 128,
+      "max_messages": null,
+      "micro_batch": 8,
+      "neg": 8,
+      "neg_seed": 2,
+      "seed": 2,
+      "shuffle_options": false,
+      "split": "selection_train",
+      "weight_decay": 0.01,
+      "workers": 1
+    },
+    "config_sha256_sans_seed": "6c230547e08d2ef186aff8551abee1eb61a499e0eabacffbb081a21080e08c06",
+    "encoder_lr": 2e-05,
+    "epoch": 10,
+    "epochs_schedule": 10,
+    "fallback": false,
+    "head_lr": 0.0001,
+    "loss_by_epoch": [
+      0.47416700790295174,
+      0.3336182285946055,
+      0.23667757228820194,
+      0.13054768835119793,
+      0.07261485881550746,
+      0.034366219590053086,
+      0.018011792339969853,
+      0.004087292961087662,
+      0.003860689598943023,
+      0.0038933241124438768
+    ],
+    "neg_seed": 2,
+    "postfit_sha256": null,
+    "run_id": "laya-selection_train-neg8-s2-45f097f4",
+    "rung": "none",
+    "split": "selection_train",
+    "stop_after_epoch": null,
+    "weaker": false
+  }
+}

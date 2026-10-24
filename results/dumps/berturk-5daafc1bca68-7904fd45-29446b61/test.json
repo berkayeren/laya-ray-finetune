@@ -1,0 +1,122 @@
+{
+  "dump_sha256": "dc9c4d8f1bccf2e36dea0857c95b2f98cd9df6094a2efa1d849690431ce5f0b9",
+  "fewshot_runs_sha256": "4eefd4d939ea56ddd0bca1336768367ff893fded937e099c5446911366ad76f6",
+  "intents_order_sha256": "43c13c0bf2037c49b9d875bf979d46fc67bb672c762b383caf318d2b2e409d4b",
+  "logit": "classifier logit per tag; P(tag) = sigmoid(logit / T)",
+  "manifest": {
+    "is_committed": true,
+    "path": "data/splits.json",
+    "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103"
+  },
+  "n_subset": null,
+  "protocol_sha256": "0d337d2019f9fcb1874fa0eb23f5f2547312e1675c832f886449d573cef54a8a",
+  "questions_sha256": "2e7255501fdeacd1b25ab62bd07f0e3b0cadec2e4ee0df813ea763c8ff68288d",
+  "run_id": "berturk-5daafc1bca68-7904fd45-29446b61",
+  "schema_version": 1,
+  "scorer": {
+    "amp_enabled": false,
+    "batching": "16 messages per forward, padded to the longest, truncated at max_len 128",
+    "device": "mps",
+    "dtype": "torch.float32",
+    "numpy_version": "2.5.4",
+    "torch_threads": 2,
+    "torch_version": "2.14.1",
+    "transformers_version": "5.19.0",
+    "workers": 0
+  },
+  "seed": 1,
+  "split": {
+    "n_messages": 413,
+    "name": "test",
+    "path": "splits/test.jsonl",
+    "role": "test",
+    "sha256": "3abfb1836033c2d9af94ab17dcb386114bb6bf7a0a002b513514160ca37ed171",
+    "uids_sha256": "f0fc53ccb638cda616177cdb5f0580a6545fa6bf9a6686773437dbfa80d0439f"
+  },
+  "subset_seed": 0,
+  "system": {
+    "baseline_source": null,
+    "checkpoint": "ckpt-fewshot-berturk-d1-k10",
+    "checkpoint_identity": {
+      "config_sha256": "0f2ddf6a11a3cb9371b08ec87ec088afb61217cc9e92e19585e61b91957554df",
+      "files_sha256": {
+        "tokenizer_config.json": "abb7cc8c813870875157e0dff63bc21bb521d4b5d3c35c2eb9facaee4fd9532f",
+        "vocab.txt": "ca72d2012b1e46ed42f5df2dc9675f9da0b37a481601785cb4dff91f67fcca65"
+      },
+      "kind": "berturk",
+      "local": true,
+      "model_sha256": "5daafc1bca68612a9fb42f153fa45752686d0fccd8696335f92618b62b8e1f54",
+      "record_sha256": "7904fd4522e1b6ee40b2072413ddc2be6693183cb5be9a3d628def556d494169"
+    },
+    "clip_eps": null,
+    "kind": "berturk"
+  },
+  "temperature": {
+    "shipped": 1.0,
+    "source": "berturk_train.json temperature"
+  },
+  "timing": {
+    "inference_seconds": 0.8031358330044895,
+    "sec_per_msg": 0.0019446388208341151,
+    "seconds": 0.8248240947723389
+  },
+  "training": {
+    "calibrated": false,
+    "canonical": {
+      "accelerate_version": "1.15.0",
+      "base_config_sha256": "0f2ddf6a11a3cb9371b08ec87ec088afb61217cc9e92e19585e61b91957554df",
+      "base_files_sha256": "60e5a3622cd6a69b3d8ee2654974ce9aeda3121047e1ae31e9e5dde33b88966a",
+      "base_model_sha256": "6bde962ea2379cf4903810b7390a6776ebe3eac3b8bcb6123dea1691e0272d48",
+      "batch": 32,
+      "data_role": "train",
+      "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+      "device": "mps",
+      "encoder_lr": 2e-05,
+      "epochs": 10,
+      "fewshot": {
+        "base_run_id": "berturk-selection_train-s1-5c1c5a76",
+        "digest": "7ecc9ca984f6a169452c78ce010975d0931cfb93be8e21a38c482d5977c487cf",
+        "draw": 1,
+        "k": 10,
+        "protocol_sha256": "0d337d2019f9fcb1874fa0eb23f5f2547312e1675c832f886449d573cef54a8a",
+        "stage": "continued"
+      },
+      "head_lr": 0.0001,
+      "loss": "masked_bce",
+      "lr_scheduler": "linear",
+      "max_grad_norm": 1.0,
+      "max_len": 128,
+      "optim": "adamw_torch",
+      "seed": 1,
+      "split": "selection_train",
+      "transformers_version": "5.19.0",
+      "warmup_ratio": 0.1,
+      "weight_decay": 0.01
+    },
+    "config_sha256_sans_seed": "c0fa68607e74ded89076756f8e1446303943b8b756f0f7bcc821ef3d385164f2",
+    "encoder_lr": 2e-05,
+    "epoch": 10,
+    "epochs_schedule": 10,
+    "fallback": null,
+    "head_lr": 0.0001,
+    "loss_by_epoch": [
+      0.08296939482291539,
+      0.06605676884452502,
+      0.057614917308092116,
+      0.05227249637246132,
+      0.04863965436816216,
+      0.04683589314421018,
+      0.04505594198902448,
+      0.04331171090404193,
+      0.0427350290119648,
+      0.042384936660528186
+    ],
+    "neg_seed": null,
+    "postfit_sha256": null,
+    "run_id": "berturk-selection_train-s1-13db7f7a",
+    "rung": null,
+    "split": "selection_train",
+    "stop_after_epoch": null,
+    "weaker": null
+  }
+}

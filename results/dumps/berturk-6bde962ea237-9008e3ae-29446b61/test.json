@@ -1,0 +1,145 @@
+{
+  "dump_sha256": "22dd367304e2f1b4bf60bf21495cd129aeb01511e789e619ea7d97e9679e68d5",
+  "fewshot_runs_sha256": "4eefd4d939ea56ddd0bca1336768367ff893fded937e099c5446911366ad76f6",
+  "intents_order_sha256": "43c13c0bf2037c49b9d875bf979d46fc67bb672c762b383caf318d2b2e409d4b",
+  "logit": "classifier logit per tag; P(tag) = sigmoid(logit / T)",
+  "manifest": {
+    "is_committed": true,
+    "path": "data/splits.json",
+    "sha256": "7376c5199685318fe459d603d5d257759303a48fc467ccdd29406e84de7e4103"
+  },
+  "n_subset": null,
+  "protocol_sha256": "0d337d2019f9fcb1874fa0eb23f5f2547312e1675c832f886449d573cef54a8a",
+  "questions_sha256": "2e7255501fdeacd1b25ab62bd07f0e3b0cadec2e4ee0df813ea763c8ff68288d",
+  "run_id": "berturk-6bde962ea237-9008e3ae-29446b61",
+  "schema_version": 1,
+  "scorer": {
+    "amp_enabled": false,
+    "batching": "16 messages per forward, padded to the longest, truncated at max_len 128",
+    "device": "mps",
+    "dtype": "torch.float32",
+    "numpy_version": "2.5.4",
+    "torch_threads": 2,
+    "torch_version": "2.14.1",
+    "transformers_version": "5.19.0",
+    "workers": 0
+  },
+  "seed": 1,
+  "split": {
+    "n_messages": 413,
+    "name": "test",
+    "path": "splits/test.jsonl",
+    "role": "test",
+    "sha256": "3abfb1836033c2d9af94ab17dcb386114bb6bf7a0a002b513514160ca37ed171",
+    "uids_sha256": "f0fc53ccb638cda616177cdb5f0580a6545fa6bf9a6686773437dbfa80d0439f"
+  },
+  "subset_seed": 0,
+  "system": {
+    "baseline_source": null,
+    "checkpoint": "ckpt-fewshot-berturk-base-s1",
+    "checkpoint_identity": {
+      "config_sha256": "0f2ddf6a11a3cb9371b08ec87ec088afb61217cc9e92e19585e61b91957554df",
+      "files_sha256": {
+        "tokenizer_config.json": "abb7cc8c813870875157e0dff63bc21bb521d4b5d3c35c2eb9facaee4fd9532f",
+        "vocab.txt": "ca72d2012b1e46ed42f5df2dc9675f9da0b37a481601785cb4dff91f67fcca65"
+      },
+      "kind": "berturk",
+      "local": true,
+      "model_sha256": "6bde962ea2379cf4903810b7390a6776ebe3eac3b8bcb6123dea1691e0272d48",
+      "record_sha256": "9008e3ae8a26bfe1d24ff9366a11031f27298e9b11c4dbc40699ed2ed70ea4ca"
+    },
+    "clip_eps": null,
+    "kind": "berturk"
+  },
+  "temperature": {
+    "shipped": 1.0,
+    "source": "berturk_train.json temperature"
+  },
+  "timing": {
+    "inference_seconds": 0.8081401268718764,
+    "sec_per_msg": 0.0019567557551377155,
+    "seconds": 0.8297829627990723
+  },
+  "training": {
+    "calibrated": false,
+    "canonical": {
+      "accelerate_version": "1.15.0",
+      "base_config_sha256": "3be8dbe74813f59a252773db34bd67640166d36c507ded3b06b55f91f05ce78a",
+      "base_model_sha256": "18e29c6c61a046ab18fa48aeec3dce1285b09c5648d9ba68da1474940b9a9fcd",
+      "batch": 32,
+      "data_role": "train",
+      "data_sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+      "device": "mps",
+      "encoder_lr": 2e-05,
+      "epochs": 30,
+      "fewshot": {
+        "protocol_sha256": "0d337d2019f9fcb1874fa0eb23f5f2547312e1675c832f886449d573cef54a8a",
+        "stage": "base"
+      },
+      "head_lr": 0.0001,
+      "loss": "masked_bce",
+      "lr_scheduler": "linear",
+      "mask_tags": [
+        "appointment",
+        "contactless",
+        "direct_debit",
+        "loan",
+        "overdraft",
+        "savings"
+      ],
+      "max_grad_norm": 1.0,
+      "max_len": 128,
+      "optim": "adamw_torch",
+      "seed": 1,
+      "split": "selection_train",
+      "stop_after_epoch": 29,
+      "transformers_version": "5.19.0",
+      "warmup_ratio": 0.1,
+      "weight_decay": 0.01
+    },
+    "config_sha256_sans_seed": "0ccde1bf51ed59f3dbe2e13728f0154ae9f2ae96b893548fdebd132d8135e757",
+    "encoder_lr": 2e-05,
+    "epoch": 29,
+    "epochs_schedule": 30,
+    "fallback": null,
+    "head_lr": 0.0001,
+    "loss_by_epoch": [
+      0.6837521506392438,
+      0.3528386931056562,
+      0.18614212099624716,
+      0.17402944713830948,
+      0.1637979331223861,
+      0.14964694821316263,
+      0.1346388718356257,
+      0.12145310138230739,
+      0.11003766970142075,
+      0.1008098917486875,
+      0.09145205354560977,
+      0.08449381201163582,
+      0.07910586739687817,
+      0.07309416341392891,
+      0.068302053877193,
+      0.06460911254196064,
+      0.060368401443828705,
+      0.05690197346974974,
+      0.053852860775330795,
+      0.051675247757331184,
+      0.04901748506919197,
+      0.047792142904970955,
+      0.04560370605600917,
+      0.04447433056876711,
+      0.04285862847514774,
+      0.04202338806151048,
+      0.041256223521802735,
+      0.04050413725654716,
+      0.03978513452507879
+    ],
+    "neg_seed": null,
+    "postfit_sha256": null,
+    "run_id": "berturk-selection_train-s1-5c1c5a76",
+    "rung": null,
+    "split": "selection_train",
+    "stop_after_epoch": 29,
+    "weaker": null
+  }
+}
