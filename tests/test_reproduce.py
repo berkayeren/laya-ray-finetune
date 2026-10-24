@@ -968,3 +968,202 @@ def test_print_run_id_reproduces_the_recorded_run_ids(tmp_path):
         got.append((label, printed, want))
     assert [g for g in got if g[1] != g[2]] == [], got
     assert not os.listdir(tmp_path) or all(not os.listdir(tmp_path / d) for d in os.listdir(tmp_path))
+
+
+# ---- full mode from scratch (plan 10-06, D-01 to D-04): synthetic registries and fake runners; nothing trains ----
+
+def _builders(cmds):
+    """BUILDERS of a synthetic registry: {name: [command tuple or (tuple, note)]} -> step builders."""
+    def build(lines):
+        return lambda root, proto, pin: [x if isinstance(x[0], tuple) or x[0] is None else (x, None) for x in lines]
+    return {n: build(lines) for n, lines in cmds.items()}
+
+
+@pytest.fixture
+def registry(tmp_path, monkeypatch):
+    """A tmp git repo (protocol.json, the Makefile, results/{a,b,g}.txt committed) under a synthetic registry: a
+    (model), b (model-free), g (gated, trained by a: GATE_PRODUCERS {"g": ("a",)}) and report. Returns (root, the
+    committed bytes, set_commands)."""
+    import shutil
+    _git_env(monkeypatch)
+    root = tmp_path / "reg"
+    (root / "results").mkdir(parents=True)
+    for rel in ("protocol.json", "Makefile"):
+        shutil.copyfile(os.path.join(REPO_ROOT, rel), root / rel)
+    committed = {n: ("%s committed\n" % n).encode() for n in "abg"}
+    for n, data in committed.items():
+        (root / "results" / ("%s.txt" % n)).write_bytes(data)
+    git_in(root, "init", "-q")
+    git_in(root, "add", "-A")
+    git_in(root, "commit", "-q", "-m", "init")
+
+    def ev(n):
+        return lambda r, proto, pin, manifest: [rp._file(r, "results/%s.txt" % n, proto)]
+    steps = [{"name": "a", "model": True, "gated": False, "evidence": ev("a"), "fix": "restore a"},
+             {"name": "b", "model": False, "gated": False, "evidence": ev("b"), "fix": "restore b"},
+             {"name": "g", "model": True, "gated": True, "evidence": ev("g"), "fix": "restore g"},
+             {"name": "report", "model": False, "gated": False, "evidence": rp.ev_report, "fix": "it always runs"}]
+    monkeypatch.setattr(rp, "STEPS", steps)
+    monkeypatch.setattr(rp, "GATE_PRODUCERS", {"g": ("a",)})
+
+    def set_commands(**over):
+        cmds = {"a": [("a.py",)], "b": [("b.py",)], "g": [("g.py",)], "report": list(rp.REBUILD)}
+        cmds.update(over)
+        monkeypatch.setattr(rp, "BUILDERS", _builders(cmds))
+    set_commands()
+    return str(root), committed, set_commands
+
+
+class Recorder:
+    """A fake run, capture, report and out over one event list: run(cmd) writes results/<name>.txt for <name>.py
+    (the committed bytes, or other bytes for a name in `bad`) and returns rc.get(name, 0)."""
+
+    def __init__(self, committed, rc=None, bad=(), rid="run-xyz"):
+        self.committed, self.rc, self.bad, self.rid, self.events = committed, rc or {}, set(bad), rid, []
+
+    def run(self, cmd, root):
+        self.events.append(("run", cmd))
+        name = cmd[0][:-3]
+        if name in self.committed and not self.rc.get(name):
+            with open(os.path.join(root, "results", "%s.txt" % name), "wb") as f:
+                f.write(b"other bytes\n" if name in self.bad else self.committed[name])
+        return self.rc.get(name, 0)
+
+    def capture(self, cmd, root):
+        self.events.append(("capture", cmd))
+        return self.rid
+
+    def report(self, root, run, blocks, precheck=True, out=print):
+        self.events.append(("report", precheck))
+
+    def out(self, line):
+        self.events.append(("out", line))
+
+    def full(self, root):
+        return rp.run_full(root, run=self.run, capture=self.capture, blocks=None, report=self.report, out=self.out)
+
+    def of(self, kind):
+        return [e[1] for e in self.events if e[0] == kind]
+
+
+def _delete(root, *names):
+    for n in names:
+        os.remove(os.path.join(root, "results", "%s.txt" % n))
+
+
+def _stop(fn):
+    with pytest.raises(SystemExit) as e:
+        fn()
+    msg = str(e.value.code)
+    assert "\n" not in msg, msg
+    return msg
+
+
+def test_full_mode_runs_todo_steps_in_order_after_the_disclosure(registry):
+    root, committed, _ = registry
+    _delete(root, "a", "b", "g")
+    r = Recorder(committed)
+    r.full(root)
+    assert r.of("run") == [("a.py",), ("b.py",), ("g.py",)] and r.of("capture") == []
+    assert r.of("report") == [False]                    # steps ran: the report compares by snapshot, no precheck
+    outs = r.of("out")
+    assert outs.count(rp.DISCLOSURE) == 1 and not [l for l in outs if l.startswith("skip ")]
+    first_run = next(i for i, e in enumerate(r.events) if e[0] == "run")
+    assert r.events.index(("out", rp.DISCLOSURE)) < first_run
+    assert [l for l in outs if l.startswith("run: ")] == ["run: python a.py", "run: python b.py", "run: python g.py"]
+    assert r.events[-1] == ("report", False)
+    assert rp.tree_changes(root) == []                  # every output equals the committed bytes
+
+
+def test_full_mode_stops_at_a_failing_command(registry):
+    root, committed, set_commands = registry
+    _delete(root, "a", "b", "g")
+    r = Recorder(committed, rc={"b": 1})
+    msg = _stop(lambda: r.full(root))
+    assert msg.startswith("step b: `python b.py` exited 1; a protocol gate refusal printed above is final (D-04)"), msg
+    assert "rerun `make reproduce`" in msg
+    assert r.of("run") == [("a.py",), ("b.py",)] and r.of("report") == []          # g never ran, no report
+    _delete(root, "a")                                    # a deferred command (its record absent) is never run
+    set_commands(a=[(("a.py",), "deferred: printed once results/postfit/x.json exists")])
+    r = Recorder(committed)
+    msg = _stop(lambda: r.full(root))
+    assert msg.startswith("a needs results/postfit/x.json, which the earlier step did not produce; "), msg
+    assert r.of("run") == [] and r.of("out").count(rp.DISCLOSURE) == 1
+
+
+def test_full_mode_stops_at_the_first_divergence(registry):
+    root, committed, _ = registry
+    _delete(root, "a", "b", "g")
+    r = Recorder(committed, bad={"a"})
+    msg = _stop(lambda: r.full(root))
+    assert msg.startswith("step a ran, but results/a.txt differs from the bytes git HEAD holds for it; "), msg
+    assert "(D-04)" in msg and "git checkout -- results/" in msg and "protocol gate" in msg
+    assert r.of("run") == [("a.py",)] and r.of("report") == []                     # b and g never ran
+    os.remove(os.path.join(root, "results", "a.txt"))     # a step that leaves its evidence missing stops too
+    r = Recorder(committed, rc={"a": 0})
+    r.committed = {}
+    msg = _stop(lambda: r.full(root))
+    assert msg.startswith("step a ran, but results/a.txt is missing; ") and "(D-04)" in msg, msg
+    assert r.of("run") == [("a.py",)]
+
+
+def test_gated_step_never_reruns_without_its_training(registry):
+    root, committed, _ = registry
+    _delete(root, "g")                                    # a and b done (committed), g todo
+    r = Recorder(committed)
+    msg = _stop(lambda: r.full(root))
+    assert msg.startswith("g has no committed gated dumps while the steps that train its checkpoints are done"), msg
+    assert "exactly-once" in msg and "never rescored" in msg and "git checkout -- results/dumps/" in msg
+    assert r.events == []                                 # refused before any command, any output and the report
+
+
+def test_full_mode_resolves_the_run_id_before_the_exports(registry):
+    root, committed, set_commands = registry
+    _delete(root, "a", "b", "g")
+    set_commands(a=[("a.py", "--print-run-id"), ("a.py",), ("score.py", "x/%s/epoch-001" % rp.RUN_ID),
+                    ("postfit.py", "--prune", "x/%s/epoch-001" % rp.RUN_ID)])
+    r = Recorder(committed)
+    r.full(root)
+    assert r.of("capture") == [("a.py", "--print-run-id")]          # the print command, once, through capture
+    assert r.of("run") == [("a.py",), ("score.py", "x/run-xyz/epoch-001"), ("postfit.py", "--prune",
+                                                                            "x/run-xyz/epoch-001"), ("b.py",), ("g.py",)]
+    assert "run id: run-xyz" in r.of("out")
+    _delete(root, "a", "b", "g")
+    for rid in ("", rp.RUN_ID, "a b"):                    # no usable run id: refused before the training command
+        r = Recorder(committed, rid=rid)
+        msg = _stop(lambda: r.full(root))
+        assert msg.startswith("step a: `python a.py --print-run-id` printed no run id"), msg
+        assert r.of("run") == []
+
+
+def test_full_mode_refuses_before_any_command_on_an_out_of_order_tree(tree, monkeypatch):
+    import json
+    import shutil
+    _data_done(monkeypatch)
+    proto, _ = pilot.protocol.require_frozen()
+    dumps = os.path.join(tree, "results", "dumps")
+    with open(os.path.join(tree, "results", "fewshot", "runs.json"), encoding="utf-8") as f:
+        fewshot_ids = {e["dump_run_id"] for e in json.load(f)["entries"]}
+    gated = [s["dump_run_id"] for kind in pilot.protocol.KINDS for s in pilot.protocol.final_seeds(proto, kind)]
+    assert len(gated) == 6 and len(fewshot_ids) == 18
+    for rid in gated:                                     # the 13 final-scoring dumps and every later artifact
+        assert sorted(os.listdir(os.path.join(dumps, rid))) == ["hotels_probe.json", "hotels_probe.npz", "test.json",
+                                                                "test.npz"]
+        shutil.rmtree(os.path.join(dumps, rid))
+    for ext in ("npz", "json"):
+        os.remove(os.path.join(dumps, pilot.protocol.ZEROSHOT, "hotels_probe." + ext))
+    for rid in fewshot_ids:
+        shutil.rmtree(os.path.join(dumps, rid))
+    shutil.rmtree(os.path.join(tree, "results", "final"))
+    shutil.rmtree(os.path.join(tree, "results", "fewshot"))
+    st = states(rp.plan(tree))
+    assert [n for n in D01[1:11] if st[n] != "done"] == [] and [n for n in D01[11:18] if st[n] != "todo"] == [], st
+    r = Recorder({})
+    msg = _stop(lambda: r.full(tree))
+    assert msg.startswith("final-scoring has no committed gated dumps while the steps that train its checkpoints are "
+                          "done: the gated dumps are the exactly-once audit record and are never rescored"), msg
+    assert r.events == []                                 # no score.py command is reached
+    shutil.rmtree(os.path.join(tree, "results", "confidence"))      # confidence todo, latency still done
+    msg = _stop(lambda: r.full(tree))
+    assert msg.startswith("step latency is done but the earlier step confidence is not"), msg
+    assert r.events == []
