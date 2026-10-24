@@ -475,3 +475,126 @@ def test_eval_only_end_to_end(tmp_path, monkeypatch):
     st = subprocess.run(["git", "status", "--porcelain", "--", "results/", "README.md", "protocol.json"], cwd=copy,
                         check=True, capture_output=True, text=True)
     assert st.stdout == ""
+
+
+# ---- --verify-checkpoints (D-06): the on-disk final seeds re-hashed against their manifests, reported, not gated ----
+
+ABSENT = "not needed: eval-only rebuilds from the committed dumps"
+
+
+def laya_ckpt(d, salt):
+    """A synthetic Laya-like checkpoint dir: weights, config, tokenizer/ and encoder/ files."""
+    files = {"model.safetensors": b"w" + salt, "rl_agent_config.json": b'{"t": 1}\n',
+             "tokenizer/tokenizer_config.json": b'{"tokenizer_class": "PreTrainedTokenizerFast"}\n',
+             "tokenizer/tokenizer.json": b'{"v": 1}\n', "encoder/config.json": b'{"h": 2}\n'}
+    for rel, data in files.items():
+        os.makedirs(os.path.dirname(os.path.join(d, rel)) or d, exist_ok=True)
+        with open(os.path.join(d, rel), "wb") as f:
+            f.write(data)
+
+
+def berturk_ckpt(d, salt):
+    """A synthetic BERTurk checkpoint dir: every pilot.berturk.CHECKPOINT_FILES entry."""
+    from pilot import berturk
+    os.makedirs(d)
+    for name in berturk.CHECKPOINT_FILES:
+        with open(os.path.join(d, name), "wb") as f:
+            f.write(name.encode("utf-8") + salt)
+
+
+def final_manifest(path, kind, ckpt_root, make):
+    """A postfit-final/1 manifest of three seeds whose identity and dump run id are computed from their dirs."""
+    import json
+    from pilot import berturk, dumps, weights
+    seeds = []
+    for s in range(3):
+        name = "ckpt-%s-s%d" % (kind, s)
+        d = os.path.join(ckpt_root, name)
+        make(d, b"%d" % s)
+        if kind == "laya":
+            ident = weights.identity(d)
+            rid = dumps.run_id("laya", ident)
+        else:
+            ident = berturk.identity(d)
+            rid = berturk.dump_run_id(ident)
+        seeds.append({"seed": s, "train_run_id": "r%d" % s, "checkpoint_name": name, "checkpoint_identity": ident,
+                      "dump_run_id": rid, "temperature": 1.0})
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"schema": "postfit-final/1", "system_kind": kind, "seeds": seeds}, f)
+    return seeds
+
+
+def make_final_seeds(tmp_path):
+    ckpts = str(tmp_path / "ckpts")
+    os.makedirs(ckpts)
+    manifests = {}
+    for kind, make in (("laya", laya_ckpt), ("berturk", berturk_ckpt)):
+        manifests[kind] = str(tmp_path / ("%s-final.json" % kind))
+        final_manifest(manifests[kind], kind, ckpts, make)
+    return ckpts, manifests
+
+
+def test_verify_checkpoints_reports_match_differs_absent(tmp_path):
+    import shutil
+    ckpts, manifests = make_final_seeds(tmp_path)
+    rows = rp.verify_checkpoints(REPO_ROOT, ckpts, manifests=manifests)
+    assert [(r["kind"], r["seed"], r["checkpoint_name"], r["status"]) for r in rows] == [
+        (k, s, "ckpt-%s-s%d" % (k, s), "match") for k in ("laya", "berturk") for s in range(3)]
+    assert set(rows[0]) == {"kind", "seed", "checkpoint_name", "status", "detail"}
+    for kind, weights_file in (("laya", "model.safetensors"), ("berturk", "model.safetensors")):
+        p = os.path.join(ckpts, "ckpt-%s-s1" % kind, weights_file)
+        with open(p, "rb") as f:
+            raw = bytearray(f.read())
+        raw[0] ^= 0x01
+        with open(p, "wb") as f:
+            f.write(bytes(raw))
+        shutil.rmtree(os.path.join(ckpts, "ckpt-%s-s2" % kind))
+    os.remove(os.path.join(ckpts, "ckpt-berturk-s0", "vocab.txt"))         # an incomplete BERTurk dir: differs
+    rows = rp.verify_checkpoints(REPO_ROOT, ckpts, manifests=manifests)
+    got = {(r["kind"], r["seed"]): r for r in rows}
+    assert got[("laya", 0)]["status"] == "match"
+    for kind in ("laya", "berturk"):
+        assert got[(kind, 1)]["status"] == "differs" and "model_sha256" in got[(kind, 1)]["detail"], got[(kind, 1)]
+        assert got[(kind, 2)]["status"] == "absent" and got[(kind, 2)]["detail"] == ABSENT, got[(kind, 2)]
+    assert got[("berturk", 0)]["status"] == "differs" and got[("berturk", 0)]["detail"], got[("berturk", 0)]
+
+
+def test_verify_checkpoints_writes_nothing(tmp_path, monkeypatch):
+    import json
+    ckpts, manifests = make_final_seeds(tmp_path)
+    before = (rp.snapshot(str(tmp_path)), rp.snapshot(REPO_ROOT), sorted(os.listdir(str(tmp_path))))
+
+    def tree_files(root):
+        return sorted(os.path.relpath(os.path.join(d, n), root) for d, _, fs in os.walk(root) for n in fs)
+    files = tree_files(str(tmp_path))
+    rp.verify_checkpoints(REPO_ROOT, ckpts, manifests=manifests)
+    assert (rp.snapshot(str(tmp_path)), rp.snapshot(REPO_ROOT), sorted(os.listdir(str(tmp_path)))) == before
+    assert tree_files(str(tmp_path)) == files
+    code = ("import json, sys, pilot.reproduce as r\n"
+            "rows = r.verify_checkpoints(r.REPO_ROOT, sys.argv[1], manifests=json.loads(sys.argv[2]))\n"
+            "print(sorted({m.split('.')[0] for m in sys.modules} & {'torch', 'transformers', 'laya', 'ray'}))\n")
+    out = subprocess.run([sys.executable, "-c", code, ckpts, json.dumps(manifests)], cwd=REPO_ROOT,
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "[]"
+    # eval_only(verify=True): the rows print before the rebuild, and differs or absent never changes the outcome
+    root = tmp_path / "root"
+    (root / "results" / "postfit").mkdir(parents=True)
+    for kind, path in manifests.items():
+        with open(path, "rb") as f, open(root / "results" / "postfit" / ("%s-final.json" % kind), "wb") as g:
+            g.write(f.read())
+    import shutil
+    shutil.rmtree(os.path.join(ckpts, "ckpt-laya-s0"))
+    calls = []
+    monkeypatch.setattr(rp, "plan", lambda r: [(s, "run" if s["name"] in rp.ALWAYS else "done", []) for s in rp.STEPS])
+    monkeypatch.setattr(rp, "report_step", lambda *a, **k: calls.append("report_step"))
+    lines = []
+    rp.eval_only(str(root), run=None, blocks=None, out=lambda s: (lines.append(s), calls.append("out")),
+                 verify=True, checkpoint_root=ckpts)
+    assert calls == ["out"] * 6 + ["report_step"], calls
+    assert lines[0] == "verify-checkpoints (reported, not gated): laya seed 0 ckpt-laya-s0: absent (%s)" % ABSENT
+    assert all(l.startswith("verify-checkpoints (reported, not gated): ") for l in lines)
+    assert [l.split(": ")[-1].split(" ")[0] for l in lines] == ["absent"] + ["match"] * 5
+    bad = subprocess.run([sys.executable, "reproduce.py", "--mode", "eval-only", "--checkpoint-root", ckpts],
+                         cwd=REPO_ROOT, capture_output=True, text=True)
+    assert bad.returncode == 2 and "--checkpoint-root" in bad.stderr and "--verify-checkpoints" in bad.stderr
