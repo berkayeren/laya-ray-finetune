@@ -219,7 +219,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# GSD planning docs (local-only)
+# local planning notes, never committed
 .planning/
 
 # Phase 1 data outputs: only the manifest is committed (D-02)
