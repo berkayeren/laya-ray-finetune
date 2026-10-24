@@ -19,9 +19,15 @@ is reported, not gated: each final seed listed in results/postfit/<kind>-final.j
 absent. It loads no model, writes nothing and never changes the exit status (no committed val dump of a final seed
 exists to re-score against: the final seeds are scored once, on test and HOTELS).
 
+--dry-run prints the interpreter, the step plan of the working tree and each todo step's exact commands (--all: every
+step's, in D-01 order), built from the committed records, protocol.json and the Makefile (pilot.reproduce.commands),
+with the D-04 disclosure before the first model step listed (pilot.reproduce.DISCLOSURE). It runs nothing and exits 0.
+No printed command passes --force or runs `make baselines`.
+
 usage:
     python reproduce.py --mode eval-only               # = make report PYTHON=.venv/bin/python
     python reproduce.py --mode eval-only --verify-checkpoints [--checkpoint-root DIR]
+    python reproduce.py --mode eval-only --dry-run [--all]   # print the plan and the commands; run nothing
 """
 import argparse
 import sys
@@ -39,10 +45,20 @@ def main(argv=None):
                     help="also re-hash the on-disk final seeds against their manifests (reported, not gated)")
     ap.add_argument("--checkpoint-root", metavar="DIR", default=None,
                     help="where the final seed dirs live (default: the repo root); only with --verify-checkpoints")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the plan and the todo steps' commands, with the D-04 disclosure; run nothing")
+    ap.add_argument("--all", action="store_true", help="--dry-run: print every step's commands, done ones included")
     a = ap.parse_args(argv)
     if a.checkpoint_root is not None and not a.verify_checkpoints:
         ap.error("--checkpoint-root applies only with --verify-checkpoints")
+    if a.all and not a.dry_run:
+        ap.error("--all applies only with --dry-run")
+    if a.dry_run and a.verify_checkpoints:
+        ap.error("--dry-run runs nothing; drop --verify-checkpoints")
     print("reproduce in " + sys.executable, flush=True)
+    if a.dry_run:
+        print(reproduce.dry_run(REPO_ROOT, all_steps=a.all), end="", flush=True)
+        return 0
     rows = reproduce.plan(REPO_ROOT)
     _, pin = protocol.require_frozen()
     print(reproduce.render_plan(rows, pin), end="", flush=True)

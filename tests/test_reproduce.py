@@ -598,3 +598,133 @@ def test_verify_checkpoints_writes_nothing(tmp_path, monkeypatch):
     bad = subprocess.run([sys.executable, "reproduce.py", "--mode", "eval-only", "--checkpoint-root", ckpts],
                          cwd=REPO_ROOT, capture_output=True, text=True)
     assert bad.returncode == 2 and "--checkpoint-root" in bad.stderr and "--verify-checkpoints" in bad.stderr
+
+
+# ---- the command layer (plan 10-05, D-01, D-04): every step's commands, the dry run, the --force guard ----
+
+TRAINERS = ("ray_train.py", "berturk_train.py")
+SELECTION_STEPS = ("laya-selection", "berturk-selection")
+
+
+@pytest.fixture
+def bare(tmp_path):
+    """A tree with only protocol.json, the Makefile and data/splits.json: every record absent (the from-scratch form,
+    with the deferred final-seed commands and the primary few-shot mode)."""
+    import shutil
+    for rel in ("protocol.json", "Makefile", "data/splits.json"):
+        os.makedirs(os.path.dirname(os.path.join(tmp_path, rel)) or str(tmp_path), exist_ok=True)
+        shutil.copyfile(os.path.join(REPO_ROOT, rel), os.path.join(tmp_path, rel))
+    return str(tmp_path)
+
+
+def header(name):
+    return "== %2d %s (" % (D01.index(name) + 1, name)
+
+
+def test_every_step_has_commands(bare):
+    for root in (REPO_ROOT, bare):
+        for name in rp.STEP_NAMES:
+            cmds = rp.commands(name, root)
+            assert cmds and all(isinstance(c, tuple) and c for c in cmds), (root, name)
+            for c in cmds:
+                assert rp.display(c).startswith(("python ", "make ")), c
+    text = rp.dry_run(REPO_ROOT, all_steps=True)
+    heads = [l for l in text.splitlines() if l.startswith("== ")]
+    assert heads == ["== %2d %s (%s)" % (i, n, "run" if n == "report" else "done") for i, n in enumerate(D01, 1)]
+    assert rp.commands("report") == list(rp.REBUILD)
+    assert "README: rewrite the 11 generated blocks of README_BLOCKS" in text
+    sel = ("python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --device mps --workers 1 "
+           "--micro-batch 8 --grad-accum 4 --max-len 128 --epochs 4 --neg 8 --seed 0 --encoder-lr 2e-05 --head-lr "
+           "0.0001 --storage ray_results --out ckpt-sel")
+    assert sel in text.splitlines() and sel + " --print-run-id" in text.splitlines()
+    deferred = rp.step_lines("laya-final", bare)                       # no record: the printer and the manifest
+    assert [c[:2] for c, _ in deferred] == [("postfit.py", "--print-final-commands"), ("postfit.py", "--final-manifest")]
+    assert all(note and "deferred" in note and "results/postfit/laya.json exists" in note for _, note in deferred)
+    assert rp.RUN_ID in " ".join(" ".join(c) for c in rp.commands("laya-selection", bare))
+
+
+def every_command(roots):
+    return [(root, name, c) for root in roots for name in rp.STEP_NAMES for c in rp.commands(name, root)]
+
+
+def test_no_command_passes_force_or_rescores(bare):
+    from pilot.data import SPLITS
+    gated_targets = {("make", t): t for t in rp.GATED}
+    seen = set()
+    for root, name, c in every_command((REPO_ROOT, bare)):
+        assert "--force" not in c and not any(a.startswith("--force") for a in c), (name, c)
+        assert c != ("make", "baselines"), (name, c)
+        assert not (c[0] == "make" and "baselines" in c[1:]), (name, c)
+        if c[:2] in gated_targets:
+            assert name == gated_targets[c[:2]], (name, c)              # a gated target only in its own step
+            seen.add(c[:2])
+        if c[0] == "score.py":
+            assert name in ("baselines",) + SELECTION_STEPS, (name, c)
+            if name in SELECTION_STEPS:                                # a selection export is scored on val only
+                assert c[1] == "data/splits/val.jsonl", c
+            else:                                                      # the ungated baselines, never a checkpoint
+                assert c[1] in ("data/splits/val.jsonl", "data/splits/test.jsonl") and "--checkpoint" not in c, c
+        assert not any("hotels_probe" in a for a in c if c[0] == "score.py"), c
+        if c[0] in TRAINERS:
+            assert name in SELECTION_STEPS + ("laya-final", "berturk-final", "fewshot-bases", "fewshot-continued"), c
+        if c[0] == "latency.py" and "--system" in c:
+            assert name == "latency", c
+        if c[0] == "make":
+            assert name in ("data", "baselines", "laya-postfit", "berturk-postfit", "confidence", "final-scoring",
+                            "fewshot-scoring", "fewshot-reports", "report"), (name, c)
+    assert seen == set(gated_targets)
+    assert {s["name"] for s in SPLITS} >= {"val", "test", "hotels_probe"}
+
+
+def test_dry_run_runs_nothing(monkeypatch, tree):
+    def boom(*a, **k):
+        raise AssertionError("the dry run ran %r" % (a,))
+    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(subprocess, "Popen", boom)
+    monkeypatch.setattr(rp, "run_command", boom)
+    monkeypatch.setattr(rp, "render_blocks", boom)
+    before = rp.snapshot(REPO_ROOT)
+    for root in (REPO_ROOT, tree):
+        for all_steps in (False, True):
+            assert rp.dry_run(root, all_steps=all_steps).endswith(", nothing was run\n")
+    assert rp.snapshot(REPO_ROOT) == before
+    monkeypatch.undo()
+    out = subprocess.run([sys.executable, "reproduce.py", "--mode", "eval-only", "--dry-run"], cwd=REPO_ROOT,
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert [l for l in out.stdout.splitlines() if l.startswith("== ")] == ["== 19 report (run)"] or \
+        [l for l in out.stdout.splitlines() if l.startswith("== ")] == ["==  1 data (todo)", "== 19 report (run)"]
+    assert "eval-only: " not in out.stdout and rp.DISCLOSURE not in out.stdout   # no model step listed, none run
+    assert out.stdout.splitlines()[0] == "reproduce in " + sys.executable
+    bad = subprocess.run([sys.executable, "reproduce.py", "--mode", "eval-only", "--all"], cwd=REPO_ROOT,
+                         capture_output=True, text=True)
+    assert bad.returncode == 2 and "--all" in bad.stderr and "--dry-run" in bad.stderr
+
+
+def test_dry_run_prints_the_disclosure_before_the_first_model_step(tree):
+    import json
+    import shutil
+    assert not re.search(r"[0-9]", rp.DISCLOSURE)
+    for phrase in ("not bit-identical", "require_admitted", "test and HOTELS", "pinned final seeds", "latency",
+                   "never reproduces", "first step whose output differs", "never weakens the gate",
+                   "never reruns a gated scoring step", "git checkout -- results/", "ray_results/<run_id>/",
+                   "berturk_runs/<run_id>/"):
+        assert phrase in rp.DISCLOSURE, phrase
+    text = rp.dry_run(REPO_ROOT, all_steps=True)
+    plan_end = text.index("19 report ")
+    assert text.count(rp.DISCLOSURE) == 1
+    assert plan_end < text.index(rp.DISCLOSURE) < text.index(header("baselines"))
+    assert text.index(header("data")) < text.index(rp.DISCLOSURE)
+    with open(os.path.join(tree, "results", "fewshot", "runs.json"), encoding="utf-8") as f:
+        ids = {e["dump_run_id"] for e in json.load(f)["entries"]}
+    shutil.rmtree(os.path.join(tree, "results", "fewshot"))           # the 10-03 todo-tail tree
+    for rid in ids:
+        shutil.rmtree(os.path.join(tree, "results", "dumps", rid))
+    text = rp.dry_run(tree)
+    heads = [l for l in text.splitlines() if l.startswith("== ")]
+    assert heads == ["==  1 data (todo)"] + [header(n) + "todo)" for n in D01[13:18]] + ["== 19 report (run)"]
+    assert text.count(rp.DISCLOSURE) == 1
+    projection = rp.display(("fewshot.py", "--projection", "--out", "results/fewshot/projection.json"))
+    assert text.index(header("fewshot-projection")) < text.index(projection) < text.index(rp.DISCLOSURE) \
+        < text.index(header("fewshot-bases"))
+    assert "# the mode is primary until results/fewshot/projection.json records the D-08 decision" in text

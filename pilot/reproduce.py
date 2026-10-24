@@ -39,14 +39,28 @@ without a shell by the interpreter running this module (make targets get PYTHON=
 verify_checkpoints (--verify-checkpoints) re-hashes the on-disk final seeds with score.py's identity functions against
 their final manifests: reported, not gated (it loads no model, writes nothing and never refuses).
 
+The command layer (D-01, D-04; reproduce.py --dry-run [--all]): commands(name, root) gives every step's argv tuples,
+built from the committed records, protocol.json and the Makefile, never retyped: the selection runs and the few-shot
+runs from protocol.json's fewshot block (rules.base_runs, the frozen epochs, the draws, pilot.fewshot.slots and
+base_seed_of under the recorded mode), the final seeds from pilot.postfit.final_command and
+pilot.berturk.final_command of the hash-verified postfit records, the baselines as the Makefile's score.py lines
+without --force, final-reports as final_report_commands (the Makefile recipe; the from-scratch form without the
+verdict's --fewshot, since fewshot.json comes later in D-01). No command passes --force or runs `make baselines`, and
+the gated scoring targets appear only in their own steps. dry_run prints the plan, then each todo step's commands (every
+step's with --all), with DISCLOSURE once before the first model step listed; it runs nothing. A from-scratch run is
+disclosed, not run here: MPS retraining is not bit-identical, so it stops at the first output that differs from the
+committed record or a protocol pin, and the gate is never weakened.
+
 usage:
     python -m pilot.reproduce --plan          # the 19-step plan of the working tree, each step done, todo or run
     python reproduce.py --mode eval-only      # = make report: verify, rebuild every report, the memo and the README
+    python reproduce.py --mode eval-only --dry-run [--all]   # print the plan and the commands; run nothing
 """
 import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 
@@ -66,7 +80,7 @@ MODEL_STEPS = ("baselines", "laya-selection", "laya-final", "berturk-selection",
 RUNS = "results/fewshot/runs.json"
 VERDICT = "results/final/verdict.json"
 CONFIDENCE_SCHEMA = "confidence/1"
-MAKEFILE_VAR_RE = re.compile(r"^([A-Z_][A-Z0-9_]*) := (.*)$")
+MAKEFILE_VAR_RE = re.compile(r"^([A-Z_][A-Z0-9_]*) [:?]= (.*)$")     # `NAME := value` and the `NAME ?= default`
 
 
 def _one_line(msg):
@@ -74,7 +88,8 @@ def _one_line(msg):
 
 
 def makefile_vars(root):
-    """{NAME: value} of the `NAME := value` lines of root/Makefile; SystemExit when it is missing."""
+    """{NAME: value} of the `NAME := value` and `NAME ?= value` lines of root/Makefile (a ?= line gives the Makefile's
+    own default); SystemExit when it is missing."""
     path = os.path.join(root, "Makefile")
     if not os.path.isfile(path):
         raise SystemExit("%s not found; restore the committed file with `git checkout -- Makefile`" % path)
@@ -716,6 +731,329 @@ def eval_only(root=REPO_ROOT, run=run_command, blocks=render_blocks, out=print, 
         if st != "done":
             raise SystemExit("eval-only: `make data` left the data step %s; regenerate with `make data`" % st)
     report_step(root, run, blocks, precheck=True, out=out)
+
+
+# ---- the command layer (D-01, D-04): every step's commands, built from the committed records, protocol.json and the
+# Makefile, never retyped; printed by dry_run, which runs nothing ----
+
+RUN_ID = "<RUN_ID>"                  # a selection run id before its postfit record exists (--print-run-id prints it)
+DISCLOSURE = (
+    "Full mode retrains every model from scratch. MPS retraining is not bit-identical, so the new selection exports, "
+    "final seeds and few-shot checkpoints get other identities and dump run ids than the frozen record holds. The "
+    "protocol gate (score.py require_admitted) admits on test and HOTELS only the protocol's pinned final seeds, and "
+    "the latency reports are protocol.json inputs that a re-timing never reproduces. The runner therefore stops at the "
+    "first step whose output differs from the committed record or a protocol pin, naming the path; it never weakens "
+    "the gate and never reruns a gated scoring step. `git checkout -- results/` restores the audit record. "
+    "ray_train.py resumes an existing ray_results/<run_id>/ and berturk_train.py refuses an existing "
+    "berturk_runs/<run_id>/, so remove both before a from-scratch run.")
+STORAGE = {"laya": "ray_results", "berturk": "berturk_runs"}
+BASE = {"laya": "multilingual", "berturk": "berturk"}
+FINAL_PREFIX = {"laya": "ckpt-final", "berturk": "ckpt-berturk-final"}
+SELECTION_OUT = "ckpt-sel"
+REFERENCE = "results/postfit/berturk-reference.json"
+PROJECTION = "results/fewshot/projection.json"
+FEWSHOT_RECORD = "results/fewshot/fewshot.json"
+LATENCY_DEVICES = ("mps", "cpu")
+
+
+def _record(root, proto, kind):
+    """(the committed postfit record of kind or None when absent, its repo-relative path), read with
+    pilot.postfit.read_record after its protocol.json pin; SystemExit (the refusal and the restore fix) for a record
+    that is present and does not verify, so an edited record never yields a command (T-10-16)."""
+    from pilot import postfit
+    rel = "results/postfit/%s.json" % kind
+    got = {}
+
+    def check(p):
+        got["record"] = postfit.read_record(p)[0]
+    item = _file(root, rel, proto, check)
+    if not item["present"]:
+        return None, rel
+    if not item["ok"]:
+        raise SystemExit("%s; restore the committed file with `git checkout -- %s`" % (item["reason"], rel))
+    if got["record"].get("system_kind") != kind:
+        raise SystemExit("%s: system kind %r, expected %s; restore the committed file with `git checkout -- %s`"
+                         % (rel, got["record"].get("system_kind"), kind, rel))
+    return got["record"], rel
+
+
+def _laya_argv(b, data, base, epochs, seed, lr, head_lr, stop=None, tail=()):
+    """A ray_train.py argv in the recorded flag order from a protocol recipe b (fewshot.rules.base_runs.laya)."""
+    argv = [b["trainer"], "--data", data, "--base", base, "--device", b["device"], "--workers", str(b["workers"]),
+            "--micro-batch", str(b["micro_batch"]), "--grad-accum", str(b["grad_accum"]), "--max-len",
+            str(b["max_len"]), "--epochs", str(epochs)]
+    if stop is not None:
+        argv += ["--stop-after-epoch", str(stop)]
+    argv += ["--neg", str(b["neg"]), "--seed", str(seed), "--encoder-lr", repr(lr), "--head-lr", repr(head_lr)]
+    return tuple(argv) + tuple(tail)
+
+
+def _berturk_argv(b, data, base, epochs, seed, lr, head_lr, stop=None, tail=()):
+    """A berturk_train.py argv in the recorded flag order from a protocol recipe b (fewshot.rules.base_runs.berturk);
+    --batch and --max-len only where b differs from berturk_train.py's defaults (pilot.berturk.BATCH, MAX_LEN), as
+    the recorded commands pass neither."""
+    from pilot import berturk
+    argv = [b["trainer"], "--data", data, "--base", base, "--device", b["device"], "--epochs", str(epochs)]
+    if stop is not None:
+        argv += ["--stop-after-epoch", str(stop)]
+    argv += ["--lr", repr(lr), "--head-lr", repr(head_lr)]
+    for key, flag, default in (("batch", "--batch", berturk.BATCH), ("max_len", "--max-len", berturk.MAX_LEN)):
+        if b.get(key, default) != default:
+            argv += [flag, str(b[key])]
+    return tuple(argv + ["--seed", str(seed)]) + tuple(tail)
+
+
+def selection_command(proto, kind):
+    """The selection run of kind: protocol fewshot.rules.base_runs.<kind> (every field but stop_after_epoch, the full
+    schedule) at pilot.postfit.SELECTION_SEED on the base runs' split; Laya with --storage ray_results --out ckpt-sel,
+    BERTurk with --storage berturk_runs (its exports are its output)."""
+    from pilot import postfit
+    runs = proto["fewshot"]["rules"]["base_runs"]
+    b, data = runs[kind], "data/splits/%s.jsonl" % runs["split"]
+    if kind == "laya":
+        return _laya_argv(b, data, BASE[kind], b["epochs"], postfit.SELECTION_SEED, b["encoder_lr"], b["head_lr"],
+                          tail=("--storage", STORAGE[kind], "--out", SELECTION_OUT))
+    return _berturk_argv(b, data, BASE[kind], b["epochs"], postfit.SELECTION_SEED, b["encoder_lr"], b["head_lr"],
+                         tail=("--storage", STORAGE[kind]))
+
+
+def _selection_lines(kind):
+    def build(root, proto, pin):
+        rec, rel = _record(root, proto, kind)
+        train, out = selection_command(proto, kind), []
+        out.append((train + ("--print-run-id",), "prints the run id (%s/<run_id>/); it starts no Ray and trains "
+                                                 "nothing" % STORAGE[kind]))
+        out.append((train, None))
+        if rec is None:
+            run_id = RUN_ID
+            out.append((None, "%s stands for the printed run id until %s exists" % (RUN_ID, rel)))
+        else:
+            ids = sorted({c.get("train_run_id") for c in rec["candidates"]})
+            if len(ids) != 1:
+                raise SystemExit("%s holds candidates of the train runs %s, not one selection run; restore the "
+                                 "committed file with `git checkout -- %s`" % (rel, ids, rel))
+            run_id = ids[0]
+        scoring = proto["scoring"]
+        for e in range(1, proto["fewshot"]["rules"]["base_runs"][kind]["epochs"] + 1):
+            export = "%s/%s/exports/epoch-%03d" % (STORAGE[kind], run_id, e)
+            out.append((("score.py", "data/splits/val.jsonl", "--model", kind, "--checkpoint", export, "--device",
+                         scoring["device"], "--workers", str(scoring["workers"])), None))
+            out.append((("postfit.py", "--prune", export), None))
+        return out
+    return build
+
+
+def _final_lines(kind):
+    def build(root, proto, pin):
+        from pilot import berturk, postfit
+        rec, rel = _record(root, proto, kind)
+        storage, prefix, out = STORAGE[kind], FINAL_PREFIX[kind], []
+        if rec is None:
+            seeds = [s["seed"] for s in protocol.final_seeds(proto, kind)]
+            printer = (("postfit.py", "--print-final-commands", rel) + (("--reference", REFERENCE) if kind == "berturk"
+                                                                        else ()) + ("--storage", storage,
+                                                                                    "--out-prefix", prefix))
+            out.append((printer, "deferred: the final-seed training commands are printed once %s exists" % rel))
+            note = "deferred: printed once %s exists, it runs after the final-seed commands" % rel
+        else:
+            seeds, note = list(rec["final"]["seeds"]), None
+            for s in seeds:
+                cmd = (postfit.final_command(rec, s, rel, storage, prefix) if kind == "laya"
+                       else berturk.final_command(rec, s, rel, REFERENCE, storage, prefix))
+                out.append((tuple(cmd), None))
+        out.append((("postfit.py", "--final-manifest", rel) + tuple("%s-s%d" % (prefix, s) for s in seeds)
+                    + ("--out", "results/postfit/%s-final.json" % kind), note))
+        return out
+    return build
+
+
+def latency_commands():
+    """The four latency runs (each final seed of a system on a device, the pinned report paths) and the render."""
+    runs = [("latency.py", "--system", kind, "--device", dev, "--out", "results/latency/%s-%s.json" % (kind, dev))
+            for kind in protocol.KINDS for dev in LATENCY_DEVICES]
+    return runs + [("latency.py", "--render", "results/latency", "--out", "results/latency/latency.md")]
+
+
+def final_report_commands(proto, fewshot=None):
+    """The Makefile final-reports recipe as argv tuples, from the protocol's final seeds, their postfit paths, ZEROSHOT
+    and the prior (report.py creates the --out dirs): the 6 per-seed test reports, the verdict (with --fewshot fewshot
+    when given) and the 15 confidence records."""
+    seeds = _final_seeds(proto)
+
+    def postfit_path(kind):
+        return proto["systems"][kind]["postfit"]["path"]
+    out = [("report.py", "results/dumps/%s" % s["dump_run_id"], "--split", "test", "--postfit", postfit_path(kind),
+            "--out", "results/final/reports/%s-test.json" % s["dump_run_id"]) for kind, s in seeds]
+    out.append(("report.py", "--verdict") + (("--fewshot", fewshot) if fewshot else ()) + ("--out", VERDICT))
+    out += [("report.py", "--confidence", "results/dumps/%s" % s["dump_run_id"], "--split", split, "--postfit",
+             postfit_path(kind), "--out", "results/final/confidence/%s-%s.json" % (s["dump_run_id"], split))
+            for kind, s in seeds for split in ("test", "hotels_probe")]
+    out += [("report.py", "--confidence", "results/dumps/%s" % protocol.ZEROSHOT, "--split", split, "--out",
+             "results/final/confidence/%s-%s.json" % (protocol.ZEROSHOT, split)) for split in ("test", "hotels_probe")]
+    return out + [("report.py", "--confidence", "results/dumps/prior", "--split", "test", "--out",
+                   "results/final/confidence/prior-test.json")]
+
+
+def fewshot_checkpoint(slot):
+    """The checkpoint dir name of a few-shot slot (kind, stage, seed, draw, k), as runs.json lists it."""
+    kind, stage, seed, draw, k = slot
+    return ("ckpt-fewshot-%s-base-s%d" % (kind, seed) if stage == "base"
+            else "ckpt-fewshot-%s-d%d-k%d" % (kind, draw, k))
+
+
+def fewshot_command(proto, slot, mode):
+    """The training argv of one few-shot slot from protocol.json's fewshot block: a masked base at
+    rules.base_runs.<kind> (--fewshot-base), or a continued run of the frozen epochs at rules.continued_training's LRs
+    from the base pilot.fewshot.base_seed_of(block, draw, mode), seed = the draw's seed."""
+    from pilot import fewshot
+    kind, stage, seed, draw, k = slot
+    block = proto["fewshot"]
+    runs = block["rules"]["base_runs"]
+    b, data = runs[kind], "data/splits/%s.jsonl" % runs["split"]
+    argv = _laya_argv if kind == "laya" else _berturk_argv
+    tail = ("--no-export-epochs", "--storage", STORAGE[kind], "--out", fewshot_checkpoint(slot))
+    if stage == "base":
+        return argv(b, data, BASE[kind], b["epochs"], seed, b["encoder_lr"], b["head_lr"], stop=b["stop_after_epoch"],
+                    tail=("--fewshot-base",) + tail)
+    ct = block["rules"]["continued_training"]
+    base = fewshot_checkpoint((kind, "base", fewshot.base_seed_of(block, draw, mode), None, None))
+    return argv(b, data, base, block["epochs"], seed, ct["encoder_lr"], ct["head_lr"],
+                tail=("--fewshot-draw", str(draw), "--fewshot-k", str(k)) + tail)
+
+
+def _fewshot_slots(root, proto, pin):
+    """(every slot of pilot.fewshot.slots in slot order, the mode, a note or None): the mode from root's D-08 record
+    (pilot.fewshot.read_mode) when it exists, else primary with a note."""
+    from pilot import fewshot
+    path = os.path.join(root, PROJECTION)
+    if os.path.lexists(path):
+        mode, note = fewshot.read_mode(pin, path), None
+    else:
+        mode, note = "primary", "the mode is primary until %s records the D-08 decision" % PROJECTION
+    return fewshot.slots(proto["fewshot"], mode), mode, note
+
+
+def _fewshot_stage_lines(stage):
+    def build(root, proto, pin):
+        slots, mode, note = _fewshot_slots(root, proto, pin)
+        out = [(None, note)] if note else []
+        for slot in slots:
+            if slot[1] != stage:
+                continue
+            name = fewshot_checkpoint(slot)
+            out.append((fewshot_command(proto, slot, mode), None))
+            out.append((("fewshot.py", "--inspect", name), None))
+            if slot[0] == "laya":
+                out.append((("fewshot.py", "--drop-storage", name, "--storage", STORAGE["laya"]), None))
+        if stage == "continued":
+            out.append((("fewshot.py", "--runs-manifest") + tuple(fewshot_checkpoint(s) for s in slots)
+                        + ("--out", RUNS), None))
+        return out
+    return build
+
+
+def _fewshot_scoring_lines(root, proto, pin):
+    slots, _, note = _fewshot_slots(root, proto, pin)
+    return ([(None, note)] if note else []) + [(("make", "fewshot-scoring"), None),
+                                                (("fewshot.py", "--prune") + tuple(fewshot_checkpoint(s)
+                                                                                   for s in slots), None)]
+
+
+def _baselines_lines(root, proto, pin):
+    """The Makefile baselines recipe without --force (every baseline dump is absent when the step is todo, so none is
+    overwritten): the six score.py lines, zero-shot Laya at the Makefile's SCORE_WORKERS and SCORE_CPUS, then
+    baseline-reports. `make baselines` itself passes --force and is never run."""
+    v = makefile_vars(root)
+    ray = ("--workers", v["SCORE_WORKERS"], "--cpus-per-worker", v["SCORE_CPUS"])
+    cmds = [("score.py", "data/splits/%s.jsonl" % split, "--model", model) + (ray if model == "laya" else ())
+            for model in ("majority", "prior", "laya") for split in ("val", "test")]
+    return [(c, None) for c in cmds] + [(("make", "baseline-reports"), None)]
+
+
+def _make(target):
+    def build(root, proto, pin):
+        return [(("make", target), None)]
+    return build
+
+
+def _fixed(*cmds):
+    def build(root, proto, pin):
+        return [(c, None) for c in cmds]
+    return build
+
+
+BUILDERS = {
+    "data": _make("data"),
+    "baselines": _baselines_lines,
+    "laya-selection": _selection_lines("laya"),
+    "laya-postfit": _make("laya-postfit"),
+    "laya-final": _final_lines("laya"),
+    "berturk-selection": _selection_lines("berturk"),
+    "berturk-postfit": _make("berturk-postfit"),
+    "berturk-reference": _fixed(("postfit.py", "--reference-check", "results/postfit/berturk.json", "--out", REFERENCE)),
+    "berturk-final": _final_lines("berturk"),
+    "confidence": _make("confidence-reports"),
+    "latency": _fixed(*latency_commands()),
+    "final-scoring": _make("final-scoring"),
+    "final-reports": lambda root, proto, pin: [(c, None) for c in final_report_commands(proto)],
+    "fewshot-projection": _fixed(("fewshot.py", "--projection", "--out", PROJECTION)),
+    "fewshot-bases": _fewshot_stage_lines("base"),
+    "fewshot-continued": _fewshot_stage_lines("continued"),
+    "fewshot-scoring": _fewshot_scoring_lines,
+    "fewshot-reports": _make("fewshot-reports"),
+    "report": _fixed(*REBUILD),
+}
+
+
+def step_lines(name, root=REPO_ROOT):
+    """[(command tuple or None, note or None)] of one step, in run order, from root's frozen protocol.json, Makefile
+    and committed records; SystemExit for an unknown step or a record that does not verify."""
+    if name not in BUILDERS:
+        raise SystemExit("no step %r; the steps are %s" % (name, ", ".join(STEP_NAMES)))
+    proto, pin = protocol.require_frozen(os.path.join(root, "protocol.json"))
+    return BUILDERS[name](root, proto, pin)
+
+
+def commands(name, root=REPO_ROOT):
+    """The command tuples of one step (no interpreter: command_argv adds it), in run order."""
+    return [c for c, _ in step_lines(name, root) if c is not None]
+
+
+def display(cmd):
+    """One command as a reader types it: "make TARGET" or "python SCRIPT ARGS" (shlex-quoted); SystemExit for
+    anything command_argv would not run."""
+    cmd = tuple(cmd)
+    command_argv(cmd)
+    if cmd[0] == "make":
+        return "make " + shlex.join(cmd[1:])
+    return "python " + shlex.join(cmd)
+
+
+def dry_run(root=REPO_ROOT, all_steps=False):
+    """The text of a dry run (D-01, D-04): the plan of root, then each todo or always-run step (every step with
+    all_steps) as a "== N name (state)" header and its displayed commands, with the DISCLOSURE once before the first
+    model step listed. It runs nothing."""
+    rows = plan(root)
+    _, pin = protocol.require_frozen(os.path.join(root, "protocol.json"))
+    out, disclosed, n = [render_plan(rows, pin).rstrip("\n")], False, 0
+    for i, (step, st, _) in enumerate(rows, 1):
+        if st == "done" and not all_steps:
+            continue
+        if step["model"] and not disclosed:
+            out += ["", DISCLOSURE]
+            disclosed = True
+        out += ["", "== %2d %s (%s)" % (i, step["name"], st)]
+        for cmd, note in step_lines(step["name"], root):
+            if cmd is not None:
+                out.append(display(cmd))
+                n += 1
+            if note:
+                out.append("# " + note)
+        if step["name"] in ALWAYS:
+            out.append("README: rewrite the %d generated blocks of README_BLOCKS (%s)"
+                       % (len(README_BLOCKS), ", ".join(name for name, _ in README_BLOCKS)))
+    out += ["", "dry run: %d commands printed, nothing was run" % n]
+    return "\n".join(out) + "\n"
 
 
 def main(argv=None):
