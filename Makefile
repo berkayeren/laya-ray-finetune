@@ -16,6 +16,7 @@
 #   make fewshot-scoring  score every few-shot checkpoint of results/fewshot/runs.json once (bases on val and test, continued models on test) behind the protocol gate (model, about 30 min on the M4; never rerun: the gate refuses an existing dump)
 #   make fewshot-reports  rebuild results/fewshot/fewshot.json from the committed few-shot dumps (no model)
 #   make memo  write results/final/memo.md, the one-page decision memo, from the committed records (no model)
+#   make report  eval-only: verify the protocol, splits and records, rebuild every report, the README blocks and the memo from the committed dumps (no training, no scoring); fails on any rebuilt file that differs
 PYTHON ?= python
 UV ?= uv
 PY312 ?= python3.12
@@ -37,7 +38,7 @@ FINAL := results/final
 FEWSHOT := results/fewshot
 FEWSHOT_ROOT ?= .
 
-.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports fewshot-scoring fewshot-reports memo
+.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports fewshot-scoring fewshot-reports memo report
 
 env:
 	$(PY312) -m venv $(VENV)
@@ -173,6 +174,9 @@ fewshot-reports:
 
 memo:
 	$(PYTHON) report.py --memo $(FINAL)/verdict.json --out $(FINAL)/memo.md > /dev/null
+
+report:
+	$(PYTHON) reproduce.py --mode eval-only $(if $(VERIFY_CHECKPOINTS),--verify-checkpoints,)
 
 clean-data:
 	rm -rf data/splits data/audit

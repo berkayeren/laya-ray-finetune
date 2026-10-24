@@ -206,3 +206,73 @@ def test_data_step_is_local(tree):
     msg = refusal(tree)
     assert msg.startswith("data: ") and "registered in" in msg, msg
     assert msg.endswith("regenerate with `make data`") and msg.count("make data") == 1, msg
+
+
+# ---- eval-only (plan 10-04, D-05, D-06): rebuild every report from the committed dumps, no training, no scoring ----
+
+BANNED_SCRIPTS = ("score.py", "ray_train.py", "berturk_train.py", "compute_checkpoint.py", "mps_spike.py")
+BANNED_TARGETS = ("baselines", "final-scoring", "fewshot-scoring")
+START_RE = re.compile(r"<!-- (\S+):start -->")
+
+
+def recipe(target):
+    """The recipe lines of one Makefile target."""
+    with open(os.path.join(REPO_ROOT, "Makefile"), encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    i = lines.index(target + ":")
+    out = []
+    for line in lines[i + 1:]:
+        if not line.startswith("\t"):
+            break
+        out.append(line[1:])
+    return out
+
+
+def test_eval_only_runs_no_model():
+    cmds = list(rp.REBUILD) + [cmd for _, cmd in rp.README_BLOCKS]
+    assert len(rp.REBUILD) == 9 and len(rp.README_BLOCKS) == 11
+    for cmd in cmds:
+        assert isinstance(cmd, tuple) and all(isinstance(c, str) for c in cmd), cmd
+        assert not set(cmd) & set(BANNED_SCRIPTS), cmd
+        assert "--force" not in cmd, cmd
+        assert not (cmd[0] == "latency.py" and "--system" in cmd), cmd
+        if cmd[0] == "make":
+            assert cmd[1] not in BANNED_TARGETS, cmd
+            body = " ".join(recipe(cmd[1]))             # the target's own recipe runs no model either
+            assert not [s for s in BANNED_SCRIPTS if s in body] and "--force" not in body, (cmd, body)
+            assert "latency.py --system" not in body and "$(MAKE)" not in body, (cmd, body)
+        argv = rp.command_argv(cmd)
+        assert argv[0] == sys.executable or argv[-1] == "PYTHON=" + sys.executable, argv
+    for bad in (("bash", "-c", "make report"), ("make",), (), ("make report; rm -rf results",), ("make", "")):
+        with pytest.raises(SystemExit):
+            rp.command_argv(bad)
+    assert rp.MODES == ("eval-only",)
+    assert rp.CHECKED == ("results/", "README.md", "protocol.json")
+
+
+def test_readme_blocks_cover_every_marker():
+    with open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8") as f:
+        names = START_RE.findall(f.read())
+    assert len(names) == len(set(names)) == 11
+    assert [n for n, _ in rp.README_BLOCKS] and {n for n, _ in rp.README_BLOCKS} == set(names)
+    assert len(rp.README_BLOCKS) == len({n for n, _ in rp.README_BLOCKS})
+
+
+def test_readme_rewriter_reproduces_the_readme():
+    with open(os.path.join(REPO_ROOT, "README.md"), "rb") as f:
+        raw = f.read()
+    renders = rp.render_blocks(REPO_ROOT)
+    assert [n for n, _ in renders] == [n for n, _ in rp.README_BLOCKS]
+    assert all(body.endswith("\n") for _, body in renders)
+    assert rp.rewrite_blocks(raw.decode("utf-8"), renders).encode("utf-8") == raw
+
+
+def test_makefile_report_target():
+    assert recipe("report") == ["$(PYTHON) reproduce.py --mode eval-only "
+                                "$(if $(VERIFY_CHECKPOINTS),--verify-checkpoints,)"]
+    with open(os.path.join(REPO_ROOT, "Makefile"), encoding="utf-8") as f:
+        text = f.read()
+    phony = re.search(r"^\.PHONY: (.+)$", text, re.M)
+    assert phony and "report" in phony.group(1).split(), "report is not in .PHONY"
+    assert re.search(r"^#   make report  eval-only: .*fails on any rebuilt file that differs$", text, re.M)
+    assert "final-reports" in phony.group(1).split()

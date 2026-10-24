@@ -26,16 +26,31 @@ rule; the report step always runs.
 Torch-free: the stdlib, pilot.protocol and pilot.data at import time; numpy, scipy and the record readers are imported
 inside the evidence functions, so computing the plan of a tree never imports torch, transformers, laya or Ray.
 
+Eval-only (D-05, D-06; `make report`, reproduce.py --mode eval-only): eval_only verifies first (plan(): the frozen
+protocol, every split and manifest hash, every committed record and dump through the step registry), refuses before
+any command a missing record or dump, naming its path and the step that makes it (eval-only never runs a todo step
+but the local data step, `make data`, run only when the local split files are absent), then report_step rebuilds
+every report from the committed dumps (REBUILD: fixed argv tuples, no score.py, training script, `latency.py
+--system`, --force or scoring target), rewrites the README's generated blocks from their renders (README_BLOCKS,
+rewrite_blocks) and proves the tree unchanged: `git status --porcelain` over CHECKED must be empty before (else the
+run is refused, so a difference is always the rebuild's) and after (else the run fails naming every differing path),
+with a sha256 snapshot of CHECKED in place of git when root is not a git work tree. Every command is an argv list run
+without a shell by the interpreter running this module (make targets get PYTHON=sys.executable).
+
 usage:
     python -m pilot.reproduce --plan          # the 19-step plan of the working tree, each step done, todo or run
+    python reproduce.py --mode eval-only      # = make report: verify, rebuild every report, the memo and the README
 """
 import argparse
 import json
 import os
 import re
+import subprocess
+import sys
 
 from pilot import protocol
-from pilot.data import AUDIT_FILES, REPO_ROOT, SPLITS, sha256_bytes, verify_audit_file, verify_split_file
+from pilot.data import (AUDIT_FILES, REPO_ROOT, SPLITS, sha256_bytes, sha256_file, verify_audit_file,
+                        verify_split_file, write_atomic)
 
 STEP_NAMES = ("data", "baselines", "laya-selection", "laya-postfit", "laya-final", "berturk-selection",
               "berturk-postfit", "berturk-reference", "berturk-final", "confidence", "latency", "final-scoring",
@@ -435,6 +450,214 @@ def render_plan(rows, pin):
             what = "no committed artifact: " + step["fix"] if step["name"] in LOCAL else "no committed artifact"
         out.append("%2d %-18s %-4s %s" % (i, step["name"], st, what))
     return "\n".join(out) + "\n"
+
+
+# ---- eval-only (D-05, D-06): rebuild every report from the committed dumps, no training, no scoring ----
+
+CHECKED = ("results/", "README.md", "protocol.json")       # the audit record a rebuild must leave byte for byte
+REBUILD = (
+    ("make", "baseline-reports"),
+    ("make", "laya-postfit"),
+    ("make", "berturk-postfit"),
+    ("postfit.py", "--reference-check", "results/postfit/berturk.json", "--out",
+     "results/postfit/berturk-reference.json"),
+    ("make", "confidence-reports"),
+    ("latency.py", "--render", "results/latency", "--out", "results/latency/latency.md"),
+    ("make", "fewshot-reports"),
+    ("make", "final-reports"),
+    ("make", "memo"),
+)
+README_BLOCKS = (
+    ("laya-postfit", ("postfit.py", "--render", "results/postfit/laya.json", "results/postfit/laya-final.json")),
+    ("berturk-postfit", ("postfit.py", "--render-berturk", "results/postfit/berturk.json",
+                         "results/postfit/berturk-reference.json", "results/postfit/berturk-final.json")),
+    ("confidence", ("report.py", "--confidence-table", "results/confidence")),
+    ("latency", ("latency.py", "--render", "results/latency")),
+    ("protocol", ("-m", "pilot.protocol", "--render")),
+    ("final-results", ("report.py", "--final-table", VERDICT)),
+    ("go-block", ("report.py", "--go-block", VERDICT)),
+    ("final-confidence", ("report.py", "--confidence-table", "results/final/confidence")),
+    ("fewshot", ("fewshot.py", "--render", "results/fewshot/fewshot.json")),
+    ("results-table", ("report.py", "--table", "results/reports")),
+    ("recommendation", ("report.py", "--recommendation", VERDICT)),
+)
+MODES = ("eval-only",)
+README = "README.md"
+
+
+def _show(cmd):
+    return " ".join(cmd)
+
+
+def command_argv(cmd):
+    """The argv list of one command tuple: a make target with PYTHON pinned to this interpreter, or a Python CLI (a
+    script or -m module) run by this interpreter; SystemExit for anything else (never a shell string)."""
+    cmd = tuple(cmd)
+    if not cmd or not all(isinstance(c, str) and c for c in cmd):
+        raise SystemExit("reproduce runs a tuple of non-empty strings, not %r" % (cmd,))
+    if cmd[0] == "make" and len(cmd) > 1:
+        return list(cmd) + ["PYTHON=" + sys.executable]
+    if cmd[0] == "-m" or cmd[0].endswith(".py"):
+        return [sys.executable] + list(cmd)
+    raise SystemExit("reproduce runs a make target or a Python CLI (a .py script or -m module), never `%s`"
+                     % _show(cmd))
+
+
+def run_command(cmd, root):
+    """Run one command tuple in root, without a shell; its exit code."""
+    sys.stdout.flush()
+    return subprocess.run(command_argv(cmd), cwd=root).returncode
+
+
+def _git(root, *args):
+    try:
+        return subprocess.run(("git",) + args, cwd=root, capture_output=True)
+    except OSError:
+        return None
+
+
+def tree_changes(root):
+    """The sorted repo-relative paths `git status --porcelain --untracked-files=all` reports under CHECKED in root
+    (modified, deleted, added or untracked), or None when git is missing or root is not the top of a work tree."""
+    top = _git(root, "rev-parse", "--show-toplevel")
+    if top is None or top.returncode != 0:
+        return None
+    if os.path.realpath(top.stdout.decode("utf-8", "surrogateescape").strip()) != os.path.realpath(root):
+        return None
+    st = _git(root, "status", "--porcelain", "-z", "--untracked-files=all", "--", *CHECKED)
+    if st is None or st.returncode != 0:
+        err = st.stderr.decode("utf-8", "replace").strip().splitlines() if st is not None else []
+        raise SystemExit("git status in %s failed (%s); eval-only cannot compare the rebuilt files"
+                         % (root, err[-1] if err else "git not runnable"))
+    tokens, out, i = st.stdout.split(b"\0"), set(), 0
+    while i < len(tokens):
+        entry = tokens[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        out.add(entry[3:].decode("utf-8", "surrogateescape"))
+        if entry[:1] in (b"R", b"C"):                          # -z: a rename's source path follows its target
+            i += 1
+    return sorted(out)
+
+
+def snapshot(root):
+    """{repo-relative path: sha256} of every file under CHECKED in root: the comparison without git."""
+    out = {}
+    for rel in CHECKED:
+        p = os.path.join(root, rel.rstrip("/"))
+        if os.path.isdir(p):
+            for d, dirs, files in os.walk(p):
+                dirs.sort()
+                for name in sorted(files):
+                    fp = os.path.join(d, name)
+                    out[os.path.relpath(fp, root).replace(os.sep, "/")] = sha256_file(fp)
+        elif os.path.isfile(p):
+            out[rel] = sha256_file(p)
+    return out
+
+
+def _snapshot_diff(before, after):
+    return sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+
+
+def rewrite_blocks(text, renders):
+    """text with each <!-- name:start --> ... <!-- name:end --> body replaced by "\\n" + its render; SystemExit,
+    before anything is written, unless each marker occurs exactly once and the start comes first."""
+    for name, body in renders:
+        s, e = "<!-- %s:start -->" % name, "<!-- %s:end -->" % name
+        if text.count(s) != 1 or text.count(e) != 1 or text.index(s) > text.index(e):
+            raise SystemExit("README.md must hold exactly one %s ... %s pair in order; restore it with "
+                             "`git checkout -- README.md`" % (s, e))
+        i, j = text.index(s) + len(s), text.index(e)
+        text = text[:i] + "\n" + body + text[j:]
+    return text
+
+
+def render_blocks(root):
+    """[(name, stdout)] of every README_BLOCKS render run in root (UTF-8, bytes kept as printed); SystemExit naming
+    the render and its last stderr line when one exits non-zero."""
+    out = []
+    for name, cmd in README_BLOCKS:
+        sys.stdout.flush()
+        r = subprocess.run(command_argv(cmd), cwd=root, capture_output=True)
+        if r.returncode != 0:
+            lines = [l for l in r.stderr.decode("utf-8", "replace").splitlines() if l.strip()]
+            raise SystemExit("README block %s: `%s` exited %d (%s)"
+                             % (name, _show(cmd), r.returncode, lines[-1].strip() if lines else "no stderr"))
+        out.append((name, r.stdout.decode("utf-8")))
+    return out
+
+
+def report_step(root=REPO_ROOT, run=run_command, blocks=render_blocks, precheck=True, out=print):
+    """The report step: every REBUILD command, then the README blocks, on a tree whose CHECKED paths equal the
+    committed ones; SystemExit when they already differ (precheck, before any command), when a command fails, or when
+    a rebuilt file differs from the committed one afterwards (naming every such path)."""
+    before_git = tree_changes(root)
+    before_snap = None
+    if before_git is None or not precheck:
+        before_snap = snapshot(root)                 # without git (or with pre-existing changes): compare contents
+    if before_git and precheck:
+        raise SystemExit("eval-only compares every rebuilt file with the committed one, but these already differ: %s; "
+                         "commit or restore them first" % ", ".join(before_git))
+    for cmd in REBUILD:
+        out("eval-only: " + _show(cmd))
+        rc = run(cmd, root)
+        if rc != 0:
+            raise SystemExit("eval-only: `%s` exited %d" % (_show(cmd), rc))
+    path = os.path.join(root, README)
+    if not os.path.isfile(path):
+        raise SystemExit("%s not found; restore the committed file with `git checkout -- README.md`" % path)
+    with open(path, "rb") as f:
+        text = f.read().decode("utf-8")
+    renders = blocks(root)
+    new = rewrite_blocks(text, renders)
+    if new != text:
+        write_atomic(path, new.encode("utf-8"))
+    out("README blocks: %d rendered, README.md %s" % (len(renders), "rewritten" if new != text else "unchanged"))
+    after_git = tree_changes(root)
+    changed = set()
+    if after_git is not None:
+        changed |= set(after_git) - set(before_git or [])
+    if before_snap is not None:
+        changed |= set(_snapshot_diff(before_snap, snapshot(root)))
+    changed = sorted(changed)
+    if changed:
+        raise SystemExit("eval-only rebuilt %d file(s) that differ from the committed ones: %s; the committed results "
+                         "are the audit record: inspect with `git diff`, restore with `git checkout -- PATH`"
+                         % (len(changed), ", ".join(changed)))
+    out("eval-only done: %d rebuild commands and %d README blocks left results/, README.md and protocol.json "
+        "byte-identical to the committed ones (%s)"
+        % (len(REBUILD), len(renders), "git status clean" if after_git is not None else "sha256 snapshot unchanged"))
+
+
+def _missing_refusal(step, items):
+    gone = [it for it in items if not it["present"]]
+    if not gone:
+        return "eval-only never trains or scores: step %s has no committed artifact; %s" % (step["name"], step["fix"])
+    it = gone[0]
+    return ("eval-only never trains or scores: %s is missing; it is made by step %s; restore the committed record "
+            "with `git checkout -- %s`" % (it["path"], step["name"], " ".join(it["files"])))
+
+
+def eval_only(root=REPO_ROOT, run=run_command, blocks=render_blocks, out=print, verify=False, checkpoint_root=None):
+    """Eval-only (D-05): verify the tree through plan(), refuse before any command a step other than data that is
+    not done (its first missing path and the step that makes it), run `make data` only when the local split files are
+    absent, then report_step."""
+    rows = plan(root)
+    for step, st, items in rows:
+        if step["name"] not in LOCAL + ALWAYS and st != "done":
+            raise SystemExit(_missing_refusal(step, items))
+    if dict((step["name"], st) for step, st, _ in rows)["data"] == "todo":
+        out("eval-only data step: make data (the local split files are absent)")
+        rc = run(("make", "data"), root)
+        if rc != 0:
+            raise SystemExit("eval-only: `make data` exited %d" % rc)
+        rows = plan(root)
+        st = dict((step["name"], s) for step, s, _ in rows)["data"]
+        if st != "done":
+            raise SystemExit("eval-only: `make data` left the data step %s; regenerate with `make data`" % st)
+    report_step(root, run, blocks, precheck=True, out=out)
 
 
 def main(argv=None):
