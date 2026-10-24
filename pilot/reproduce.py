@@ -37,8 +37,9 @@ every report from the committed dumps (REBUILD: fixed argv tuples, no score.py, 
 --system`, --force or scoring target), rewrites the README's generated blocks from their renders (README_BLOCKS,
 rewrite_blocks) and proves the tree unchanged: `git status --porcelain` over CHECKED (results/, README.md,
 protocol.json, and the Makefile and runner sources that decide what runs) must be empty before (else the
-run is refused, so a difference is always the rebuild's) and after (else the run fails naming every differing path),
-with a sha256 snapshot of CHECKED in place of git when root is not a git work tree. In full mode after steps ran, the
+run is refused, so a difference is always the rebuild's) and after (else the run fails naming every differing path);
+a root that is not the top of a git work tree is refused before any command (NO_GIT), because without git there is
+no committed copy to compare the rebuilt files with or to restore them from. In full mode after steps ran, the
 report step compares a file git HEAD tracks with HEAD's bytes (an already dirty file fails) and a file HEAD does not
 track (an output of those steps) with its bytes before the rebuild; "git status clean" is printed only when it is. Every command is an argv list run
 without a shell by the interpreter running this module (make targets get PYTHON=sys.executable).
@@ -571,6 +572,10 @@ def _git(root, *args):
 
 
 UNTRACKED = "??"                     # the porcelain status of a file git HEAD does not track
+NO_GIT = ("%s compares every rebuilt file with the bytes git HEAD holds, but %s is not the top of a git work tree, so "
+          "there is no committed copy to compare with or restore from; it is refused before any command, so no file "
+          "is overwritten: run it in a clone of the repository (a source copy: `git init`, `git add -A` and "
+          "`git commit` first)")
 
 
 def tree_changes(root):
@@ -612,7 +617,7 @@ def _hashes(root, rels):
 
 
 def snapshot(root):
-    """{repo-relative path: sha256} of every file under CHECKED in root: the comparison without git."""
+    """{repo-relative path: sha256} of every file under CHECKED in root (a content fingerprint of a tree)."""
     out = {}
     for rel in CHECKED:
         p = os.path.join(root, rel.rstrip("/"))
@@ -664,13 +669,15 @@ def report_step(root=REPO_ROOT, run=run_command, blocks=render_blocks, precheck=
     differ from git HEAD (precheck, before any command), when a command fails, or afterwards, naming every path, when a
     file git HEAD tracks differs from HEAD's bytes (whatever it was before the rebuild, so an already dirty file
     fails) or a file HEAD does not track (full mode, after steps ran: their untracked outputs) was created, changed or
-    removed by the rebuild (10-REVIEW WR-02)."""
+    removed by the rebuild (10-REVIEW WR-02). A root that is not the top of a git work tree is refused before any
+    command (NO_GIT): without git there is no committed copy to compare with or restore from (10-REVIEW WR-05)."""
     before = tree_status(root)
-    before_snap = snapshot(root) if before is None else None    # without git: compare contents
+    if before is None:
+        raise SystemExit(NO_GIT % ("eval-only", root))
     if before and precheck:
         raise SystemExit("eval-only compares every rebuilt file with the committed one, but these already differ: %s; "
                          "commit or restore them first" % ", ".join(sorted(before)))
-    untracked = _hashes(root, [p for p, xy in (before or {}).items() if xy == UNTRACKED])
+    untracked = _hashes(root, [p for p, xy in before.items() if xy == UNTRACKED])
     for cmd in REBUILD:
         out("eval-only: " + _show(cmd))
         rc = run(cmd, root)
@@ -687,21 +694,18 @@ def report_step(root=REPO_ROOT, run=run_command, blocks=render_blocks, precheck=
         write_atomic(path, new.encode("utf-8"))
     out("README blocks: %d rendered, README.md %s" % (len(renders), "rewritten" if new != text else "unchanged"))
     after = tree_status(root)
-    changed = set()
-    if after is not None:
-        changed |= {p for p, xy in after.items() if xy != UNTRACKED}           # differs from git HEAD
-        changed |= set(_snapshot_diff(untracked, _hashes(root, [p for p, xy in after.items() if xy == UNTRACKED])))
-    if before_snap is not None:
-        changed |= set(_snapshot_diff(before_snap, snapshot(root)))
+    if after is None:
+        raise SystemExit("eval-only: %s is no longer the top of a git work tree; the rebuilt files cannot be compared "
+                         "with git HEAD" % root)
+    changed = {p for p, xy in after.items() if xy != UNTRACKED}                # differs from git HEAD
+    changed |= set(_snapshot_diff(untracked, _hashes(root, [p for p, xy in after.items() if xy == UNTRACKED])))
     changed = sorted(changed)
     if changed:
         raise SystemExit("eval-only rebuilt %d file(s) that differ from the committed ones: %s; the committed results "
                          "are the audit record (git HEAD's bytes for a file it tracks, the bytes before the rebuild for "
                          "an untracked one): inspect with `git diff`, restore with `git checkout -- PATH`"
                          % (len(changed), ", ".join(changed)))
-    if after is None:
-        how = "sha256 snapshot unchanged"
-    elif not after:
+    if not after:
         how = "git status clean"
     else:
         how = ("git status lists only %d untracked file(s), the outputs of the steps that ran, each unchanged by the "
@@ -1276,10 +1280,12 @@ def run_full(root=REPO_ROOT, run=run_command, capture=capture_command, blocks=re
         if st == "todo" and not all(p in todo for p in GATE_PRODUCERS.get(step["name"], ())):
             raise SystemExit(_gate_refusal(step["name"]))
     # every output is compared with git HEAD, so a committed path that already differs from it (other than the
-    # evidence of a todo step) is refused before any command (10-REVIEW WR-02)
+    # evidence of a todo step) is refused before any command (10-REVIEW WR-02), and so is a root without git (WR-05)
     status = tree_status(root)
+    if status is None:
+        raise SystemExit(NO_GIT % ("full mode", root))
     todo_files = {f for step, st, items in rows if st == "todo" for it in items for f in it["files"]}
-    dirty = sorted(p for p, xy in (status or {}).items() if xy != UNTRACKED and p not in todo_files)
+    dirty = sorted(p for p, xy in status.items() if xy != UNTRACKED and p not in todo_files)
     if dirty:
         raise SystemExit("full mode compares every output with git HEAD, but these committed files already differ "
                          "from it: %s; commit or restore them with `git checkout -- PATH` first" % ", ".join(dirty))

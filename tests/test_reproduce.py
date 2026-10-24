@@ -418,7 +418,7 @@ def test_eval_only_refuses_a_dirty_tree_before_any_command(repo):
     assert "\n" not in msg
 
 
-def _rebuild_case(root, with_git):
+def _rebuild_case(root):
     with open(os.path.join(root, "results", "x.json"), "rb") as f:
         committed = f.read()
     run, calls = fake_run({"results/x.json": committed})                    # identical bytes: green
@@ -426,8 +426,7 @@ def _rebuild_case(root, with_git):
     rp.report_step(root, run=run, blocks=no_blocks, out=lines.append)
     assert calls == list(rp.REBUILD)
     assert [l for l in lines if l.startswith("eval-only: ")] == ["eval-only: " + " ".join(c) for c in rp.REBUILD]
-    assert lines[-1].startswith("eval-only done: ")
-    assert ("git status clean" if with_git else "sha256 snapshot unchanged") in lines[-1]
+    assert lines[-1].startswith("eval-only done: ") and "git status clean" in lines[-1]
     changed = bytearray(committed)
     changed[2] ^= 0x01
     run, calls = fake_run({"results/x.json": bytes(changed)})               # one byte changed: red, naming it
@@ -439,17 +438,38 @@ def _rebuild_case(root, with_git):
     assert calls == list(rp.REBUILD)
 
 
-def test_eval_only_fails_naming_a_rebuilt_file_that_differs(repo, tmp_path):
-    import shutil
-    nogit = str(tmp_path / "nogit")                     # the snapshot fallback: the same tree without .git
-    shutil.copytree(repo, nogit, ignore=shutil.ignore_patterns(".git"))
-    assert rp.tree_changes(nogit) is None
-    _rebuild_case(repo, True)
+def test_eval_only_fails_naming_a_rebuilt_file_that_differs(repo):
+    _rebuild_case(repo)
     run, calls = fake_run()                             # the differing file is left: the next run is refused up front
     with pytest.raises(SystemExit):
         rp.report_step(repo, run=run, blocks=no_blocks, out=lambda s: None)
     assert calls == []
-    _rebuild_case(nogit, False)
+
+
+def test_eval_only_without_git_is_refused_before_overwriting_anything(repo, tree, tmp_path, monkeypatch):
+    """WR-05: without git there is no committed copy to compare the rebuilt files with or restore them from, so the
+    report step (eval-only, and full mode up front) is refused before any command, and every file keeps its bytes;
+    the refusal names no git restore command."""
+    import shutil
+    nogit = str(tmp_path / "nogit")                     # the same tree without .git
+    shutil.copytree(repo, nogit, ignore=shutil.ignore_patterns(".git"))
+    assert rp.tree_changes(nogit) is None
+    before = rp.snapshot(nogit)
+    for precheck in (True, False):
+        run, calls = fake_run({"results/x.json": b"overwritten\n"})
+        msg = _stop(lambda: rp.report_step(nogit, run=run, blocks=no_blocks, precheck=precheck, out=lambda s: None))
+        assert msg.startswith("eval-only compares every rebuilt file with the bytes git HEAD holds, but %s is not the "
+                              "top of a git work tree" % nogit), msg
+        assert "refused before any command, so no file is overwritten" in msg and "git checkout --" not in msg, msg
+        assert calls == [] and rp.snapshot(nogit) == before
+    _data_done(monkeypatch)                             # full mode on a copy of the committed record without git
+    assert rp.tree_changes(tree) is None
+    before = rp.snapshot(tree)
+    r = Recorder({})
+    msg = _stop(lambda: r.full(tree))
+    assert msg.startswith("full mode compares every rebuilt file with the bytes git HEAD holds, but %s is not the top "
+                          "of a git work tree" % tree), msg
+    assert r.events == [] and rp.snapshot(tree) == before
 
 
 def test_eval_only_refuses_an_edited_makefile_or_runner(repo):

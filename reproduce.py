@@ -10,7 +10,8 @@ reference check, the confidence records, the latency markdown, the few-shot reco
 --fewshot) and the memo. It rewrites the README's generated blocks from their renders (pilot.reproduce.README_BLOCKS)
 and fails, naming each path, when a rebuilt file under results/, README.md or protocol.json differs from the committed
 one. A tree whose checked paths (those, plus the Makefile, reproduce.py and pilot/reproduce.py, which decide what
-runs) already differ is refused before any rebuild command, so a difference is always the rebuild's.
+runs) already differ is refused before any rebuild command, so a difference is always the rebuild's, and so is a tree
+that is not the top of a git work tree: without git there is no committed copy to compare with or restore from.
 
 The gated splits are scored exactly once (protocol.json), so eval-only never rescores a checkpoint: criterion 2's
 re-scoring is met by the committed dumps. --verify-checkpoints (`make report VERIFY_CHECKPOINTS=1`) adds a check that
