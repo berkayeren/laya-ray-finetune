@@ -1167,3 +1167,18 @@ def test_full_mode_refuses_before_any_command_on_an_out_of_order_tree(tree, monk
     msg = _stop(lambda: r.full(tree))
     assert msg.startswith("step latency is done but the earlier step confidence is not"), msg
     assert r.events == []
+
+
+def test_memo_names_the_one_command_rebuild():
+    """The memo's rebuild bullet names `make report` (every report, the README blocks and the memo from the committed
+    dumps) and `make reproduce` (the whole pipeline, skipping every finished step), digit-free (plan 10-06)."""
+    from pilot import memo
+    text = memo.MEMO_REBUILD
+    assert text.startswith("- Rebuild: ") and "\n" not in text
+    for phrase in ("`make report`", "`make reproduce`", "without training or scoring", "differs",
+                   "skips every step its committed artifacts prove done"):
+        assert phrase in text, phrase
+    assert not memo.NUMBER_RE.search(text)
+    with open(os.path.join(REPO_ROOT, "results", "final", "memo.md"), encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    assert text in lines and len([l for l in lines if l]) <= memo.MEMO_MAX_LINES
