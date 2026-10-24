@@ -1,6 +1,6 @@
-"""Unit contracts of the latency harness (EVAL-06): integer nearest rank, summary edges, the full-pass warm-up and sync
-contract (G-07-6: every timed message runs once untimed first; the policy is recorded and checked on build and render),
-the label and the render, every refusal before a model load (a removed --warmup flag included), and torch-free imports.
+"""Unit contracts of the latency harness: integer nearest rank, summary edges, the full-pass warm-up and sync contract
+(every timed message runs once untimed first; the policy is recorded and checked on build and render), the label and
+the render, every refusal before a model load (a removed --warmup flag included), and torch-free imports.
 
 The refusals run on the synthetic snapshot and a tiny Laya checkpoint (tests/test_latency_cpu.py's helpers). Each must
 come before the quiet-machine preflight (which runs right before torch is imported) and before any model load: the
@@ -11,6 +11,8 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any, Callable, NoReturn
 
 import pytest
 
@@ -25,14 +27,15 @@ pytestmark = pytest.mark.unit
 HEAVY = ("torch", "transformers", "laya", "ray")
 
 
-def _boom(what):
-    def boom(*a, **k):
+def _boom(what: str) -> Callable[..., NoReturn]:
+    """A stand-in that fails the test naming `what` when it is called."""
+    def boom(*a: Any, **k: Any) -> NoReturn:
         raise AssertionError("%s was reached before the refusal" % what)
     return boom
 
 
 @pytest.fixture
-def no_load(monkeypatch):
+def no_load(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail the test if the preflight or any checkpoint load is reached (a refusal must come first)."""
     monkeypatch.setattr(latency, "preflight", _boom("the preflight"))
     for name in ("resolve_checkpoint", "Predictor", "check_berturk", "load_bert"):
@@ -40,18 +43,19 @@ def no_load(monkeypatch):
 
 
 @pytest.fixture
-def laya(tmp_path, synthetic_raw):
+def laya(tmp_path: Path, synthetic_raw: Callable[..., tuple[str, dict[str, str]]]) -> tuple[str, str, str, str]:
     """(splits dir, splits manifest, final manifest, checkpoint root) of one tiny Laya seed with T = 1.3."""
     return laya_setup(tmp_path, synthetic_raw)
 
 
-def _write(path, obj):
+def _write(path: Path, obj: Any) -> str:
+    """obj written as JSON to path; returns str(path)."""
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
     return str(path)
 
 
-def _toy_report(**meta):
+def _toy_report(**meta: Any) -> dict[str, Any]:
     """A latency/1 report of two seeds with known times (no model): seed 0 at 1..20 ms, seed 1 at 21..40 ms."""
     base = {"system": "laya", "device": "cpu", "dtype": "torch.float32", "amp_enabled": False, "threads": 4,
             "warmup": 20, "warmup_policy": plat.WARMUP_POLICY, "batch": 1, "versions": {"torch": "x", "numpy": "y"},
@@ -72,11 +76,11 @@ def _toy_report(**meta):
 
 # ---- statistics ----
 
-def test_nearest_rank_uses_integer_ranks():
+def test_nearest_rank_uses_integer_ranks() -> None:
     for n, p50, p95 in ((208, 104, 198), (20, 10, 19), (100, 50, 95), (11, 6, 11), (1, 1, 1)):
         s = list(range(1, n + 1))
         assert plat.nearest_rank(s, 50) == p50 and plat.nearest_rank(s, 95) == p95
-    assert plat.nearest_rank(list(range(1, 101)), 7) == 7        # math.ceil(7 / 100 * 100) is 8 (Pitfall 3)
+    assert plat.nearest_rank(list(range(1, 101)), 7) == 7        # math.ceil(7 / 100 * 100) is 8 (float product)
     assert plat.nearest_rank([7.5], 50) == plat.nearest_rank([7.5], 95) == 7.5
     with pytest.raises(SystemExit, match="empty"):
         plat.nearest_rank([], 50)
@@ -85,7 +89,7 @@ def test_nearest_rank_uses_integer_ranks():
             plat.nearest_rank([1, 2], q)
 
 
-def test_summarize_single_and_empty():
+def test_summarize_single_and_empty() -> None:
     with pytest.raises(SystemExit, match="laya seed 2 on mps: no timings to summarise"):
         plat.summarize([], "laya seed 2 on mps")
     assert plat.summarize([0.25], "x") == {"n": 1, "min": 0.25, "p50": 0.25, "p95": 0.25, "mean": 0.25, "max": 0.25}
@@ -93,21 +97,21 @@ def test_summarize_single_and_empty():
     assert (s["min"], s["p50"], s["p95"], s["max"], s["n"]) == (0.1, 0.2, 0.3, 0.3, 3)
 
 
-def test_time_messages_warms_every_message_before_timing():
-    """G-07-6: every text runs once untimed, in order, before the clock is first read; then one sync; then each text
+def test_time_messages_warms_every_message_before_timing() -> None:
+    """Every text runs once untimed, in order, before the clock is first read; then one sync; then each text
     is timed between a sync before t0 and a sync after the host copy. A repeated text is warmed (and timed) too."""
     events, calls, syncs = [], [], []
     ticks = iter([0.0, 1.0, 10.0, 13.0, 20.0, 26.0, 30.0, 34.0, 40.0, 45.0])
 
-    def fn(t):
+    def fn(t: str) -> None:
         calls.append(t)
         events.append("fn:" + t)
 
-    def sync():
+    def sync() -> None:
         syncs.append(1)
         events.append("sync")
 
-    def clock():
+    def clock() -> float:
         events.append("clock")
         return next(ticks)
     texts = ["a", "bb", "a", "ccc", "dd"]
@@ -128,7 +132,7 @@ def test_time_messages_warms_every_message_before_timing():
     assert plat.time_messages(fn, ["x"], sync, clock=iter([5.0, 5.5]).__next__) == [0.5]
 
 
-def test_build_report_records_the_warmup_policy():
+def test_build_report_records_the_warmup_policy() -> None:
     """The policy is stated in RULES, recorded in every report with the warm-up count, and a meta without it, with
     another policy, or with a count other than every seed's timed count is refused."""
     r = _toy_report()
@@ -147,7 +151,7 @@ def test_build_report_records_the_warmup_policy():
         _toy_report(warmup=20.0)
 
 
-def test_render_refuses_a_report_without_the_warmup_policy(tmp_path):
+def test_render_refuses_a_report_without_the_warmup_policy(tmp_path: Path) -> None:
     """A latency/1 report timed before the full-pass policy is never rendered (next to a post-fix one or alone)."""
     d = tmp_path / "latency"
     d.mkdir()
@@ -163,17 +167,17 @@ def test_render_refuses_a_report_without_the_warmup_policy(tmp_path):
 
 # ---- label and render ----
 
-def test_label_in_report_and_markdown():
+def test_label_in_report_and_markdown() -> None:
     r = _toy_report()
     assert plat.LABEL == "reported, not gated" and r["label"] == plat.LABEL and r["schema"] == "latency/1"
     assert r["pooled"]["n"] == 40 and r["pooled"]["p50"] == 0.020 and r["pooled"]["p95"] == 0.038
     md = plat.render_markdown([r])
-    assert md.startswith("### Latency per message (Phase 7, EVAL-06): reported, not gated\n")
+    assert md.startswith("### Latency per message: reported, not gated\n")
     assert "| 0 | ckpt-final-s0 | 20 | 10.0 | 19.0 |" in md and "| pooled | 2 seed(s) | 40 | 20.0 | 38.0 |" in md
     assert "fp16 autocast default on MPS (laya_default_amp) is not what is timed" in md
 
 
-def test_render_from_json_shows_busy_banner(tmp_path, capsys):
+def test_render_from_json_shows_busy_banner(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     quiet = json.loads(json.dumps(_toy_report()))
     assert "Busy-machine" not in plat.render_markdown([quiet])
     overridden = _toy_report(preflight=dict(PREFLIGHT, override=True, min_available_gib=0))
@@ -201,7 +205,7 @@ def test_render_from_json_shows_busy_banner(tmp_path, capsys):
 
 # ---- refusals before any load ----
 
-def test_refuses_non_val_split_before_load(laya, no_load, tmp_path):
+def test_refuses_non_val_split_before_load(laya: tuple[str, str, str, str], no_load: None, tmp_path: Path) -> None:
     splits, manifest, m, root = laya
     for name, why in (("test", "has role test; expected one of val"), ("hotels_probe", "has role ood_probe"),
                       ("selection_train", "has role train")):
@@ -212,7 +216,8 @@ def test_refuses_non_val_split_before_load(laya, no_load, tmp_path):
     assert not (tmp_path / "out.json").exists()
 
 
-def test_refuses_committed_test_content_before_load(laya, no_load, tmp_path, monkeypatch):
+def test_refuses_committed_test_content_before_load(laya: tuple[str, str, str, str], no_load: None, tmp_path: Path,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
     """A manifest copy registering the committed test or HOTELS rows (or a part of them) as val is refused by content.
     The synthetic data stands in for the committed split (as tests/test_score_berturk.py's interlock test does)."""
     splits, manifest, m, root = laya
@@ -230,7 +235,8 @@ def test_refuses_committed_test_content_before_load(laya, no_load, tmp_path, mon
     assert not (tmp_path / "out.json").exists()
 
 
-def test_refuses_manifest_of_other_system_or_schema(laya, no_load, tmp_path):
+def test_refuses_manifest_of_other_system_or_schema(laya: tuple[str, str, str, str], no_load: None,
+                                                    tmp_path: Path) -> None:
     splits, manifest, m, root = laya
     with open(m, encoding="utf-8") as f:
         good = json.load(f)
@@ -250,7 +256,8 @@ def test_refuses_manifest_of_other_system_or_schema(laya, no_load, tmp_path):
 
 
 @pytest.mark.parametrize("name", ["../ckpt-s0", "a/b", "a\\b", "..", ".", "", "/abs"])
-def test_refuses_unsafe_checkpoint_name(laya, no_load, tmp_path, name):
+def test_refuses_unsafe_checkpoint_name(laya: tuple[str, str, str, str], no_load: None, tmp_path: Path,
+                                        name: str) -> None:
     splits, manifest, m, root = laya
     with open(m, encoding="utf-8") as f:
         good = json.load(f)
@@ -259,7 +266,7 @@ def test_refuses_unsafe_checkpoint_name(laya, no_load, tmp_path, name):
         latency.main(run_args("laya", splits, manifest, bad, root, tmp_path / "out.json"))
 
 
-def test_refuses_identity_mismatch_before_load(laya, no_load, tmp_path):
+def test_refuses_identity_mismatch_before_load(laya: tuple[str, str, str, str], no_load: None, tmp_path: Path) -> None:
     splits, manifest, m, root = laya
     with open(m, encoding="utf-8") as f:
         good = json.load(f)
@@ -280,7 +287,8 @@ def test_refuses_identity_mismatch_before_load(laya, no_load, tmp_path):
     assert not (tmp_path / "out.json").exists()
 
 
-def test_refuses_served_temperature_other_than_the_manifest(laya, tmp_path, monkeypatch):
+def test_refuses_served_temperature_other_than_the_manifest(laya: tuple[str, str, str, str], tmp_path: Path,
+                                                            monkeypatch: pytest.MonkeyPatch) -> None:
     """After the (real, tiny) load: a final seed must serve the manifest's T, else nothing is timed."""
     import torch
     threads = torch.get_num_threads()
@@ -297,7 +305,7 @@ def test_refuses_served_temperature_other_than_the_manifest(laya, tmp_path, monk
         torch.set_num_threads(threads)
 
 
-def test_argument_errors(capsys):
+def test_argument_errors(capsys: pytest.CaptureFixture[str]) -> None:
     for argv in (["--system", "laya", "--render", "x"], [], ["--system", "laya", "--threads", "0"],
                  ["--system", "laya", "--warmup", "10"], ["--system", "laya", "--min-available-gib", "-1"],
                  ["--system", "other"], ["--system", "laya", "--device", "tpu"]):
@@ -307,7 +315,7 @@ def test_argument_errors(capsys):
     capsys.readouterr()
 
 
-def test_latency_modules_are_torch_free():
+def test_latency_modules_are_torch_free() -> None:
     code = ("import sys, pilot.latency, latency; bad = [m for m in %r if m in sys.modules]; "
             "assert not bad, bad" % (HEAVY,))
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
@@ -316,14 +324,16 @@ def test_latency_modules_are_torch_free():
     assert r.returncode == 0, r.stderr
 
 
-def test_val_texts_reach_the_tokenizer_unchanged(laya, tmp_path, monkeypatch):
+def test_val_texts_reach_the_tokenizer_unchanged(laya: tuple[str, str, str, str], tmp_path: Path,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
     """A message is the row's state string, unchanged (no lowercasing, folding or normalization), in split-file
     order: what time_messages receives (and so both warms and times) is exactly the val rows' texts."""
     import torch
     threads = torch.get_num_threads()
     seen = []
 
-    def spy(fn, texts, sync, clock=None):
+    def spy(fn: Callable[[str], Any], texts: list[str], sync: Callable[[], Any],
+            clock: Callable[[], float] | None = None) -> list[float]:
         seen.append(list(texts))
         return [0.001] * len(texts)
     monkeypatch.setattr(latency, "preflight", lambda g: dict(PREFLIGHT))

@@ -1,21 +1,21 @@
-"""Time the final seeds of fine-tuned Laya or BERTurk per message, in-process (EVAL-06): reported, not gated.
+"""Time the final seeds of fine-tuned Laya or BERTurk per message, in-process: reported, not gated.
 
 One run times every final seed of one system (--system laya|berturk), listed in its final manifest (default
 results/postfit/<system>-final.json, schema postfit-final/1), on one device (--device cpu|mps|cuda), in this process,
 without Ray, at batch 1. Each message goes from its val text to 48 probabilities on the host through the path that
-scored the dumps (07-RESEARCH Pattern 5):
+scored the dumps:
 - laya: score.resolve_checkpoint (every file bound to the seed's identity), la.check_version, score.Predictor
   (laya.load with digests, la.force_fp32, check_agent), then per message la.noul_logits of the one text (48 noul
   questions, one forward) and pilot.metrics.probabilities at the served T;
 - berturk: score.check_berturk (label order, casing, record bytes), score.load_bert (the loader score.py --model
   berturk uses: every digest verified right before the fp32 load, check_bert), then per message the tokenizer of the
   one text (truncated at the record's max_len), one forward, the logits copied to the host and probabilities at T.
-Warm-up (pilot.latency.WARMUP_POLICY, full_pass_per_seed; G-07-6): after each seed's load, every val message runs once
+Warm-up (pilot.latency.WARMUP_POLICY, full_pass_per_seed): after each seed's load, every val message runs once
 untimed, in split-file order, then the device is synced once; then every message is timed with time.perf_counter
 between a device sync right before t0 and one right after the host copy (torch.mps.synchronize on mps,
 torch.cuda.synchronize on cuda, nothing on cpu), under torch.no_grad; so every seed follows the same sequence and every
 input it times has already run once on its model in this process; the seeds run in manifest order, so a residual
-seed-order effect is not separated from a seed effect (07-REVIEW WR-01). fp32 with autocast off is checked after the
+seed-order effect is not separated from a seed effect. fp32 with autocast off is checked after the
 load and after the loop. --threads sets the torch threads (default 4). Never score.py's batch-of-16
 inference seconds: those carry no sync and no warm-up.
 
@@ -46,6 +46,7 @@ import gc
 import json
 import os
 import time
+from typing import Any, Callable
 
 import numpy as np
 
@@ -61,11 +62,13 @@ T_TOLERANCE = 1e-12
 HELD_OUT = ("test", "hotels_probe")                         # committed content never timed, whatever the manifest says
 
 
-def default_final_manifest(system):
+def default_final_manifest(system: str) -> str:
+    """The committed final manifest of a system: results/postfit/<system>-final.json under the repo."""
     return os.path.join(REPO_ROOT, "results", "postfit", "%s-final.json" % system)
 
 
-def parser():
+def parser() -> argparse.ArgumentParser:
+    """The argument parser of latency.py (timing mode and --render mode)."""
     ap = argparse.ArgumentParser(description="time the final seeds of one system per message, in-process "
                                              "(reported, not gated)")
     ap.add_argument("--system", choices=latency.SYSTEMS, default=None)
@@ -87,14 +90,14 @@ def parser():
     return ap
 
 
-def preflight(min_available_gib):
+def preflight(min_available_gib: float) -> dict[str, Any]:
     """The compute checkpoint's quiet-machine preflight (compute_checkpoint.preflight: refuse below the threshold,
     sample swap twice 5 s apart while idle); imported here so --render never reads it."""
     import compute_checkpoint
     return compute_checkpoint.preflight(min_available_gib)
 
 
-def read_split(a):
+def read_split(a: argparse.Namespace) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """(manifest entry, parsed rows) of --split: registered with role val and holding no committed test or HOTELS
     content, verified on the bytes that are parsed."""
     if not os.path.isfile(a.split):
@@ -112,7 +115,7 @@ def read_split(a):
     return entry, cases
 
 
-def bind_seed(system, root, s):
+def bind_seed(system: str, root: str, s: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """(checkpoint dir, identity) of a manifest seed, refused unless the dir under --checkpoint-root holds exactly the
     checkpoint the manifest names (its identity and dump run id). Hashes only: no model loads here."""
     ckpt = os.path.join(root, s["checkpoint_name"])
@@ -134,13 +137,15 @@ def bind_seed(system, root, s):
     return ckpt, ident
 
 
-def check_temperature(served, s):
+def check_temperature(served: float, s: dict[str, Any]) -> None:
+    """SystemExit when the served T differs from the manifest seed's temperature by more than T_TOLERANCE."""
     if abs(float(served) - s["temperature"]) > T_TOLERANCE:
         raise SystemExit("%s serves T %r, the final manifest records %r for seed %d; time only the final seeds the "
                          "manifest binds" % (s["checkpoint_name"], served, s["temperature"], s["seed"]))
 
 
-def time_laya(s, ckpt, ident, device, threads, texts, sync):
+def time_laya(s: dict[str, Any], ckpt: str, ident: dict[str, Any], device: str, threads: int, texts: list[str],
+              sync: Callable[[], Any]) -> tuple[float, float, list[float], dict[str, Any]]:
     """(load seconds, served T, per-message seconds, checked state) of one Laya seed, through score.py's load path."""
     import torch
     t = time.perf_counter()
@@ -152,14 +157,15 @@ def time_laya(s, ckpt, ident, device, threads, texts, sync):
     check_temperature(temp, s)
     agent = p.agent
 
-    def fn(text):
+    def fn(text: str) -> np.ndarray:
         return metrics.probabilities(la.noul_logits(agent, [text], QUESTIONS), temp)
     with torch.no_grad():
         times = latency.time_messages(fn, texts, sync)       # warm-up pass over every text, then the timed loop
     return load_s, temp, times, score.check_agent(agent, device)
 
 
-def time_berturk(s, ckpt, ident, device, threads, texts, sync):
+def time_berturk(s: dict[str, Any], ckpt: str, ident: dict[str, Any], device: str, threads: int, texts: list[str],
+                 sync: Callable[[], Any]) -> tuple[float, float, list[float], dict[str, Any]]:
     """(load seconds, served T, per-message seconds, checked state) of one BERTurk seed, through score.load_bert."""
     import torch
     t = time.perf_counter()
@@ -170,7 +176,7 @@ def time_berturk(s, ckpt, ident, device, threads, texts, sync):
     load_s = time.perf_counter() - t
     max_len = rec["canonical"]["max_len"]
 
-    def fn(text):
+    def fn(text: str) -> np.ndarray:
         enc = tok([text], truncation=True, max_length=max_len, return_tensors="pt")
         logits = model(**{k: v.to(device) for k, v in enc.items()}).logits.float().cpu().numpy()
         return metrics.probabilities(logits, temp)
@@ -179,11 +185,14 @@ def time_berturk(s, ckpt, ident, device, threads, texts, sync):
     return load_s, temp, times, score.check_bert(model, device)
 
 
-def _no_sync():
+def _no_sync() -> None:
+    """The cpu device sync: nothing to wait for."""
     return None
 
 
-def measure(a):
+def measure(a: argparse.Namespace) -> dict[str, Any]:
+    """Time every final seed of a.system on a.device and write (or print) the latency/1 report; returns it. Every
+    refusal that needs no model runs before torch is imported."""
     system, device = a.system, a.device
     entry, cases = read_split(a)
     mpath = a.final_manifest or default_final_manifest(system)
@@ -245,7 +254,8 @@ def measure(a):
     return report
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> str | dict[str, Any]:
+    """CLI entry: --render returns the markdown it printed, --system the report it wrote."""
     ap = parser()
     a = ap.parse_args(argv)
     if (a.system is None) == (a.render is None):

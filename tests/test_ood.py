@@ -1,18 +1,19 @@
-"""The out-of-domain false-positive rate on HOTELS (EVAL-05, 07-RESEARCH A7) end to end on the synthetic snapshot, with
-no model, torch or Ray.
+"""The out-of-domain false-positive rate on HOTELS end to end on the synthetic snapshot, with no model, torch or Ray.
 
-No scorer runs here (Phase 7 opened the dump reader): a hotels_probe dump (role ood_probe) is written here by
-pilot.dumps.write_dump with a score.sidecar_base sidecar of the synthetic manifest, next to a prior baseline's val dump
-(score.py --model prior) of the same source. pilot.dumps.load_dump reads it with every check, gold_valid_tags names its
-valid columns (the manifest's ood_scoring_tags; the 22 pins tags under the committed manifest), and
-report.py --confidence RUN_DIR --split hotels_probe reports fp_rate on those columns at θ 0.5 and at the banking-val θ.
-report.run_report and report.compare refuse the dump naming its role. score.py scores hotels_probe for --model laya
-or berturk only, a fine-tuned checkpoint only through its Phase 8 protocol gate (tests/test_score_gate.py), and refuses
-it for the baselines and evaluate.py (tests/test_score_report.py, tests/test_consumers.py).
+No scorer runs here: a hotels_probe dump (role ood_probe) is written by pilot.dumps.write_dump with a
+score.sidecar_base sidecar of the synthetic manifest, next to a prior baseline's val dump (score.py --model prior) of
+the same source. pilot.dumps.load_dump reads it with every check, gold_valid_tags names its valid columns (the
+manifest's ood_scoring_tags; the 22 pins tags under the committed manifest), and report.py --confidence RUN_DIR
+--split hotels_probe reports fp_rate on those columns at θ 0.5 and at the banking-val θ. report.run_report and
+report.compare refuse the dump naming its role. score.py scores hotels_probe for --model laya or berturk only, a
+fine-tuned checkpoint only through its protocol gate (tests/test_score_gate.py), and refuses it for the baselines and
+evaluate.py (tests/test_score_report.py, tests/test_consumers.py).
 """
 import json
 import os
 import shutil
+from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 import pytest
@@ -28,12 +29,12 @@ pytestmark = pytest.mark.unit
 
 
 @pytest.fixture
-def snap(tmp_path, synthetic_raw):
+def snap(tmp_path: Path, synthetic_raw: Callable[..., tuple[str, dict[str, str]]]) -> tuple[str, str]:
     """(out_dir, manifest_path) of the synthetic snapshot prepared under tmp_path."""
     return prepared(tmp_path, synthetic_raw)
 
 
-def _hotels(manifest):
+def _hotels(manifest: str) -> tuple[dict[str, Any], list[str]]:
     """(manifest entry, uids in file order) of the verified synthetic hotels_probe split."""
     path = os.path.join(os.path.dirname(manifest), "splits", "hotels_probe.jsonl")
     with open(path, "rb") as f:
@@ -42,7 +43,7 @@ def _hotels(manifest):
     return entry, [r["uid"] for r in pilot.data.parse_jsonl(raw)]
 
 
-def write_hotels_run(root, snap, seed=3, val=True):
+def write_hotels_run(root: Path, snap: tuple[str, str], seed: int = 3, val: bool = True) -> tuple[str, np.ndarray]:
     """A run dir holding the prior baseline's val dump (score.py) and a synthetic hotels_probe dump of the same source:
     the val sidecar's run_id, system, temperature, scorer, seed and training on score.sidecar_base of the hotels
     entry, logits from a seeded generator so some banking-only columns fire at θ 0.5. Returns (run_dir, logits)."""
@@ -63,13 +64,14 @@ def write_hotels_run(root, snap, seed=3, val=True):
 
 
 @pytest.fixture
-def run(tmp_path, snap, capsys):
+def run(tmp_path: Path, snap: tuple[str, str], capsys: pytest.CaptureFixture[str]) -> tuple[str, np.ndarray]:
+    """(run_dir, hotels logits) of write_hotels_run under tmp_path/dumps."""
     d = write_hotels_run(tmp_path / "dumps", snap)
     capsys.readouterr()
     return d
 
 
-def test_hotels_dump_loads_with_role_ood_probe(snap, run):
+def test_hotels_dump_loads_with_role_ood_probe(snap: tuple[str, str], run: tuple[str, np.ndarray]) -> None:
     run_dir, logits = run
     entry, uids = _hotels(snap[1])
     got, got_uids, side, got_entry = dumps.load_dump(run_dir, "hotels_probe", snap[1])
@@ -81,7 +83,7 @@ def test_hotels_dump_loads_with_role_ood_probe(snap, run):
     assert dumps.EVAL_ROLES == ("val", "test") and dumps.READ_ROLES == ("val", "test", "ood_probe")
 
 
-def test_hotels_dump_keeps_every_load_check(tmp_path, snap, run):
+def test_hotels_dump_keeps_every_load_check(tmp_path: Path, snap: tuple[str, str], run: tuple[str, np.ndarray]) -> None:
     run_dir, logits = run
     _, uids, side, _ = dumps.load_dump(run_dir, "hotels_probe", snap[1])
     planted = {k: v for k, v in side.items() if k not in ("dump_sha256", "schema_version")}
@@ -94,7 +96,7 @@ def test_hotels_dump_keeps_every_load_check(tmp_path, snap, run):
         dumps.load_dump(run_dir, "hotels_probe", snap[1])
 
 
-def test_ood_columns_are_the_manifest_banking_only_tags(snap):
+def test_ood_columns_are_the_manifest_banking_only_tags(snap: tuple[str, str]) -> None:
     manifest = snap[1]
     entry, _ = _hotels(manifest)
     with open(manifest, encoding="utf-8") as f:
@@ -110,7 +112,8 @@ def test_ood_columns_are_the_manifest_banking_only_tags(snap):
     assert committed == [t for t in INTENTS if t in pins.OOD_SCORING_TAGS]
 
 
-def _manifest_with(tmp_path, snap, tags):
+def _manifest_with(tmp_path: Path, snap: tuple[str, str], tags: Any) -> str:
+    """A copy of the snapshot's manifest whose ood_scoring_tags is `tags` (any value, to test the refusals)."""
     with open(snap[1], encoding="utf-8") as f:
         m = json.load(f)
     m["ood_scoring_tags"] = tags
@@ -120,7 +123,8 @@ def _manifest_with(tmp_path, snap, tags):
     return str(path)
 
 
-def test_gold_valid_tags_refuses_a_bad_list(tmp_path, snap, monkeypatch):
+def test_gold_valid_tags_refuses_a_bad_list(tmp_path: Path, snap: tuple[str, str],
+                                            monkeypatch: pytest.MonkeyPatch) -> None:
     entry = {"gold_valid_tags": "ood_scoring_tags"}
     for tags in ([], ["card", "card"], ["card", "booking"], "card", None):
         with pytest.raises(SystemExit, match="non-empty list of distinct INTENTS tags"):
@@ -133,7 +137,8 @@ def test_gold_valid_tags_refuses_a_bad_list(tmp_path, snap, monkeypatch):
     assert len(dumps.gold_valid_tags(entry, dumps.DEFAULT_MANIFEST)) == 22
 
 
-def test_ood_fp_report_uses_val_theta_on_banking_only_columns(snap, run):
+def test_ood_fp_report_uses_val_theta_on_banking_only_columns(snap: tuple[str, str],
+                                                              run: tuple[str, np.ndarray]) -> None:
     run_dir, logits = run
     manifest = snap[1]
     entry, uids = _hotels(manifest)
@@ -165,14 +170,15 @@ def test_ood_fp_report_uses_val_theta_on_banking_only_columns(snap, run):
     assert fired > 0                                             # the seeded logits do fire some columns
 
 
-def test_ood_report_refuses_without_a_val_theta_source(tmp_path, snap, capsys):
+def test_ood_report_refuses_without_a_val_theta_source(tmp_path: Path, snap: tuple[str, str],
+                                                       capsys: pytest.CaptureFixture[str]) -> None:
     run_dir, _ = write_hotels_run(tmp_path / "noval", snap, val=False)
     capsys.readouterr()
     with pytest.raises(SystemExit, match="no full val dump in .*θ is chosen on val only"):
         report.confidence_report(run_dir, "hotels_probe", snap[1])
 
 
-def test_ood_report_refuses_a_val_dump_of_another_source(snap, run):
+def test_ood_report_refuses_a_val_dump_of_another_source(snap: tuple[str, str], run: tuple[str, np.ndarray]) -> None:
     run_dir, logits = run
     _, uids, side, _ = dumps.load_dump(run_dir, "hotels_probe", snap[1])
     planted = {k: v for k, v in side.items() if k not in ("dump_sha256", "schema_version")}
@@ -182,25 +188,27 @@ def test_ood_report_refuses_a_val_dump_of_another_source(snap, run):
         report.confidence_report(run_dir, "hotels_probe", snap[1])
 
 
-def test_run_report_refuses_hotels_probe_role(snap, run):
+def test_run_report_refuses_hotels_probe_role(snap: tuple[str, str], run: tuple[str, np.ndarray]) -> None:
     with pytest.raises(SystemExit, match="split hotels_probe has role ood_probe"):
         report.run_report(run[0], "hotels_probe", snap[1])
     with pytest.raises(SystemExit, match="role ood_probe"):
         report.main([run[0], "--split", "hotels_probe", "--manifest", snap[1]])
 
 
-def test_compare_refuses_hotels_probe_role(tmp_path, snap, run, capsys):
+def test_compare_refuses_hotels_probe_role(tmp_path: Path, snap: tuple[str, str], run: tuple[str, np.ndarray],
+                                           capsys: pytest.CaptureFixture[str]) -> None:
     other, _ = write_hotels_run(tmp_path / "other", snap, seed=11)
     capsys.readouterr()
     with pytest.raises(SystemExit, match="role ood_probe; report.py --compare"):
         report.compare([run[0]], [other], "hotels_probe", snap[1], B=10)
 
 
-def _sections(text):
+def _sections(text: str) -> dict[str, str]:
+    """{heading: section text} of a render_confidence output, split at its level-3 headings."""
     return {p.split("\n", 1)[0]: p for p in ("\n" + text).split("\n### ")[1:]}
 
 
-def test_render_shows_ood_table_only_with_ood_records(snap, run):
+def test_render_shows_ood_table_only_with_ood_records(snap: tuple[str, str], run: tuple[str, np.ndarray]) -> None:
     val = report.confidence_report(run[0], "val", snap[1])
     ood = report.confidence_report(run[0], "hotels_probe", snap[1])
     alone = report.render_confidence([val])
@@ -220,7 +228,8 @@ def test_render_shows_ood_table_only_with_ood_records(snap, run):
     assert list(_sections(only)) == [heading]
 
 
-def test_ood_out_writes_json_without_svg(tmp_path, snap, run, capsys):
+def test_ood_out_writes_json_without_svg(tmp_path: Path, snap: tuple[str, str], run: tuple[str, np.ndarray],
+                                         capsys: pytest.CaptureFixture[str]) -> None:
     out = tmp_path / "conf" / "prior-hotels_probe.json"
     rep = report.main(["--confidence", run[0], "--split", "hotels_probe", "--manifest", snap[1], "--out", str(out)])
     capsys.readouterr()

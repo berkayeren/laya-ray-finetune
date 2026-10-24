@@ -1,8 +1,7 @@
-"""Torch-free metric functions on [n, 48] arrays, shared by report.py and later phases (EVAL-02).
+"""Torch-free metric functions on [n, 48] arrays, shared by report.py, the verdict and the few-shot record.
 
 Every system (majority, label prior, zero-shot and fine-tuned Laya, BERTurk) goes through the same two functions, so
-nothing here may name a system (D-10). Values are computed in float64 and never rounded (D-01): rounding is for
-display only.
+nothing here may name a system. Values are computed in float64 and never rounded: rounding is for display only.
 
 Semantics (ported from the legacy evaluate.metrics):
 - decision rule: a tag is predicted when P >= theta (inclusive); theta is one float or one value per tag
@@ -14,7 +13,7 @@ Semantics (ported from the legacy evaluate.metrics):
 - top-1: on rows with at least one gold tag only (n_top1), the argmax tag is gold; argmax ties go to the earlier
   INTENTS tag; None when no row has a gold tag
 
-Val-selected thresholds (EVAL-02, D-12), one rule for every system, chosen on val only and never on test:
+Val-selected thresholds, one rule for every system, chosen on val only and never on test:
 - GRID: 0.05..0.95 in steps of 0.01 (91 points), GRID_CENTI (the integers 5..95) divided by 100, so each point
   equals its decimal literal; no rounding call
 - global θ: maximises val micro-F1 over GRID
@@ -22,12 +21,12 @@ Val-selected thresholds (EVAL-02, D-12), one rule for every system, chosen on va
   same grid; every other tag uses the global θ (theta_vector)
 - ties (global and per-tag alike): the θ closest to 0.5; between two equally close points, the lower θ; when every
   point scores 0 that is 0.5. The distance to 0.5 is measured in integer hundredths (GRID_CENTI), so two equally
-  close points tie exactly and the lower θ wins (CR-01: a float distance picked the higher θ on 9 of 45 pairs).
-  The per-tag objective and this tie rule are research assumption A2, confirmed by the user on 2026-10-14 (the
-  alternative, breaking per-tag ties toward the global θ, was rejected)
+  close points tie exactly and the lower θ wins (a float distance picked the higher θ on 9 of 45 pairs). The
+  per-tag objective and this tie rule were confirmed by the user on 2026-10-14 (the alternative, breaking per-tag
+  ties toward the global θ, was rejected)
 - θ is selected on the probabilities a system reports, i.e. after its temperature (the caller passes them)
 
-Paired bootstrap (EVAL-07), the one interval procedure for every comparison:
+Paired bootstrap, the one interval procedure for every comparison:
 - seed_average: each system's per-seed probabilities sigmoid(logit / T_s) are averaged per message and tag BEFORE
   thresholding (probabilities, never metrics, are averaged); one seed is the identity
 - paired_bootstrap: messages are resampled with replacement through ONE index draw (rng.integers(0, n, size=(B, n))
@@ -46,9 +45,9 @@ Paired bootstrap (EVAL-07), the one interval procedure for every comparison:
   metric of the resampled rows. Brier gates; the binned ECE is biased under the bootstrap (its observed delta sits
   near the edge of its own percentile interval), so it is reported, not gated
 
-Calibration (EVAL-03): the 48 tags are 48 binary problems, every function takes gold Y and probabilities P [n, 48]
-(P, never logits, so Phase 8's seed-averaged probabilities go through the same code; D-10 still holds: no system is
-named), computes in float64 and never rounds. The rule texts are CALIBRATION_RULES, copied into every record:
+Calibration: the 48 tags are 48 binary problems, every function takes gold Y and probabilities P [n, 48] (P, never
+logits, so the verdict's seed-averaged probabilities go through the same code; still no system is named), computes
+in float64 and never rounds. The rule texts are CALIBRATION_RULES, copied into every record:
 - Brier: the mean over every (message, tag) pair of (p - y)^2 (sklearn brier_score_loss on the flattened pairs); the
   per-message sum over 48 tags is 48 x this
 - NLL: the mean binary cross-entropy over every pair, p clipped to [NLL_EPS, 1 - NLL_EPS] (sklearn log_loss on the
@@ -61,7 +60,7 @@ named), computes in float64 and never rounds. The rule texts are CALIBRATION_RUL
 - reliability: per bin the pair count, the mean p and the observed frequency (None for an empty bin), pooled over
   every pair and per tag for the caller's eligible tags; vectorised with np.bincount, no Python loop over messages
 
-Abstention (EVAL-04): one message-confidence definition for every system and for seed-averaged probabilities, fixed
+Abstention: one message-confidence definition for every system and for seed-averaged probabilities, fixed
 before any fine-tuned test number (the rule texts CONFIDENCE_RULE, COVERAGE_RULE and AURC_RULE go into every record):
 - message confidence (message_confidence): c_i = the sum over the 48 tags of log q, q = p when p >= θ (the inclusive
   decision rule of metrics()) else 1 - p; the model's own probability, under tag independence, that all 48 of its
@@ -76,7 +75,7 @@ before any fine-tuned test number (the rule texts CONFIDENCE_RULE, COVERAGE_RULE
 - AURC (Geifman et al. 2019): the mean over k = 1..n of 1 - the exact-match rate of the k most confident messages;
   lower is better
 
-False positives (EVAL-05): one definition (fp_rate, FP_RULE) serves the no-intent rate and the out-of-domain rate:
+False positives: one definition (fp_rate, FP_RULE) serves the no-intent rate and the out-of-domain rate:
 - the counted messages are those with no gold tag among the scored columns `cols` (all 48 tags for no-intent; the 22
   banking-only ood_scoring_tags of the manifest for the out-of-domain probe); a counted message is a false positive
   when at least one `cols` tag is predicted at θ (P >= θ, the inclusive rule of metrics(); a per-tag θ is restricted
@@ -89,8 +88,9 @@ False positives (EVAL-05): one definition (fp_rate, FP_RULE) serves the no-inten
   no-intent set holds 7 messages and the test set 15, so the interval is always wide: 2/7 reads as 29 % with an
   interval of about 8 % to 64 %
 
-Average precision (Phase 9 primary metric, frozen in Phase 8): one definition (average_precision, AP_RULE), the
-threshold-free score of one held-out tag; new_tag_ap gives it per tag and its unweighted mean (macro) over the tags:
+Average precision (the few-shot experiment's primary metric, frozen in protocol.json): one definition
+(average_precision, AP_RULE), the threshold-free score of one held-out tag; new_tag_ap gives it per tag and its
+unweighted mean (macro) over the tags:
 - AP = the sum over the distinct score thresholds, in decreasing order, of (R_n - R_(n-1)) * P_n, P_n and R_n the
   precision and recall of the messages scoring at or above the n-th threshold; tied scores form one threshold; not
   interpolated. This is sklearn's average_precision_score, its test oracle (sklearn stays out of this module)
@@ -107,6 +107,7 @@ usage: from pilot import metrics; metrics.metrics(Y, metrics.probabilities(logit
        metrics.new_tag_ap(Y, metrics.probabilities(logits, 1.0), ["savings", "loan"])   # per-tag AP and macro
 """
 import math
+from typing import Any, Iterable
 
 import numpy as np
 
@@ -117,7 +118,7 @@ N_RANKED = 5                                                # tags listed in bes
 GRID_CENTI = np.arange(5, 96)                               # θ grid in integer hundredths 5..95, exact
 GRID = GRID_CENTI / 100.0                                   # 0.05..0.95, 91 points, each equal to its decimal literal
 GRID_CENTI.flags.writeable = False                          # read-only: pick reads both, so neither may drift
-GRID.flags.writeable = False                                # (03-REVIEW-gap-09 IN-02)
+GRID.flags.writeable = False
 MIN_VAL_POSITIVES = 10                                      # val positives a tag needs for its own θ
 TIE_RULE = "closest to 0.5; between two equally close points, the lower θ"
 BOOT_METRICS = ("micro_f1", "macro_f1", "exact_match", "top1_hit")
@@ -137,7 +138,7 @@ CALIBRATION_RULES = {
                       "|sum of y - sum of p| / n; averaged over all 48 tags, zero-support tags included"),
     "bins": "15 equal-width bins [k/15, (k+1)/15), p = 1.0 in the last bin (Guo et al. 2017, M = 15)",
 }
-COVERAGES = (50, 70, 80, 90)                                # integer percent; Phase 8 criterion (d) reads 80
+COVERAGES = (50, 70, 80, 90)                                # integer percent; the verdict's criterion (d) reads 80
 CONFIDENCE_RULE = ("message confidence = sum over the 48 tags of log q, q = p if p >= θ (predicted) else 1 - p: the "
                    "model's probability that every tag decision is right, assuming tag independence")
 COVERAGE_RULE = ("keep the k = ceil(c * n / 100) most confident messages, k computed as (c * n + 99) // 100; ties in "
@@ -154,7 +155,7 @@ AP_RULE = ("average precision of one tag: AP = sum over the distinct score thres
            "with no positive is refused; T-invariant (a monotone transform of the logits keeps the ranking)")
 
 
-def probabilities(logits, temperature):
+def probabilities(logits: np.ndarray, temperature: float) -> np.ndarray:
     """sigmoid(logits / T) in float64, written as 0.5 * (1 + tanh(x / 2)) so no |logit| overflows."""
     try:
         t = float(temperature)
@@ -165,7 +166,7 @@ def probabilities(logits, temperature):
     return 0.5 * (1.0 + np.tanh(0.5 * np.asarray(logits, dtype=np.float64) / t))
 
 
-def _prf(tp, fp, fn):
+def _prf(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
     """(precision, recall, F1) of integer counts; every 0/0 is 0.0."""
     p = tp / (tp + fp) if tp + fp else 0.0
     r = tp / (tp + fn) if tp + fn else 0.0
@@ -173,7 +174,7 @@ def _prf(tp, fp, fn):
     return float(p), float(r), float(f)
 
 
-def _arrays(Y, P, empty):
+def _arrays(Y: np.ndarray, P: np.ndarray, empty: str) -> tuple[np.ndarray, np.ndarray]:
     """(Y bool, P float64) checked to be the same non-empty [n, 48]; `empty` is the refusal for zero rows."""
     if len(Y) == 0:
         raise SystemExit(empty)
@@ -184,7 +185,7 @@ def _arrays(Y, P, empty):
     return Y, P
 
 
-def metrics(Y, P, theta):
+def metrics(Y: np.ndarray, P: np.ndarray, theta: float | np.ndarray) -> dict[str, Any]:
     """The metric block of one system at one threshold: Y bool [n, 48] gold, P float [n, 48] probabilities."""
     Y, P = _arrays(Y, P, "no messages to score")
     th = np.asarray(theta, dtype=np.float64)
@@ -225,26 +226,26 @@ def metrics(Y, P, theta):
             "best_tags": {t: per_tag[t]["f1"] for t in best}, "worst_tags": {t: per_tag[t]["f1"] for t in worst}}
 
 
-def pick(scores):
+def pick(scores: np.ndarray) -> float:
     """The GRID point with the best score; ties go to the point closest to 0.5, then to the lower θ (TIE_RULE)."""
     scores = np.asarray(scores, dtype=np.float64)
     if scores.shape != GRID.shape:
         raise SystemExit("%d scores for a %d-point θ grid" % (scores.size, GRID.size))
-    if not np.isfinite(scores).all():                       # NaN would empty cand below (03-REVIEW-gap-09 IN-01)
+    if not np.isfinite(scores).all():                       # NaN would empty cand below
         raise SystemExit("θ-grid scores hold a non-finite value (NaN or inf); every score must be finite")
     cand = np.flatnonzero(scores == scores.max())           # ascending, so the lower θ comes first
     # the distance to 0.5 is exact in integer hundredths: equally close points tie exactly and argmin keeps the lower
     return float(GRID[cand[np.argmin(np.abs(GRID_CENTI[cand] - 50))]])
 
 
-def _f1_counts(tp, fp, fn):
+def _f1_counts(tp: np.ndarray, fp: np.ndarray, fn: np.ndarray) -> np.ndarray:
     """F1 = 2tp / (2tp + fp + fn) elementwise; 0 where tp is 0 (so 0/0 is 0)."""
     den = 2 * tp + fp + fn
     return np.where(tp > 0, 2 * tp / np.maximum(den, 1), 0.0)
 
 
-def select_theta(Y_val, P_val):
-    """The val-selected θ (D-12): global θ on val micro-F1, per-tag θ on val F1 for tags with >= 10 val positives.
+def select_theta(Y_val: np.ndarray, P_val: np.ndarray) -> dict[str, Any]:
+    """The val-selected θ: global θ on val micro-F1, per-tag θ on val F1 for tags with >= 10 val positives.
 
     P_val are the probabilities the system reports (after its temperature). Only val may be passed in: the caller
     applies the result to test with theta_vector, never the other way round.
@@ -265,13 +266,13 @@ def select_theta(Y_val, P_val):
             "tie_break": TIE_RULE}
 
 
-def theta_vector(sel):
+def theta_vector(sel: dict[str, Any]) -> np.ndarray:
     """float64 [48] θ in INTENTS order: a tag's own θ where select_theta gave one, the global θ elsewhere."""
     return np.array([sel["per_tag"].get(t, sel["global"]) for t in TAGS], dtype=np.float64)
 
 
-def seed_average(prob_list):
-    """EVAL-07: the per-message, per-tag mean of a system's per-seed probabilities (one seed -> itself).
+def seed_average(prob_list: Iterable[np.ndarray]) -> np.ndarray:
+    """The per-message, per-tag mean of a system's per-seed probabilities (one seed -> itself).
 
     Probabilities are averaged before any threshold, never metrics: a tag at 0.4 and 0.7 averages to 0.55 and is
     predicted at θ 0.5 although one seed alone would not predict it.
@@ -285,7 +286,7 @@ def seed_average(prob_list):
     return np.mean(np.stack(arrays), axis=0)
 
 
-def bootstrap_weights(n, B, seed):
+def bootstrap_weights(n: int, B: int, seed: int | None) -> tuple[np.ndarray, np.ndarray]:
     """(idx int [B, n], W float64 [B, n]): one draw of n row indices with replacement per replicate, and W[b, i] the
     number of times row i is in replicate b. Built without a Python loop over replicates."""
     if int(n) < 1:
@@ -298,12 +299,12 @@ def bootstrap_weights(n, B, seed):
     return idx, W.astype(np.float64)
 
 
-def _ratio(num, den):
+def _ratio(num: np.ndarray, den: np.ndarray) -> np.ndarray:
     """num / den elementwise; 0.0 where den is 0."""
     return np.where(den > 0, num / np.where(den > 0, den, 1.0), 0.0)
 
 
-def replicate_metrics(W, Y, pred, P):
+def replicate_metrics(W: np.ndarray, Y: np.ndarray, pred: np.ndarray, P: np.ndarray) -> dict[str, np.ndarray]:
     """{name: float64 [B]} of BOOT_METRICS for every replicate row of W, with the semantics of metrics():
     micro-F1, exact match and top-1 score 0.0 on a 0 denominator; macro-F1 averages per-tag F1 over tags with
     replicate support > 0 or a prediction, and is NaN for a replicate with no such tag."""
@@ -326,7 +327,7 @@ def replicate_metrics(W, Y, pred, P):
     return {"micro_f1": micro, "macro_f1": macro, "exact_match": exact, "top1_hit": top1}
 
 
-def _percentiles(level):
+def _percentiles(level: float) -> list[float]:
     """The two percentile points of a central interval at `level` (0.95 -> [2.5, 97.5])."""
     level = float(level)
     if not 0.0 < level < 1.0:
@@ -334,8 +335,9 @@ def _percentiles(level):
     return [round(50.0 * (1.0 - level), 12), round(50.0 * (1.0 + level), 12)]
 
 
-def paired_bootstrap(Y, PA, thA, PB, thB, B=10000, seed=0, level=0.95):
-    """EVAL-07 paired message-level bootstrap of A - B on one shared index draw.
+def paired_bootstrap(Y: np.ndarray, PA: np.ndarray, thA: float | np.ndarray, PB: np.ndarray, thB: float | np.ndarray,
+                     B: int = 10000, seed: int | None = 0, level: float = 0.95) -> dict[str, Any]:
+    """The paired message-level bootstrap of A - B on one shared index draw.
 
     PA / PB are each system's (seed-averaged) probabilities on the same messages in the same order, thA / thB its
     thresholds (one float or 48 values; chosen by the caller, never here). Each metric reports A and B on the full
@@ -365,14 +367,15 @@ def paired_bootstrap(Y, PA, thA, PB, thB, B=10000, seed=0, level=0.95):
             "metrics": out}
 
 
-def _coverage(coverage):
+def _coverage(coverage: int) -> int:
     """The coverage as an int in 1..100 (integer percent, never a bool); SystemExit otherwise."""
     if isinstance(coverage, bool) or not isinstance(coverage, (int, np.integer)) or not 1 <= coverage <= 100:
         raise SystemExit("coverage %r is not an integer percent in 1..100" % (coverage,))
     return int(coverage)
 
 
-def replicate_extra(idx, W, Y, P, theta, coverage=80):
+def replicate_extra(idx: np.ndarray, W: np.ndarray, Y: np.ndarray, P: np.ndarray, theta: float | np.ndarray,
+                    coverage: int = 80) -> dict[str, np.ndarray]:
     """{name: float64 [B]} of brier, classwise_ece and precision_at_<coverage> for every replicate of one draw
     (idx [B, n] and its count weights W, from bootstrap_weights), BOOT_EXTRA_RULE: replicate b equals brier,
     classwise_ece and selective of the rows idx[b] in draw order."""
@@ -390,7 +393,9 @@ def replicate_extra(idx, W, Y, P, theta, coverage=80):
     return out
 
 
-def paired_bootstrap_extra(Y, PA, thA, PB, thB, B=10000, seed=0, level=0.95, coverage=80):
+def paired_bootstrap_extra(Y: np.ndarray, PA: np.ndarray, thA: float | np.ndarray, PB: np.ndarray,
+                           thB: float | np.ndarray, B: int = 10000, seed: int | None = 0, level: float = 0.95,
+                           coverage: int = 80) -> dict[str, Any]:
     """BOOT_EXTRA_RULE: the paired bootstrap of A - B for Brier, classwise ECE and micro precision at `coverage`
     percent (criterion (d)'s calibration and abstention statistics) on the one draw paired_bootstrap uses.
 
@@ -418,7 +423,7 @@ def paired_bootstrap_extra(Y, PA, thA, PB, thB, B=10000, seed=0, level=0.95, cov
             "coverage": coverage, "metrics": out}
 
 
-def ece_bins(P, n_bins=ECE_BINS):
+def ece_bins(P: np.ndarray, n_bins: int = ECE_BINS) -> np.ndarray:
     """int bin index of every entry of P: bins [k/n_bins, (k+1)/n_bins), p = 1.0 (and above) in the last bin, p <= 0
     in bin 0. The one bin helper of every calibration function (searchsorted on linspace, never floor(p * n_bins))."""
     edges = np.linspace(0.0, 1.0, int(n_bins) + 1)
@@ -426,20 +431,20 @@ def ece_bins(P, n_bins=ECE_BINS):
     return np.clip(b, 0, int(n_bins) - 1)
 
 
-def brier(Y, P):
+def brier(Y: np.ndarray, P: np.ndarray) -> float:
     """CALIBRATION_RULES["brier"]: the mean over every (message, tag) pair of (p - y)^2."""
     Y, P = _arrays(Y, P, "no messages to score")
     return float(np.mean((P - Y) ** 2))
 
 
-def nll(Y, P):
+def nll(Y: np.ndarray, P: np.ndarray) -> float:
     """CALIBRATION_RULES["nll"]: the mean binary cross-entropy over every pair, p clipped to [NLL_EPS, 1 - NLL_EPS]."""
     Y, P = _arrays(Y, P, "no messages to score")
     p = np.clip(P, NLL_EPS, 1.0 - NLL_EPS)
     return float(-np.mean(np.where(Y, np.log(p), np.log1p(-p))))
 
 
-def _bin_sums(Y, P, n_bins):
+def _bin_sums(Y: np.ndarray, P: np.ndarray, n_bins: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """(count, sum p, sum y), each float64 [48, n_bins], over the flat index tag * n_bins + bin."""
     k = Y.shape[1]
     flat = (np.arange(k)[None, :] * n_bins + ece_bins(P, n_bins)).ravel()
@@ -450,7 +455,7 @@ def _bin_sums(Y, P, n_bins):
     return cnt, sp, sy
 
 
-def classwise_ece(Y, P, n_bins=ECE_BINS):
+def classwise_ece(Y: np.ndarray, P: np.ndarray, n_bins: int = ECE_BINS) -> tuple[float, np.ndarray]:
     """(mean over all 48 tags, float64 [48] per-tag ECE): CALIBRATION_RULES["classwise_ece"]; a tag with zero
     support still counts in the mean."""
     Y, P = _arrays(Y, P, "no messages to score")
@@ -459,7 +464,8 @@ def classwise_ece(Y, P, n_bins=ECE_BINS):
     return float(per_tag.mean()), per_tag
 
 
-def reliability(Y, P, n_bins=ECE_BINS, tags=None):
+def reliability(Y: np.ndarray, P: np.ndarray, n_bins: int = ECE_BINS,
+                tags: Iterable[str] | None = None) -> list[dict[str, Any]]:
     """[{"lo", "hi", "count", "mean_p", "freq"}] per bin over every (message, tag) pair, or over the given tag
     columns only; mean_p and freq are None for an empty bin."""
     Y, P = _arrays(Y, P, "no messages to score")
@@ -478,8 +484,8 @@ def reliability(Y, P, n_bins=ECE_BINS, tags=None):
              "freq": float(sy[b] / cnt[b]) if cnt[b] else None} for b in range(n_bins)]
 
 
-def calibration(Y, P, eligible_tags=()):
-    """The EVAL-03 block of one probability array: Brier, NLL, classwise ECE with per-tag ECE and support, and the
+def calibration(Y: np.ndarray, P: np.ndarray, eligible_tags: Iterable[str] = ()) -> dict[str, Any]:
+    """The calibration block of one probability array: Brier, NLL, classwise ECE with per-tag ECE and support, and the
     reliability bins pooled over every pair plus per tag for eligible_tags (the θ rule's tags with >= 10 val
     positives)."""
     Y, P = _arrays(Y, P, "no messages to score")
@@ -491,7 +497,7 @@ def calibration(Y, P, eligible_tags=()):
                             "per_tag": {t: reliability(Y, P, tags=[t]) for t in eligible_tags}}}
 
 
-def message_confidence(P, theta):
+def message_confidence(P: np.ndarray, theta: float | np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """(c float64 [n], pred bool [n, 48]): CONFIDENCE_RULE, c_i = sum over the tags of log q, q = p where p >= θ
     (predicted, the inclusive rule of metrics()) else 1 - p. θ is one float or one value per tag, every value finite
     and strictly between 0 and 1 (so q > 0 and c is finite)."""
@@ -508,10 +514,11 @@ def message_confidence(P, theta):
     return np.log(np.where(pred, P, 1.0 - P)).sum(axis=1), pred
 
 
-def selective(Y, P, theta, coverages=COVERAGES):
-    """The EVAL-04 block of one probability array at one θ: per coverage (integer percent) the kept message count,
-    tp, fp, micro precision, exact-match accuracy and n_tied_at_cut (COVERAGE_RULE), and the AURC (AURC_RULE), all
-    under message_confidence."""
+def selective(Y: np.ndarray, P: np.ndarray, theta: float | np.ndarray,
+              coverages: Iterable[int] = COVERAGES) -> dict[str, Any]:
+    """The selective (abstention) block of one probability array at one θ: per coverage (integer percent) the kept
+    message count, tp, fp, micro precision, exact-match accuracy and n_tied_at_cut (COVERAGE_RULE), and the AURC
+    (AURC_RULE), all under message_confidence."""
     Y, P = _arrays(Y, P, "no messages to score")
     c, pred = message_confidence(P, theta)
     n = Y.shape[0]
@@ -532,7 +539,7 @@ def selective(Y, P, theta, coverages=COVERAGES):
     return {"n": int(n), "coverages": rows, "aurc": aurc}
 
 
-def wilson(k, n, z=WILSON_Z):
+def wilson(k: int, n: int, z: float = WILSON_Z) -> list[float] | None:
     """[lo, hi] of the Wilson score interval of k successes in n trials (95% at the default z), no continuity
     correction, clamped to [0, 1], with lo = 0.0 exactly at k = 0 and hi = 1.0 exactly at k = n; None when n <= 0.
     k must be an integer in 0..n."""
@@ -548,7 +555,8 @@ def wilson(k, n, z=WILSON_Z):
     return [0.0 if k == 0 else max(0.0, center - half), 1.0 if k == n else min(1.0, center + half)]
 
 
-def fp_rate(Y, P, theta, cols=None):
+def fp_rate(Y: np.ndarray, P: np.ndarray, theta: float | np.ndarray,
+            cols: Iterable[str] | None = None) -> dict[str, Any]:
     """FP_RULE at θ (one float or one value per tag; a 48-vector is restricted to `cols`): k false positives of the n
     counted messages (no gold among `cols`; all 48 tags when cols is None), the rate k / n (None when n is 0), its
     Wilson 95% interval, and per_tag_fp, the `cols` tags predicted on counted messages (nonzero counts, INTENTS
@@ -573,7 +581,7 @@ def fp_rate(Y, P, theta, cols=None):
             "cols": cols if cols is not None else "all"}
 
 
-def average_precision(y, s):
+def average_precision(y: np.ndarray, s: np.ndarray) -> float:
     """AP_RULE of one tag: y bool [n] gold, s float [n] scores (probabilities or logits: AP depends on the ranking
     only). Every tied score group is one threshold; float64, vectorised, no loop over messages."""
     y, s = np.asarray(y), np.asarray(s, dtype=np.float64)
@@ -594,7 +602,7 @@ def average_precision(y, s):
     return float(np.sum(np.diff(np.r_[0.0, recall]) * precision))
 
 
-def new_tag_ap(Y, P, tags):
+def new_tag_ap(Y: np.ndarray, P: np.ndarray, tags: Iterable[str]) -> dict[str, Any]:
     """{"tags", "per_tag": {tag: AP}, "macro": their unweighted mean} of the given distinct INTENTS tags, in the given
     order (AP_RULE); a tag column with no positive is refused."""
     Y, P = _arrays(Y, P, "no messages to score")

@@ -1,39 +1,39 @@
-"""The per-seed half of REP-02 (Phase 8, 08-04), offline on synthetic final seeds: no model, torch or Ray.
+"""The final scoring's per-seed reports and verdict, offline on synthetic final seeds: no model, torch or Ray.
 
 A final seed (a dump whose training.postfit_sha256 is set) was trained on final_train, which holds the val folds, so
-report.py never selects θ on its own val, and never on test (08-RESEARCH A5, Pattern 3). `report.py RUN_DIR --split
+report.py never selects θ on its own val, and never on test. `report.py RUN_DIR --split
 test --postfit RECORD` reports it at its postfit record's θ instead: theta.shipped for the shipped variant (at the
 sidecar's shipped T, which must be the record's chosen T) and theta.raw for raw (T = 1), through
 report.final_seed_binding, the one helper the --confidence final_seed binding uses too (record sha256 ==
 training.postfit_sha256, the same system kind, refuse_held_out_record, T within T_MATCH), so the two report modes
 refuse a wrong record with the same message. The val_selected rows name their source, theta_source {postfit, chosen,
 split: val}; without --postfit a final seed's val_selected rows are null with FINAL_SEED_REASON; --postfit on any
-other dump (a selection candidate, a baseline) is refused. Pitfall 3 (the record θ was selected on one selection-run
-seed) is disclosed in Phase 8, never re-selected.
+other dump (a selection candidate, a baseline) is refused. The record θ was selected on one selection-run seed; that
+is disclosed with the verdict, never re-selected.
 
-The invariant (assumption delta, theta_source promoted): every val_selected row of every report mode names a θ source
+The invariant (theta_source promoted): every val_selected row of every report mode names a θ source
 on val: run_report's theta_source, each --confidence binding's theta_source, and each --compare side's val dumps
 (dump_sha256.val; the compare output is left as it is, so the committed results/reports/compare-*.json still rebuild
 byte for byte).
 
-render_confidence takes svg_dir (default CONFIDENCE_SVG_DIR, results/confidence, so the committed Phase 7 README block
+render_confidence takes svg_dir (default CONFIDENCE_SVG_DIR, results/confidence, so the committed val README block
 renders byte for byte as before), and --confidence-table derives it from the inputs' one common directory
-(confidence_svg_dir), so 08-12 renders the test/HOTELS block from results/final/confidence with matching links.
+(confidence_svg_dir), so the README's test/HOTELS block renders from results/final/confidence with matching links.
 
 The synthetic snapshot, the postfit record over a synthetic grid and the final-seed and split-dump builders are
 tests/test_confidence.py's.
 
-The verdict (08-09, REP-02 and REP-03) is proven end to end on a synthetic repo before any real test number exists
-(synthetic_final, one module fixture): a fitted Laya and BERTurk postfit record over synthetic grids, three final seeds
-per kind whose test dumps carry protocol_sha256 == the synthetic protocol's own sha256 and training.postfit_sha256 ==
-their record's, the label prior's and majority's val and test dumps with their test reports as the reference rows, two
-latency-like reports and a protocol dict (pilot.protocol's blocks where they apply to any root, B 200 for speed) that
-lists every input with its sha256. report.verdict_from checks every input's sha256, loads exactly the protocol's
+The verdict (the results table and the GO block) is proven end to end on a synthetic repo, independent of any real test
+number (synthetic_final, one module fixture): a fitted Laya and BERTurk postfit record over synthetic grids, three final
+seeds per kind whose test dumps carry protocol_sha256 == the synthetic protocol's own sha256 and training.postfit_sha256
+== their record's, the label prior's and majority's val and test dumps with their test reports as the reference rows,
+two latency-like reports and a protocol dict (pilot.protocol's blocks where they apply to any root, B 200 for speed)
+that lists every input with its sha256. report.verdict_from checks every input's sha256, loads exactly the protocol's
 final-seed test dumps (pin, seed, postfit binding, pairing, the protocol's test uids), seed-averages each model at its
-record T and θ (A5), recomputes the prior's frozen fractions and hands the inputs to pilot.verdict.build_verdict, whose
+record T and θ, recomputes the prior's frozen fractions and hands the inputs to pilot.verdict.build_verdict, whose
 criteria and verdict the tests recompute from the record's own numbers. Every refusal is exercised on a copy of the
-dumps or of the protocol dict, so the module fixture is never changed. The renders (render_final_table, render_go)
-and the CLI modes (--verdict, --final-table, --go-block) are tested on the synthetic verdict and on build_verdict of
+dumps or of the protocol dict, so the module fixture is never changed. The renders (render_final_table, render_go) and
+the CLI modes (--verdict, --final-table, --go-block) are tested on the synthetic verdict and on build_verdict of
 hand-made inputs (INCONCLUSIVE, PROVISIONAL, GO, equal seed values).
 """
 import copy as copy_module
@@ -41,6 +41,8 @@ import json
 import os
 import shutil
 import types
+from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 import pytest
@@ -60,18 +62,20 @@ from pilot import verdict
 from pilot.data import repo_relpath
 from test_berturk_postfit import EPOCHS as BERTURK_EPOCHS
 from test_berturk_postfit import write_berturk_candidate
-from test_confidence import _drop_val, _final_seed, _prior, _write_json, _write_split_dump, fitted, snap  # noqa: F401
+from test_confidence import (Fitted, Snap, _drop_val, _final_seed, _prior, _write_json, _write_split_dump,  # noqa: F401
+                             fitted, snap)
 from test_postfit import GRID, write_candidate
 
 pytestmark = pytest.mark.unit
 
 
-def _final(root, snap, record, sha, **kw):
-    """A final seed's run dir holding only a test dump (Phase 8's final-seed dirs hold no val dump)."""
+def _final(root: Path, snap: Snap, record: dict[str, Any], sha: str, **kw: Any) -> str:
+    """A final seed's run dir holding only a test dump (the final seeds' dump dirs hold no val dump)."""
     return _drop_val(_write_split_dump(_final_seed(root, snap, record, sha, **kw), snap[1], "test"))
 
 
-def _expected_row(run_dir, manifest, T, theta):
+def _expected_row(run_dir: str, manifest: str, T: float, theta: dict[str, Any]) -> dict[str, Any]:
+    """The metric row of run_dir's test dump at T and θ, as run_report's val_selected row of a final seed."""
     logits, uids, _, entry = dumps.load_dump(run_dir, "test", manifest)
     Y = dumps.read_gold(entry, manifest, uids)
     P = metrics.probabilities(logits, T)
@@ -80,7 +84,7 @@ def _expected_row(run_dir, manifest, T, theta):
 
 # --- the final-seed θ binding in run_report ----------------------------------------------------------------------
 
-def test_final_seed_report_uses_the_record_theta(tmp_path, snap, fitted):
+def test_final_seed_report_uses_the_record_theta(tmp_path: Path, snap: Snap, fitted: Fitted) -> None:
     """The shipped row at the record's theta.shipped (sidecar T == record T), the raw row at theta.raw (T = 1), both
     held-out, and the source named: the record (path, sha256, kind), its chosen candidate, split val."""
     _, path, record, sha = fitted
@@ -100,7 +104,7 @@ def test_final_seed_report_uses_the_record_theta(tmp_path, snap, fitted):
         assert rep["variants"][name]["rows"]["0.5"] == no_post["variants"][name]["rows"]["0.5"]
 
 
-def test_final_seed_report_without_postfit_names_the_reason(tmp_path, snap, fitted):
+def test_final_seed_report_without_postfit_names_the_reason(tmp_path: Path, snap: Snap, fitted: Fitted) -> None:
     """θ is never self-selected for a final seed: without --postfit its val_selected rows are null, with the reason."""
     _, _, record, sha = fitted
     rep = report.run_report(_final(tmp_path / "final", snap, record, sha), "test", snap[1])
@@ -110,13 +114,14 @@ def test_final_seed_report_without_postfit_names_the_reason(tmp_path, snap, fitt
     assert "--postfit RECORD" in report.FINAL_SEED_REASON
 
 
-def _message(call):
+def _message(call: Callable[[], Any]) -> str:
+    """The SystemExit message call() raises."""
     with pytest.raises(SystemExit) as e:
         call()
     return str(e.value)
 
 
-def test_final_seed_postfit_refusals_match_confidence(tmp_path, snap, fitted):
+def test_final_seed_postfit_refusals_match_confidence(tmp_path: Path, snap: Snap, fitted: Fitted) -> None:
     """A copy of the record (same content, other bytes), another kind's record and a shipped T off by 0.5 are refused
     by run_report with exactly the message --confidence gives: one binding, final_seed_binding."""
     _, path, record, sha = fitted
@@ -134,7 +139,8 @@ def test_final_seed_postfit_refusals_match_confidence(tmp_path, snap, fitted):
         assert got == _message(lambda: report.confidence_report(run_dir, "test", snap[1], rec))
 
 
-def test_postfit_refused_for_a_dump_that_is_not_a_final_seed(tmp_path, snap, fitted, capsys):
+def test_postfit_refused_for_a_dump_that_is_not_a_final_seed(tmp_path: Path, snap: Snap, fitted: Fitted,
+                                                             capsys: pytest.CaptureFixture[str]) -> None:
     """--postfit binds a final seed only: a selection candidate and a baseline take θ from their run dir's val dump;
     a final seed reported on val stays refused (its val is training data)."""
     run_dirs, path, record, sha = fitted
@@ -149,7 +155,8 @@ def test_postfit_refused_for_a_dump_that_is_not_a_final_seed(tmp_path, snap, fit
             report.run_report(final, "val", snap[1], **args)
 
 
-def test_cli_run_dir_postfit_writes_the_run_report(tmp_path, snap, fitted, capsys):
+def test_cli_run_dir_postfit_writes_the_run_report(tmp_path: Path, snap: Snap, fitted: Fitted,
+                                                   capsys: pytest.CaptureFixture[str]) -> None:
     """`report.py RUN_DIR --split test --postfit RECORD --out X.json` writes exactly run_report's dict; --postfit with
     --compare or --table is an argparse error."""
     _, path, record, sha = fitted
@@ -166,7 +173,7 @@ def test_cli_run_dir_postfit_writes_the_run_report(tmp_path, snap, fitted, capsy
         assert e.value.code == 2 and "--postfit applies only to RUN_DIR or --confidence" in capsys.readouterr().err
 
 
-def _theta_sources(rep, manifest, dirs=()):
+def _theta_sources(rep: dict[str, Any], manifest: str, dirs: tuple[str, ...] = ()) -> list[tuple[str, Any]]:
     """[(where, θ-source split)] of every val_selected row of one report: run_report's theta_source, a confidence
     record's binding.theta_source, each --compare side's val dumps (dump_sha256.val, read back by load_dump from the
     one of `dirs` named by the side's run id)."""
@@ -187,7 +194,8 @@ def _theta_sources(rep, manifest, dirs=()):
     return [("run_report %s" % rep["run_id"], (rep["theta_source"] or {}).get("split"))]
 
 
-def test_every_val_selected_row_names_a_val_theta_source(tmp_path, snap, fitted, capsys):
+def test_every_val_selected_row_names_a_val_theta_source(tmp_path: Path, snap: Snap, fitted: Fitted,
+                                                         capsys: pytest.CaptureFixture[str]) -> None:
     """The invariant of the promoted theta_source: in every report mode, every val_selected row names where θ came
     from, and that is always val (a baseline's own val dump, a selection candidate's record, a final seed's record)."""
     run_dirs, path, record, sha = fitted
@@ -208,12 +216,13 @@ def test_every_val_selected_row_names_a_val_theta_source(tmp_path, snap, fitted,
     assert all(split == "val" for _, split in seen), seen
 
 
-# --- render_confidence's svg_dir (08-12 renders the test/HOTELS block from results/final/confidence) ----------------
+# --- render_confidence's svg_dir (the README's test/HOTELS block renders from results/final/confidence) ------------
 
 CONFIDENCE_DIR = os.path.join(pilot.data.REPO_ROOT, "results", "confidence")
 
 
-def _committed_confidence():
+def _committed_confidence() -> tuple[list[str], list[dict[str, Any]]]:
+    """(paths, parsed records) of the committed val confidence records, in sorted path order."""
     paths = report.table_inputs([CONFIDENCE_DIR])
     assert paths, "no committed confidence record under results/confidence/"
     out = []
@@ -223,14 +232,14 @@ def _committed_confidence():
     return paths, out
 
 
-def test_render_confidence_svg_dir_default_is_the_phase7_block():
-    """The default svg_dir is results/confidence, so the committed Phase 7 README block renders as before."""
+def test_render_confidence_svg_dir_default_is_the_val_block() -> None:
+    """The default svg_dir is results/confidence, so the committed val README block renders as before."""
     _, records = _committed_confidence()
     assert report.CONFIDENCE_SVG_DIR == "results/confidence"
     assert report.render_confidence(records) == report.render_confidence(records, svg_dir="results/confidence")
 
 
-def test_render_confidence_svg_dir_changes_only_the_links():
+def test_render_confidence_svg_dir_changes_only_the_links() -> None:
     """Another svg_dir moves every diagram link there and changes nothing else."""
     _, records = _committed_confidence()
     base = report.render_confidence(records).split("\n")
@@ -243,16 +252,16 @@ def test_render_confidence_svg_dir_changes_only_the_links():
     assert [a for a, _ in changed] == [x.replace("results/final/confidence/", "results/confidence/") for x in links]
 
 
-def test_confidence_table_svg_dir_keeps_the_committed_block(capsys):
+def test_confidence_table_svg_dir_keeps_the_committed_block(capsys: pytest.CaptureFixture[str]) -> None:
     """`report.py --confidence-table results/confidence` derives svg_dir from the inputs' directory: the committed
-    records give exactly render_confidence's default text (the README Phase 7 block)."""
+    records give exactly render_confidence's default text (the README val confidence block)."""
     paths, records = _committed_confidence()
     assert report.confidence_svg_dir(paths) == report.CONFIDENCE_SVG_DIR
     text = report.main(["--confidence-table", CONFIDENCE_DIR])
     assert capsys.readouterr().out == text == report.render_confidence(records)
 
 
-def test_confidence_svg_dir_follows_one_common_directory_under_root(tmp_path):
+def test_confidence_svg_dir_follows_one_common_directory_under_root(tmp_path: Path) -> None:
     """One common directory under root gives its forward-slash relative path; two directories, root itself or a
     record outside root give CONFIDENCE_SVG_DIR (never an absolute or outside-repo link)."""
     root = tmp_path / "repo"
@@ -271,21 +280,21 @@ def test_confidence_svg_dir_follows_one_common_directory_under_root(tmp_path):
     assert report.confidence_svg_dir([], root=str(root)) == report.CONFIDENCE_SVG_DIR
 
 
-# --- the verdict (08-09): a synthetic protocol, three Laya and three BERTurk final seeds ----------------------------
+# --- the verdict: a synthetic protocol, three Laya and three BERTurk final seeds ------------------------------------
 
 KINDS = ("laya", "berturk")
 SEEDS = (0, 1, 2)
 SEVEN = ("micro_f1", "macro_f1", "exact_match", "top1_hit", "brier", "classwise_ece", "precision_at_80")
 LATENCY = {"laya": {"system": "laya", "device": "mps", "pooled": {"n": 21, "p50": 0.33, "p95": 0.41}},
            "berturk": {"system": "berturk", "device": "mps", "pooled": {"n": 21, "p50": 0.012, "p95": 0.015}}}
-# the synthetic few-shot block (09-08): tag card, k 1 and 2, two draws on base seeds 0 and 1, primary metric at k = 2,
+# the synthetic few-shot block: tag card, k 1 and 2, two draws on base seeds 0 and 1, primary metric at k = 2,
 # which the synthetic criteria (d) fewshot path names too (the real protocol has k = 10 in both places)
 FEWSHOT_K = 2
 FEWSHOT_RULES = dict(plant_rules((0, 1)), primary_metric={"k": FEWSHOT_K, "rule": "the synthetic primary metric at "
                                                                                  "k = %d" % FEWSHOT_K})
 
 
-def _rewrite(run_dir, manifest, split, reverse=False, **over):
+def _rewrite(run_dir: str, manifest: str, split: str, reverse: bool = False, **over: Any) -> str:
     """Rewrite a dump of run_dir with sidecar keys replaced by `over` (a planted case); reverse=True writes the rows in
     reverse order as a --n subset of the full count (the only way load_dump admits another order)."""
     logits, uids, side, _ = dumps.load_dump(run_dir, split, manifest)
@@ -297,8 +306,8 @@ def _rewrite(run_dir, manifest, split, reverse=False, **over):
     return run_dir
 
 
-def _gated_test_dump(run_dir, manifest, pin, rng_seed):
-    """The test dump score.py's protocol gate writes for a final seed (08-07): the val sidecar's run_id, system,
+def _gated_test_dump(run_dir: str, manifest: str, pin: str, rng_seed: int) -> str:
+    """The test dump score.py's protocol gate writes for a final seed: the val sidecar's run_id, system,
     temperature, scorer, seed and training, protocol_sha256 == pin, seeded float32 logits."""
     _, _, vside, _ = dumps.load_dump(run_dir, "val", manifest)
     path = os.path.join(os.path.dirname(manifest), "splits", "test.jsonl")
@@ -314,7 +323,7 @@ def _gated_test_dump(run_dir, manifest, pin, rng_seed):
     return run_dir
 
 
-def _final_seed_dir(dump_root, snap, kind, record, rsha, seed):
+def _final_seed_dir(dump_root: Path, snap: Snap, kind: str, record: dict[str, Any], rsha: str, seed: int) -> str:
     """A final seed's val dump (dropped once its gated test dump exists): calibrated, at the record's T, trained on
     final_train, training.postfit_sha256 == rsha. BERTurk's builder has no postfit argument, so its sidecar is
     rewritten with the binding."""
@@ -329,7 +338,7 @@ def _final_seed_dir(dump_root, snap, kind, record, rsha, seed):
 
 
 @pytest.fixture(scope="module")
-def synthetic_final(tmp_path_factory):
+def synthetic_final(tmp_path_factory: pytest.TempPathFactory) -> types.SimpleNamespace:
     """A synthetic repo (root): the snapshot under data/, a fitted laya and berturk postfit record and their final
     manifests under results/postfit/, three gated final-seed test dumps per kind, the prior's and majority's dumps and
     test reports, two latency reports, and the protocol dict listing every input with its sha256, written to
@@ -419,17 +428,20 @@ def synthetic_final(tmp_path_factory):
                                  sha=sha, path=path, records=records, finals=finals, snap=snap)
 
 
-def _verdict(sf, protocol=None, sha=None, dump_root=None):
+def _verdict(sf: types.SimpleNamespace, protocol: dict[str, Any] | None = None, sha: str | None = None,
+             dump_root: str | None = None) -> dict[str, Any]:
+    """report.verdict_from of the synthetic repo, with the protocol, pin or dump root replaced when given."""
     return report.verdict_from(sf.protocol if protocol is None else protocol, sf.sha if sha is None else sha,
                                sf.manifest, sf.root, sf.dump_root if dump_root is None else dump_root)
 
 
 @pytest.fixture(scope="module")
-def synthetic_verdict(synthetic_final):
+def synthetic_verdict(synthetic_final: types.SimpleNamespace) -> dict[str, Any]:
+    """The verdict of the synthetic repo without the few-shot record (the few-shot path PENDING)."""
     return _verdict(synthetic_final)
 
 
-def test_verdict_end_to_end_on_synthetic_final_seeds(synthetic_final):
+def test_verdict_end_to_end_on_synthetic_final_seeds(synthetic_final: types.SimpleNamespace) -> None:
     """verdict/1 from protocol-bound final-seed dumps: its criteria are pilot.verdict's functions of its own deltas,
     collapse rows and latency rows under the protocol's criteria block, its verdict is decide of those statuses, the
     per-seed rows are run_report's at the record θ, and the settings are the records'."""
@@ -478,8 +490,9 @@ def test_verdict_end_to_end_on_synthetic_final_seeds(synthetic_final):
             assert s["summary"][m] == {"mean": mean, "std": std, "values": [r[m] for r in s["per_seed"]]}
 
 
-def test_verdict_seed_averages_at_the_record_t_and_theta(synthetic_final, synthetic_verdict):
-    """The seed-averaged systems (A5): per seed sigmoid(logit / T) at the record T, averaged, thresholded at the
+def test_verdict_seed_averages_at_the_record_t_and_theta(synthetic_final: types.SimpleNamespace,
+                                                         synthetic_verdict: dict[str, Any]) -> None:
+    """The seed-averaged systems: per seed sigmoid(logit / T) at the record T, averaged, thresholded at the
     record's theta.shipped (raw: T 1, theta.raw), compared by system_deltas with the protocol's bootstrap block; the
     seven metrics of system_deltas, Laya - BERTurk."""
     sf, v = synthetic_final, synthetic_verdict
@@ -499,9 +512,10 @@ def test_verdict_seed_averages_at_the_record_t_and_theta(synthetic_final, synthe
         assert got["a"] == "laya" and got["b"] == "berturk" and got["n"] == Y.shape[0] and got["B"] == 200
 
 
-def test_verdict_collapse_rows_in_order(synthetic_final, synthetic_verdict):
+def test_verdict_collapse_rows_in_order(synthetic_final: types.SimpleNamespace,
+                                        synthetic_verdict: dict[str, Any]) -> None:
     """Collapse rows: selection laya, selection berturk, then final laya s0..s2 and final berturk s0..s2; the
-    selection runs by the val floor and the loss, the final seeds by the loss and the test floor (A6), against the
+    selection runs by the val floor and the loss, the final seeds by the loss and the test floor, against the
     protocol's frozen prior fractions."""
     sf, v = synthetic_final, synthetic_verdict
     rows = v["collapse"]["rows"]
@@ -529,14 +543,14 @@ def test_verdict_collapse_rows_in_order(synthetic_final, synthetic_verdict):
                                                                  col["prior_test_fraction"])
 
 
-def test_verdict_is_deterministic(synthetic_final, synthetic_verdict):
+def test_verdict_is_deterministic(synthetic_final: types.SimpleNamespace, synthetic_verdict: dict[str, Any]) -> None:
     """No timestamp, no rounding: the same inputs give identical bytes."""
     again = _verdict(synthetic_final)
     assert json.dumps(again, ensure_ascii=False, indent=2) == json.dumps(synthetic_verdict, ensure_ascii=False,
                                                                          indent=2)
 
 
-def test_verdict_refuses_a_changed_protocol_input(synthetic_final):
+def test_verdict_refuses_a_changed_protocol_input(synthetic_final: types.SimpleNamespace) -> None:
     """An input whose bytes changed after the freeze is refused, named, before anything is computed."""
     sf = synthetic_final
     path = os.path.join(sf.root, "results", "latency", "laya-mps.json")
@@ -552,13 +566,14 @@ def test_verdict_refuses_a_changed_protocol_input(synthetic_final):
             f.write(raw)
 
 
-def _dump_copy(sf, tmp_path):
+def _dump_copy(sf: types.SimpleNamespace, tmp_path: Path) -> str:
+    """A copy of the synthetic dump root under tmp_path (the module fixture's dumps are never changed)."""
     out = str(tmp_path / "dumps")
     shutil.copytree(sf.dump_root, out)
     return out
 
 
-def test_verdict_refuses_a_missing_final_seed_test_dump(synthetic_final, tmp_path):
+def test_verdict_refuses_a_missing_final_seed_test_dump(synthetic_final: types.SimpleNamespace, tmp_path: Path) -> None:
     sf = synthetic_final
     root = _dump_copy(sf, tmp_path)
     rid = os.path.basename(sf.finals["berturk"][1])
@@ -567,7 +582,7 @@ def test_verdict_refuses_a_missing_final_seed_test_dump(synthetic_final, tmp_pat
         _verdict(sf, dump_root=root)
 
 
-def test_verdict_refuses_a_dump_bound_to_another_protocol(synthetic_final):
+def test_verdict_refuses_a_dump_bound_to_another_protocol(synthetic_final: types.SimpleNamespace) -> None:
     """A sidecar protocol_sha256 other than the frozen protocol's sha256 is refused."""
     with pytest.raises(SystemExit, match="protocol_sha256"):
         _verdict(synthetic_final, sha="0" * 64)
@@ -577,7 +592,9 @@ def test_verdict_refuses_a_dump_bound_to_another_protocol(synthetic_final):
     (lambda side: {"seed": 7}, "seed 7"),
     (lambda side: {"training": dict(side["training"], postfit_sha256="9" * 64)}, "postfit_sha256 " + "9" * 64),
 ])
-def test_verdict_refuses_a_seed_or_postfit_binding_mismatch(synthetic_final, tmp_path, plant, want):
+def test_verdict_refuses_a_seed_or_postfit_binding_mismatch(synthetic_final: types.SimpleNamespace, tmp_path: Path,
+                                                            plant: Callable[[dict[str, Any]], dict[str, Any]],
+                                                            want: str) -> None:
     sf = synthetic_final
     root = _dump_copy(sf, tmp_path)
     d = os.path.join(root, os.path.basename(sf.finals["laya"][2]))
@@ -587,8 +604,8 @@ def test_verdict_refuses_a_seed_or_postfit_binding_mismatch(synthetic_final, tmp
         _verdict(sf, dump_root=root)
 
 
-def test_verdict_refuses_an_unpaired_uid_order(synthetic_final, tmp_path):
-    """Every final-seed test dump must score the protocol's test uids in one order (EVAL-07 pairing)."""
+def test_verdict_refuses_an_unpaired_uid_order(synthetic_final: types.SimpleNamespace, tmp_path: Path) -> None:
+    """Every final-seed test dump must score the protocol's test uids in one order (the bootstrap's pairing)."""
     sf = synthetic_final
     root = _dump_copy(sf, tmp_path)
     _rewrite(os.path.join(root, os.path.basename(sf.finals["berturk"][0])), sf.manifest, "test", reverse=True)
@@ -598,7 +615,8 @@ def test_verdict_refuses_an_unpaired_uid_order(synthetic_final, tmp_path):
 
 @pytest.mark.parametrize("key, value", [("prior_val_fraction", "1/3"), ("prior_test_fraction", "1/3"),
                                         ("prior_theta_global", 0.37)])
-def test_verdict_refuses_a_prior_fraction_off_the_frozen_one(synthetic_final, key, value):
+def test_verdict_refuses_a_prior_fraction_off_the_frozen_one(synthetic_final: types.SimpleNamespace, key: str,
+                                                             value: Any) -> None:
     """The prior's floors are recomputed from its dumps (pilot.protocol.prior_floors) and must equal the frozen ones."""
     protocol = copy_module.deepcopy(synthetic_final.protocol)
     protocol["collapse"][key] = value
@@ -608,8 +626,9 @@ def test_verdict_refuses_a_prior_fraction_off_the_frozen_one(synthetic_final, ke
 
 @pytest.mark.parametrize("where, key", [("definitions", "brier"), ("definitions", "bootstrap_method"),
                                         ("bootstrap", "procedure"), ("bootstrap", "extra")])
-def test_verdict_refuses_code_texts_off_the_frozen_ones(synthetic_final, monkeypatch, where, key):
-    """08-REVIEW WR-04: the verdict is computed by the frozen code only. A metric or bootstrap text of the live code
+def test_verdict_refuses_code_texts_off_the_frozen_ones(synthetic_final: types.SimpleNamespace,
+                                                        monkeypatch: pytest.MonkeyPatch, where: str, key: str) -> None:
+    """The verdict is computed by the frozen code only. A metric or bootstrap text of the live code
     that differs from the protocol's (here: the live block changed after the freeze) is refused naming the key, before
     any input is read; the bootstrap parameters (B, seed, level, coverage) are the protocol's to set."""
     fn = "definitions_block" if where == "definitions" else "bootstrap_block"
@@ -624,30 +643,30 @@ def test_verdict_refuses_code_texts_off_the_frozen_ones(synthetic_final, monkeyp
     report.frozen_code(synthetic_final.protocol)                                                # and still pass
 
 
-def test_verdict_refuses_a_system_with_fewer_final_seeds_than_listed(synthetic_final):
+def test_verdict_refuses_a_system_with_fewer_final_seeds_than_listed(synthetic_final: types.SimpleNamespace) -> None:
     protocol = copy_module.deepcopy(synthetic_final.protocol)
     protocol["systems"]["laya"]["final_seeds"].pop()
     with pytest.raises(SystemExit, match="laya: .*final seeds \\[0, 1\\].*\\[0, 1, 2\\]"):
         _verdict(synthetic_final, protocol=protocol)
 
 
-# --- the verdict with the few-shot record (09-08, D-13): criterion (d)'s few-shot path at its frozen threshold --------
+# --- the verdict with the few-shot record: criterion (d)'s few-shot path at its frozen threshold ---------------------
 
-def _separating(good):
+def _separating(good: str) -> Callable[[dict[str, Any], str, np.ndarray, np.random.Generator], np.ndarray]:
     """A logits callback: `good` kind ranks every positive above every negative, the other kind inverts the ranking."""
-    def make(e, split, Y, rng):
+    def make(e: dict[str, Any], split: str, Y: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         sign = 1.0 if e["kind"] == good else -1.0
         return np.where(Y, 4.0, -4.0) * sign + rng.normal(0.0, 0.1, size=Y.shape)
     return make
 
 
 @pytest.fixture(scope="module")
-def synthetic_fewshot(synthetic_final):
-    """The few-shot results of the synthetic protocol, planted after its freeze under its root: the D-08 decision record
-    (primary mode), the complete runs manifest, every dump it lists in the verdict's dump root (Laya ranks the new tag
-    perfectly, BERTurk inverts it, so the few-shot path is MET) and the record pilot.fewshot_report.build_record writes,
-    with repo-relative paths under the synthetic root. fewshot.DECISION_PATH must point at `decision` while a test
-    reads it (monkeypatch)."""
+def synthetic_fewshot(synthetic_final: types.SimpleNamespace) -> types.SimpleNamespace:
+    """The few-shot results of the synthetic protocol, planted after its freeze under its root: the compute decision
+    record (primary mode), the complete runs manifest, every dump it lists in the verdict's dump root (Laya ranks the
+    new tag perfectly, BERTurk inverts it, so the few-shot path is MET) and the record
+    pilot.fewshot_report.build_record writes, with repo-relative paths under the synthetic root. fewshot.DECISION_PATH
+    must point at `decision` while a test reads it (monkeypatch)."""
     sf = synthetic_final
     ns = types.SimpleNamespace(manifest=sf.manifest, pin=sf.sha, block=sf.protocol["fewshot"], protocol=sf.protocol)
     base = os.path.join(sf.root, "results", "fewshot")
@@ -667,15 +686,20 @@ def synthetic_fewshot(synthetic_final):
                                  runs_sha=runs_sha, decision=decision)
 
 
-def _fewshot_verdict(sf, fw, monkeypatch, path=None, protocol=None, dump_root=None):
+def _fewshot_verdict(sf: types.SimpleNamespace, fw: types.SimpleNamespace, monkeypatch: pytest.MonkeyPatch,
+                     path: str | None = None, protocol: dict[str, Any] | None = None,
+                     dump_root: str | None = None) -> dict[str, Any]:
+    """report.verdict_from of the synthetic repo with the few-shot record (`path`, default the planted one)."""
     monkeypatch.setattr(fs, "DECISION_PATH", fw.decision)
     return report.verdict_from(sf.protocol if protocol is None else protocol, sf.sha, sf.manifest, sf.root,
                                sf.dump_root if dump_root is None else dump_root,
                                fewshot=fw.path if path is None else path)
 
 
-def test_verdict_with_the_fewshot_record(synthetic_final, synthetic_fewshot, synthetic_verdict, monkeypatch):
-    """D-13: verdict_from(..., fewshot=RECORD) recomputes the record's primary block from the dumps and gives criterion
+def test_verdict_with_the_fewshot_record(synthetic_final: types.SimpleNamespace,
+                                         synthetic_fewshot: types.SimpleNamespace, synthetic_verdict: dict[str, Any],
+                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """verdict_from(..., fewshot=RECORD) recomputes the record's primary block from the dumps and gives criterion
     (d)'s few-shot path its status (MET: Laya - BERTurk mean macro-AP at k = 2 is far above 0.05); (d) is PASS, the
     verdict is not provisional and names no few-shot branch; the fewshot block holds the path's numbers, the record's
     path and sha256 and the mode; check_record accepts it and render_go shows the mean delta and the few-shot line.
@@ -707,14 +731,14 @@ def test_verdict_with_the_fewshot_record(synthetic_final, synthetic_fewshot, syn
     text = verdict.render_go(v)
     d_row = [r for r in _table_rows(text) if r.startswith("| (d) ")][0]
     assert "fewshot (new_tag_macro_ap): MET, mean delta %+.2f points" % (p["mean_delta"] * 100) in d_row
-    assert "PENDING (Phase 9)" not in text and "PROVISIONAL" not in text
-    assert ("- Few-shot path (Phase 9): k = %d, mean over %d draws, mode primary; record results/fewshot/fewshot.json "
+    assert "fewshot (new_tag_macro_ap): %s" % verdict.PENDING not in text and "PROVISIONAL" not in text
+    assert ("- Few-shot path: k = %d, mean over %d draws, mode primary; record results/fewshot/fewshot.json "
             "sha256 `%s`." % (FEWSHOT_K, len(p["draws"]), fw.sha[:12])) in text
     assert _verdict(sf) == synthetic_verdict                # without the record: the PENDING verdict, unchanged
     assert verdict.render_go(synthetic_verdict).count("Few-shot path") == 0
 
 
-def _record_copy(fw, tmp_path, edit):
+def _record_copy(fw: types.SimpleNamespace, tmp_path: Path, edit: Callable[[dict[str, Any]], Any]) -> str:
     """A copy of the planted few-shot record (the module fixture's file is never changed) with one edit applied to
     its parsed JSON, written as fewshot_report.record_bytes would; returns its path."""
     rec = copy_module.deepcopy(fw.record)
@@ -725,7 +749,8 @@ def _record_copy(fw, tmp_path, edit):
     return path
 
 
-def _bump_primary(rec):
+def _bump_primary(rec: dict[str, Any]) -> None:
+    """Move every primary draw delta by 0.01 and recompute the mean: an edit that keeps the block self-consistent."""
     rec["primary"]["draws"] = [x + 0.01 for x in rec["primary"]["draws"]]
     rec["primary"]["mean_delta"] = fewshot_report.mean_delta(rec["primary"]["draws"])
 
@@ -740,9 +765,11 @@ def _bump_primary(rec):
     (_bump_primary, "primary block does not recompute"),
     (lambda r: r.update(schema="fewshot-results/0"), "schema"),
 ])
-def test_verdict_refuses_an_edited_fewshot_record(synthetic_final, synthetic_fewshot, tmp_path, monkeypatch, edit,
-                                                  want):
-    """T-09-26: a few-shot record is read into criterion (d) only when it is of the pin, its primary k is criteria
+def test_verdict_refuses_an_edited_fewshot_record(synthetic_final: types.SimpleNamespace,
+                                                  synthetic_fewshot: types.SimpleNamespace, tmp_path: Path,
+                                                  monkeypatch: pytest.MonkeyPatch,
+                                                  edit: Callable[[dict[str, Any]], Any], want: str) -> None:
+    """A few-shot record is read into criterion (d) only when it is of the pin, its primary k is criteria
     (d)'s, the runs manifest it names is under the repo and is its own (sha256), its decision is that manifest's and
     its primary block recomputes from the dumps; an edited copy is refused with one line, before any verdict."""
     sf, fw = synthetic_final, synthetic_fewshot
@@ -752,7 +779,9 @@ def test_verdict_refuses_an_edited_fewshot_record(synthetic_final, synthetic_few
     assert "\n" not in str(e.value.code)
 
 
-def test_verdict_refuses_a_fewshot_k_off_criteria_d(synthetic_final, synthetic_fewshot, monkeypatch):
+def test_verdict_refuses_a_fewshot_k_off_criteria_d(synthetic_final: types.SimpleNamespace,
+                                                    synthetic_fewshot: types.SimpleNamespace,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
     """The few-shot path is applied at criteria (d)'s k only: a protocol (copy) whose criteria (d) fewshot k is not the
     record's primary k is refused naming both."""
     protocol = copy_module.deepcopy(synthetic_final.protocol)
@@ -763,8 +792,9 @@ def test_verdict_refuses_a_fewshot_k_off_criteria_d(synthetic_final, synthetic_f
         _fewshot_verdict(synthetic_final, synthetic_fewshot, monkeypatch, protocol=protocol)
 
 
-def test_verdict_refuses_a_fewshot_record_whose_dumps_changed(synthetic_final, synthetic_fewshot, tmp_path,
-                                                              monkeypatch):
+def test_verdict_refuses_a_fewshot_record_whose_dumps_changed(synthetic_final: types.SimpleNamespace,
+                                                              synthetic_fewshot: types.SimpleNamespace, tmp_path: Path,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
     """The record is recomputed from the dumps at verdict time: a listed test dump rewritten with other logits (same
     sidecar, a copy of the dump root) makes the unchanged record refused."""
     sf, fw = synthetic_final, synthetic_fewshot
@@ -779,7 +809,9 @@ def test_verdict_refuses_a_fewshot_record_whose_dumps_changed(synthetic_final, s
         _fewshot_verdict(sf, fw, monkeypatch, dump_root=root)
 
 
-def test_cli_verdict_with_fewshot(synthetic_final, synthetic_fewshot, tmp_path, monkeypatch, capsys):
+def test_cli_verdict_with_fewshot(synthetic_final: types.SimpleNamespace, synthetic_fewshot: types.SimpleNamespace,
+                                  tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                  capsys: pytest.CaptureFixture[str]) -> None:
     """`report.py --verdict --fewshot RECORD --out X.json` writes verdict_from(..., fewshot=RECORD) (JSON plus a
     newline), and --go-block renders it after check_record; --fewshot with any other mode is an argparse error."""
     sf, fw = synthetic_final, synthetic_fewshot
@@ -800,12 +832,16 @@ def test_cli_verdict_with_fewshot(synthetic_final, synthetic_fewshot, tmp_path, 
 
 # --- build_verdict on hand-made inputs ------------------------------------------------------------------------------
 
-def _delta(d, lo, hi, a=0.5):
+def _delta(d: float, lo: float, hi: float, a: float = 0.5) -> dict[str, Any]:
+    """One bootstrap metric block: A = a + d, B = a, delta d, CI [lo, hi]."""
     return {"a": a + d, "b": a, "delta": d, "ci": [lo, hi], "width": hi - lo, "n_undefined": 0}
 
 
-def _hand_deltas(micro=(0.0, -0.01, 0.01), macro=(0.0, -0.02, 0.02), brier=(0.001, 0.0005, 0.002),
-                 p80=(0.0, -0.02, 0.02)):
+def _hand_deltas(micro: tuple[float, float, float] = (0.0, -0.01, 0.01),
+                 macro: tuple[float, float, float] = (0.0, -0.02, 0.02),
+                 brier: tuple[float, float, float] = (0.001, 0.0005, 0.002),
+                 p80: tuple[float, float, float] = (0.0, -0.02, 0.02)) -> dict[str, Any]:
+    """A seed_averaged variant with the given (delta, lo, hi) of micro-F1, macro-F1, Brier and precision at 80 %."""
     m = {"micro_f1": _delta(*micro), "macro_f1": _delta(*macro), "exact_match": _delta(0.01, -0.02, 0.04),
          "top1_hit": _delta(-0.01, -0.03, 0.01), "brier": _delta(*brier, a=0.02),
          "classwise_ece": _delta(0.002, 0.001, 0.004, a=0.03), "precision_at_80": _delta(*p80, a=0.8)}
@@ -814,14 +850,16 @@ def _hand_deltas(micro=(0.0, -0.01, 0.01), macro=(0.0, -0.02, 0.02), brier=(0.00
             "theta": {"laya": "theta.shipped", "berturk": "theta.shipped"}}
 
 
-def _hand_seed(kind, seed, values=None):
+def _hand_seed(kind: str, seed: int, values: dict[str, float] | None = None) -> dict[str, Any]:
+    """One per-seed row of `kind` with fixed metrics, `values` overriding them."""
     v = dict({"micro_f1": 0.8, "macro_f1": 0.7, "exact_match": 0.5, "top1_hit": 0.9}, **(values or {}))
     return dict({"seed": seed, "dump_run_id": "%s-final-%d" % (kind, seed), "dump_sha256": "d" * 64,
                  "train_run_id": "%s-final_train-s%d" % (kind, seed), "temperature": 1.5, "n_top1": 398,
                  "test_counts": {"tp": 400, "fp": 100, "fn": 100}, "loss_by_epoch": [0.8, 0.5, 0.3]}, **v)
 
 
-def _hand_inputs(per_seed=None, **deltas):
+def _hand_inputs(per_seed: dict[str, list[dict[str, Any]]] | None = None,
+                 **deltas: tuple[float, float, float]) -> dict[str, Any]:
     """verdict_from's inputs with chosen numbers: no collapsed run, three seeds per model, the headline deltas as
     given (the raw variant equal to them)."""
     systems = {}
@@ -853,15 +891,16 @@ def _hand_inputs(per_seed=None, **deltas):
             "latency": [{"system": k, "device": "mps", "n": 624, "p50": 0.3, "p95": 0.4} for k in KINDS]}
 
 
-def _hand_protocol():
+def _hand_protocol() -> dict[str, Any]:
+    """The protocol blocks build_verdict reads: the default criteria and collapse, the verdict and bootstrap blocks."""
     collapse = dict(copy_module.deepcopy(verdict.DEFAULT_COLLAPSE), prior_val_fraction="10/41",
                     prior_test_fraction="520/2163", prior_theta_global=0.12)
     return {"criteria": copy_module.deepcopy(verdict.DEFAULT_CRITERIA), "collapse": collapse,
             "verdict": pilot_protocol.verdict_block(), "bootstrap": dict(pilot_protocol.bootstrap_block())}
 
 
-def test_build_verdict_marks_the_fewshot_path_pending():
-    """With no few-shot result (Phase 9), (d)'s few-shot path is PENDING and the record says so; a (d) with neither
+def test_build_verdict_marks_the_fewshot_path_pending() -> None:
+    """With no few-shot result, (d)'s few-shot path is PENDING and the record says so; a (d) with neither
     other path met is PENDING, and the verdict is decide's."""
     v = verdict.build_verdict(_hand_protocol(), "a" * 64, _hand_inputs())
     assert v["fewshot"] == {"status": verdict.PENDING, "phase": 9}
@@ -872,7 +911,7 @@ def test_build_verdict_marks_the_fewshot_path_pending():
     assert v["verdict"] == verdict.decide(s["a"], s["b"], s["d"], s["alternative_go"])
 
 
-def test_build_verdict_refuses_rules_other_than_the_code_it_runs():
+def test_build_verdict_refuses_rules_other_than_the_code_it_runs() -> None:
     """The frozen verdict rules must be the ones pilot.verdict implements, else the verdict would not follow them."""
     protocol = _hand_protocol()
     protocol["verdict"]["rules"][0] = "(b) FAIL -> GO"
@@ -880,15 +919,16 @@ def test_build_verdict_refuses_rules_other_than_the_code_it_runs():
         verdict.build_verdict(protocol, "a" * 64, _hand_inputs())
 
 
-def test_build_verdict_refuses_per_seed_rows_off_the_listed_seeds():
+def test_build_verdict_refuses_per_seed_rows_off_the_listed_seeds() -> None:
     inputs = _hand_inputs()
     inputs["systems"]["berturk"]["per_seed"] = inputs["systems"]["berturk"]["per_seed"][:2]
     with pytest.raises(SystemExit, match="berturk.*seeds \\[0, 1\\].*\\[0, 1, 2\\]"):
         verdict.build_verdict(_hand_protocol(), "a" * 64, inputs)
 
 
-def test_mean_std_is_the_sample_std_and_exact_for_equal_values():
-    """A16: ddof 1; equal values give exactly 0.0 and their own value as the mean; fewer than 2 values are refused."""
+def test_mean_std_is_the_sample_std_and_exact_for_equal_values() -> None:
+    """The sample std (ddof 1); equal values give exactly 0.0 and their own value as the mean; fewer than 2 values are
+    refused."""
     mean, std = verdict.mean_std([0.5, 0.5, 0.7])
     assert mean == pytest.approx(0.5666666666666667, abs=1e-15)
     assert std == pytest.approx(float(np.std([0.5, 0.5, 0.7], ddof=1)), abs=1e-15)
@@ -899,32 +939,33 @@ def test_mean_std_is_the_sample_std_and_exact_for_equal_values():
             verdict.mean_std(bad)
 
 
-# --- the renders (REP-02 table, REP-03 GO block) and the CLI modes ---------------------------------------------------
+# --- the renders (the results table, the GO block) and the CLI modes ----------------------------------------------
 
-def _cell(values):
+def _cell(values: list[float]) -> str:
+    """The results-table cell of per-seed values: mean ± sample std (the values in seed order)."""
     mean, std = verdict.mean_std(values)
     return "%.3f ± %.3f (%s)" % (mean, std, " / ".join("%.3f" % x for x in values))
 
 
-def _table_rows(text):
+def _table_rows(text: str) -> list[str]:
     """The body rows of the markdown tables in text (a header row is the one followed by the |---| line)."""
     lines = text.split("\n")
     return [x for i, x in enumerate(lines) if x.startswith("| ")
             and not (i + 1 < len(lines) and lines[i + 1].startswith("|---"))]
 
 
-def test_render_final_table_rows_in_the_fixed_order(synthetic_verdict):
-    """REP-02: references (majority, prior, zero-shot Laya), then each fine-tuned model as mean ± sample std with its
-    per-seed values in seed order, then its seed-averaged EVAL-07 system; the order does not follow the record's list
+def test_render_final_table_rows_in_the_fixed_order(synthetic_verdict: dict[str, Any]) -> None:
+    """References (majority, prior, zero-shot Laya), then each fine-tuned model as mean ± sample std with its
+    per-seed values in seed order, then its seed-averaged system; the order does not follow the record's list
     order; a settings table with T, θ, epoch, LRs, seeds and train run ids."""
     v = synthetic_verdict
     text = verdict.render_final_table(v)
-    assert text.startswith("### Results on test (Phase 8)\n")
+    assert text.startswith(verdict.FINAL_HEADING + "\n")
     rows = _table_rows(text.split("Settings")[0])
     labels = [r.split(" | ")[0][2:] for r in rows]
     assert labels == ["majority (train: final_train)", "prior (train: final_train)",
-                      "laya fine-tuned (final seeds 0, 1, 2)", "laya fine-tuned, seed-averaged (EVAL-07 system)",
-                      "berturk fine-tuned (final seeds 0, 1, 2)", "berturk fine-tuned, seed-averaged (EVAL-07 system)"]
+                      "laya fine-tuned (final seeds 0, 1, 2)", "laya fine-tuned, seed-averaged",
+                      "berturk fine-tuned (final seeds 0, 1, 2)", "berturk fine-tuned, seed-averaged"]
     for kind, row in (("laya", rows[2]), ("berturk", rows[4])):
         cells = row.strip("| ").split(" | ")
         per = v["systems"][kind]["per_seed"]
@@ -945,8 +986,8 @@ def test_render_final_table_rows_in_the_fixed_order(synthetic_verdict):
     assert verdict.render_final_table(v) == text                  # deterministic
 
 
-def test_render_final_table_keeps_equal_seed_values_and_a_zero_std():
-    """REP-02 adjacency edge: two equal seed values stay two values; equal values give std exactly 0.000."""
+def test_render_final_table_keeps_equal_seed_values_and_a_zero_std() -> None:
+    """Adjacency edge: two equal seed values stay two values; equal values give std exactly 0.000."""
     per = {"laya": [_hand_seed("laya", s, {"micro_f1": x}) for s, x in zip(SEEDS, (0.81, 0.81, 0.83))],
            "berturk": [_hand_seed("berturk", s, {"micro_f1": 0.8}) for s in SEEDS]}
     v = verdict.build_verdict(_hand_protocol(), "a" * 64, _hand_inputs(per_seed=per))
@@ -958,8 +999,8 @@ def test_render_final_table_keeps_equal_seed_values_and_a_zero_std():
     assert berturk[2] == "0.800 ± 0.000 (0.800 / 0.800 / 0.800)"
 
 
-def test_render_final_table_refuses_a_dropped_seed_or_missing_references(synthetic_verdict):
-    """REP-02 empty edge: fewer per-seed rows than the listed seeds, no reference row, or another schema is refused."""
+def test_render_final_table_refuses_a_dropped_seed_or_missing_references(synthetic_verdict: dict[str, Any]) -> None:
+    """Empty edge: fewer per-seed rows than the listed seeds, no reference row, or another schema is refused."""
     dropped = copy_module.deepcopy(synthetic_verdict)
     dropped["systems"]["laya"]["per_seed"].pop()
     with pytest.raises(SystemExit, match="laya"):
@@ -971,8 +1012,8 @@ def test_render_final_table_refuses_a_dropped_seed_or_missing_references(synthet
             render(dict(synthetic_verdict, schema="confidence/1"))
 
 
-def test_render_go_shows_every_criterion_and_the_verdict(synthetic_verdict):
-    """REP-03: one row per criterion and the alternative GO with its status and numbers, (c) REPORTED (not gated), the
+def test_render_go_shows_every_criterion_and_the_verdict(synthetic_verdict: dict[str, Any]) -> None:
+    """One row per criterion and the alternative GO with its status and numbers, (c) REPORTED (not gated), the
     macro-F1 CI label, the verdict line, the protocol sha256's first 12 hex characters, and a closing descriptive line;
     deterministic."""
     v = synthetic_verdict
@@ -1000,7 +1041,7 @@ def test_render_go_shows_every_criterion_and_the_verdict(synthetic_verdict):
     assert "%+.2f points" % (raw * 100) in last
 
 
-def test_render_go_inconclusive_counts_as_no_go():
+def test_render_go_inconclusive_counts_as_no_go() -> None:
     """(a) INCONCLUSIVE, the alternative GO not met: the verdict is INCONCLUSIVE and the block says what it means."""
     v = verdict.build_verdict(_hand_protocol(), "a" * 64, _hand_inputs(micro=(-0.005, -0.03, 0.02)))
     assert v["criteria"]["a"]["status"] == verdict.INCONCLUSIVE and v["verdict"]["verdict"] == verdict.INCONCLUSIVE
@@ -1009,7 +1050,7 @@ def test_render_go_inconclusive_counts_as_no_go():
     assert "PROVISIONAL" not in text
 
 
-def test_render_go_provisional_names_both_outcomes():
+def test_render_go_provisional_names_both_outcomes() -> None:
     """(a) PASS, (d) PENDING (neither Brier nor abstention met), (b) PASS: the verdict depends on the few-shot path
     and the block shows the PROVISIONAL sentence; with the Brier path met it is a plain GO."""
     v = verdict.build_verdict(_hand_protocol(), "a" * 64, _hand_inputs())
@@ -1023,13 +1064,16 @@ def test_render_go_provisional_names_both_outcomes():
     assert "**Verdict: GO**" in text and "PROVISIONAL" not in text
 
 
-def _frozen(monkeypatch, sf):
+def _frozen(monkeypatch: pytest.MonkeyPatch, sf: types.SimpleNamespace) -> None:
+    """Point pilot.protocol's path and pin and report.REPO_ROOT at the synthetic repo."""
     monkeypatch.setattr(pilot_protocol, "PROTOCOL_PATH", sf.path)
     monkeypatch.setattr(pilot_protocol, "PROTOCOL_SHA256", sf.sha)
     monkeypatch.setattr(report, "REPO_ROOT", sf.root)
 
 
-def test_cli_verdict_final_table_and_go_block(synthetic_final, synthetic_verdict, tmp_path, monkeypatch, capsys):
+def test_cli_verdict_final_table_and_go_block(synthetic_final: types.SimpleNamespace, synthetic_verdict: dict[str, Any],
+                                              tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                              capsys: pytest.CaptureFixture[str]) -> None:
     """`report.py --verdict --out X.json` writes the verdict of the frozen protocol (JSON plus a newline);
     `--final-table X.json` and `--go-block X.json` print the renders of the saved record."""
     sf = synthetic_final
@@ -1046,8 +1090,8 @@ def test_cli_verdict_final_table_and_go_block(synthetic_final, synthetic_verdict
     assert capsys.readouterr().out == verdict.render_go(synthetic_verdict)
 
 
-def _edit_verdict(v, how):
-    """A copy of verdict record v with one hand edit (08-REVIEW WR-03)."""
+def _edit_verdict(v: dict[str, Any], how: str) -> dict[str, Any]:
+    """A copy of verdict record v with one hand edit."""
     v = copy_module.deepcopy(v)
     if how == "verdict":
         v["verdict"]["verdict"] = verdict.GO if v["verdict"]["verdict"] != verdict.GO else verdict.NO_GO
@@ -1069,8 +1113,10 @@ def _edit_verdict(v, how):
 
 
 @pytest.mark.parametrize("how", ["verdict", "status", "number", "protocol", "collapse", "seeds", "fewshot"])
-def test_cli_renders_refuse_an_edited_verdict(synthetic_final, synthetic_verdict, tmp_path, monkeypatch, capsys, how):
-    """08-REVIEW WR-03: --go-block and --final-table render only a record bound to the frozen protocol, whose every
+def test_cli_renders_refuse_an_edited_verdict(synthetic_final: types.SimpleNamespace, synthetic_verdict: dict[str, Any],
+                                              tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                              capsys: pytest.CaptureFixture[str], how: str) -> None:
+    """--go-block and --final-table render only a record bound to the frozen protocol, whose every
     criterion, collapse flag and verdict recompute from its own numbers (pilot.verdict.check_record); a hand-edited
     status, verdict, number or protocol sha256 is refused with one line, nothing printed."""
     sf = synthetic_final
@@ -1087,9 +1133,10 @@ def test_cli_renders_refuse_an_edited_verdict(synthetic_final, synthetic_verdict
         assert capsys.readouterr().out == "", (how, mode)
 
 
-def test_cli_renders_refuse_while_the_protocol_is_not_frozen(synthetic_final, synthetic_verdict, tmp_path,
-                                                             monkeypatch):
-    """08-REVIEW WR-03: without the frozen protocol (pin unset) no verdict record is rendered."""
+def test_cli_renders_refuse_while_the_protocol_is_not_frozen(synthetic_final: types.SimpleNamespace,
+                                                             synthetic_verdict: dict[str, Any], tmp_path: Path,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without the frozen protocol (pin unset) no verdict record is rendered."""
     path = tmp_path / "verdict.json"
     path.write_text(json.dumps(synthetic_verdict, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     monkeypatch.setattr(pilot_protocol, "PROTOCOL_SHA256", None)
@@ -1098,7 +1145,8 @@ def test_cli_renders_refuse_while_the_protocol_is_not_frozen(synthetic_final, sy
             report.main([mode, str(path)])
 
 
-def test_cli_verdict_modes_are_exclusive(synthetic_final, tmp_path, capsys):
+def test_cli_verdict_modes_are_exclusive(synthetic_final: types.SimpleNamespace, tmp_path: Path,
+                                         capsys: pytest.CaptureFixture[str]) -> None:
     path = str(tmp_path / "v.json")
     for argv in (["--verdict", "--final-table", path], ["--final-table", path, "--go-block", path],
                  ["--go-block", path, "--table", path], ["--verdict", "--confidence-table", path]):
@@ -1107,7 +1155,7 @@ def test_cli_verdict_modes_are_exclusive(synthetic_final, tmp_path, capsys):
         assert e.value.code == 2 and "give exactly one of" in capsys.readouterr().err
 
 
-def test_cli_verdict_refuses_while_the_protocol_is_not_frozen(monkeypatch):
+def test_cli_verdict_refuses_while_the_protocol_is_not_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
     """With the pin unset (the repo before the freeze commit), --verdict is refused naming the protocol, before any
     dump is read."""
     monkeypatch.setattr(pilot_protocol, "PROTOCOL_SHA256", None)

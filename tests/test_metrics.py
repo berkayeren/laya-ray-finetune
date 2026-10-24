@@ -16,25 +16,25 @@ pytestmark = pytest.mark.unit
 TAGS = list(INTENTS)
 
 
-def _gold(*tags):
+def _gold(*tags: str) -> np.ndarray:
     return np.array([t in tags for t in TAGS], dtype=bool)
 
 
-def _probs(**hot):
+def _probs(**hot: float) -> np.ndarray:
     return np.array([hot.get(t, 0.0) for t in TAGS], dtype=np.float64)
 
 
-def test_metrics_refuses_empty_input():
+def test_metrics_refuses_empty_input() -> None:
     with pytest.raises(SystemExit, match="no messages"):
         metrics.metrics(np.zeros((0, 48), dtype=bool), np.zeros((0, 48)), 0.5)
 
 
-def test_single_row_input():
+def test_single_row_input() -> None:
     out = metrics.metrics(_gold("card")[None], _probs(card=0.9)[None], 0.5)
     assert out["n"] == 1 and out["micro_f1"] == 1.0 and out["exact_match"] == 1.0 and out["top1_hit"] == 1.0
 
 
-def test_all_no_intent_rows():
+def test_all_no_intent_rows() -> None:
     Y = np.zeros((2, 48), dtype=bool)
     out = metrics.metrics(Y, np.stack([_probs(), _probs(card=0.9)]), 0.5)
     assert out["n"] == 2 and out["n_top1"] == 0 and out["top1_hit"] is None and out["n_no_intent"] == 2
@@ -45,7 +45,7 @@ def test_all_no_intent_rows():
     assert out["macro_f1"] is None and out["n_tags_in_macro"] == 0
 
 
-def test_top1_ignores_no_intent_rows():
+def test_top1_ignores_no_intent_rows() -> None:
     Y = np.stack([_gold("card"), _gold("lost_stolen"), _gold()])
     P = np.stack([_probs(card=0.9), _probs(card=0.8, lost_stolen=0.1), _probs(card=0.7)])
     out = metrics.metrics(Y, P, 0.5)
@@ -53,17 +53,18 @@ def test_top1_ignores_no_intent_rows():
     assert out["top1_hit"] == 0.5                           # the no-intent row is not a forced miss
 
 
-def test_exact_match_counts_empty_prediction_on_no_intent_row():
+def test_exact_match_counts_empty_prediction_on_no_intent_row() -> None:
     out = metrics.metrics(_gold()[None], np.full((1, 48), 0.4), 0.5)
     assert out["exact_match"] == 1.0 and out["mean_tags_predicted"] == 0.0
 
 
-def test_threshold_is_inclusive():
+def test_threshold_is_inclusive() -> None:
     out = metrics.metrics(_gold("card")[None], _probs(card=0.5)[None], 0.5)
     assert out["per_tag"]["card"]["n_pred"] == 1 and out["per_tag"]["card"]["tp"] == 1 and out["micro_f1"] == 1.0
 
 
-def _random_case(seed, n=60, density=0.1, pred_density=0.15):
+def _random_case(seed: int, n: int = 60, density: float = 0.1,
+                 pred_density: float = 0.15) -> tuple[np.ndarray, np.ndarray]:
     """Random gold at `density`; probabilities above 0.5 in about `pred_density` of the cells."""
     rng = np.random.default_rng(seed)
     Y = rng.random((n, 48)) < density
@@ -72,7 +73,7 @@ def _random_case(seed, n=60, density=0.1, pred_density=0.15):
 
 
 @pytest.mark.parametrize("theta", [0.3, 0.5, 0.7])
-def test_micro_subset_and_per_tag_match_sklearn(theta):
+def test_micro_subset_and_per_tag_match_sklearn(theta: float) -> None:
     Y, P = _random_case(7)
     out = metrics.metrics(Y, P, theta)
     pred = P >= theta
@@ -83,7 +84,7 @@ def test_micro_subset_and_per_tag_match_sklearn(theta):
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3])
-def test_macro_matches_sklearn_on_included_labels(seed):
+def test_macro_matches_sklearn_on_included_labels(seed: int) -> None:
     Y, P = _random_case(seed, n=25, density=0.05, pred_density=0.03)   # some tags: no support, no pred
     pred = P >= 0.5
     labels = [j for j in range(48) if Y[:, j].any() or pred[:, j].any()]
@@ -94,12 +95,12 @@ def test_macro_matches_sklearn_on_included_labels(seed):
     assert abs(out["macro_f1"] - want) < 1e-12
 
 
-def test_values_are_unrounded():
+def test_values_are_unrounded() -> None:
     out = metrics.metrics(_gold("card", "lost_stolen")[None], _probs(card=0.9)[None], 0.5)
     assert out["micro_f1"] == 2 / 3 and out["micro_recall"] == 0.5
 
 
-def test_per_tag_order_and_best_worst_ties():
+def test_per_tag_order_and_best_worst_ties() -> None:
     hit, miss = [TAGS[i] for i in (30, 2, 15)], [TAGS[i] for i in (40, 7, 20)]
     Y = np.stack([_gold(t) for t in hit + miss])
     P = np.stack([_probs(**{t: 0.9}) for t in hit] + [_probs() for _ in miss])
@@ -112,7 +113,7 @@ def test_per_tag_order_and_best_worst_ties():
     assert out["top1_hit"] == 0.0
 
 
-def test_probabilities_stable_and_temperature():
+def test_probabilities_stable_and_temperature() -> None:
     with np.errstate(all="raise"):
         p = metrics.probabilities(np.array([[-1e4, 0, 1e4]], dtype=np.float32), 1.0)
     assert p.dtype == np.float64 and p.tolist() == [[0.0, 0.5, 1.0]]
@@ -123,7 +124,7 @@ def test_probabilities_stable_and_temperature():
             metrics.probabilities(z, bad)
 
 
-def test_per_tag_theta_vector():
+def test_per_tag_theta_vector() -> None:
     Y = np.stack([_gold("card"), _gold("lost_stolen")])
     P = np.stack([_probs(card=0.6), _probs(lost_stolen=0.6)])
     th = np.full(48, 0.5)
@@ -132,9 +133,9 @@ def test_per_tag_theta_vector():
     assert out["per_tag"]["card"]["tp"] == 1 and out["per_tag"]["lost_stolen"]["fn"] == 1
 
 
-# --- the val-selected θ rule (EVAL-02, D-12; per-tag objective and tie rule: research A2, user-confirmed) ----------
+# --- the val-selected θ rule (its per-tag objective and tie rule confirmed by the user) ---------------------------
 
-def _scores(*best):
+def _scores(*best: float) -> np.ndarray:
     """GRID-aligned scores: 1.0 at the θ values in `best`, 0 elsewhere."""
     s = np.zeros(len(metrics.GRID))
     for th in best:
@@ -142,7 +143,7 @@ def _scores(*best):
     return s
 
 
-def _rows(spec, n):
+def _rows(spec: dict[str, tuple[list[int], float, float]], n: int) -> tuple[np.ndarray, np.ndarray]:
     """(Y, P) [n, 48] from {tag: (gold rows, P on gold rows, P on other rows)}; every other cell is 0."""
     Y, P = np.zeros((n, 48), dtype=bool), np.zeros((n, 48))
     for t, (gold, p_pos, p_neg) in spec.items():
@@ -152,7 +153,7 @@ def _rows(spec, n):
     return Y, P
 
 
-def test_grid_is_exact():
+def test_grid_is_exact() -> None:
     g = metrics.GRID
     assert len(g) == 91 and g.dtype == np.float64
     assert g[0] == 0.05 and g[-1] == 0.95 and g[2] == 0.07 and g[35] == 0.40
@@ -163,20 +164,20 @@ def test_grid_is_exact():
     assert (g == c / 100.0).all()
 
 
-def test_pick_prefers_closest_to_half():
+def test_pick_prefers_closest_to_half() -> None:
     assert metrics.pick(_scores(0.30, 0.60)) == 0.6                     # 0.6 is 0.1 from 0.5, 0.3 is 0.2
 
 
-def test_pick_equidistant_takes_lower():
+def test_pick_equidistant_takes_lower() -> None:
     assert metrics.pick(_scores(0.45, 0.55)) == 0.45
 
 
 @pytest.mark.parametrize("k", range(1, 46))
-def test_pick_equidistant_takes_lower_every_pair(k):
+def test_pick_equidistant_takes_lower_every_pair(k: int) -> None:
     assert metrics.pick(_scores((50 - k) / 100, (50 + k) / 100)) == (50 - k) / 100
 
 
-def test_select_theta_tie_takes_lower_global_and_per_tag():
+def test_select_theta_tie_takes_lower_global_and_per_tag() -> None:
     # card's F1 (and so micro-F1) is 2/3 at exactly 0.30 and 0.70 and lower at every other grid point; the global and
     # the per-tag θ both go through pick, so both must take the lower of the two equally close points
     Y, P = np.zeros((21, 48), dtype=bool), np.zeros((21, 48))
@@ -188,10 +189,11 @@ def test_select_theta_tie_takes_lower_global_and_per_tag():
     assert sel["global"] == 0.30 and sel["per_tag"] == {"card": 0.30}
 
 
-def test_per_tag_tie_ignores_global_theta():
-    # card ties at 0.30 / 0.70 on its own F1; lost_stolen drags the global micro-F1 optimum to 0.70. A2: card's own tie
+def test_per_tag_tie_ignores_global_theta() -> None:
+    # card ties at 0.30 / 0.70 on its own F1; lost_stolen drags the global micro-F1 optimum to 0.70. card's own tie
     # still goes to the lower of the two equally close points (0.30), not toward the global θ (the rejected rule would
-    # give 0.70); 0.30 / 0.70 is also one of the CR-01 float-distance pairs, so a failure here can be either regression
+    # give 0.70); 0.30 / 0.70 is also a pair a float distance to 0.5 got wrong, so a failure here can be either
+    # regression
     Y, P = np.zeros((221, 48), dtype=bool), np.zeros((221, 48))
     j, k = TAGS.index("card"), TAGS.index("lost_stolen")
     Y[:10, j] = True
@@ -203,14 +205,14 @@ def test_per_tag_tie_ignores_global_theta():
     assert sel["per_tag"] == {"card": 0.30, "lost_stolen": 0.70}
 
 
-def test_pick_multi_point_tie():
-    # 03-REVIEW-gap-09 IN-03: three or more tied points on both sides of 0.5, and an asymmetric tie
+def test_pick_multi_point_tie() -> None:
+    # three or more tied points on both sides of 0.5, and an asymmetric tie
     assert metrics.pick(_scores(0.40, 0.45, 0.55, 0.60)) == 0.45
     assert metrics.pick(_scores(0.05, 0.95, 0.20)) == 0.20
 
 
 @pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf])
-def test_pick_refuses_non_finite_scores(bad):
+def test_pick_refuses_non_finite_scores(bad: float) -> None:
     s = _scores(0.40)
     s[10] = bad
     with pytest.raises(SystemExit, match="non-finite"):
@@ -219,8 +221,8 @@ def test_pick_refuses_non_finite_scores(bad):
         metrics.pick(np.full(91, bad))
 
 
-def test_grid_is_read_only():
-    # 03-REVIEW-gap-09 IN-02: pick reads GRID_CENTI for the tie distance and GRID for the value; neither may drift
+def test_grid_is_read_only() -> None:
+    # pick reads GRID_CENTI for the tie distance and GRID for the value; neither may drift
     for arr, value in ((metrics.GRID, 0.5), (metrics.GRID_CENTI, 50)):
         keep = arr.copy()
         try:
@@ -233,11 +235,11 @@ def test_grid_is_read_only():
     assert metrics.GRID[0] == 0.05 and metrics.GRID_CENTI[0] == 5
 
 
-def test_pick_all_zero_scores_returns_half():
+def test_pick_all_zero_scores_returns_half() -> None:
     assert metrics.pick(np.zeros(91)) == 0.5
 
 
-def test_boundary_is_inclusive():
+def test_boundary_is_inclusive() -> None:
     # the only positive sits exactly on 0.40: one step above loses it, one step below adds a false positive
     Y, P = _rows({"card": ([0], 0.40, 0.39)}, 3)
     sel = metrics.select_theta(Y, P)
@@ -245,7 +247,7 @@ def test_boundary_is_inclusive():
     assert metrics.metrics(Y, P, metrics.theta_vector(sel))["micro_f1"] == 1.0
 
 
-def test_eligibility_at_ten_positives():
+def test_eligibility_at_ten_positives() -> None:
     assert metrics.MIN_VAL_POSITIVES == 10
     Y, P = _rows({"card": (list(range(10)), 0.9, 0.7), "lost_stolen": (list(range(9)), 0.3, 0.2)}, 20)
     sel = metrics.select_theta(Y, P)
@@ -258,14 +260,14 @@ def test_eligibility_at_ten_positives():
     assert (np.delete(vec, TAGS.index("card")) == 0.30).all()
 
 
-def test_zero_positive_tag_uses_global():
+def test_zero_positive_tag_uses_global() -> None:
     Y, P = _rows({"card": (list(range(12)), 0.8, 0.1), "new": ([], 0.0, 0.6)}, 15)
     sel = metrics.select_theta(Y, P)
     assert "new" not in sel["eligible_tags"] and sel["eligible_tags"] == ["card"]
     assert metrics.theta_vector(sel)[TAGS.index("new")] == sel["global"]
 
 
-def test_theta_selected_after_temperature():
+def test_theta_selected_after_temperature() -> None:
     # one tag positive at z = 2 and negative at z = 1; θ lives on the reported (after-temperature) scale
     Z = np.full((2, 48), -10.0, dtype=np.float32)
     Z[0, TAGS.index("card")], Z[1, TAGS.index("card")] = 2.0, 1.0
@@ -278,21 +280,21 @@ def test_theta_selected_after_temperature():
         assert metrics.metrics(Y, P, metrics.theta_vector(sel))["micro_f1"] == 1.0
 
 
-def test_select_theta_refuses_empty_val():
+def test_select_theta_refuses_empty_val() -> None:
     with pytest.raises(SystemExit, match="no val messages"):
         metrics.select_theta(np.zeros((0, 48), dtype=bool), np.zeros((0, 48)))
 
 
-# --- new-tag average precision (AP_RULE; Phase 9's primary metric, frozen in Phase 8), sklearn as the oracle ---------
+# --- new-tag average precision (AP_RULE; the few-shot primary metric), sklearn as the oracle -----------------------
 
-def test_average_precision_tied_scores_form_one_threshold():
+def test_average_precision_tied_scores_form_one_threshold() -> None:
     y = np.array([1, 0, 1, 0], dtype=bool)
     s = np.array([0.5, 0.5, 0.5, 0.1])
     assert abs(metrics.average_precision(y, s) - 2 / 3) <= 1e-12   # one threshold at 0.5: P 2/3, R 1
     assert abs(metrics.average_precision(y, s) - average_precision_score(y, s)) <= 1e-12
 
 
-def test_average_precision_matches_sklearn():
+def test_average_precision_matches_sklearn() -> None:
     rng = np.random.default_rng(0)
     for i in range(20):
         y = rng.random(413) < rng.uniform(0.01, 0.3)
@@ -313,12 +315,12 @@ def test_average_precision_matches_sklearn():
                                   (np.ones(3, dtype=bool), np.array([0.1, np.nan, 0.2])),
                                   (np.ones(3, dtype=bool), np.array([0.1, np.inf, 0.2])),
                                   (np.ones((2, 2), dtype=bool), np.zeros((2, 2)))])   # not one column
-def test_average_precision_refuses(y, s):
+def test_average_precision_refuses(y: np.ndarray, s: np.ndarray) -> None:
     with pytest.raises(SystemExit):
         metrics.average_precision(y, s)
 
 
-def test_new_tag_ap_per_tag_and_macro():
+def test_new_tag_ap_per_tag_and_macro() -> None:
     rng = np.random.default_rng(1)
     Y = rng.random((60, 48)) < 0.2
     P = rng.random((60, 48))
@@ -330,7 +332,7 @@ def test_new_tag_ap_per_tag_and_macro():
     assert out["macro"] == (out["per_tag"]["savings"] + out["per_tag"]["loan"]) / 2
 
 
-def test_new_tag_ap_refuses():
+def test_new_tag_ap_refuses() -> None:
     rng = np.random.default_rng(2)
     Y = rng.random((30, 48)) < 0.3
     P = rng.random((30, 48))
@@ -342,7 +344,7 @@ def test_new_tag_ap_refuses():
         metrics.new_tag_ap(Y, P, ["savings", "loan"])
 
 
-def test_ap_rule_states_the_definition():
+def test_ap_rule_states_the_definition() -> None:
     rule = metrics.AP_RULE
     for word in ("tied scores form one threshold", "not interpolated", "average_precision_score", "refused",
                  "T-invariant"):

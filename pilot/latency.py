@@ -1,4 +1,4 @@
-"""Torch-free bookkeeping of the Phase 7 latency harness (EVAL-06): per-message times -> latency/1 report -> markdown.
+"""Torch-free bookkeeping of the latency harness (latency.py): per-message times -> latency/1 report -> markdown.
 
 latency.py times every final seed of one system (Laya or BERTurk) on one device, in one process, without Ray; this
 module holds what does not need a model: the constants of the timing contract, the timing loop itself (time_messages,
@@ -6,23 +6,23 @@ which takes the forward as a callable), the integer nearest-rank statistics, the
 layout and its markdown. latency.py --render imports only this module to rebuild the markdown, so nothing here may
 import torch, transformers, laya or Ray.
 
-Timing contract (07-RESEARCH Pattern 5, Pitfall 7): batch 1, in-process; a message is one val JSONL row's state
+Timing contract: batch 1, in-process; a message is one val JSONL row's state
 string, passed unchanged to the checkpoint's own tokenizer; its latency is the wall-clock seconds (time.perf_counter)
 from that string to 48 probabilities on the host, through the path that scored the dumps (fp32, autocast off, checked
-after the load and after the loop). Warm-up (WARMUP_POLICY, G-07-6): after each seed's load, one untimed pass over
+after the load and after the loop). Warm-up (WARMUP_POLICY): after each seed's load, one untimed pass over
 every message the seed then times, in split-file order, then one device sync; only then is every message timed; so
 every seed follows the same sequence and every input it times has already run once on its model in this process; the
-seeds run in manifest order, so a residual seed-order effect is not separated from a seed effect (07-REVIEW WR-01).
+seeds run in manifest order, so a residual seed-order effect is not separated from a seed effect.
 The device is synchronised right before t0 and right after the host copy of every timed message (torch.mps.synchronize
 on mps, torch.cuda.synchronize on cuda, nothing on cpu). Only val messages are timed and only times are kept: no model
 output, message text, uid list, timestamp or local path enters a report.
 
 Statistics: nearest-rank percentiles with integer ranks, s[(q * n + 99) // 100 - 1] for an integer percent q (never
-interpolated; never math.ceil(q / 100 * n), whose float product can land one rank off: 07-RESEARCH Pitfall 3). n 208:
-p50 is the 104th and p95 the 198th smallest time. Latency is reported, not gated: LABEL is in every report and in the
-markdown (REP-01 (c)); a latency budget is DEC-01 (v2). A report keeps the RULES text in force when it was timed;
-render_markdown numbers the current RULES and marks every report whose recorded rules differ from them (rules_drift,
-07-REVIEW WR-02).
+interpolated; never math.ceil(q / 100 * n), whose float product can land one rank off). n 208: p50 is the 104th and
+p95 the 198th smallest time. Latency is reported, not gated: LABEL is in every report and in the markdown (the
+protocol's criterion (c)); a latency budget is left to a later version. A report keeps the RULES text in force when it
+was timed; render_markdown numbers the current RULES and marks every report whose recorded rules differ from them
+(rules_drift).
 
 usage: from pilot import latency
        times = latency.time_messages(fn, texts, sync)          # inside torch.no_grad(), right after the seed's load
@@ -33,6 +33,7 @@ import json
 import math
 import os
 import time
+from typing import Any, Callable, Iterable, Sequence
 
 from pilot import spike
 from pilot.data import sha256_bytes
@@ -41,7 +42,7 @@ SCHEMA = "latency/1"
 LABEL = "reported, not gated"
 WARMUP_POLICY = "full_pass_per_seed"    # after each seed's load, one untimed pass over every message it then times
 QUANTILES = (50, 95)                                        # integer percents, nearest rank
-THREADS = 4                                                 # torch threads (Phase 4 measured Laya on CPU at 4)
+THREADS = 4                                                 # torch threads, as in the compute checkpoint's CPU runs
 MIN_AVAILABLE_GIB = 7.0                                     # the compute checkpoint's quiet-machine threshold
 MD_NAME = "latency.md"
 FINAL_SCHEMA = "postfit-final/1"
@@ -75,7 +76,7 @@ RULES_EXTRA_LINE = ("- Recorded rules: this report's `rules` field holds %d rule
 SUMMARY_KEYS = ("n", "min", "p50", "p95", "mean", "max")
 
 
-def nearest_rank(sorted_values, q):
+def nearest_rank(sorted_values: Sequence[float], q: int) -> float:
     """The nearest-rank q-th percentile (q an integer percent in 1..100) of an ascending list: the value at integer
     rank (q * n + 99) // 100, i.e. sorted_values[(q * n + 99) // 100 - 1]."""
     n = len(sorted_values)
@@ -86,7 +87,7 @@ def nearest_rank(sorted_values, q):
     return sorted_values[(q * n + 99) // 100 - 1]
 
 
-def summarize(times, where):
+def summarize(times: Iterable[float], where: str) -> dict[str, Any]:
     """{"n", "min", "p50", "p95", "mean", "max"} of per-message seconds (unrounded); SystemExit naming `where` (the
     system, seed and device summarised) when there is no timing."""
     if not times:
@@ -96,7 +97,8 @@ def summarize(times, where):
             "mean": math.fsum(s) / len(s), "max": s[-1]}
 
 
-def time_messages(fn, texts, sync, clock=time.perf_counter):
+def time_messages(fn: Callable[[str], Any], texts: Sequence[str], sync: Callable[[], Any],
+                  clock: Callable[[], float] = time.perf_counter) -> list[float]:
     """Per-message seconds of fn(text) over `texts`, in their order (split-file order).
 
     The warm-up pass (WARMUP_POLICY): fn runs once on every text, in order, untimed and its output discarded, then
@@ -117,13 +119,13 @@ def time_messages(fn, texts, sync, clock=time.perf_counter):
     return out
 
 
-def _plain_name(name):
+def _plain_name(name: Any) -> bool:
     """True for a plain directory name: non-empty, no path separator, not made of dots only ('.', '..')."""
     return isinstance(name, str) and bool(name) and "/" not in name and "\\" not in name and set(name) != {"."} \
         and os.path.basename(name) == name
 
 
-def read_final_manifest(path, system):
+def read_final_manifest(path: str, system: str) -> tuple[dict[str, Any], str]:
     """(final manifest, sha256 of its bytes) from one read; SystemExit unless it is a postfit-final/1 manifest of
     `system` (system_kind, "laya" when absent) whose non-empty seeds each carry an int seed, a train_run_id, a plain
     checkpoint_name (a directory under --checkpoint-root, never a path), a dict checkpoint_identity, a dump_run_id and
@@ -177,7 +179,7 @@ def read_final_manifest(path, system):
     return m, sha256_bytes(raw)
 
 
-def build_report(meta, seeds):
+def build_report(meta: dict[str, Any], seeds: list[dict[str, Any]]) -> dict[str, Any]:
     """The latency/1 report: schema, LABEL, RULES, the system's TIMED_PATH, the run's `meta` (system, device, threads,
     warm-up policy and count, versions, code state, preflight, swap, split and final-manifest provenance), the
     per-seed rows and a summary pooled over every seed's times. SystemExit unless meta records warmup_policy
@@ -199,7 +201,7 @@ def build_report(meta, seeds):
     return report
 
 
-def swap_grew(report):
+def swap_grew(report: dict[str, Any]) -> bool:
     """True when swap in use grew across the timed loops of a report."""
     swap = report.get("swap_used_bytes") or {}
     before, after = swap.get("before"), swap.get("after")
@@ -210,27 +212,30 @@ def swap_grew(report):
 _ABSENT = object()
 
 
-def rules_drift(report):
+def rules_drift(report: dict[str, Any]) -> list[int]:
     """The ascending 1-based positions at which a report's recorded `rules` differ from RULES (a position on one side
-    only counts, against a private sentinel, so a recorded null past the end of RULES counts too (07-13 review IN-01);
-    a missing or non-list `rules` is empty); [] when it records RULES exactly. A report keeps the rules text in force
-    when it was timed, so a later wording change shows here and in render_markdown (07-REVIEW WR-02)."""
+    only counts, against a private sentinel, so a recorded null past the end of RULES counts too; a missing or non-list
+    `rules` is empty); [] when it records RULES exactly. A report keeps the rules text in force when it was timed, so a
+    later wording change shows here and in render_markdown."""
     rec = report.get("rules")
     rec = rec if isinstance(rec, list) else []
     return [i for i in range(1, max(len(rec), len(RULES)) + 1)
             if (rec[i - 1] if i <= len(rec) else _ABSENT) != (RULES[i - 1] if i <= len(RULES) else _ABSENT)]
 
 
-def _ms(v):
+def _ms(v: float) -> str:
+    """Seconds as milliseconds with one decimal (display only)."""
     return "%.1f" % (1000.0 * v)
 
 
-def _row(label, checkpoint, s):
+def _row(label: str, checkpoint: str, s: dict[str, Any]) -> str:
+    """One markdown table row of a summary: label, checkpoint, n, then p50, p95, mean, min and max in ms."""
     return "| %s | %s | %d | %s |" % (label, checkpoint, s["n"],
                                       " | ".join(_ms(s[k]) for k in ("p50", "p95", "mean", "min", "max")))
 
 
-def _report_lines(r):
+def _report_lines(r: dict[str, Any]) -> list[str]:
+    """The markdown lines of one report: heading, timed path, busy-machine banner, provenance and the seed table."""
     v = r.get("versions") or {}
     code = r.get("code") or {}
     sha = code.get("git_sha")
@@ -274,15 +279,16 @@ def _report_lines(r):
     return lines
 
 
-def render_markdown(reports):
+def render_markdown(reports: Iterable[dict[str, Any]]) -> str:
     """Markdown of latency/1 reports (sorted by system, then device): the label, the current RULES as a numbered list,
     then per report the timed path, a busy-machine banner when the preflight was overridden or swap grew (idle or
     during the timed loops), the provenance (with a Recorded rules line, RULES_DRIFT_LINE, when the report's recorded
     rules differ from RULES at a shown rule: rules_drift; recorded rules past the last of RULES are counted, not
     numbered, by RULES_EXTRA_LINE) and one row per seed plus a pooled row. Milliseconds with one decimal, for display
     only."""
-    lines = ["### Latency per message (Phase 7, EVAL-06): %s" % LABEL, "",
-             "Latency is %s: it is not a decision criterion (a latency budget is DEC-01, v2)." % LABEL, "",
+    lines = ["### Latency per message: %s" % LABEL, "",
+             "Latency is %s: it is not a decision criterion (a latency budget is left to a later version)." % LABEL,
+             "",
              "Rules:", ""] + ["%d. %s" % (i, rule) for i, rule in enumerate(RULES, 1)]
     for r in sorted(reports, key=lambda r: (r["system"], r["device"])):
         lines += _report_lines(r)
@@ -291,7 +297,7 @@ def render_markdown(reports):
     return "\n".join(lines) + "\n"
 
 
-def load_reports(path):
+def load_reports(path: str) -> list[dict[str, Any]]:
     """The latency/1 reports of a directory's *.json, in sorted path order; SystemExit on a missing or empty
     directory, on a *.json of another schema, or on a report without warmup_policy WARMUP_POLICY (timed before the
     full-pass warm-up, so it is never rendered next to one timed under it)."""

@@ -1,6 +1,6 @@
-"""latency.py end to end on CPU, offline (EVAL-06): tiny final seeds bound to a synthetic postfit-final/1 manifest are
-timed per message through score.py's load path, each seed after its own untimed pass over every val message (the
-full-pass warm-up of G-07-6, shown on two seeds in one process) and with sync, into a labelled latency/1 report that
+"""latency.py end to end on CPU, offline: tiny final seeds bound to a synthetic postfit-final/1 manifest are timed per
+message through score.py's load path, each seed after its own untimed pass over every val message (the full-pass
+warm-up, shown on two seeds in one process) and with sync, into a labelled latency/1 report that
 renders to markdown.
 
 The tiny Laya checkpoint comes from tests/tiny_laya.py, the tiny BERTurk export from berturk_train.py on CPU (1 epoch,
@@ -12,6 +12,8 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
+from typing import Any, Callable, Iterator, NoReturn
 
 import pytest
 
@@ -34,7 +36,7 @@ PREFLIGHT = {"available_gib": 12.0, "min_available_gib": 7.0, "swap_used_bytes":
 
 
 @pytest.fixture(autouse=True)
-def _threads(monkeypatch):
+def _threads(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """latency.py sets torch's process-wide thread count; restored so later tests keep the session's setting. The
     preflight is a recorded dict, so no test sleeps or depends on this machine's free memory."""
     import torch
@@ -44,7 +46,7 @@ def _threads(monkeypatch):
     torch.set_num_threads(n)
 
 
-def final_manifest(path, seeds, system="laya"):
+def final_manifest(path: Path, seeds: list[tuple[int, str, dict[str, Any], str, float]], system: str = "laya") -> str:
     """Write a synthetic postfit-final/1 manifest of `seeds` [(seed, checkpoint_name, identity, dump_run_id, T)]."""
     m = {"schema": "postfit-final/1", "postfit": {"path": "results/postfit/synthetic.json", "sha256": "0" * 64},
          "final_split": "final_train", "chosen": {},
@@ -58,7 +60,8 @@ def final_manifest(path, seeds, system="laya"):
     return str(path)
 
 
-def laya_setup(tmp_path, synthetic_raw, seeds=(0,)):
+def laya_setup(tmp_path: Path, synthetic_raw: Callable[..., tuple[str, dict[str, str]]],
+               seeds: tuple[int, ...] = (0,)) -> tuple[str, str, str, str]:
     """(splits dir, splits manifest, final manifest, checkpoint root) of one tiny Laya seed per entry of `seeds`
     (checkpoint ckpt-s<seed>, T = 1.3), listed in that order."""
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
@@ -72,17 +75,20 @@ def laya_setup(tmp_path, synthetic_raw, seeds=(0,)):
     return os.path.join(out_dir, "splits"), manifest, m, str(root)
 
 
-def run_args(system, splits, manifest, final, root, out, *extra):
+def run_args(system: str, splits: str, manifest: str, final: str, root: str, out: Path | str, *extra: str) -> list[str]:
+    """The latency.py argv timing `system` on cpu over splits/val.jsonl into `out`, plus `extra`."""
     return ["--system", system, "--device", "cpu", "--final-manifest", final, "--checkpoint-root", root,
             "--split", os.path.join(splits, "val.jsonl"), "--manifest", manifest, "--out", str(out)] + list(extra)
 
 
-def val_cases(splits):
+def val_cases(splits: str) -> list[dict[str, Any]]:
+    """The parsed rows of splits/val.jsonl, in file order."""
     with open(os.path.join(splits, "val.jsonl"), "rb") as f:
         return pilot.data.parse_jsonl(f.read())
 
 
-def check_report(report, out, splits, system):
+def check_report(report: dict[str, Any], out: Path, splits: str, system: str) -> None:
+    """Assert the shape of a one-seed cpu latency/1 report and that its file holds only times (no text, uid or path)."""
     cases = val_cases(splits)
     assert report["schema"] == "latency/1" and report["label"] == "reported, not gated"
     assert report["system"] == system and report["device"] == "cpu"
@@ -104,7 +110,8 @@ def check_report(report, out, splits, system):
     assert str(REPO) not in text and os.path.expanduser("~") not in text
 
 
-def test_tiny_laya_latency_on_cpu(tmp_path, synthetic_raw, capsys):
+def test_tiny_laya_latency_on_cpu(tmp_path: Path, synthetic_raw: Callable[..., tuple[str, dict[str, str]]],
+                                  capsys: pytest.CaptureFixture[str]) -> None:
     splits, manifest, m, root = laya_setup(tmp_path, synthetic_raw)
     out = tmp_path / "latency" / "laya-cpu.json"
     report = latency.main(run_args("laya", splits, manifest, m, root, out))
@@ -117,8 +124,10 @@ def test_tiny_laya_latency_on_cpu(tmp_path, synthetic_raw, capsys):
     assert "reported, not gated" in md and "| pooled |" in md and "Busy-machine" not in md
 
 
-def test_every_seed_warms_every_timed_message_first(tmp_path, synthetic_raw, monkeypatch):
-    """G-07-6 (07-REVIEW-01-08 WR-04): two tiny Laya seeds timed in one process each follow the identical sequence,
+def test_every_seed_warms_every_timed_message_first(tmp_path: Path,
+                                                    synthetic_raw: Callable[..., tuple[str, dict[str, str]]],
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two tiny Laya seeds timed in one process each follow the identical sequence,
     whatever their position: load, one untimed forward of exactly the val texts in split-file order, one sync, then
     every message timed (sync, clock, forward, sync, clock). So no seed's timed loop absorbs a first-occurrence cost
     that another seed's warm-up paid."""
@@ -128,27 +137,28 @@ def test_every_seed_warms_every_timed_message_first(tmp_path, synthetic_raw, mon
     events, forwards = [], []
     real_time, real_predictor, real_noul = plat.time_messages, latency.score.Predictor, latency.la.noul_logits
 
-    def recorder(fn, texts_, sync, clock=time.perf_counter):
+    def recorder(fn: Callable[[str], Any], texts_: list[str], sync: Callable[[], Any],
+                 clock: Callable[[], float] = time.perf_counter) -> list[float]:
         events.append(("seed",))
 
-        def fwd(t):
+        def fwd(t: str) -> Any:
             events.append(("fwd", t))
             return fn(t)
 
-        def rsync():
+        def rsync() -> Any:
             events.append(("sync",))
             return sync()
 
-        def rclock():
+        def rclock() -> float:
             events.append(("clock",))
             return clock()
         return real_time(fwd, texts_, rsync, clock=rclock)
 
-    def predictor(*args, **kwargs):
+    def predictor(*args: Any, **kwargs: Any) -> Any:
         events.append(("load",))
         return real_predictor(*args, **kwargs)
 
-    def noul(*args, **kwargs):
+    def noul(*args: Any, **kwargs: Any) -> Any:
         forwards.append(1)
         return real_noul(*args, **kwargs)
     monkeypatch.setattr(plat, "time_messages", recorder)
@@ -175,7 +185,7 @@ def test_every_seed_warms_every_timed_message_first(tmp_path, synthetic_raw, mon
 # ---- BERTurk ----
 
 @pytest.fixture(scope="module")
-def berturk_built(tmp_path_factory):
+def berturk_built(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str, str]:
     """(splits dir, splits manifest, a 1-epoch CPU export of the tiny BERTurk base), built once for the module."""
     from tiny_berturk import tiny_base
     tmp = tmp_path_factory.mktemp("latency_berturk")
@@ -197,7 +207,8 @@ def berturk_built(tmp_path_factory):
     return splits, manifest, str(storage / rid / "exports")
 
 
-def berturk_setup(berturk_built, tmp_path, change=None):
+def berturk_setup(berturk_built: tuple[str, str, str], tmp_path: Path,
+                  change: Callable[[dict[str, Any]], Any] | None = None) -> tuple[str, str]:
     """(final manifest, checkpoint root) of the module's export as seed 0 "epoch-001" (T 1.0); `change` edits the
     recorded identity."""
     _, _, root = berturk_built
@@ -211,7 +222,7 @@ def berturk_setup(berturk_built, tmp_path, change=None):
     return m, root
 
 
-def test_tiny_berturk_latency_on_cpu(berturk_built, tmp_path):
+def test_tiny_berturk_latency_on_cpu(berturk_built: tuple[str, str, str], tmp_path: Path) -> None:
     splits, manifest, _ = berturk_built
     m, root = berturk_setup(berturk_built, tmp_path)
     out = tmp_path / "latency" / "berturk-cpu.json"
@@ -221,9 +232,10 @@ def test_tiny_berturk_latency_on_cpu(berturk_built, tmp_path):
     assert report["timed_path"] == plat.TIMED_PATH["berturk"]
 
 
-def test_berturk_identity_mismatch_refused_before_load(berturk_built, tmp_path, monkeypatch):
+def test_berturk_identity_mismatch_refused_before_load(berturk_built: tuple[str, str, str], tmp_path: Path,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
     """One digest of the recorded identity changed: refused before score.load_bert (or any check of the files)."""
-    def boom(*a, **k):
+    def boom(*a: Any, **k: Any) -> NoReturn:
         raise AssertionError("a BERTurk checkpoint was loaded before the refusal")
     monkeypatch.setattr(latency.score, "load_bert", boom)
     monkeypatch.setattr(latency.score, "check_berturk", boom)

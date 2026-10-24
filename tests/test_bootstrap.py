@@ -1,4 +1,4 @@
-"""The EVAL-07 paired bootstrap (pilot.metrics.seed_average / bootstrap_weights / replicate_metrics /
+"""The paired bootstrap (pilot.metrics.seed_average / bootstrap_weights / replicate_metrics /
 paired_bootstrap) and report.py --compare: zero-width self and copy intervals, pairing, seed averaging of
 probabilities, determinism for a seed, refusals, and a per-replicate oracle against pilot.metrics.metrics.
 No model, torch or Ray: dump-level cases run score.py baselines on the synthetic snapshot (conftest).
@@ -7,6 +7,8 @@ import io
 import json
 import os
 import shutil
+from pathlib import Path
+from typing import Any, Callable, NoReturn
 
 import numpy as np
 import pytest
@@ -24,12 +26,12 @@ TAGS = list(INTENTS)
 
 
 @pytest.fixture
-def snap(tmp_path, synthetic_raw):
+def snap(tmp_path: Path, synthetic_raw: Callable[..., tuple[str, dict[str, str]]]) -> tuple[str, str]:
     """(out_dir, manifest_path) of the synthetic snapshot prepared under tmp_path."""
     return prepared(tmp_path, synthetic_raw)
 
 
-def _score_both(snap, root, model="prior"):
+def _score_both(snap: tuple[str, str], root: Path, model: str = "prior") -> tuple[str, str]:
     """Score `model` on the synthetic val and test splits under root; return (run_dir, manifest)."""
     out_dir, manifest = snap
     for name in ("val", "test"):
@@ -38,7 +40,7 @@ def _score_both(snap, root, model="prior"):
     return os.path.join(str(root), model), manifest
 
 
-def _assert_zero_width(rep):
+def _assert_zero_width(rep: dict[str, Any]) -> None:
     assert set(rep["thresholds"]) == {"0.5", "val_selected"}
     for t, r in rep["thresholds"].items():
         assert r["B"] == rep["B"] and r["seed"] == rep["seed"]
@@ -46,7 +48,7 @@ def _assert_zero_width(rep):
             assert m["ci"] == [0.0, 0.0] and m["width"] == 0.0, (t, name, m)
 
 
-def test_compare_self_is_zero_width(tmp_path, snap):
+def test_compare_self_is_zero_width(tmp_path: Path, snap: tuple[str, str]) -> None:
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     rep = report.compare([run_dir], [run_dir], "test", manifest, B=200, seed=0)
     assert rep["kind"] == "paired_bootstrap" and rep["n"] == 7 and rep["B"] == 200
@@ -56,7 +58,7 @@ def test_compare_self_is_zero_width(tmp_path, snap):
 
 # --- toy inputs: pairing, seed averaging, determinism, the per-replicate oracle ----------------------------------
 
-def _toy(n=40, seed=7):
+def _toy(n: int = 40, seed: int = 7) -> tuple[np.ndarray, np.ndarray]:
     """(Y bool [n, 48], P float [n, 48]) with every row tagged or not at random and noisy probabilities."""
     rng = np.random.default_rng(seed)
     Y = rng.random((n, 48)) < 0.08
@@ -64,7 +66,7 @@ def _toy(n=40, seed=7):
     return Y, P
 
 
-def test_different_systems_have_width():
+def test_different_systems_have_width() -> None:
     Y, P = _toy(n=20)
     Q = P.copy()
     for i in (2, 9, 15):                                     # B differs from A on 3 of 20 rows
@@ -76,13 +78,13 @@ def test_different_systems_have_width():
     assert all(m["ci"] == [0.0, 0.0] for m in same["metrics"].values())
 
 
-def test_seed_average_is_identity_for_one_seed():
+def test_seed_average_is_identity_for_one_seed() -> None:
     _, P = _toy()
     avg = metrics.seed_average([P])
     assert avg.dtype == np.float64 and np.array_equal(avg, P)
 
 
-def test_seed_average_averages_probabilities():
+def test_seed_average_averages_probabilities() -> None:
     Y = np.zeros((1, 48), dtype=bool)
     Y[0, 3] = True
     p0, p1 = np.zeros((1, 48)), np.zeros((1, 48))
@@ -97,7 +99,7 @@ def test_seed_average_averages_probabilities():
         metrics.seed_average([p0, np.zeros((2, 48))])
 
 
-def test_same_seed_reproduces_and_other_seed_differs():
+def test_same_seed_reproduces_and_other_seed_differs() -> None:
     Y, P = _toy(n=60)
     _, Q = _toy(n=60, seed=8)
     r0 = metrics.paired_bootstrap(Y, P, 0.5, Q, 0.5, B=300, seed=0)
@@ -108,7 +110,7 @@ def test_same_seed_reproduces_and_other_seed_differs():
     assert np.array_equal(idx0, np.random.default_rng(0).integers(0, 60, size=(300, 60)))
 
 
-def test_bootstrap_weights_count_the_draw():
+def test_bootstrap_weights_count_the_draw() -> None:
     idx, W = metrics.bootstrap_weights(7, 5, 2)
     assert idx.shape == W.shape == (5, 7) and W.dtype == np.float64
     assert (W.sum(axis=1) == 7).all()
@@ -116,7 +118,7 @@ def test_bootstrap_weights_count_the_draw():
         assert np.array_equal(W[b], np.bincount(idx[b], minlength=7))
 
 
-def test_replicates_match_direct_recomputation():
+def test_replicates_match_direct_recomputation() -> None:
     n, B = 30, 50
     Y, P = _toy(n=n, seed=11)
     rare = 7                                                 # one positive and never predicted: lost in some replicates
@@ -143,7 +145,7 @@ def test_replicates_match_direct_recomputation():
     assert 0 < lost < B                                      # the zero-support macro rule was exercised
 
 
-def test_replicate_with_zero_denominators_scores_zero():
+def test_replicate_with_zero_denominators_scores_zero() -> None:
     Y = np.zeros((2, 48), dtype=bool)
     pred = np.zeros((2, 48), dtype=bool)
     rep = metrics.replicate_metrics(np.array([[2.0, 0.0]]), Y, pred, np.zeros((2, 48)))
@@ -153,12 +155,12 @@ def test_replicate_with_zero_denominators_scores_zero():
     assert r["metrics"]["macro_f1"]["n_undefined"] == 20 and r["metrics"]["macro_f1"]["ci"] is None
 
 
-# --- the (d) statistics on the shared draw (08-01): Brier, classwise ECE, precision at a coverage ----------------
+# --- criterion (d)'s statistics on the shared draw: Brier, classwise ECE, precision at a coverage ---------------
 
 EXTRA = ("brier", "classwise_ece", "precision_at_80")
 
 
-def test_extra_self_comparison_is_zero_width():
+def test_extra_self_comparison_is_zero_width() -> None:
     Y, P = _toy(n=40)
     r = metrics.paired_bootstrap_extra(Y, P, 0.5, P, 0.5, B=500, seed=0)
     assert sorted(r["metrics"]) == sorted(EXTRA) and r["coverage"] == 80 and r["B"] == 500 and r["n"] == 40
@@ -168,7 +170,7 @@ def test_extra_self_comparison_is_zero_width():
     assert metrics.paired_bootstrap_extra(Y, P, 0.5, P.copy(), 0.5, B=500, seed=0) == r   # an identical copy
 
 
-def test_extra_full_data_values_are_the_direct_metrics():
+def test_extra_full_data_values_are_the_direct_metrics() -> None:
     Y, P = _toy(n=40)
     _, Q = _toy(n=40, seed=8)
     th = np.full(48, 0.5)
@@ -183,7 +185,7 @@ def test_extra_full_data_values_are_the_direct_metrics():
     assert type(r["brier"]["delta"]) is float and type(r["brier"]["ci"][0]) is float
 
 
-def test_extra_replicates_match_direct_recomputation():
+def test_extra_replicates_match_direct_recomputation() -> None:
     n, B, seed = 40, 50, 3
     Y, P = _toy(n=n, seed=11)
     _, Q = _toy(n=n, seed=12)
@@ -205,13 +207,13 @@ def test_extra_replicates_match_direct_recomputation():
         assert r["metrics"][name]["ci"] == [float(v) for v in np.percentile(rep[name] - rb[name], [2.5, 97.5])]
 
 
-def test_extra_shares_the_draw_of_paired_bootstrap(monkeypatch):
+def test_extra_shares_the_draw_of_paired_bootstrap(monkeypatch: pytest.MonkeyPatch) -> None:
     Y, P = _toy(n=30)
     _, Q = _toy(n=30, seed=9)
     calls = []
     real = metrics.bootstrap_weights
 
-    def recording(n, B, seed):
+    def recording(n: int, B: int, seed: int | None) -> tuple[np.ndarray, np.ndarray]:
         out = real(n, B, seed)
         calls.append(((n, B, seed), out[0].copy()))
         return out
@@ -223,7 +225,7 @@ def test_extra_shares_the_draw_of_paired_bootstrap(monkeypatch):
     assert np.array_equal(calls[0][1], calls[1][1])         # one draw, so the (d) deltas pair with the F1 deltas
 
 
-def test_extra_is_deterministic_for_a_seed():
+def test_extra_is_deterministic_for_a_seed() -> None:
     Y, P = _toy(n=40)
     _, Q = _toy(n=40, seed=8)
     r0 = metrics.paired_bootstrap_extra(Y, P, 0.5, Q, 0.5, B=200, seed=0)
@@ -236,10 +238,10 @@ def test_extra_is_deterministic_for_a_seed():
 
 @pytest.mark.parametrize("kw", [{"coverage": 0}, {"coverage": 101}, {"coverage": 80.5}, {"coverage": True},
                                 {"thA": 0.0}, {"thB": 1.0}, {"thA": float("nan")}, {"level": 1.0}])
-def test_extra_refuses_before_any_draw(monkeypatch, kw):
+def test_extra_refuses_before_any_draw(monkeypatch: pytest.MonkeyPatch, kw: dict[str, Any]) -> None:
     Y, P = _toy(n=40)
 
-    def no_draw(*a):
+    def no_draw(*a: Any) -> NoReturn:
         raise AssertionError("a replicate was drawn before the refusal")
 
     monkeypatch.setattr(metrics, "bootstrap_weights", no_draw)
@@ -250,7 +252,7 @@ def test_extra_refuses_before_any_draw(monkeypatch, kw):
         metrics.paired_bootstrap_extra(Y, P, thA, P, thB, B=10, seed=0, **args)
 
 
-def test_extra_rule_names_the_shared_draw():
+def test_extra_rule_names_the_shared_draw() -> None:
     rule = metrics.BOOT_EXTRA_RULE
     assert "bootstrap_weights(n, B, seed)" in rule and "paired_bootstrap" in rule and "draw order" in rule
     assert metrics.BOOT_EXTRA_METRICS == ("brier", "classwise_ece")
@@ -261,7 +263,7 @@ COMMITTED_CANDIDATES = (("laya", "laya-047381259d3b-cf0f7846-cc216d59"),
 
 
 @pytest.mark.data
-def test_extra_bootstrap_runs_on_the_committed_val_dumps():
+def test_extra_bootstrap_runs_on_the_committed_val_dumps() -> None:
     """The end-to-end slice: two committed val dumps, each at its postfit record's T and θ, through the extra
     bootstrap (in-sample val numbers; only their shape is asserted, never a value)."""
     probs, ths, Y = [], [], None
@@ -283,7 +285,7 @@ def test_extra_bootstrap_runs_on_the_committed_val_dumps():
         assert np.isfinite(m["delta"]) and m["ci"][0] <= m["ci"][1] and m["n_undefined"] == 0, (name, m)
 
 
-def test_bootstrap_refuses_empty_inputs():
+def test_bootstrap_refuses_empty_inputs() -> None:
     Y, P = _toy(n=5)
     with pytest.raises(SystemExit, match="no seed dumps"):
         metrics.seed_average([])
@@ -297,7 +299,7 @@ def test_bootstrap_refuses_empty_inputs():
 
 # --- dump level: copies, seeds, pairing and refusals through report.compare --------------------------------------
 
-def _rename_run(run_dir, dst):
+def _rename_run(run_dir: str, dst: str) -> str:
     """Copy run_dir to dst and set every sidecar's run_id to dst's name (load_dump ties run_id to the dir name)."""
     shutil.copytree(run_dir, dst)
     for split in ("val", "test"):
@@ -314,7 +316,7 @@ def _rename_run(run_dir, dst):
 FAKE_TRAINING = {"config_sha256_sans_seed": "c" * 64, "run_id": "fake"}
 
 
-def _set_seed(run_dir, seed, training=FAKE_TRAINING):
+def _set_seed(run_dir: str, seed: int | None, training: dict[str, Any] = FAKE_TRAINING) -> str:
     """Give run_dir's val and test sidecars a training seed and block (only dump_sha256 binds the npz, not the JSON)."""
     for split in ("val", "test"):
         path = os.path.join(run_dir, split + ".json")
@@ -326,7 +328,8 @@ def _set_seed(run_dir, seed, training=FAKE_TRAINING):
     return run_dir
 
 
-def _seed_copy(run_dir, dst, seed, manifest, rng_seed=5, training=FAKE_TRAINING):
+def _seed_copy(run_dir: str, dst: str, seed: int | None, manifest: str, rng_seed: int = 5,
+               training: dict[str, Any] = FAKE_TRAINING) -> str:
     """A renamed copy of run_dir turned into another seed of the same system: other logits on both splits (so its
     dumps differ) and sidecars with seed `seed` and the shared training block."""
     _rename_run(run_dir, dst)
@@ -339,7 +342,7 @@ def _seed_copy(run_dir, dst, seed, manifest, rng_seed=5, training=FAKE_TRAINING)
     return _set_seed(dst, seed, training)
 
 
-def test_identical_copy_is_zero_width(tmp_path, snap):
+def test_identical_copy_is_zero_width(tmp_path: Path, snap: tuple[str, str]) -> None:
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     copy = _rename_run(run_dir, str(tmp_path / "copies" / "prior-copy"))
     rep = report.compare([run_dir], [copy], "test", manifest, B=300, seed=0)
@@ -347,7 +350,7 @@ def test_identical_copy_is_zero_width(tmp_path, snap):
     _assert_zero_width(rep)
 
 
-def test_compare_averages_seed_dumps(tmp_path, snap):
+def test_compare_averages_seed_dumps(tmp_path: Path, snap: tuple[str, str]) -> None:
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     _set_seed(run_dir, 0)                                   # seed 0 of a fake recipe; a second seed with other logits
     seed1 = _seed_copy(run_dir, str(tmp_path / "seeds" / "prior-s1"), 1, manifest)
@@ -364,7 +367,7 @@ def test_compare_averages_seed_dumps(tmp_path, snap):
         report.compare([], [run_dir], "test", manifest, B=100, seed=0)
 
 
-def _swap_two_uids(run_dir, split):
+def _swap_two_uids(run_dir: str, split: str) -> None:
     """Swap the first two uids of run_dir/<split>.npz, mark the dump a full-size subset so load_dump accepts it."""
     z = np.load(os.path.join(run_dir, split + ".npz"), allow_pickle=False)
     uids = z["uids"].copy()
@@ -383,7 +386,7 @@ def _swap_two_uids(run_dir, split):
 
 
 @pytest.mark.parametrize("split", ["test", "val"])
-def test_compare_refuses_unpaired(tmp_path, snap, split):
+def test_compare_refuses_unpaired(tmp_path: Path, snap: tuple[str, str], split: str) -> None:
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     other = _rename_run(run_dir, str(tmp_path / "other" / "prior-b"))
     _swap_two_uids(other, split)
@@ -393,7 +396,7 @@ def test_compare_refuses_unpaired(tmp_path, snap, split):
     assert str(e.value.code).startswith("unpaired: "), e.value.code     # the message, not a tmp_path that names it
 
 
-def test_compare_refuses_repeated_seed(tmp_path, snap):
+def test_compare_refuses_repeated_seed(tmp_path: Path, snap: tuple[str, str]) -> None:
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     elsewhere = shutil.copytree(run_dir, str(tmp_path / "elsewhere" / "prior"))
     for side in ([run_dir, run_dir], [run_dir, elsewhere]):  # the same dir twice, or the same run_id twice
@@ -404,7 +407,7 @@ def test_compare_refuses_repeated_seed(tmp_path, snap):
             report.compare([run_dir], side, "test", manifest, B=50, seed=0)
 
 
-def test_compare_refuses_a_side_that_is_not_one_system(tmp_path, snap):
+def test_compare_refuses_a_side_that_is_not_one_system(tmp_path: Path, snap: tuple[str, str]) -> None:
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     maj, _ = _score_both(snap, tmp_path / "dumps", model="majority")
     for a in ([run_dir, maj], [maj, run_dir]):
@@ -413,7 +416,7 @@ def test_compare_refuses_a_side_that_is_not_one_system(tmp_path, snap):
         assert "seeds of one system" in str(e.value.code) and "mixes system kinds" in str(e.value.code)
         with pytest.raises(SystemExit, match="seeds of one system"):
             report.compare([run_dir], a, "test", manifest, B=50, seed=0)
-    # one kind, but no training block (Phase 3 sidecars) or another training recipe: not seeds of one system
+    # one kind, but no training block (the baselines' sidecars) or another training recipe: not seeds of one system
     s1 = _seed_copy(run_dir, str(tmp_path / "s" / "prior-s1"), 1, manifest)
     with pytest.raises(SystemExit, match="same training config apart from the seed"):
         report.compare([run_dir, s1], [run_dir], "test", manifest, B=50, seed=0)
@@ -422,7 +425,7 @@ def test_compare_refuses_a_side_that_is_not_one_system(tmp_path, snap):
         report.compare([run_dir, s1], [run_dir], "test", manifest, B=50, seed=0)
 
 
-def test_compare_refuses_missing_or_repeated_seeds(tmp_path, snap):
+def test_compare_refuses_missing_or_repeated_seeds(tmp_path: Path, snap: tuple[str, str]) -> None:
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     _set_seed(run_dir, None)                                # a training block but no recorded seed
     s1 = _seed_copy(run_dir, str(tmp_path / "s" / "prior-s1"), None, manifest)
@@ -437,7 +440,7 @@ def test_compare_refuses_missing_or_repeated_seeds(tmp_path, snap):
         report.compare([run_dir], [run_dir, s1], "test", manifest, B=50, seed=0)
 
 
-def test_compare_refuses_identical_dumps_on_one_side(tmp_path, snap):
+def test_compare_refuses_identical_dumps_on_one_side(tmp_path: Path, snap: tuple[str, str]) -> None:
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     _set_seed(run_dir, 0)
     copy = _set_seed(_rename_run(run_dir, str(tmp_path / "s" / "prior-s1")), 1)   # distinct seeds, same npz bytes
@@ -448,7 +451,7 @@ def test_compare_refuses_identical_dumps_on_one_side(tmp_path, snap):
     _assert_zero_width(rep)
 
 
-def test_compare_accepts_distinct_seeds_of_one_system(tmp_path, snap):
+def test_compare_accepts_distinct_seeds_of_one_system(tmp_path: Path, snap: tuple[str, str]) -> None:
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     _set_seed(run_dir, 0)
     s1 = _seed_copy(run_dir, str(tmp_path / "s" / "prior-s1"), 1, manifest, rng_seed=1)
@@ -458,7 +461,7 @@ def test_compare_accepts_distinct_seeds_of_one_system(tmp_path, snap):
     assert len(set(rep["a"]["dump_sha256"]["split"])) == 3 and len(set(rep["a"]["dump_sha256"]["val"])) == 3
 
 
-def test_compare_refuses_subset_or_missing_val(tmp_path, snap):
+def test_compare_refuses_subset_or_missing_val(tmp_path: Path, snap: tuple[str, str]) -> None:
     out_dir, manifest = snap
     root = tmp_path / "sub"
     score.main([os.path.join(out_dir, "splits", "test.jsonl"), "--model", "prior", "--manifest", manifest,
@@ -471,7 +474,7 @@ def test_compare_refuses_subset_or_missing_val(tmp_path, snap):
         report.compare([str(root / "prior")], [str(root / "prior")], "test", manifest, B=50, seed=0)
 
 
-def test_compare_records_provenance_and_no_decision(tmp_path, snap):
+def test_compare_records_provenance_and_no_decision(tmp_path: Path, snap: tuple[str, str]) -> None:
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     maj, _ = _score_both(snap, tmp_path / "dumps", model="majority")
     rep = report.compare([maj], [run_dir], "test", manifest, B=100, seed=4)
@@ -479,7 +482,7 @@ def test_compare_records_provenance_and_no_decision(tmp_path, snap):
     for word in ("verdict", "GO", "PASS", "FAIL"):
         assert word not in text.replace("GOLD", ""), word
     assert rep["B"] == 100 and rep["seed"] == 4 and rep["split"] == "test" and rep["theta_in_sample"] is False
-    assert rep["procedure"].startswith("EVAL-07") and "protocol.json" in rep["theta_rule"] and rep["note"]
+    assert rep["procedure"] == report.COMPARE_PROCEDURE and "protocol.json" in rep["theta_rule"] and rep["note"]
     _, _, side, _ = dumps.load_dump(maj, "test", manifest)
     _, _, vside, _ = dumps.load_dump(maj, "val", manifest)
     assert rep["a"]["dump_sha256"] == {"split": [side["dump_sha256"]], "val": [vside["dump_sha256"]]}
@@ -488,7 +491,7 @@ def test_compare_records_provenance_and_no_decision(tmp_path, snap):
         assert r["method"] == "percentile (numpy linear interpolation)" and r["level"] == 0.95 and r["n"] == 7
 
 
-def test_cli_compare(tmp_path, snap, capsys):
+def test_cli_compare(tmp_path: Path, snap: tuple[str, str], capsys: pytest.CaptureFixture[str]) -> None:
     run_dir, manifest = _score_both(snap, tmp_path / "dumps")
     _set_seed(run_dir, 0)
     seed1 = _seed_copy(run_dir, str(tmp_path / "seeds" / "prior-s1"), 1, manifest)

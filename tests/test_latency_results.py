@@ -1,5 +1,5 @@
-"""The committed latency reports (plan 07-07, EVAL-06) are the real M4 runs of the final seeds and stay consistent with
-the code: reported, not gated.
+"""The committed latency reports are the real M4 runs of the final seeds and stay consistent with the code: reported,
+not gated.
 
 - every tracked results/latency/*.json is a latency/1 report labelled "reported, not gated" of one system (laya or
   berturk) on mps or cpu, bound to the committed final manifest results/postfit/<system>-final.json (its sha256,
@@ -14,26 +14,27 @@ the code: reported, not gated.
 - each report passes the repository's sidecar text and path check (no message text, no uid list, no local path)
 - exactly four reports are tracked, laya-mps, laya-cpu, berturk-mps and berturk-cpu, each named after its system and
   device, and results/latency/latency.md equals pilot.latency.render_markdown of them byte for byte
-- README.md holds exactly one latency block, in the Phase 7 section, equal to pilot.latency.render_markdown of the
-  reports (`latency.py --render results/latency`), and the Phase 7 prose before the generated blocks says
-  "reported, not gated" too
+- README.md holds exactly one latency block, in the confidence and latency section, equal to
+  pilot.latency.render_markdown of the reports (`latency.py --render results/latency`), and that section's prose
+  before the generated blocks says "reported, not gated" too
 - the README's seed-order disclosure (k/208 messages on which seed 0 is slower than the mean of seeds 1 and 2, the
   mean and relative excess of seed 0 over that mean, and the exact two-sided sign test) recomputes from the committed
-  times: p < 1e-7 for both Laya reports, no consistent direction (p > 0.05) for both BERTurk reports (07-REVIEW
-  WR-01); every disclosed sentence is asserted whole, so a number passes only for its own system, on its own device,
-  in its own direction and for its own seed, the Laya sentence is asserted from its subject through its confound
-  disclaimer, the seeds are bound to 0, 1, 2, and every review mutation must fail (07-REVIEW WR-01, WR-03; 07-13
-  review WR-01); CLAUDE.md's rounded Laya numbers are bound to the same times (07-REVIEW IN-02)
-- pilot.latency.RULES' one warm-up line, both latency module docstrings and the README Phase 7 prose state the
-  seed-order limit, and no doc or code file repeats a withdrawn latency phrase (OLD_CLAIMS, each mapped to the finding
-  that withdrew it; 07-REVIEW WR-01, IN-05; 07-13 review IN-02)
+  times: p < 1e-7 for both Laya reports, no consistent direction (p > 0.05) for both BERTurk reports; every
+  disclosed sentence is asserted whole, so a number passes only for its own system, on its own device, in its own
+  direction and for its own seed, the Laya sentence is asserted from its subject through its confound disclaimer, the
+  seeds are bound to 0, 1, 2, and every listed mutation of the prose must fail; CLAUDE.md's rounded Laya numbers are
+  bound to the same times
+- pilot.latency.RULES' one warm-up line, both latency module docstrings and the README section's prose state the
+  seed-order limit, and no doc or code file repeats a withdrawn latency phrase (OLD_CLAIMS, each mapped to the reason
+  it was withdrawn)
 - the four reports' recorded rules differ from pilot.latency.RULES at rule 3 (the warm-up line, the text in force when
-  they were timed); render_markdown marks each, and the README prose says so (07-REVIEW WR-02)
+  they were timed); render_markdown marks each, and the README prose says so
 """
 import json
 import math
 import os
 import subprocess
+from typing import Any
 
 import pytest
 
@@ -49,7 +50,7 @@ N_VAL = 208
 SEED_KEYS = ("seed", "train_run_id", "checkpoint_name", "checkpoint_identity", "dump_run_id", "temperature")
 
 
-def committed():
+def committed() -> list[tuple[str, dict[str, Any]]]:
     """[(repo-relative path, parsed report)] of the tracked results/latency/*.json, in sorted order (git ls-files)."""
     out = subprocess.run(["git", "ls-files", "-z", "--", "results/latency/"], cwd=REPO_ROOT, check=True,
                          capture_output=True, text=True, encoding="utf-8")
@@ -62,13 +63,14 @@ def committed():
 
 
 @pytest.fixture(scope="module")
-def reports():
+def reports() -> list[tuple[str, dict[str, Any]]]:
+    """committed(), refused when no report is tracked."""
     found = committed()
     assert found, "no latency report is tracked under results/latency/"
     return found
 
 
-def test_committed_reports_bind_the_final_manifests(reports):
+def test_committed_reports_bind_the_final_manifests(reports: list[tuple[str, dict[str, Any]]]) -> None:
     for rel, r in reports:
         assert r["schema"] == latency.SCHEMA and r["label"] == latency.LABEL, rel
         assert r["system"] in latency.SYSTEMS and r["device"] in DEVICES, rel
@@ -85,7 +87,7 @@ def test_committed_reports_bind_the_final_manifests(reports):
             "%s does not time exactly the final seeds of %s in order" % (rel, path)
 
 
-def test_protocol_settings(reports):
+def test_protocol_settings(reports: list[tuple[str, dict[str, Any]]]) -> None:
     with open(DEFAULT_MANIFEST, encoding="utf-8") as f:
         val = json.load(f)["splits"]["val"]
     for rel, r in reports:
@@ -102,7 +104,7 @@ def test_protocol_settings(reports):
             "%s was not timed on the committed val split" % rel
 
 
-def test_summaries_recompute_from_times(reports):
+def test_summaries_recompute_from_times(reports: list[tuple[str, dict[str, Any]]]) -> None:
     for rel, r in reports:
         pooled = []
         for s in r["seeds"]:
@@ -117,20 +119,20 @@ def test_summaries_recompute_from_times(reports):
         assert r["pooled"]["n"] == N_VAL * len(r["seeds"]), rel
 
 
-def test_reports_hold_no_text_or_paths(reports):
+def test_reports_hold_no_text_or_paths(reports: list[tuple[str, dict[str, Any]]]) -> None:
     home, texts = home_dir(), local_split_texts()
     bad = {rel: p for rel, _ in reports for p in [sidecar_problems(os.path.join(REPO_ROOT, rel), home, texts)] if p}
     assert bad == {}, "latency reports hold text, local paths or subset runs: %s" % bad
 
 
-def test_exactly_four_reports(reports):
+def test_exactly_four_reports(reports: list[tuple[str, dict[str, Any]]]) -> None:
     names = [os.path.basename(rel) for rel, _ in reports]
     assert names == ["berturk-cpu.json", "berturk-mps.json", "laya-cpu.json", "laya-mps.json"], names
     for rel, r in reports:
         assert os.path.basename(rel) == "%s-%s.json" % (r["system"], r["device"]), rel
 
 
-def test_markdown_matches_render():
+def test_markdown_matches_render() -> None:
     with open(os.path.join(LATENCY, latency.MD_NAME), encoding="utf-8") as f:
         md = f.read()
     assert md == latency.render_markdown(latency.load_reports(LATENCY)), \
@@ -146,15 +148,15 @@ RULES_FIELD_DISCLOSURE = (
     "current wording, and the block marks every report whose recorded rules differ from them.")
 
 
-def test_recorded_rules_drift_is_disclosed(reports):
+def test_recorded_rules_drift_is_disclosed(reports: list[tuple[str, dict[str, Any]]]) -> None:
     """Each committed report keeps the rules text in force when it was timed, so its recorded rule 3 (the warm-up line)
     differs from pilot.latency.RULES; rules_drift finds exactly that set, render_markdown marks each report, the
-    README says so, and the paraphrase is bound to the recorded text (07-REVIEW WR-02)."""
+    README says so, and the paraphrase is bound to the recorded text."""
     by_name = {os.path.basename(rel)[:-len(".json")]: r for rel, r in reports}
     drift = {name: latency.rules_drift(r) for name, r in by_name.items()}
     assert drift == RULES_DRIFT, \
-        "rules_drift of the committed reports is %r, not RULES_DRIFT %r; update RULES_DRIFT and the README Phase 7 " \
-        "prose (07-REVIEW WR-02)" % (drift, RULES_DRIFT)
+        "rules_drift of the committed reports is %r, not RULES_DRIFT %r; update RULES_DRIFT and the README latency " \
+        "prose" % (drift, RULES_DRIFT)
     warm = "warm-up (%s)" % latency.WARMUP_POLICY
     for name, r in by_name.items():
         assert len(r["rules"]) == len(latency.RULES), \
@@ -170,8 +172,8 @@ def test_recorded_rules_drift_is_disclosed(reports):
         "the render marks %d report(s) as drifting at rule 3, not %d" \
         % (md.count(latency.RULES_DRIFT_LINE % "3"), len(RULES_DRIFT))
     assert "3. %s" % warm in md, "the render does not number the rules (no %r)" % ("3. %s" % warm)
-    assert RULES_FIELD_DISCLOSURE in " ".join(phase7_prose().split()), \
-        "the README Phase 7 prose must state %r (07-REVIEW WR-02)" % RULES_FIELD_DISCLOSURE
+    assert RULES_FIELD_DISCLOSURE in " ".join(section_prose().split()), \
+        "the README latency prose must state %r" % RULES_FIELD_DISCLOSURE
     base = by_name["laya-cpu"]
     same = dict(base, rules=list(latency.RULES))
     assert latency.rules_drift(same) == [], latency.rules_drift(same)
@@ -182,9 +184,9 @@ def test_recorded_rules_drift_is_disclosed(reports):
     assert latency.rules_drift(bare) == list(range(1, len(latency.RULES) + 1)), latency.rules_drift(bare)
 
 
-def test_rules_drift_counts_recorded_rules_past_rules(reports):
+def test_rules_drift_counts_recorded_rules_past_rules(reports: list[tuple[str, dict[str, Any]]]) -> None:
     """A recorded value past the end of RULES (a JSON null included) counts, and the render counts such rules instead of
-    naming rule numbers it does not show (07-13 review IN-01)."""
+    naming rule numbers it does not show."""
     by_name = {os.path.basename(rel)[:-len(".json")]: r for rel, r in reports}
     base, n = by_name["laya-cpu"], len(latency.RULES)
     null = dict(base, rules=list(latency.RULES) + [None])
@@ -206,12 +208,12 @@ def test_rules_drift_counts_recorded_rules_past_rules(reports):
     assert latency.RULES_EXTRA_LINE % (2, n) in md, "the render does not count the two extra rules: %r" % md
 
 
-README =os.path.join(REPO_ROOT, "README.md")
+README = os.path.join(REPO_ROOT, "README.md")
 LATENCY_START, LATENCY_END = "<!-- latency:start -->", "<!-- latency:end -->"
-PHASE7_HEADING = "## Confidence, out-of-domain and latency metrics (Phase 7)"
+SECTION_HEADING = "## Confidence, out-of-domain and latency metrics"
 
 
-def test_readme_latency_block_matches_render():
+def test_readme_latency_block_matches_render() -> None:
     """The README block between the latency markers is pilot.latency.render_markdown of the committed reports; a hand
     edit or a stale block fails, and the section's prose states the label outside the generated block."""
     with open(README, encoding="utf-8") as f:
@@ -223,26 +225,27 @@ def test_readme_latency_block_matches_render():
     assert text[i + len(LATENCY_START):j].strip() == latency.render_markdown(latency.load_reports(LATENCY)).strip(), (
         "the README latency block differs from pilot.latency.render_markdown of the committed reports; "
         "regenerate it with `python latency.py --render results/latency`")
-    assert text.count(PHASE7_HEADING) == 1 and text.index(PHASE7_HEADING) < i, \
-        "the latency block is not in the Phase 7 section"
-    assert latency.LABEL in phase7_prose(), \
-        "the Phase 7 prose must say %r next to the generated latency block" % latency.LABEL
+    assert text.count(SECTION_HEADING) == 1 and text.index(SECTION_HEADING) < i, \
+        "the latency block is not in the confidence and latency section"
+    assert latency.LABEL in section_prose(), \
+        "the section's prose must say %r next to the generated latency block" % latency.LABEL
 
 
-def phase7_prose():
-    """The README's Phase 7 prose: from PHASE7_HEADING to the latency start marker, cut at the confidence block."""
+def section_prose() -> str:
+    """The README confidence and latency section's prose: from SECTION_HEADING to the latency start marker, cut at the
+    confidence block."""
     with open(README, encoding="utf-8") as f:
         text = f.read()
-    return text[text.index(PHASE7_HEADING):text.index(LATENCY_START)].split("<!-- confidence:start -->")[0]
+    return text[text.index(SECTION_HEADING):text.index(LATENCY_START)].split("<!-- confidence:start -->")[0]
 
 
-def sign_test_p(k, n):
+def sign_test_p(k: int, n: int) -> float:
     """Exact two-sided sign-test p of k successes in n untied pairs under p = 1/2 (math.comb, no scipy)."""
     tail = sum(math.comb(n, i) for i in range(min(k, n - k) + 1))
     return min(1.0, 2.0 * tail / 2 ** n)
 
 
-def seed_order(r):
+def seed_order(r: dict[str, Any]) -> tuple[int, int, float, float, float]:
     """(k, n, mean excess ms, relative excess %, sign-test p) of seed 0 against the mean of seeds 1 and 2, message by
     message over the committed times; the report must time seeds 0, 1, 2 in that order."""
     seeds = [s["seed"] for s in r["seeds"]]
@@ -270,10 +273,10 @@ ORDER_DISCLOSURE = (
 CLAUDE_MD_ROUNDED = "the committed Laya reports show seed 0 slower (about %.1f%% on CPU, %.1f%% on MPS)"
 
 
-def assert_seed_order_disclosure(prose, by_name):
+def assert_seed_order_disclosure(prose: str, by_name: dict[str, dict[str, Any]]) -> None:
     """The README's seed-order disclosure, asserted as whole sentences rebuilt from the committed times, so a number
     passes only for its own system, on its own device, in its own direction and for its own seed; the Laya sentence is
-    asserted from its subject through its confound disclaimer (07-13 review WR-01); `prose` is whitespace-collapsed."""
+    asserted from its subject through its confound disclaimer; `prose` is whitespace-collapsed."""
     lc, lm, bc, bm = (seed_order(by_name[n]) for n in ("laya-cpu", "laya-mps", "berturk-cpu", "berturk-mps"))
     for name, v in (("laya-cpu", lc), ("laya-mps", lm)):
         assert v[4] < 1e-7, "%s: the seed-0 sign test gives p %.3g, not < 1e-7; the README disclosure is stale" \
@@ -287,38 +290,37 @@ def assert_seed_order_disclosure(prose, by_name):
              BERTURK_DISCLOSURE % (bc[0], bc[1], bm[0], bm[1], bc[4], bm[4], bc[2], bc[3], bm[2], bm[3]),
              ORDER_DISCLOSURE % orders.pop()]
     for want in wants:
-        assert want in prose, "the README Phase 7 prose must state %r, recomputed from the committed times" % want
+        assert want in prose, "the README latency prose must state %r, recomputed from the committed times" % want
 
 
-def test_readme_discloses_the_seed_order_effect(reports):
+def test_readme_discloses_the_seed_order_effect(reports: list[tuple[str, dict[str, Any]]]) -> None:
     """The README's seed-order disclosure is asserted as whole sentences rebuilt from the committed per-message times
     (the Laya seed-0 excess with k/n, mean and relative excess and p < 1e-7, from the subject naming Laya through the
-    confound disclaimer (07-13 review WR-01); BERTurk's lack of a consistent direction with its counts, p, mean and
-    relative excess; the manifest order), so a number cannot pass for another system, device, direction or seed
-    (07-REVIEW WR-01, WR-03); CLAUDE.md's rounded Laya excess is bound too (07-REVIEW IN-02)."""
-    prose = " ".join(phase7_prose().split())
+    confound disclaimer; BERTurk's lack of a consistent direction with its counts, p, mean and relative excess; the
+    manifest order), so a number cannot pass for another system, device, direction or seed; CLAUDE.md's rounded Laya
+    excess is bound too."""
+    prose = " ".join(section_prose().split())
     by_name = {os.path.basename(rel)[:-len(".json")]: r for rel, r in reports}
     assert_seed_order_disclosure(prose, by_name)
     with open(os.path.join(REPO_ROOT, "CLAUDE.md"), encoding="utf-8") as f:
         claude = " ".join(f.read().split())
     want = CLAUDE_MD_ROUNDED % (seed_order(by_name["laya-cpu"])[3], seed_order(by_name["laya-mps"])[3])
     assert want in claude, \
-        "CLAUDE.md must state %r: its numbers must be rounded from the committed times (07-REVIEW IN-02)" % want
+        "CLAUDE.md must state %r: its numbers must be rounded from the committed times" % want
 
 
-def swap(text, a, b):
+def swap(text: str, a: str, b: str) -> str:
     """text with every a and b exchanged, through a placeholder character."""
     assert "\0" not in text
     return text.replace(a, "\0").replace(b, a).replace("\0", b)
 
 
-def test_seed_order_disclosure_rejects_the_review_mutations(reports):
-    """The reviewers' mutations of the README prose (devices swapped, direction inverted, BERTurk counts swapped, seed
+def test_seed_order_disclosure_rejects_the_prose_mutations(reports: list[tuple[str, dict[str, Any]]]) -> None:
+    """Mutations of the README prose (devices swapped, direction inverted, BERTurk counts swapped, seed
     order changed, a Laya number moved out of its sentence, the Laya numbers attributed to BERTurk, the disclosure
     turned into a denial, the confound disclaimer replaced by a causal claim) each fail assert_seed_order_disclosure;
-    every surviving mutation is reported, so the check cannot quietly become presence-only again (07-REVIEW WR-01,
-    WR-03; 07-13 review WR-01)."""
-    good = " ".join(phase7_prose().split())
+    every surviving mutation is reported, so the check cannot quietly become presence-only again."""
+    good = " ".join(section_prose().split())
     by_name = {os.path.basename(rel)[:-len(".json")]: r for rel, r in reports}
     assert_seed_order_disclosure(good, by_name)
     bc, bm, lc = (seed_order(by_name[n]) for n in ("berturk-cpu", "berturk-mps", "laya-cpu"))
@@ -347,35 +349,35 @@ def test_seed_order_disclosure_rejects_the_review_mutations(reports):
         survivors.append(name)
     assert survivors == [], \
         "these mutations of the README prose still pass assert_seed_order_disclosure, so the check does not bind " \
-        "what they change: %r (07-13 review WR-01)" % survivors
+        "what they change: %r" % survivors
 
 
 SEED_ORDER_LIMIT = "a residual seed-order effect is not separated from a seed effect"
 POSITION_CLAIM = "depends on its position"
-# Each withdrawn latency phrase maps to the finding that withdrew it.
+# Each withdrawn latency phrase maps to the reason it was withdrawn.
 OLD_CLAIMS = {
-    POSITION_CLAIM: "07-REVIEW-10-11 WR-01",
-    "independent of its position": "07-REVIEW-10-11 WR-01",
-    "those included": "07-REVIEW-10-11 IN-05",
-    "first-occurrence costs are paid": "07-REVIEW-12 IN-01",
-    "BERTurk shows none": "07-REVIEW-12 WR-03",
+    POSITION_CLAIM: "the seeds always run in manifest order, so the times cannot show how a seed's times relate to its "
+                    "position",
+    "independent of its position": "the seeds always run in manifest order, so position independence cannot be shown",
+    "those included": "a leftover clause of the withdrawn position claim in the warm-up line",
+    "first-occurrence costs are paid": "a warm-up guarantee the full-pass design does not make",
+    "BERTurk shows none": "an unqualified claim; the README states BERTurk's counts, p and excess instead",
 }
 
 
-def test_latency_wording_states_the_seed_order_limit():
+def test_latency_wording_states_the_seed_order_limit() -> None:
     """RULES has exactly one warm-up line, and it states only what full_pass_per_seed guarantees (the same sequence per
-    seed, every timed input run once before) and the seed-order limit; both module docstrings and the README Phase 7
-    prose say the same, and no doc or code file repeats the old position-independence claim (07-REVIEW WR-01, IN-05,
-    G-07-UAT2-1); each banned phrase is specific to the latency wording and is reported with the finding that withdrew
-    it (07-13 review IN-02). The committed reports keep the rules text in force when they were timed, so they are not
-    checked."""
+    seed, every timed input run once before) and the seed-order limit; both module docstrings and the README section's
+    prose say the same, and no doc or code file repeats the old position-independence claim; each banned phrase is
+    specific to the latency wording and is reported with the reason it was withdrawn. The committed reports keep the
+    rules text in force when they were timed, so they are not checked."""
     warm = [rule for rule in latency.RULES if rule.startswith("warm-up")]
     assert len(warm) == 1, "pilot.latency.RULES must hold exactly one warm-up line, not %d" % len(warm)
     for want in (latency.WARMUP_POLICY, "every seed follows the same sequence",
                  "every input it times has already run once on its model in this process", SEED_ORDER_LIMIT):
         assert want in warm[0], "the RULES warm-up line must say %r" % want
     texts = {"pilot/latency.py docstring": latency.__doc__,
-             "README.md Phase 7 prose": phase7_prose()}
+             "README.md latency prose": section_prose()}
     with open(os.path.join(REPO_ROOT, "latency.py"), encoding="utf-8") as f:
         texts["latency.py"] = f.read()
     for name, text in texts.items():

@@ -1,6 +1,6 @@
-### Latency per message (Phase 7, EVAL-06): reported, not gated
+### Latency per message: reported, not gated
 
-Latency is reported, not gated: it is not a decision criterion (a latency budget is DEC-01, v2).
+Latency is reported, not gated: it is not a decision criterion (a latency budget is left to a later version).
 
 Rules:
 
