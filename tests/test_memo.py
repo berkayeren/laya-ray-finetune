@@ -15,6 +15,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 
 import pytest
 
@@ -304,3 +305,56 @@ def test_readme_points_to_the_recommendation():
     assert intro.index(lines[0]) > first_paragraph_end, "the pointer line must follow the intro's first paragraph"
     assert not PROSE_NUMBER_RE.search(lines[0]) and "Recommendation" in lines[0]
     assert text.count(POINTER) == 1
+
+
+# ---- 10-02 Task 1: the one-page decision memo results/final/memo.md (REP-05, D-09, D-10) ----
+
+MEMO = os.path.join(REPO_ROOT, "results", "final", "memo.md")
+MAKEFILE = os.path.join(REPO_ROOT, "Makefile")
+MEMO_RECIPE = ["$(PYTHON) report.py --memo $(FINAL)/verdict.json --out $(FINAL)/memo.md > /dev/null"]
+MEMO_HEADER = ("#   make memo  write results/final/memo.md, the one-page decision memo, from the committed records "
+               "(no model)")
+
+
+def memo_text():
+    v, _ = committed()
+    return memo.render_memo(v, *report.memo_inputs(v))
+
+
+def test_memo_matches_render():
+    want = memo_text()
+    assert os.path.isfile(MEMO), "results/final/memo.md is missing; write it with `make memo`"
+    with open(MEMO, "rb") as f:
+        got = f.read()
+    assert got == want.encode("utf-8"), "results/final/memo.md differs from its render; regenerate it with `make memo`"
+    lines = want.split("\n")
+    assert lines[0] == memo.MEMO_TITLE and lines[1] == memo.MEMO_GENERATED
+    assert want.endswith("\n") and not want.endswith("\n\n")
+    assert "**Recommendation: NO-GO; collect bank data**" in lines
+
+
+def test_cli_memo_prints_the_memo(capsys, tmp_path):
+    want = memo_text()
+    capsys.readouterr()
+    assert report.main(["--memo", VERDICT]) == want
+    assert capsys.readouterr().out == want
+    out = tmp_path / "memo.md"
+    assert report.main(["--memo", VERDICT, "--out", str(out)]) == want
+    assert out.read_bytes() == want.encode("utf-8")
+    with pytest.raises(SystemExit, match="not found; write the verdict with report.py --verdict --fewshot"):
+        report.main(["--memo", str(tmp_path / "missing.json")])
+    with pytest.raises(SystemExit) as info:
+        report.main(["--memo", VERDICT, "--recommendation", VERDICT])
+    assert info.value.code == 2
+    assert "--memo VERDICT_JSON" in capsys.readouterr().err
+
+
+def test_makefile_memo_target():
+    from test_final_results import recipe
+    with open(MAKEFILE, encoding="utf-8") as f:
+        text = f.read()
+    assert recipe(text, "memo") == MEMO_RECIPE
+    phony = re.search(r"^\.PHONY: (.+)$", text, re.M)
+    assert phony and "memo" in phony.group(1).split(), "memo is not in .PHONY"
+    assert MEMO_HEADER in text.split("\n"), "the Makefile header has no `make memo` line"
+    assert "memo.md" not in "\n".join(recipe(text, "final-reports")), "final-reports writes no memo (10-RESEARCH)"
