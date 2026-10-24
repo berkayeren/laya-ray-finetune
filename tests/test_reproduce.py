@@ -594,7 +594,7 @@ def test_verify_checkpoints_writes_nothing(tmp_path, monkeypatch):
     assert calls == ["out"] * 6 + ["report_step"], calls
     assert lines[0] == "verify-checkpoints (reported, not gated): laya seed 0 ckpt-laya-s0: absent (%s)" % ABSENT
     assert all(l.startswith("verify-checkpoints (reported, not gated): ") for l in lines)
-    assert [l.split(": ")[-1].split(" ")[0] for l in lines] == ["absent"] + ["match"] * 5
+    assert [re.search(r" ckpt-\S+: (\w+)", l).group(1) for l in lines] == ["absent"] + ["match"] * 5
     bad = subprocess.run([sys.executable, "reproduce.py", "--mode", "eval-only", "--checkpoint-root", ckpts],
                          cwd=REPO_ROOT, capture_output=True, text=True)
     assert bad.returncode == 2 and "--checkpoint-root" in bad.stderr and "--verify-checkpoints" in bad.stderr

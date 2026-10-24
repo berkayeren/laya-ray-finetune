@@ -13,10 +13,15 @@ one. A tree whose checked paths already differ is refused before anything runs, 
 rebuild's.
 
 The gated splits are scored exactly once (protocol.json), so eval-only never rescores a checkpoint: criterion 2's
-re-scoring is met by the committed dumps.
+re-scoring is met by the committed dumps. --verify-checkpoints (`make report VERIFY_CHECKPOINTS=1`) adds a check that
+is reported, not gated: each final seed listed in results/postfit/<kind>-final.json is re-hashed under
+--checkpoint-root (default the repo root) with the identity functions score.py uses and reported as match, differs or
+absent. It loads no model, writes nothing and never changes the exit status (no committed val dump of a final seed
+exists to re-score against: the final seeds are scored once, on test and HOTELS).
 
 usage:
     python reproduce.py --mode eval-only               # = make report PYTHON=.venv/bin/python
+    python reproduce.py --mode eval-only --verify-checkpoints [--checkpoint-root DIR]
 """
 import argparse
 import sys
@@ -30,12 +35,18 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--mode", choices=reproduce.MODES, required=True,
                     help="eval-only: rebuild every report, the memo and the README blocks from the committed dumps")
+    ap.add_argument("--verify-checkpoints", action="store_true",
+                    help="also re-hash the on-disk final seeds against their manifests (reported, not gated)")
+    ap.add_argument("--checkpoint-root", metavar="DIR", default=None,
+                    help="where the final seed dirs live (default: the repo root); only with --verify-checkpoints")
     a = ap.parse_args(argv)
+    if a.checkpoint_root is not None and not a.verify_checkpoints:
+        ap.error("--checkpoint-root applies only with --verify-checkpoints")
     print("reproduce in " + sys.executable, flush=True)
     rows = reproduce.plan(REPO_ROOT)
     _, pin = protocol.require_frozen()
     print(reproduce.render_plan(rows, pin), end="", flush=True)
-    reproduce.eval_only(REPO_ROOT)
+    reproduce.eval_only(REPO_ROOT, verify=a.verify_checkpoints, checkpoint_root=a.checkpoint_root or REPO_ROOT)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,8 @@ rewrite_blocks) and proves the tree unchanged: `git status --porcelain` over CHE
 run is refused, so a difference is always the rebuild's) and after (else the run fails naming every differing path),
 with a sha256 snapshot of CHECKED in place of git when root is not a git work tree. Every command is an argv list run
 without a shell by the interpreter running this module (make targets get PYTHON=sys.executable).
+verify_checkpoints (--verify-checkpoints) re-hashes the on-disk final seeds with score.py's identity functions against
+their final manifests: reported, not gated (it loads no model, writes nothing and never refuses).
 
 usage:
     python -m pilot.reproduce --plan          # the 19-step plan of the working tree, each step done, todo or run
@@ -631,6 +633,58 @@ def report_step(root=REPO_ROOT, run=run_command, blocks=render_blocks, precheck=
         % (len(REBUILD), len(renders), "git status clean" if after_git is not None else "sha256 snapshot unchanged"))
 
 
+VERIFY_LINE = "verify-checkpoints (reported, not gated): "
+ABSENT_DETAIL = "not needed: eval-only rebuilds from the committed dumps"
+
+
+def _identity_diff(have, want):
+    """The identity keys (files_sha256 entries as files_sha256[NAME]) whose digests differ."""
+    have, want = have if isinstance(have, dict) else {}, want if isinstance(want, dict) else {}
+    out = []
+    for k in sorted(set(have) | set(want)):
+        a, b = have.get(k), want.get(k)
+        if k == "files_sha256" and isinstance(a, dict) and isinstance(b, dict):
+            out += ["files_sha256[%s]" % f for f in sorted(set(a) | set(b)) if a.get(f) != b.get(f)]
+        elif a != b:
+            out.append(k)
+    return out
+
+
+def verify_checkpoints(root=REPO_ROOT, checkpoint_root=None, manifests=None):
+    """D-06, reported, not gated: [{kind, seed, checkpoint_name, status, detail}] of every final seed listed in
+    root's results/postfit/<kind>-final.json (manifests={kind: path} overrides them), its dir under checkpoint_root
+    (default root) re-hashed with the identity functions score.py uses (pilot.weights.identity + pilot.dumps.run_id,
+    pilot.berturk.identity + dump_run_id) against the manifest's checkpoint_identity and dump_run_id: "match",
+    "differs" (naming the differing keys, or the identity's own refusal for an incomplete dir) or "absent". Hashes only:
+    no model load, no write, and never a refusal for differs or absent."""
+    from pilot import berturk, dumps, latency, weights
+    rows = []
+    for kind in protocol.KINDS:
+        path = (manifests or {}).get(kind) or os.path.join(root, "results", "postfit", "%s-final.json" % kind)
+        m, _ = latency.read_final_manifest(path, kind)
+        for s in m["seeds"]:
+            d = os.path.join(checkpoint_root or root, s["checkpoint_name"])
+            row = {"kind": kind, "seed": s["seed"], "checkpoint_name": s["checkpoint_name"]}
+            if not os.path.isdir(d):
+                rows.append(dict(row, status="absent", detail=ABSENT_DETAIL))
+                continue
+            try:
+                if kind == "laya":
+                    ident = weights.identity(d)
+                    rid = dumps.run_id("laya", ident)
+                else:
+                    ident = berturk.identity(d)
+                    rid = berturk.dump_run_id(ident)
+            except SystemExit as e:
+                rows.append(dict(row, status="differs", detail=_one_line(e.code)))
+                continue
+            keys = _identity_diff(ident, s["checkpoint_identity"]) + (["dump_run_id"] if rid != s["dump_run_id"]
+                                                                       else [])
+            rows.append(dict(row, status="differs" if keys else "match",
+                             detail="differs in %s" % ", ".join(keys) if keys else ""))
+    return rows
+
+
 def _missing_refusal(step, items):
     gone = [it for it in items if not it["present"]]
     if not gone:
@@ -643,11 +697,15 @@ def _missing_refusal(step, items):
 def eval_only(root=REPO_ROOT, run=run_command, blocks=render_blocks, out=print, verify=False, checkpoint_root=None):
     """Eval-only (D-05): verify the tree through plan(), refuse before any command a step other than data that is
     not done (its first missing path and the step that makes it), run `make data` only when the local split files are
-    absent, then report_step."""
+    absent, then (verify: the verify_checkpoints rows first, reported, not gated) report_step."""
     rows = plan(root)
     for step, st, items in rows:
         if step["name"] not in LOCAL + ALWAYS and st != "done":
             raise SystemExit(_missing_refusal(step, items))
+    if verify:
+        for r in verify_checkpoints(root, checkpoint_root):
+            out("%s%s seed %s %s: %s%s" % (VERIFY_LINE, r["kind"], r["seed"], r["checkpoint_name"], r["status"],
+                                          " (%s)" % r["detail"] if r["detail"] else ""))
     if dict((step["name"], st) for step, st, _ in rows)["data"] == "todo":
         out("eval-only data step: make data (the local split files are absent)")
         rc = run(("make", "data"), root)
