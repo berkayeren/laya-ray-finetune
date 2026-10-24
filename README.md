@@ -1508,6 +1508,143 @@ The test no-intent set holds 15 messages, so every interval is wide.
 - nll: mean binary cross-entropy over every (message, tag) pair, p clipped to [1e-12, 1 - 1e-12]
 <!-- final-confidence:end -->
 
+## Few-shot new-intent experiment (Phase 9)
+
+Phase 9 asks whether each model learns intents it has never seen from a handful of labelled messages. It ran the
+few-shot protocol that `protocol.json` froze in Phase 8, unchanged. This prose holds no number of its own: every number
+in this section comes from the generated block below, and a test fails if the block is edited by hand or goes stale.
+
+- **Masked bases.** The protocol's held-out tags were masked while each model's base was trained on `selection_train`,
+  at the model's own recipe from the main experiment. Every message was kept. For Laya the held-out tags were deleted
+  from each row's labels before negative sampling, so the base saw no question item for them. For BERTurk they were set
+  to the masked label, so their columns got no gradient. The committed runs manifest (`results/fewshot/runs.json`)
+  records the proof for each base: zero items or unmasked labels for every held-out tag.
+- **Identical support sets.** Each model then continued from its own masked base on the identical frozen support sets
+  plus the same replay messages: three draws, at k = 5 and k = 10, with the protocol's epochs and learning rates. Both
+  models train the same number of epochs on the same rows. This is epoch parity, not step parity: BERTurk's batches
+  hold many messages, so it takes far fewer optimizer steps than Laya.
+- **Scored once.** The runs manifest is the allow-list. It was committed on its own before any few-shot test dump, and
+  a test checks that git order. Every few-shot checkpoint was then scored once behind `score.py`'s protocol gate, and
+  the gate refuses a rerun. `make fewshot-reports` rebuilds the record below from the committed dumps, without a model.
+- **How to read it.** The primary metric is the new-tag average precision at k = 10: per draw, the macro average
+  precision over the held-out tags, Laya minus BERTurk, then the mean over the draws. Average precision needs no
+  threshold or temperature. Forgetting is the change in old-tag micro-F1 from each masked base to the runs continued
+  from it, at that base's val θ, which was chosen on its own val dump and never on test. The bootstrap interval is
+  descriptive and gates nothing.
+- **Compute fallback.** The compute fallback was not used: the decision record reads mode primary, so every draw
+  continued from its own masked base seed and the base-model variance is captured.
+- **The GO block.** Criterion (d)'s few-shot path in the GO block reads this record's primary block at the frozen
+  threshold.
+
+Regenerate with `python fewshot.py --render results/fewshot/fewshot.json`.
+
+<!-- fewshot:start -->
+### Few-shot new-intent results (Phase 9)
+
+Protocol `0d337d2019f9`, runs manifest `4eefd4d939ea`, decision record `c203fafb7064`, mode primary. Held-out tags: savings, loan, overdraft, appointment, contactless, direct_debit; k values 5, 10; draws 0 (digest `d72d8aa2e2c0`, base seed 0), 1 (digest `7ecc9ca984f6`, base seed 1), 2 (digest `847dc93d6628`, base seed 2).
+
+Test split: 413 messages; positives per held-out tag: savings 13, loan 11, overdraft 13, appointment 13, contactless 13, direct_debit 12.
+
+#### The primary metric: new-tag macro-AP at k = 10 (test, raw T = 1)
+
+| Draw | Laya | BERTurk | Laya - BERTurk |
+|---|---|---|---|
+| 0 | 0.708 | 0.101 | +60.71 points |
+| 1 | 0.781 | 0.157 | +62.33 points |
+| 2 | 0.854 | 0.109 | +74.56 points |
+| mean over draws |  |  | +65.87 points |
+
+Criterion (d)'s few-shot path reads the mean over draws of Laya - BERTurk at k = 10, unrounded.
+
+#### New-tag macro-AP by k (mean over draws)
+
+| k | Laya | BERTurk | Laya - BERTurk |
+|---|---|---|---|
+| k = 0 (masked base) | 0.293 | 0.064 | +22.85 points |
+| k = 5 | 0.699 | 0.101 | +59.75 points |
+| k = 10 | 0.781 | 0.122 | +65.87 points |
+
+#### Per-tag AP at k = 10 (mean over draws)
+
+| Tag | Laya | BERTurk |
+|---|---|---|
+| savings | 0.526 | 0.243 |
+| loan | 0.889 | 0.075 |
+| overdraft | 0.488 | 0.142 |
+| appointment | 0.976 | 0.040 |
+| contactless | 0.974 | 0.097 |
+| direct_debit | 0.832 | 0.136 |
+
+#### Forgetting: micro-F1 at each masked base's val θ (test)
+
+| Model | Run | New-tag micro-F1 | Old-tag micro-F1 | Old-tag change vs base (negative = forgetting) |
+|---|---|---|---|---|
+| Laya | base seed 0, k = 0 | 0.264 | 0.808 |  |
+| Laya | base seed 1, k = 0 | 0.321 | 0.792 |  |
+| Laya | base seed 2, k = 0 | 0.343 | 0.791 |  |
+| Laya | draw 0, k = 5 | 0.671 | 0.771 | -3.73 points |
+| Laya | draw 0, k = 10 | 0.691 | 0.814 | +0.58 points |
+| Laya | draw 1, k = 5 | 0.564 | 0.800 | +0.84 points |
+| Laya | draw 1, k = 10 | 0.816 | 0.809 | +1.69 points |
+| Laya | draw 2, k = 5 | 0.708 | 0.780 | -1.08 points |
+| Laya | draw 2, k = 10 | 0.786 | 0.806 | +1.48 points |
+| BERTurk | base seed 0, k = 0 | 0.015 | 0.752 |  |
+| BERTurk | base seed 1, k = 0 | 0.021 | 0.750 |  |
+| BERTurk | base seed 2, k = 0 | 0.067 | 0.726 |  |
+| BERTurk | draw 0, k = 5 | 0.000 | 0.781 | +2.86 points |
+| BERTurk | draw 0, k = 10 | 0.000 | 0.783 | +3.13 points |
+| BERTurk | draw 1, k = 5 | 0.000 | 0.762 | +1.19 points |
+| BERTurk | draw 1, k = 10 | 0.000 | 0.769 | +1.84 points |
+| BERTurk | draw 2, k = 5 | 0.000 | 0.749 | +2.25 points |
+| BERTurk | draw 2, k = 10 | 0.000 | 0.751 | +2.50 points |
+
+#### Bootstrap of the mean-over-draws delta (descriptive, not gated)
+
+| k | Laya - BERTurk | 95% CI | Undefined replicates | B |
+|---|---|---|---|---|
+| k = 0 (masked base) | +22.85 points | [+17.01, +29.93] points | 0 | 10000 |
+| k = 5 | +59.75 points | [+52.46, +66.37] points | 0 | 10000 |
+| k = 10 | +65.87 points | [+58.69, +70.25] points | 0 | 10000 |
+
+#### Wall clock of each continued run (seconds, reported, not gated)
+
+| Model | Draw | k | Seconds |
+|---|---|---|---|
+| Laya | 0 | 5 | 2548.4 |
+| Laya | 0 | 10 | 3765.1 |
+| Laya | 1 | 5 | 2500.4 |
+| Laya | 1 | 10 | 3692.3 |
+| Laya | 2 | 5 | 2586.8 |
+| Laya | 2 | 10 | 3873.0 |
+| BERTurk | 0 | 5 | 45.8 |
+| BERTurk | 0 | 10 | 61.5 |
+| BERTurk | 1 | 5 | 44.2 |
+| BERTurk | 1 | 10 | 60.5 |
+| BERTurk | 2 | 5 | 45.7 |
+| BERTurk | 2 | 10 | 62.3 |
+
+#### Realised positives per held-out tag in each support set
+
+| Draw | k | savings | loan | overdraft | appointment | contactless | direct_debit |
+|---|---|---|---|---|---|---|---|
+| 0 | 5 | 9 | 12 | 8 | 8 | 8 | 8 |
+| 0 | 10 | 14 | 16 | 14 | 17 | 13 | 16 |
+| 1 | 5 | 6 | 6 | 8 | 10 | 10 | 7 |
+| 1 | 10 | 17 | 12 | 15 | 15 | 16 | 13 |
+| 2 | 5 | 11 | 10 | 11 | 10 | 10 | 5 |
+| 2 | 10 | 16 | 17 | 22 | 16 | 18 | 14 |
+
+#### Notes
+
+- A1: each masked base's θ is pilot.metrics.select_theta on its own val dump at T = 1 over all 48 columns (the val rule unchanged: a global θ on val micro-F1, a tag's own θ only with >= 10 val positives); the held-out tags have fewer val positives, so they use the global θ; the base's θ is applied unchanged to the base and to every continued run from it (pilot.fewshot.base_seed_of); nothing is chosen on test.
+- A3: one pilot.metrics.bootstrap_weights(n, B, seed) draw of test messages, shared by every model and draw; each replicate's statistic is the mean over draws of (Laya - BERTurk) new-tag macro-AP on the resampled messages; a replicate in which a held-out tag has no positive is undefined (AP is undefined there), counted in n_undefined and left out of the percentile interval; descriptive only, never gated.
+- Epoch parity, not step parity: every continued run trains the frozen number of epochs on the same support and replay rows, so BERTurk (batch 32) takes far fewer optimizer steps than Laya (one item per question).
+- Laya trains on neg8 items (pilot.fewshot.LAYA_ROWS_RULE) against BERTurk's full 48 labels per row, as in the main experiment.
+- A continued Laya run starts from the masked base checkpoint as saved (fp16-rounded weights, the same checkpoint that is scored as k = 0); BERTurk checkpoints are fp32.
+- AP is threshold-free and T-invariant: the primary metric uses raw T = 1 and no θ; only the secondary F1 numbers use the masked base's val θ.
+- The support-set and replay uid lists live in protocol.json only; this record names each draw by its digest.
+<!-- fewshot:end -->
+
 ## Results (Phase 3: baselines and zero-shot, full test split)
 
 Majority (the most frequent `final_train` tag), the label prior (each tag's `final_train`

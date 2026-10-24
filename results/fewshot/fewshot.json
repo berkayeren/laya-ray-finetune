@@ -1,0 +1,828 @@
+{
+  "ap": {
+    "berturk": {
+      "base": {
+        "s0": {
+          "macro": 0.05248600530608239,
+          "per_tag": {
+            "appointment": 0.02324955282344827,
+            "contactless": 0.08814216507704267,
+            "direct_debit": 0.029451620913519234,
+            "loan": 0.021361269062967633,
+            "overdraft": 0.04299628350837052,
+            "savings": 0.10971514045114603
+          }
+        },
+        "s1": {
+          "macro": 0.08162178502809879,
+          "per_tag": {
+            "appointment": 0.02059380348992858,
+            "contactless": 0.07580605245827768,
+            "direct_debit": 0.09090194886580648,
+            "loan": 0.02531425403618993,
+            "overdraft": 0.13173463749308248,
+            "savings": 0.14538001382530763
+          }
+        },
+        "s2": {
+          "macro": 0.05882831088046219,
+          "per_tag": {
+            "appointment": 0.031205100893994187,
+            "contactless": 0.02694628082747956,
+            "direct_debit": 0.04489362541151791,
+            "loan": 0.10437795053462053,
+            "overdraft": 0.04555814801395725,
+            "savings": 0.09998875960120372
+          }
+        }
+      },
+      "continued": {
+        "d0-k10": {
+          "macro": 0.10059615851199949,
+          "per_tag": {
+            "appointment": 0.051491296116905144,
+            "contactless": 0.09341396076662188,
+            "direct_debit": 0.061714112332885006,
+            "loan": 0.06339868626200244,
+            "overdraft": 0.17091875446026267,
+            "savings": 0.16264014113331976
+          }
+        },
+        "d0-k5": {
+          "macro": 0.08277006945393124,
+          "per_tag": {
+            "appointment": 0.02984554734367726,
+            "contactless": 0.08405477496720236,
+            "direct_debit": 0.05380858041221808,
+            "loan": 0.05987061759197845,
+            "overdraft": 0.12662652120782708,
+            "savings": 0.14241437520068423
+          }
+        },
+        "d1-k10": {
+          "macro": 0.15734133393286057,
+          "per_tag": {
+            "appointment": 0.03445197308942222,
+            "contactless": 0.10356503090387352,
+            "direct_debit": 0.24367738729833213,
+            "loan": 0.06799911845448922,
+            "overdraft": 0.1455223912780198,
+            "savings": 0.34883210257302655
+          }
+        },
+        "d1-k5": {
+          "macro": 0.11575994409142241,
+          "per_tag": {
+            "appointment": 0.025730187937124862,
+            "contactless": 0.0827242962568302,
+            "direct_debit": 0.17358292528900912,
+            "loan": 0.023308708861555144,
+            "overdraft": 0.14253260304615756,
+            "savings": 0.24668094315785757
+          }
+        },
+        "d2-k10": {
+          "macro": 0.10891276892831642,
+          "per_tag": {
+            "appointment": 0.03258658840298744,
+            "contactless": 0.09518099866801347,
+            "direct_debit": 0.10344128357142085,
+            "loan": 0.09464600860654548,
+            "overdraft": 0.10862232399226388,
+            "savings": 0.2189994103286674
+          }
+        },
+        "d2-k5": {
+          "macro": 0.10495384886864695,
+          "per_tag": {
+            "appointment": 0.030690616924867176,
+            "contactless": 0.07279672965513675,
+            "direct_debit": 0.06257957522660282,
+            "loan": 0.06420562218945668,
+            "overdraft": 0.1549747523698846,
+            "savings": 0.24447579684593368
+          }
+        }
+      }
+    },
+    "laya": {
+      "base": {
+        "s0": {
+          "macro": 0.24483477974985499,
+          "per_tag": {
+            "appointment": 0.732017982017982,
+            "contactless": 0.08675263538488398,
+            "direct_debit": 0.15310835113170518,
+            "loan": 0.1758952373435958,
+            "overdraft": 0.03217734239562753,
+            "savings": 0.2890571302253355
+          }
+        },
+        "s1": {
+          "macro": 0.29977136892569706,
+          "per_tag": {
+            "appointment": 0.4421493784871394,
+            "contactless": 0.0722258425018772,
+            "direct_debit": 0.5555170203182807,
+            "loan": 0.3213388923173613,
+            "overdraft": 0.025081185158385907,
+            "savings": 0.3823158947711378
+          }
+        },
+        "s2": {
+          "macro": 0.3339052715727486,
+          "per_tag": {
+            "appointment": 0.9210696710696711,
+            "contactless": 0.17414497615222843,
+            "direct_debit": 0.325543170715805,
+            "loan": 0.30697424830101416,
+            "overdraft": 0.0215589554158637,
+            "savings": 0.2541406077819091
+          }
+        }
+      },
+      "continued": {
+        "d0-k10": {
+          "macro": 0.7076605899569381,
+          "per_tag": {
+            "appointment": 0.9273504273504274,
+            "contactless": 0.9371614301191766,
+            "direct_debit": 0.8568061568061568,
+            "loan": 0.9129077029840388,
+            "overdraft": 0.3686614352232159,
+            "savings": 0.2430763872586138
+          }
+        },
+        "d0-k5": {
+          "macro": 0.7303504300297163,
+          "per_tag": {
+            "appointment": 1.0,
+            "contactless": 0.9945054945054945,
+            "direct_debit": 0.8674064122339984,
+            "loan": 0.8775709864441493,
+            "overdraft": 0.10336036310702373,
+            "savings": 0.5392593238876324
+          }
+        },
+        "d1-k10": {
+          "macro": 0.7806588321762741,
+          "per_tag": {
+            "appointment": 1.0,
+            "contactless": 0.9945054945054945,
+            "direct_debit": 0.7765651584299125,
+            "loan": 0.9059458218549128,
+            "overdraft": 0.13101692504003953,
+            "savings": 0.8759195932272856
+          }
+        },
+        "d1-k5": {
+          "macro": 0.6033109894731071,
+          "per_tag": {
+            "appointment": 0.6537797897109638,
+            "contactless": 1.0,
+            "direct_debit": 0.783483588963041,
+            "loan": 0.6100852272727273,
+            "overdraft": 0.11981621965648608,
+            "savings": 0.45270111123542484
+          }
+        },
+        "d2-k10": {
+          "macro": 0.8544859644240944,
+          "per_tag": {
+            "appointment": 1.0,
+            "contactless": 0.9897435897435898,
+            "direct_debit": 0.86385582010582,
+            "loan": 0.848109473109473,
+            "overdraft": 0.9647788109326572,
+            "savings": 0.4604280926530272
+          }
+        },
+        "d2-k5": {
+          "macro": 0.7624664171951218,
+          "per_tag": {
+            "appointment": 0.9897435897435898,
+            "contactless": 0.9774161735700198,
+            "direct_debit": 0.7188793126596524,
+            "loan": 0.6748254394221305,
+            "overdraft": 0.9388888888888889,
+            "savings": 0.2750450988864492
+          }
+        }
+      }
+    }
+  },
+  "bootstrap": {
+    "0": {
+      "B": 10000,
+      "ci": [
+        0.1701144638088898,
+        0.2993348009189148
+      ],
+      "delta": 0.2285251063445524,
+      "level": 0.95,
+      "method": "percentile (numpy linear interpolation)",
+      "n_undefined": 0,
+      "pairing": "A3: one pilot.metrics.bootstrap_weights(n, B, seed) draw of test messages, shared by every model and draw; each replicate's statistic is the mean over draws of (Laya - BERTurk) new-tag macro-AP on the resampled messages; a replicate in which a held-out tag has no positive is undefined (AP is undefined there), counted in n_undefined and left out of the percentile interval; descriptive only, never gated",
+      "seed": 0
+    },
+    "10": {
+      "B": 10000,
+      "ci": [
+        0.5868774798368221,
+        0.7024595880141645
+      ],
+      "delta": 0.6586517083947101,
+      "level": 0.95,
+      "method": "percentile (numpy linear interpolation)",
+      "n_undefined": 0,
+      "pairing": "A3: one pilot.metrics.bootstrap_weights(n, B, seed) draw of test messages, shared by every model and draw; each replicate's statistic is the mean over draws of (Laya - BERTurk) new-tag macro-AP on the resampled messages; a replicate in which a held-out tag has no positive is undefined (AP is undefined there), counted in n_undefined and left out of the percentile interval; descriptive only, never gated",
+      "seed": 0
+    },
+    "5": {
+      "B": 10000,
+      "ci": [
+        0.5246291882446356,
+        0.6636576672496218
+      ],
+      "delta": 0.5975479914279815,
+      "level": 0.95,
+      "method": "percentile (numpy linear interpolation)",
+      "n_undefined": 0,
+      "pairing": "A3: one pilot.metrics.bootstrap_weights(n, B, seed) draw of test messages, shared by every model and draw; each replicate's statistic is the mean over draws of (Laya - BERTurk) new-tag macro-AP on the resampled messages; a replicate in which a held-out tag has no positive is undefined (AP is undefined there), counted in n_undefined and left out of the percentile interval; descriptive only, never gated",
+      "seed": 0
+    }
+  },
+  "by_k": {
+    "0": {
+      "draws": [
+        0.1923487744437726,
+        0.21814958389759825,
+        0.2750769606922864
+      ],
+      "mean_delta": 0.2285251063445524,
+      "per_draw": [
+        {
+          "berturk": 0.05248600530608239,
+          "delta": 0.1923487744437726,
+          "draw": 0,
+          "laya": 0.24483477974985499
+        },
+        {
+          "berturk": 0.08162178502809879,
+          "delta": 0.21814958389759825,
+          "draw": 1,
+          "laya": 0.29977136892569706
+        },
+        {
+          "berturk": 0.05882831088046219,
+          "delta": 0.2750769606922864,
+          "draw": 2,
+          "laya": 0.3339052715727486
+        }
+      ]
+    },
+    "10": {
+      "draws": [
+        0.6070644314449387,
+        0.6233174982434135,
+        0.745573195495778
+      ],
+      "mean_delta": 0.6586517083947101,
+      "per_draw": [
+        {
+          "berturk": 0.10059615851199949,
+          "delta": 0.6070644314449387,
+          "draw": 0,
+          "laya": 0.7076605899569381
+        },
+        {
+          "berturk": 0.15734133393286057,
+          "delta": 0.6233174982434135,
+          "draw": 1,
+          "laya": 0.7806588321762741
+        },
+        {
+          "berturk": 0.10891276892831642,
+          "delta": 0.745573195495778,
+          "draw": 2,
+          "laya": 0.8544859644240944
+        }
+      ]
+    },
+    "5": {
+      "draws": [
+        0.647580360575785,
+        0.4875510453816847,
+        0.6575125683264749
+      ],
+      "mean_delta": 0.5975479914279815,
+      "per_draw": [
+        {
+          "berturk": 0.08277006945393124,
+          "delta": 0.647580360575785,
+          "draw": 0,
+          "laya": 0.7303504300297163
+        },
+        {
+          "berturk": 0.11575994409142241,
+          "delta": 0.4875510453816847,
+          "draw": 1,
+          "laya": 0.6033109894731071
+        },
+        {
+          "berturk": 0.10495384886864695,
+          "delta": 0.6575125683264749,
+          "draw": 2,
+          "laya": 0.7624664171951218
+        }
+      ]
+    }
+  },
+  "decision": {
+    "disclosure": null,
+    "mode": "primary",
+    "path": "results/fewshot/projection.json",
+    "sha256": "c203fafb7064a39f75747a9df087f9d75d0cbbb3fc9cdb05c447f0eb83ba1be8"
+  },
+  "draws": [
+    {
+      "base_seed": 0,
+      "base_seed_used": 0,
+      "digest": "d72d8aa2e2c03a9c93b33760733a4cb2357e28e1c87510d058376f8ff118d96e",
+      "draw": 0,
+      "seed": 0
+    },
+    {
+      "base_seed": 1,
+      "base_seed_used": 1,
+      "digest": "7ecc9ca984f6a169452c78ce010975d0931cfb93be8e21a38c482d5977c487cf",
+      "draw": 1,
+      "seed": 1
+    },
+    {
+      "base_seed": 2,
+      "base_seed_used": 2,
+      "digest": "847dc93d662877582f13d1a7f1d2657c114e887081a6bdbe5daf8e30d7d8ca2d",
+      "draw": 2,
+      "seed": 2
+    }
+  ],
+  "dumps": {
+    "berturk-0f0106f082cb-5c73dc92-29446b61": {
+      "test": "01fcea55461149cfea70e35e9fe8996fb5c25127987090f3c626547cf3270497",
+      "val": "2a2163fec993bc372e4926b9f5a7b32cc6e7b53d9f60474335fb9fe1382b5ec7"
+    },
+    "berturk-1a2bf2481d6d-1aad6aa2-29446b61": {
+      "test": "ca69b8ea69e4afef94a00a846842aba95cd7bd4e23bc6efddf1c57c33127c14d"
+    },
+    "berturk-5daafc1bca68-7904fd45-29446b61": {
+      "test": "dc9c4d8f1bccf2e36dea0857c95b2f98cd9df6094a2efa1d849690431ce5f0b9"
+    },
+    "berturk-6bde962ea237-9008e3ae-29446b61": {
+      "test": "22dd367304e2f1b4bf60bf21495cd129aeb01511e789e619ea7d97e9679e68d5",
+      "val": "33dd6a01dd76345cad1264a4b1f0cc1b94b7a0e5d72b16b6285c7295e8b20a50"
+    },
+    "berturk-71d421ecb7f5-31a49413-29446b61": {
+      "test": "fd95cda7db3b5f88eada5ceeed21bbd97eadaa225f622aa50f2901f66f0ff03b"
+    },
+    "berturk-7cff4c5bb745-dea43922-29446b61": {
+      "test": "c8fa1020b382dd8ce6b4a68977d4f15bdc8250d4ae7da00a09a97d8bc4d46603"
+    },
+    "berturk-8641ea63111a-d7103770-29446b61": {
+      "test": "a056a6ffff19760fd7aafd7623acdfd6a28d929763d3934ce7e6cd0ca0679af6",
+      "val": "436ced31988ba834a4bcb6dd5ee100bf02d5a414f79e6433e871a4df54674841"
+    },
+    "berturk-90a0634517f9-82021745-29446b61": {
+      "test": "81713a8745629fa4dd02e6f4c69ca6823e59578cee6b9ccac1c5b3b0901ffb3b"
+    },
+    "berturk-f9ca38743e22-8eb3a6a6-29446b61": {
+      "test": "93940bf93b547e749b3af1791ed61832874f8be2be3d303a60c88c609c5720ad"
+    },
+    "laya-1ec9b2167867-689cbace-530ef11d": {
+      "test": "744310749fe3bd8edc596c20fce7f78ef34cc3166ed641460ed8770469a3e4d8"
+    },
+    "laya-411877a18bf8-c60550a0-530ef11d": {
+      "test": "8c12949d10641de04c627a65b319eec8b23460b75944e47e296c832dabfea561"
+    },
+    "laya-4d979a818e53-50e7d540-cc216d59": {
+      "test": "c04b5add831e7aea6746377d1af028c0e3ef80efe066b8a1e61e1856526386f9",
+      "val": "c856490225875e9e18280fcb11209acb5e3d65c34be28b0fc349e8d52a391ab7"
+    },
+    "laya-56003b2fdc57-0a9f7150-530ef11d": {
+      "test": "5106baebebc8de38396226405094d23279cf3708c70bdaf0e2cf2fbf855cb641"
+    },
+    "laya-e9f9e812cb67-164dedfd-530ef11d": {
+      "test": "77bffb899e32fd11df98fde8f17068bd82a8f32f7177512881da57c1a7522adb"
+    },
+    "laya-eab4a9af9dba-7b1906d5-cc216d59": {
+      "test": "977efb6108424d67b510a338d213b29536aee3a82ee6680eae06e37021b1ae82",
+      "val": "d750650e87665ff18a3e5898b3b666becb548226daf2c0c410dfec3bf9eae2ad"
+    },
+    "laya-f2060daa69db-da39e037-530ef11d": {
+      "test": "ec3b65aeaa4d32c03c370ee031d1aa1d87e54689d83374df7071061e4f82c196"
+    },
+    "laya-f47de5224480-42318a08-530ef11d": {
+      "test": "19ba01f4696ac58529c8440a3c573ed4692390d6468ecdef3eaac418bc27add8"
+    },
+    "laya-f4c70bdcf781-00316ae2-cc216d59": {
+      "test": "a8fa77f601d87ba1ea021be8168fefce79c4d86da24359786a63e00e1b49be7e",
+      "val": "e1b5e8ae8f639665a29ba624a0b254eb5322718ba1407d857df282618c40f5c4"
+    }
+  },
+  "f1": {
+    "berturk": {
+      "base": {
+        "s0": {
+          "new": 0.015267175572519083,
+          "old": 0.7521367521367521
+        },
+        "s1": {
+          "new": 0.020833333333333332,
+          "old": 0.7504860661049902
+        },
+        "s2": {
+          "new": 0.06666666666666667,
+          "old": 0.7263294422827496
+        }
+      },
+      "continued": {
+        "d0-k10": {
+          "base_seed": 0,
+          "forgetting": 0.03127338611209585,
+          "new": 0.0,
+          "old": 0.783410138248848
+        },
+        "d0-k5": {
+          "base_seed": 0,
+          "forgetting": 0.02864007472302399,
+          "new": 0.0,
+          "old": 0.7807768268597761
+        },
+        "d1-k10": {
+          "base_seed": 1,
+          "forgetting": 0.018351737215571706,
+          "new": 0.0,
+          "old": 0.768837803320562
+        },
+        "d1-k5": {
+          "base_seed": 1,
+          "forgetting": 0.011909297706986566,
+          "new": 0.0,
+          "old": 0.7623953638119768
+        },
+        "d2-k10": {
+          "base_seed": 2,
+          "forgetting": 0.02495921751106478,
+          "new": 0.0,
+          "old": 0.7512886597938144
+        },
+        "d2-k5": {
+          "base_seed": 2,
+          "forgetting": 0.022546601390981857,
+          "new": 0.0,
+          "old": 0.7488760436737315
+        }
+      }
+    },
+    "laya": {
+      "base": {
+        "s0": {
+          "new": 0.26436781609195403,
+          "old": 0.8080593849416755
+        },
+        "s1": {
+          "new": 0.32142857142857145,
+          "old": 0.7917948717948718
+        },
+        "s2": {
+          "new": 0.3431952662721893,
+          "old": 0.7912423625254582
+        }
+      },
+      "continued": {
+        "d0-k10": {
+          "base_seed": 0,
+          "forgetting": 0.00580728172499112,
+          "new": 0.6906474820143885,
+          "old": 0.8138666666666666
+        },
+        "d0-k5": {
+          "base_seed": 0,
+          "forgetting": -0.03734255728534608,
+          "new": 0.6713286713286714,
+          "old": 0.7707168276563294
+        },
+        "d1-k10": {
+          "base_seed": 1,
+          "forgetting": 0.016919262105234423,
+          "new": 0.8163265306122449,
+          "old": 0.8087141339001063
+        },
+        "d1-k5": {
+          "base_seed": 1,
+          "forgetting": 0.008411101428609125,
+          "new": 0.5644171779141104,
+          "old": 0.800205973223481
+        },
+        "d2-k10": {
+          "base_seed": 2,
+          "forgetting": 0.014775907221989404,
+          "new": 0.7857142857142857,
+          "old": 0.8060182697474476
+        },
+        "d2-k5": {
+          "base_seed": 2,
+          "forgetting": -0.010829991391437588,
+          "new": 0.7080745341614907,
+          "old": 0.7804123711340206
+        }
+      }
+    }
+  },
+  "k_values": [
+    5,
+    10
+  ],
+  "notes": [
+    "epoch parity, not step parity: every continued run trains the frozen number of epochs on the same support and replay rows, so BERTurk (batch 32) takes far fewer optimizer steps than Laya (one item per question)",
+    "Laya trains on neg8 items (pilot.fewshot.LAYA_ROWS_RULE) against BERTurk's full 48 labels per row, as in the main experiment",
+    "a continued Laya run starts from the masked base checkpoint as saved (fp16-rounded weights, the same checkpoint that is scored as k = 0); BERTurk checkpoints are fp32",
+    "AP is threshold-free and T-invariant: the primary metric uses raw T = 1 and no θ; only the secondary F1 numbers use the masked base's val θ",
+    "the support-set and replay uid lists live in protocol.json only; this record names each draw by its digest"
+  ],
+  "positives": {
+    "d0": {
+      "10": {
+        "appointment": 17,
+        "contactless": 13,
+        "direct_debit": 16,
+        "loan": 16,
+        "overdraft": 14,
+        "savings": 14
+      },
+      "5": {
+        "appointment": 8,
+        "contactless": 8,
+        "direct_debit": 8,
+        "loan": 12,
+        "overdraft": 8,
+        "savings": 9
+      }
+    },
+    "d1": {
+      "10": {
+        "appointment": 15,
+        "contactless": 16,
+        "direct_debit": 13,
+        "loan": 12,
+        "overdraft": 15,
+        "savings": 17
+      },
+      "5": {
+        "appointment": 10,
+        "contactless": 10,
+        "direct_debit": 7,
+        "loan": 6,
+        "overdraft": 8,
+        "savings": 6
+      }
+    },
+    "d2": {
+      "10": {
+        "appointment": 16,
+        "contactless": 18,
+        "direct_debit": 14,
+        "loan": 17,
+        "overdraft": 22,
+        "savings": 16
+      },
+      "5": {
+        "appointment": 10,
+        "contactless": 10,
+        "direct_debit": 5,
+        "loan": 10,
+        "overdraft": 11,
+        "savings": 11
+      }
+    }
+  },
+  "primary": {
+    "draws": [
+      0.6070644314449387,
+      0.6233174982434135,
+      0.745573195495778
+    ],
+    "k": 10,
+    "mean_delta": 0.6586517083947101,
+    "metric": "new_tag_macro_ap",
+    "per_draw": [
+      {
+        "berturk": 0.10059615851199949,
+        "delta": 0.6070644314449387,
+        "draw": 0,
+        "laya": 0.7076605899569381
+      },
+      {
+        "berturk": 0.15734133393286057,
+        "delta": 0.6233174982434135,
+        "draw": 1,
+        "laya": 0.7806588321762741
+      },
+      {
+        "berturk": 0.10891276892831642,
+        "delta": 0.745573195495778,
+        "draw": 2,
+        "laya": 0.8544859644240944
+      }
+    ]
+  },
+  "protocol_sha256": "0d337d2019f9fcb1874fa0eb23f5f2547312e1675c832f886449d573cef54a8a",
+  "rules": {
+    "ap": "average precision of one tag: AP = sum over the distinct score thresholds, in decreasing order, of (R_n - R_(n-1)) * P_n, with P_n and R_n the precision and recall of the messages scoring at or above the n-th threshold; tied scores form one threshold; not interpolated (sklearn average_precision_score); a tag with no positive is refused; T-invariant (a monotone transform of the logits keeps the ranking)",
+    "bootstrap": "A3: one pilot.metrics.bootstrap_weights(n, B, seed) draw of test messages, shared by every model and draw; each replicate's statistic is the mean over draws of (Laya - BERTurk) new-tag macro-AP on the resampled messages; a replicate in which a held-out tag has no positive is undefined (AP is undefined there), counted in n_undefined and left out of the percentile interval; descriptive only, never gated",
+    "laya_rows": "a continued run's Laya rows: one random.Random(neg seed) pass over the support and replay rows in selection_train file order (neg seed = training seed = draw seed); per row the old-tag positives, then rng.sample(sorted old-tag negatives, min(neg, n)) (pilot.spike.neg8_rows's shape), then, for a support row only, every label of the held-out tags (positive or negative); a replay row keeps no held-out key",
+    "primary": "per new tag, average precision on test by pilot.metrics.AP_RULE on P = sigmoid(logit) (T-invariant: raw T = 1); macro-AP = mean over the six tags; the aggregate is the mean over the three draws; criterion (d) reads the mean over draws of (Laya - BERTurk) macro-AP at k = 10; k = 5 is reported",
+    "theta": "A1: each masked base's θ is pilot.metrics.select_theta on its own val dump at T = 1 over all 48 columns (the val rule unchanged: a global θ on val micro-F1, a tag's own θ only with >= 10 val positives); the held-out tags have fewer val positives, so they use the global θ; the base's θ is applied unchanged to the base and to every continued run from it (pilot.fewshot.base_seed_of); nothing is chosen on test",
+    "wall": "incremental wall clock of a run, from its own run record (A7): Laya: the sum over its epochs of train_s and save_s, plus load_s and final_save_s; BERTurk: the sum over its epochs of train_s, plus load_s; reported, not gated"
+  },
+  "runs": {
+    "path": "results/fewshot/runs.json",
+    "sha256": "4eefd4d939ea56ddd0bca1336768367ff893fded937e099c5446911366ad76f6"
+  },
+  "schema": "fewshot-results/1",
+  "split": {
+    "test": {
+      "n": 413,
+      "positives": {
+        "appointment": 13,
+        "contactless": 13,
+        "direct_debit": 12,
+        "loan": 11,
+        "overdraft": 13,
+        "savings": 13
+      },
+      "sha256": "3abfb1836033c2d9af94ab17dcb386114bb6bf7a0a002b513514160ca37ed171",
+      "uids_sha256": "f0fc53ccb638cda616177cdb5f0580a6545fa6bf9a6686773437dbfa80d0439f"
+    },
+    "val": {
+      "n": 208,
+      "positives": {
+        "appointment": 6,
+        "contactless": 9,
+        "direct_debit": 5,
+        "loan": 6,
+        "overdraft": 7,
+        "savings": 6
+      },
+      "sha256": "95f5cfe5ae5921a5d9a28c285efbcbce5d6bf63c081e7f05bf8d4d2df36ad5bc",
+      "uids_sha256": "6b68eac2f153290bfc25a84aaf6fc2cef2b7bbcc9a95c44691734aa76b457f89"
+    }
+  },
+  "tags": [
+    "savings",
+    "loan",
+    "overdraft",
+    "appointment",
+    "contactless",
+    "direct_debit"
+  ],
+  "theta": {
+    "berturk": {
+      "s0": {
+        "global": 0.69,
+        "n_per_tag": 13,
+        "per_tag": {
+          "account": 0.24,
+          "affirm": 0.5,
+          "cancel_close_leave_freeze": 0.49,
+          "card": 0.5,
+          "change": 0.5,
+          "current": 0.15,
+          "deny": 0.22,
+          "how_much": 0.14,
+          "make_open_apply_setup_get_activate": 0.33,
+          "more_higher_after": 0.45,
+          "request_info": 0.22,
+          "transfer_payment_deposit": 0.45,
+          "wrong_notworking_notshowing": 0.27
+        }
+      },
+      "s1": {
+        "global": 0.66,
+        "n_per_tag": 13,
+        "per_tag": {
+          "account": 0.44,
+          "affirm": 0.23,
+          "cancel_close_leave_freeze": 0.57,
+          "card": 0.48,
+          "change": 0.27,
+          "current": 0.13,
+          "deny": 0.27,
+          "how_much": 0.12,
+          "make_open_apply_setup_get_activate": 0.21,
+          "more_higher_after": 0.5,
+          "request_info": 0.22,
+          "transfer_payment_deposit": 0.61,
+          "wrong_notworking_notshowing": 0.3
+        }
+      },
+      "s2": {
+        "global": 0.72,
+        "n_per_tag": 13,
+        "per_tag": {
+          "account": 0.37,
+          "affirm": 0.22,
+          "cancel_close_leave_freeze": 0.5,
+          "card": 0.5,
+          "change": 0.18,
+          "current": 0.06,
+          "deny": 0.3,
+          "how_much": 0.18,
+          "make_open_apply_setup_get_activate": 0.2,
+          "more_higher_after": 0.48,
+          "request_info": 0.27,
+          "transfer_payment_deposit": 0.29,
+          "wrong_notworking_notshowing": 0.25
+        }
+      }
+    },
+    "laya": {
+      "s0": {
+        "global": 0.58,
+        "n_per_tag": 13,
+        "per_tag": {
+          "account": 0.5,
+          "affirm": 0.84,
+          "cancel_close_leave_freeze": 0.5,
+          "card": 0.5,
+          "change": 0.5,
+          "current": 0.5,
+          "deny": 0.58,
+          "how_much": 0.5,
+          "make_open_apply_setup_get_activate": 0.5,
+          "more_higher_after": 0.5,
+          "request_info": 0.5,
+          "transfer_payment_deposit": 0.5,
+          "wrong_notworking_notshowing": 0.5
+        }
+      },
+      "s1": {
+        "global": 0.5,
+        "n_per_tag": 13,
+        "per_tag": {
+          "account": 0.5,
+          "affirm": 0.5,
+          "cancel_close_leave_freeze": 0.5,
+          "card": 0.5,
+          "change": 0.5,
+          "current": 0.5,
+          "deny": 0.5,
+          "how_much": 0.5,
+          "make_open_apply_setup_get_activate": 0.5,
+          "more_higher_after": 0.5,
+          "request_info": 0.5,
+          "transfer_payment_deposit": 0.5,
+          "wrong_notworking_notshowing": 0.5
+        }
+      },
+      "s2": {
+        "global": 0.93,
+        "n_per_tag": 13,
+        "per_tag": {
+          "account": 0.5,
+          "affirm": 0.5,
+          "cancel_close_leave_freeze": 0.5,
+          "card": 0.5,
+          "change": 0.5,
+          "current": 0.5,
+          "deny": 0.5,
+          "how_much": 0.5,
+          "make_open_apply_setup_get_activate": 0.5,
+          "more_higher_after": 0.5,
+          "request_info": 0.5,
+          "transfer_payment_deposit": 0.5,
+          "wrong_notworking_notshowing": 0.5
+        }
+      }
+    }
+  },
+  "wall_clock_s": {
+    "berturk": {
+      "d0-k10": 61.4551095131319,
+      "d0-k5": 45.770628235535696,
+      "d1-k10": 60.456271721748635,
+      "d1-k5": 44.15136803628411,
+      "d2-k10": 62.33975639939308,
+      "d2-k5": 45.66024565312546
+    },
+    "laya": {
+      "d0-k10": 3765.1206743750954,
+      "d0-k5": 2548.418031166075,
+      "d1-k10": 3692.308851123089,
+      "d1-k5": 2500.421930251061,
+      "d2-k10": 3873.0079135829583,
+      "d2-k5": 2586.7789397900924
+    }
+  },
+  "wall_rule": "incremental wall clock of a run, from its own run record (A7): Laya: the sum over its epochs of train_s and save_s, plus load_s and final_save_s; BERTurk: the sum over its epochs of train_s, plus load_s; reported, not gated"
+}

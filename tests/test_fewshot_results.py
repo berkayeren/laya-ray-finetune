@@ -1,7 +1,7 @@
 """The committed Phase 9 few-shot records (FEW-02 and later): bindings, byte rebuilds and the rules they apply.
 
-This file grows through Phase 9: 09-04 adds the D-08 compute projection and decision record, 09-11 to 09-13 add the
-runs manifest, the few-shot result record and the README block.
+This file grows through Phase 9: 09-04 adds the D-08 compute projection and decision record, 09-11 the runs manifest
+and the once-only scoring, 09-12 the few-shot result record and the README block.
 
 09-04 (D-08, ROADMAP Phase 9 criterion 1):
 - results/fewshot/projection.json (fewshot-projection/1) is tracked, bound to the frozen protocol's sha256 and to the
@@ -38,6 +38,20 @@ runs manifest, the few-shot result record and the README block.
   base's val sidecar neither (its ungated θ source, D-05).
 - git order (D-09, T-09-35): runs.json has exactly one commit M, M descends from the protocol.json commit, and every
   tracked few-shot test dump file was added in a commit C != M with M an ancestor of C (skipped in a shallow clone).
+
+09-12 (D-12, ROADMAP Phase 9 criteria 1, 3, 4):
+- results/fewshot/fewshot.json (fewshot-results/1) is tracked and bound: protocol_sha256 the pin, the runs manifest
+  and the D-08 decision record by path and sha256, its mode the decision record's (the disclosure present iff
+  fallback), every runs.json entry's dumps by the dump_sha256 of their sidecars; its primary block is at criteria
+  (d)'s fewshot k, each per-draw delta is laya - berturk, mean_delta == float(np.mean(draws)) in float64; by_k holds
+  k = 0 and every frozen k, the bootstrap block the protocol's B, seed and level, forgetting = old-tag F1 minus the
+  base's; its bytes hold no bank_ or hotel_ uid and no local path, written as pilot.fewshot_report.record_bytes.
+- README.md's Phase 9 section follows the Phase 8 section and holds exactly one block between <!-- fewshot:start -->
+  and <!-- fewshot:end -->, equal to `python fewshot.py --render results/fewshot/fewshot.json`; its prose (heading to
+  the first marker) states what was masked and how it was proven, the identical support sets, epoch parity, the
+  once-only scoring behind the allow-list, how to read the primary metric and forgetting, the record's compute mode
+  and how the GO block uses the record, and holds no metric value (test_final_results.PROSE_NUMBER_RE).
+- data-marked: pilot.fewshot_report.build_record rebuilds the committed record byte for byte from the dumps.
 Offline except the `data` tests.
 """
 import json
@@ -485,3 +499,150 @@ def test_fewshot_dumps_descend_from_the_runs_manifest():
                            capture_output=True)
         assert r.returncode == 0, "%s was added in %s, which does not descend from the runs manifest %s" % (
             path, added[0], manifest[0])
+
+
+# ---- 09-12: the few-shot results record and the README Phase 9 section (D-12, ROADMAP criteria 1, 3, 4) ----
+
+RECORD = os.path.join(REPO_ROOT, "results", "fewshot", "fewshot.json")
+DECISION = os.path.join(REPO_ROOT, "results", "fewshot", "projection.json")
+README = os.path.join(REPO_ROOT, "README.md")
+PHASE9_HEADING = "## Few-shot new-intent experiment (Phase 9)"
+FEWSHOT_START, FEWSHOT_END = "<!-- fewshot:start -->", "<!-- fewshot:end -->"
+FINAL_CONF_END = "<!-- final-confidence:end -->"
+RENDER_LINE = "Regenerate with `python fewshot.py --render results/fewshot/fewshot.json`."
+PHASE9_PROSE = ("protocol.json", "unchanged", "no number of its own", "masked", "deleted", "before negative sampling",
+                "masked label", "Every message was kept", "runs manifest", "identical frozen support sets", "replay",
+                "k = 5 and k = 10", "epoch parity, not step parity", "allow-list", "scored once", "protocol gate",
+                "refuses a rerun", "make fewshot-reports", "average precision at k = 10", "mean over the draws",
+                "Forgetting", "old-tag micro-F1", "val θ", "never on test", "descriptive", "Compute fallback",
+                "Criterion (d)'s few-shot path in the GO block reads this record")
+FALLBACK_PROSE = {"primary": "The compute fallback was not used: the decision record reads mode primary",
+                  "fallback": "The compute fallback was used: the decision record reads mode fallback"}
+
+
+def committed_record():
+    """(record, its sha256, its bytes) of the tracked results/fewshot/fewshot.json."""
+    assert git("ls-files", "--", "results/fewshot/fewshot.json").strip() == "results/fewshot/fewshot.json", \
+        "results/fewshot/fewshot.json is not tracked"
+    raw = read_bytes(RECORD)
+    return json.loads(raw.decode("utf-8")), sha256_bytes(raw), raw
+
+
+def test_fewshot_record_binds_the_protocol_and_runs():
+    import numpy as np
+    from pilot import fewshot_report as fr
+    proto, pin = frozen()
+    rec, _, raw = committed_record()
+    assert rec["schema"] == fr.RESULTS_SCHEMA == "fewshot-results/1"
+    assert rec["protocol_sha256"] == pin == pr.PROTOCOL_SHA256
+    runs, runs_sha, _ = committed_runs()
+    assert rec["runs"] == {"path": "results/fewshot/runs.json", "sha256": runs_sha}
+    assert rec["decision"]["path"] == "results/fewshot/projection.json"
+    assert rec["decision"]["sha256"] == sha256_bytes(read_bytes(DECISION)) == runs["decision"]["sha256"]
+    mode = fs.read_mode(pin)
+    assert rec["decision"]["mode"] == mode == runs["mode"]
+    disclosure = proto["fewshot"]["rules"]["compute_fallback"]["disclosure"]
+    assert rec["decision"]["disclosure"] == (disclosure if mode == "fallback" else None)
+    dump_root = os.path.join(REPO_ROOT, "results", "dumps")
+    want = {}
+    for e in runs["entries"]:
+        for split in (("val", "test") if e["stage"] == "base" else ("test",)):
+            side = load_json(os.path.join(dump_root, e["dump_run_id"], "%s.json" % split))
+            want.setdefault(e["dump_run_id"], {})[split] = side["dump_sha256"]
+    assert rec["dumps"] == want
+    p = rec["primary"]
+    k = [q for q in proto["criteria"]["d"]["paths"] if q["path"] == "fewshot"][0]["k"]
+    assert p["k"] == k == proto["fewshot"]["rules"]["primary_metric"]["k"] and p["metric"] == "new_tag_macro_ap"
+    assert [d["draw"] for d in p["per_draw"]] == list(range(len(proto["fewshot"]["draws"])))
+    for d in p["per_draw"]:
+        assert d["delta"] == d["laya"] - d["berturk"], d
+    assert p["draws"] == [d["delta"] for d in p["per_draw"]]
+    assert p["mean_delta"] == float(np.mean(np.asarray(p["draws"], dtype=np.float64)))
+    assert {key: rec["by_k"][str(k)][key] for key in ("per_draw", "draws", "mean_delta")} == \
+        {key: p[key] for key in ("per_draw", "draws", "mean_delta")}
+    assert sorted(rec["by_k"], key=int) == ["0"] + [str(v) for v in sorted(proto["fewshot"]["k_values"])]
+    assert sorted(rec["bootstrap"], key=int) == sorted(rec["by_k"], key=int)
+    for key, b in rec["bootstrap"].items():
+        assert b["delta"] == rec["by_k"][key]["mean_delta"], key
+        assert (b["B"], b["seed"], b["level"]) == (proto["bootstrap"]["B"], proto["bootstrap"]["seed"],
+                                                   proto["bootstrap"]["level"]), key
+    for kind in fs.KINDS:
+        assert set(rec["f1"][kind]["continued"]) == set(rec["wall_clock_s"][kind]), kind
+        for key, row in rec["f1"][kind]["continued"].items():
+            base = rec["f1"][kind]["base"]["s%d" % row["base_seed"]]
+            assert row["forgetting"] == row["old"] - base["old"], (kind, key)
+    assert rec["tags"] == list(proto["fewshot"]["tags"]) and rec["k_values"] == list(proto["fewshot"]["k_values"])
+    assert [d["digest"] for d in rec["draws"]] == [d["digest"] for d in proto["fewshot"]["draws"]]
+    text = raw.decode("utf-8")
+    assert "bank_" not in text and "hotel_" not in text
+    assert os.path.expanduser("~") not in text and REPO_ROOT not in text
+    assert raw == fr.record_bytes(rec)
+
+
+def load_json(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def readme_text():
+    with open(README, encoding="utf-8") as f:
+        return f.read()
+
+
+def phase9_section(text):
+    assert text.count(PHASE9_HEADING) == 1, "README.md has no single Phase 9 section"
+    i = text.index(PHASE9_HEADING)
+    j = text.find("\n## ", i + len(PHASE9_HEADING))
+    return i, (len(text) if j < 0 else j)
+
+
+def test_readme_fewshot_block_matches_render(capsys):
+    text = readme_text()
+    assert text.count(FEWSHOT_START) == 1 and text.count(FEWSHOT_END) == 1, "README.md must hold one fewshot block"
+    i, j = text.index(FEWSHOT_START), text.index(FEWSHOT_END)
+    lo, hi = phase9_section(text)
+    assert text.index(FINAL_CONF_END) < lo < i < j < hi, "the fewshot block must sit in the Phase 9 section, after " \
+        "the Phase 8 section"
+    assert text.index(RENDER_LINE) < i and text.index(RENDER_LINE) > lo
+    capsys.readouterr()
+    rendered = runner.main(["--render", RECORD])
+    assert capsys.readouterr().out.strip() == rendered.strip()
+    assert text[i + len(FEWSHOT_START):j].strip() == rendered.strip(), (
+        "the README fewshot block differs from `python fewshot.py --render results/fewshot/fewshot.json`; "
+        "regenerate it")
+
+
+def phase9_prose(text=None):
+    """The README's Phase 9 prose: from the section heading to the first generated block's marker after it."""
+    text = readme_text() if text is None else text
+    lo, hi = phase9_section(text)
+    j = text.find("<!--", lo)
+    assert lo < j < hi, "the Phase 9 section holds no generated block"
+    return " ".join(text[lo:j].split())
+
+
+def test_readme_phase9_prose():
+    """The prose states what was masked and how it was proven, the identical support sets and replay, the epoch
+    parity, the once-only scoring behind the committed allow-list, how to read the primary metric and forgetting, the
+    record's compute mode and how the GO block uses the record, and holds no metric value of its own."""
+    from test_final_results import PROSE_NUMBER_RE
+    prose = phase9_prose()
+    for want in PHASE9_PROSE:
+        assert want in prose, "the README Phase 9 prose must state %r before its generated block" % want
+    rec, _, _ = committed_record()
+    mode = rec["decision"]["mode"]
+    assert FALLBACK_PROSE[mode] in prose, "the Phase 9 prose must say %r (the record's mode)" % FALLBACK_PROSE[mode]
+    other = [m for m in FALLBACK_PROSE if m != mode]
+    assert all(FALLBACK_PROSE[m] not in prose for m in other)
+    if mode == "fallback":
+        assert rec["decision"]["disclosure"] in prose
+    hits = [m.group(0) for m in PROSE_NUMBER_RE.finditer(prose)]
+    assert hits == [], "the README Phase 9 prose holds metric values %r; numbers belong in a generated block" % hits
+
+
+@pytest.mark.data
+def test_fewshot_record_rebuilds():
+    from pilot import fewshot_report as fr
+    proto, pin = frozen()
+    _, _, raw = committed_record()
+    assert fr.record_bytes(fr.build_record(proto, pin)) == raw, "results/fewshot/fewshot.json does not rebuild"
