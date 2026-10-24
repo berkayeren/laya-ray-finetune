@@ -452,6 +452,41 @@ def test_eval_only_fails_naming_a_rebuilt_file_that_differs(repo, tmp_path):
     _rebuild_case(nogit, False)
 
 
+def test_report_step_after_steps_compares_with_git_head(repo):
+    """WR-02: with the precheck off (full mode after steps ran), a committed file already dirty fails even when the
+    rebuild leaves it alone, and the last line never claims a clean git status; a deleted committed file the rebuild
+    restores to HEAD's bytes passes; an untracked output must keep its bytes, and a file the rebuild creates fails."""
+    x = os.path.join(repo, "results", "x.json")
+    with open(x, "rb") as f:
+        committed = f.read()
+
+    def step(write):
+        run, calls = fake_run(write)
+        lines = []
+        rp.report_step(repo, run=run, blocks=no_blocks, precheck=False, out=lines.append)
+        assert calls == list(rp.REBUILD)
+        return lines[-1]
+    with open(x, "ab") as f:                              # (a) dirty before the rebuild, untouched by it
+        f.write(b" ")
+    msg = _stop(lambda: step(None))
+    assert msg.startswith("eval-only rebuilt 1 file(s) that differ from the committed ones: results/x.json;"), msg
+    assert "git status clean" not in msg
+    os.remove(x)                                          # (b) deleted, rebuilt to HEAD's bytes
+    last = step({"results/x.json": committed})
+    assert last.startswith("eval-only done: ") and "git status clean" in last, last
+    assert rp.tree_changes(repo) == []
+    new = os.path.join(repo, "results", "new.json")       # (c) an untracked output, rewritten identically
+    with open(new, "wb") as f:
+        f.write(b"{}\n")
+    last = step({"results/new.json": b"{}\n"})
+    assert "git status clean" not in last and "only 1 untracked file(s)" in last, last
+    msg = _stop(lambda: step({"results/new.json": b"[]\n"}))     # rewritten with other bytes
+    assert msg.startswith("eval-only rebuilt 1 file(s) that differ from the committed ones: results/new.json;"), msg
+    os.remove(new)
+    msg = _stop(lambda: step({"results/made.json": b"{}\n"}))    # (d) a file the rebuild creates
+    assert msg.startswith("eval-only rebuilt 1 file(s) that differ from the committed ones: results/made.json;"), msg
+
+
 def test_eval_only_names_the_step_of_a_missing_artifact(tree):
     import json
     import shutil
@@ -1115,6 +1150,23 @@ def test_gated_step_never_reruns_without_its_training(registry):
     assert msg.startswith("g has no committed gated dumps while the steps that train its checkpoints are done"), msg
     assert "exactly-once" in msg and "never rescored" in msg and "git checkout -- results/dumps/" in msg
     assert r.events == []                                 # refused before any command, any output and the report
+
+
+def test_full_mode_refuses_a_dirty_committed_file_before_any_command(registry):
+    """WR-02: a committed file under the checked paths that already differs from git HEAD (and is no todo step's
+    evidence) is refused before any command, naming it."""
+    root, committed, _ = registry
+    (open(os.path.join(root, "results", "z.txt"), "wb")).close()
+    git_in(root, "add", "results/z.txt")
+    git_in(root, "commit", "-q", "-m", "z")
+    _delete(root, "a", "b", "g")
+    with open(os.path.join(root, "results", "z.txt"), "wb") as f:
+        f.write(b"edited\n")
+    r = Recorder(committed)
+    msg = _stop(lambda: r.full(root))
+    assert msg.startswith("full mode compares every output with git HEAD, but these committed files already differ "
+                          "from it: results/z.txt;"), msg
+    assert r.events == []
 
 
 def test_full_mode_resolves_the_run_id_before_the_exports(registry):
