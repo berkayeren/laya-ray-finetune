@@ -216,3 +216,91 @@ def test_recommendation_refuses_a_go_render_that_disagrees(monkeypatch):
     with pytest.raises(SystemExit, match="statuses"):
         memo.render_recommendation(edited, VERDICT_REL, sha, f)
     assert memo.render_recommendation(v, VERDICT_REL, sha, f) == want
+
+
+# ---- Task 3: the README "## Recommendation (Phase 10)" section (number-free prose, every D-08 caveat, the block) ----
+
+PHASE10_HEADING = "## Recommendation (Phase 10)"
+PHASE10_PROSE = ("mechanical", "frozen", "INCONCLUSIVE", "NO-GO", "collect bank data", "audit", "override")
+REC_START, REC_END = "<!-- recommendation:start -->", "<!-- recommendation:end -->"
+FEWSHOT_END = "<!-- fewshot:end -->"
+PHASE3_HEADING = "## Results (Phase 3: baselines and zero-shot, full test split)"
+REGEN_LINE = ("Regenerate with `python report.py --recommendation results/final/verdict.json` (a test fails if it "
+              "differs).")
+POINTER = "(#recommendation-phase-10)"
+
+
+def readme_text():
+    with open(README, encoding="utf-8") as f:
+        return f.read()
+
+
+def phase10_section(text):
+    """(start, end) offsets of the README's Recommendation section: its heading to the next "\\n## "."""
+    assert text.count("\n" + PHASE10_HEADING + "\n") == 1, "README.md has no single %r section" % PHASE10_HEADING
+    i = text.index("\n" + PHASE10_HEADING + "\n") + 1
+    j = text.find("\n## ", i + len(PHASE10_HEADING))
+    return i, (len(text) if j < 0 else j)
+
+
+def test_caveats_cover_every_key_without_numbers():
+    assert len(memo.CAVEATS) == 8 and len(set(memo.CAVEATS)) == 8
+    for key in memo.CAVEAT_KEYS:
+        assert any(key in c for c in memo.CAVEATS), "no pilot.memo.CAVEATS bullet states %r" % key
+        assert not memo.NUMBER_RE.search(key), key
+    for c in memo.CAVEATS:
+        hits = [m.group(0) for m in memo.NUMBER_RE.finditer(c)]
+        assert hits == [], "the caveat %r holds numbers %r; numbers come from the records" % (c, hits)
+    for planted in ("k = 10", "+65.87", "DEC-01", "n = 413", "0.707", "-1.72 points"):
+        assert memo.NUMBER_RE.search(planted), planted
+    for clean in ("fp16", "neg8", "v2", "fp32", "Multi3NLU++", "Apple M4", "micro-F1", "θ", "rule_4"):
+        assert not memo.NUMBER_RE.search(clean), clean
+
+
+def test_readme_recommendation_block_matches_render(capsys):
+    text = readme_text()
+    lo, hi = phase10_section(text)
+    assert text.index(FEWSHOT_END) < lo, "the Recommendation section must follow the Phase 9 section"
+    assert text.count(PHASE3_HEADING) == 1 and text[hi:].startswith("\n" + PHASE3_HEADING), (
+        "the Recommendation section must sit right before %r" % PHASE3_HEADING)
+    assert text.count(REC_START) == 1 and text.count(REC_END) == 1, "README.md must hold exactly one %s pair" % REC_START
+    i, j = text.index(REC_START), text.index(REC_END)
+    assert lo < i < j < hi, "the recommendation block must sit inside the Recommendation section"
+    assert text.count(REGEN_LINE) == 1 and lo < text.index(REGEN_LINE) < i
+    capsys.readouterr()
+    got = report.main(["--recommendation", VERDICT])
+    assert capsys.readouterr().out == got
+    assert got == rendered()[0]
+    assert text[i + len(REC_START):j] == "\n" + got, (
+        "the README recommendation block differs from `python report.py --recommendation results/final/verdict.json`; "
+        "regenerate it")
+
+
+def test_readme_phase10_prose():
+    """The prose (heading to the first generated block) states the recommendation is the frozen protocol's mechanical
+    verdict, INCONCLUSIVE counts as NO-GO and means collect bank data, humans can audit and override it, and every
+    D-08 caveat keyword; it holds no metric value of its own (PROSE_NUMBER_RE)."""
+    from test_final_results import PROSE_NUMBER_RE
+    text = readme_text()
+    lo, hi = phase10_section(text)
+    k = text.find("<!--", lo)
+    assert lo < k < hi, "the Recommendation section holds no generated block"
+    prose = " ".join(text[lo:k].split())
+    for want in PHASE10_PROSE + memo.CAVEAT_KEYS:
+        assert want in prose, "the README Recommendation prose must state %r before its generated block" % want
+    for want in ("protocol.json", "results/final/verdict.json", "results/fewshot/fewshot.json", "results/dumps/"):
+        assert want in prose, "the README Recommendation prose must name the record %r" % want
+    hits = [m.group(0) for m in PROSE_NUMBER_RE.finditer(prose)]
+    assert hits == [], "the README Recommendation prose holds metric values %r; numbers belong in the block" % hits
+
+
+def test_readme_points_to_the_recommendation():
+    from test_final_results import PROSE_NUMBER_RE
+    text = readme_text()
+    intro = text[:text.index("\n## ")]
+    lines = [l for l in intro.split("\n") if POINTER in l]
+    assert len(lines) == 1, "the README intro must hold exactly one line linking to %s" % POINTER
+    first_paragraph_end = intro.index("\n\n", intro.index("\n\n") + 2)
+    assert intro.index(lines[0]) > first_paragraph_end, "the pointer line must follow the intro's first paragraph"
+    assert not PROSE_NUMBER_RE.search(lines[0]) and "Recommendation" in lines[0]
+    assert text.count(POINTER) == 1
