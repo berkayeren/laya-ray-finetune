@@ -15,6 +15,7 @@
 #   make final-reports  rebuild results/final/ (per-seed reports, verdict with the few-shot record, confidence records) from the committed dumps (no model)
 #   make fewshot-scoring  score every few-shot checkpoint of results/fewshot/runs.json once (bases on val and test, continued models on test) behind the protocol gate (model, about 30 min on the M4; never rerun: the gate refuses an existing dump)
 #   make fewshot-reports  rebuild results/fewshot/fewshot.json from the committed few-shot dumps (no model)
+#   make memo  write results/final/memo.md, the one-page decision memo, from the committed records (no model)
 PYTHON ?= python
 UV ?= uv
 PY312 ?= python3.12
@@ -36,7 +37,7 @@ FINAL := results/final
 FEWSHOT := results/fewshot
 FEWSHOT_ROOT ?= .
 
-.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports fewshot-scoring fewshot-reports
+.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports fewshot-scoring fewshot-reports memo
 
 env:
 	$(PY312) -m venv $(VENV)
@@ -169,6 +170,9 @@ fewshot-scoring:
 
 fewshot-reports:
 	$(PYTHON) fewshot.py --report --out $(FEWSHOT)/fewshot.json
+
+memo:
+	$(PYTHON) report.py --memo $(FINAL)/verdict.json --out $(FINAL)/memo.md > /dev/null
 
 clean-data:
 	rm -rf data/splits data/audit

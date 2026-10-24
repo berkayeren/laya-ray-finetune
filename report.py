@@ -145,6 +145,12 @@ README recommendation block): the same bytes are hashed and parsed, then pilot.p
 pilot.verdict.check_record run before the render, as for --go-block. The recommendation is pilot.memo.RECOMMENDATION of
 the verdict field (INCONCLUSIVE -> NO-GO; collect bank data), never a judgement; a provisional verdict or one whose
 few-shot path of (d) is PENDING is refused.
+--memo VERDICT_JSON (Phase 10, REP-05, D-09, D-10) prints pilot.memo.render_memo of a saved final record, the one-page
+decision memo `make memo` writes to results/final/memo.md, after require_frozen and check_record as for --go-block.
+memo_inputs(v) follows the verdict's own bindings: the few-shot record at the verdict's fewshot.record path, refused
+unless its sha256 is the one the verdict binds, the final confidence records of results/final/confidence (rendered as
+--confidence-table renders them) and the latency reports of results/latency (pilot.latency.render_markdown). Every
+line of the memo that holds a number is a whole line of one of those renders, of render_go or of render_final_table.
 The Phase 3 results table (--table) and COMPARE_THETA_RULE stay as they are: the committed comparison reports embed
 them and rebuild byte for byte; the frozen seed-averaged θ rule lives in protocol.json.
 
@@ -160,6 +166,7 @@ usage: python report.py results/dumps/RUN_ID [--split val|test] [--out report.js
        python report.py --final-table results/final/verdict.json [--out table.md]
        python report.py --go-block results/final/verdict.json [--out go.md]
        python report.py --recommendation results/final/verdict.json [--out rec.md]
+       python report.py --memo results/final/verdict.json [--out results/final/memo.md]      # or: make memo
 """
 import argparse
 import json
@@ -167,6 +174,7 @@ import os
 
 import pilot.fewshot                                        # numpy-free: read_runs (the few-shot runs manifest)
 import pilot.fewshot_report                                 # numpy only: read_record, primary (09-08)
+import pilot.latency                                        # torch-free: load_reports, render_markdown (the memo)
 import pilot.memo                                           # stdlib, pilot.verdict and pilot.data: REP-04's render
 import pilot.protocol                                       # stdlib only at import: require_frozen, prior_floors
 import pilot.verdict
@@ -1458,6 +1466,32 @@ def render_confidence(reports, svg_dir=CONFIDENCE_SVG_DIR):
     return "\n\n".join(p for p in parts if p is not None) + "\n"
 
 
+def memo_inputs(v, root=REPO_ROOT):
+    """(fewshot_md, confidence_md, latency_md) of a final verdict/1 record, the renders pilot.memo.render_memo selects
+    lines from: the few-shot record the verdict binds (its fewshot.record path under root, refused unless its sha256
+    is the verdict's), the final confidence records of results/final/confidence (render_confidence, as
+    --confidence-table renders them) and the latency reports of results/latency (pilot.latency.render_markdown)."""
+    record = (v.get("fewshot") or {}).get("record") if isinstance(v, dict) else None
+    rel, want = (record.get("path"), record.get("sha256")) if isinstance(record, dict) else (None, None)
+    if not isinstance(rel, str) or not isinstance(want, str) or os.path.isabs(rel) \
+            or os.path.normpath(rel).split(os.sep)[0] == os.pardir:
+        raise SystemExit("the verdict binds no repo-relative few-shot record (%r); %s"
+                         % (record, pilot.verdict.FEWSHOT_FIX))
+    path = os.path.join(root, rel)
+    rec, sha = pilot.fewshot_report.read_record(path)
+    if sha != want:
+        raise SystemExit("%s has sha256 %s, the verdict binds %s; rebuild it with `make fewshot-reports`, then "
+                         "`make final-reports`" % (rel, sha, want))
+    fewshot_md = pilot.fewshot_report.render_markdown(rec)
+    reports, paths = [], table_inputs([os.path.join(root, "results", "final", "confidence")])
+    for p in paths:
+        with open(p, encoding="utf-8") as f:
+            reports.append(json.load(f))
+    confidence_md = render_confidence(reports, svg_dir=confidence_svg_dir(paths, root))
+    latency_md = pilot.latency.render_markdown(pilot.latency.load_reports(os.path.join(root, "results", "latency")))
+    return fewshot_md, confidence_md, latency_md
+
+
 def _run_dirs(ap, text):
     dirs = text.split(",")
     if not all(dirs):
@@ -1499,13 +1533,16 @@ def main(argv=None):
     ap.add_argument("--recommendation", metavar="VERDICT_JSON", default=None,
                     help="markdown of REP-04's recommendation, the mechanical mapping of a saved final verdict/1 "
                          "record (pilot.memo.render_recommendation)")
+    ap.add_argument("--memo", metavar="VERDICT_JSON", default=None,
+                    help="markdown of REP-05's one-page decision memo of a saved final verdict/1 record "
+                         "(pilot.memo.render_memo; `make memo` writes results/final/memo.md)")
     a = ap.parse_args(argv)
     modes = (a.run_dir, a.compare, a.table, a.confidence, a.confidence_table, a.verdict or None, a.final_table,
-             a.go_block, a.recommendation)
+             a.go_block, a.recommendation, a.memo)
     if sum(x is not None for x in modes) != 1:
         ap.error("give exactly one of RUN_DIR, --compare A_DIRS B_DIRS, --table PATH [PATH ...], "
                  "--confidence RUN_DIR, --confidence-table PATH [PATH ...], --verdict, --final-table VERDICT_JSON, "
-                 "--go-block VERDICT_JSON or --recommendation VERDICT_JSON")
+                 "--go-block VERDICT_JSON, --recommendation VERDICT_JSON or --memo VERDICT_JSON")
     if a.postfit is not None and a.confidence is None and a.run_dir is None:
         ap.error("--postfit applies only to RUN_DIR or --confidence")
     if a.fewshot is not None and not a.verdict:
@@ -1545,6 +1582,15 @@ def main(argv=None):
         proto, pin = pilot.protocol.require_frozen()        # REP-04: only the frozen protocol's verdict, every status
         pilot.verdict.check_record(v, proto, pin)            # recomputed from its own numbers (08-REVIEW WR-03)
         text = pilot.memo.render_recommendation(v, repo_relpath(path), sha, pilot.memo.facts(v, proto))
+    elif a.memo is not None:
+        path = a.memo
+        if not os.path.isfile(path):
+            raise SystemExit("%s not found; write the verdict with report.py --verdict --fewshot "
+                             "results/fewshot/fewshot.json --out PATH" % path)
+        v = _read_json_input(path, "verdict record")
+        proto, pin = pilot.protocol.require_frozen()        # REP-05: only the frozen protocol's verdict, every status
+        pilot.verdict.check_record(v, proto, pin)            # recomputed from its own numbers (08-REVIEW WR-03)
+        text = pilot.memo.render_memo(v, *memo_inputs(v))
     if text is not None:
         print(text, end="")
         if a.out:
