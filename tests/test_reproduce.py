@@ -1182,3 +1182,85 @@ def test_memo_names_the_one_command_rebuild():
     with open(os.path.join(REPO_ROOT, "results", "final", "memo.md"), encoding="utf-8") as f:
         lines = f.read().split("\n")
     assert text in lines and len([l for l in lines if l]) <= memo.MEMO_MAX_LINES
+
+
+# ---- 10-07: the README Files table, Run block and reproduction rules name every Phase 10 file and command ----
+
+PHASE10_FILES = {
+    "reproduce.py": ("--mode full", "--mode eval-only", "--dry-run", "--all", "--verify-checkpoints",
+                     "--checkpoint-root", "make reproduce", "make report"),
+    "pilot/reproduce.py": ("STEP_NAMES", "committed, hash-verified", "plan", "eval_only", "run_full", "dry_run",
+                           "verify_checkpoints"),
+    "pilot/memo.py": ("render_recommendation", "render_memo", "CAVEATS"),
+    "report.py": ("Phase 10: `--recommendation`", "`--memo` writes the decision memo"),
+    "results/": ("Phase 10: `final/memo.md`", "decision memo"),
+}
+PHASE10_RUN = (
+    "# Phase 10: the recommendation, the decision memo and one-command reproduction",
+    "make reproduce              #",
+    "make reproduce MODE=eval-only",
+    "make report                 #",
+    "make report VERIFY_CHECKPOINTS=1",
+    "python -m pilot.reproduce --plan",
+    "python reproduce.py --dry-run --all",
+    "python reproduce.py --mode eval-only --verify-checkpoints",
+    "make memo",
+    "python report.py --memo results/final/verdict.json --out results/final/memo.md",
+    "python report.py --recommendation results/final/verdict.json",
+)
+PHASE9_LAST = "python report.py --verdict --fewshot results/fewshot/fewshot.json --out results/final/verdict.json"
+REPRODUCTION_RULES = ("committed, hash-verified", "skips every finished step", "exactly once",
+                      "recomputes from the committed dumps", "fails on any rebuilt file that differs",
+                      "reported, not gated", "first divergence", "never weakens the gate")
+RULES_START = "`make reproduce` decides each step"
+
+
+def _readme():
+    with open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_readme_names_the_phase10_files_and_commands():
+    """D-11: the README Files table has a row for each Phase 10 file, naming its key flags or functions, and extends
+    the report.py and results/ rows; the Run block holds the Phase 10 commands after the Phase 9 verdict line, in
+    order; the Makefile has the targets the block names."""
+    from test_fewshot_results import files_rows, run_block
+    text = _readme()
+    rows = files_rows(text)
+    for path, wants in PHASE10_FILES.items():
+        assert path in rows, "the README Files table has no row for %s" % path
+        missing = [w for w in wants if w not in rows[path]]
+        assert not missing, "the README Files row of %s does not name %s" % (path, ", ".join(missing))
+    run = run_block(text)
+    assert run.count(PHASE9_LAST) == 1, "the Run block must hold the Phase 9 verdict line once"
+    at = run.index(PHASE9_LAST)
+    for cmd in PHASE10_RUN:
+        i = run.find(cmd, at + 1)
+        assert i > at, "the README Run block does not hold %r after the previous Phase 10 command" % cmd
+        at = i
+    for target in ("reproduce:", "report:", "memo:"):
+        assert re.search(r"^%s$" % re.escape(target), makefile_text(), re.M), "the Makefile has no %s target" % target
+
+
+def makefile_text():
+    with open(os.path.join(REPO_ROOT, "Makefile"), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_readme_states_the_reproduction_rules():
+    """D-04, D-05, D-06: the Run section, outside its fenced code, states the reproduction rules in words, in one
+    number-free paragraph."""
+    from test_fewshot_results import readme_part
+    from test_final_results import PROSE_NUMBER_RE
+    part = readme_part(_readme(), "\n## Run\n", "\n## Scoring path\n")
+    prose = re.sub(r"```bash\n.*?\n```", "", part, flags=re.S)
+    assert prose.count(RULES_START) == 1, "the Run section has no reproduction-rules paragraph"
+    i = prose.index(RULES_START)
+    j = prose.find("\n\n", i)
+    para = " ".join(prose[i:j if j >= 0 else len(prose)].split())     # one line: the README wraps its prose
+    missing = [r for r in REPRODUCTION_RULES if r not in para]
+    assert not missing, "the reproduction-rules paragraph does not state %r" % missing
+    hits = [m.group(0) for m in PROSE_NUMBER_RE.finditer(para)]
+    assert hits == [], "the reproduction-rules paragraph holds numbers %r" % hits
+    words = re.sub(r"`[^`]*`", "", para)
+    assert not re.search(r"\d", words), "the reproduction-rules paragraph holds a digit outside its code spans"
