@@ -13,6 +13,9 @@ runs on test gated). No checkpoint and no model.
   and without a runs manifest
 - build_record refuses a test dump of another pin or runs manifest, a val dump carrying protocol_sha256, a missing
   dump, a sidecar of another training run or seed, and test dumps that score different uid orders
+- theta_trained (09-REVIEW CR-01): labelled post hoc, not frozen, descriptive and not a decision input; each base's
+  θ on its trained columns only (an independent grid reading), F1 and forgetting at it; replacing its rule changes no
+  other record key; on hand-made arrays, held-out rows near P = 0.5 push the 48-column θ up and not this one
 """
 import copy
 import json
@@ -286,6 +289,96 @@ def test_forgetting_is_continued_old_minus_base_old(planted):
                 assert c["forgetting"] == c["old"] - rec["f1"][kind]["base"]["s%d" % b]["old"]
 
 
+def _trained_global(Y, P, held):
+    """An independent reading of THETA_TRAINED_RULE's global θ: val micro-F1 over the trained columns only, per grid
+    point, then pilot.metrics.pick (the shared tie rule)."""
+    cols = [j for j, t in enumerate(TAGS) if t not in set(held)]
+    Y, P = np.asarray(Y, dtype=bool)[:, cols], np.asarray(P, dtype=np.float64)[:, cols]
+    f1 = []
+    for g in metrics.GRID:
+        pred = P >= g
+        tp, fp, fn = (pred & Y).sum(), (pred & ~Y).sum(), (~pred & Y).sum()
+        f1.append(2 * tp / (2 * tp + fp + fn) if 2 * tp + fp + fn else 0.0)
+    return metrics.pick(np.asarray(f1, dtype=np.float64))
+
+
+def test_trained_theta_variant_is_post_hoc_beside_the_frozen_reading(planted):
+    """09-REVIEW CR-01: theta_trained is labelled post hoc, not frozen, descriptive and not a decision input, carries
+    the rule and the cause, and holds each masked base's θ chosen on its trained columns only (the held-out columns
+    excluded) with the new- and old-tag micro-F1 and forgetting at that θ."""
+    from pilot import fewshot_report as fr
+    ns, runs, sha, root = planted
+    rec = fr.build_record(ns.protocol, ns.pin)
+    t = rec["theta_trained"]
+    assert sorted(t) == ["cause", "f1", "label", "rule", "theta"]
+    assert t["label"] == fr.POST_HOC_LABEL == "post hoc, not frozen, descriptive; not a decision input"
+    assert t["rule"] == fr.THETA_TRAINED_RULE and t["cause"] == fr.THETA_CAUSE
+    assert "trained columns" in t["rule"] and "CR-01" in t["rule"] and "criterion (d) read neither" in t["rule"]
+    held = list(ns.block["tags"])
+    old = [x for x in TAGS if x not in held]
+    for kind in ("laya", "berturk"):
+        assert sorted(t["theta"][kind]) == sorted(rec["theta"][kind])
+        for seed in (0, 1):
+            base = _entry(runs, kind, "base", seed=seed)
+            lv, uv, _, ev = dumps.load_dump(os.path.join(root, base["dump_run_id"]), "val", ns.manifest)
+            Yv, Pv = dumps.read_gold(ev, ns.manifest, uv), metrics.probabilities(lv, 1.0)
+            th = t["theta"][kind]["s%d" % seed]
+            assert th["global"] == _trained_global(Yv, Pv, held)
+            assert not set(held) & set(th["per_tag"]) and th["n_per_tag"] == len(th["per_tag"])
+            frozen_sel = metrics.select_theta(Yv, Pv)
+            assert th["per_tag"] == {x: v for x, v in frozen_sel["per_tag"].items() if x not in held}
+            Y, P = _test_ap(ns, root, base)
+            m = metrics.metrics(Y, P, metrics.theta_vector(th))["per_tag"]
+            assert t["f1"][kind]["base"]["s%d" % seed] == {"new": _f1(m, held), "old": _f1(m, old)}
+        for draw in (0, 1):
+            for k in (1, 2):
+                e = _entry(runs, kind, "continued", draw, k)
+                b = fs.base_seed_of(ns.block, draw, "primary")
+                c = t["f1"][kind]["continued"]["d%d-k%d" % (draw, k)]
+                Y, P = _test_ap(ns, root, e)
+                m = metrics.metrics(Y, P, metrics.theta_vector(t["theta"][kind]["s%d" % b]))["per_tag"]
+                assert c["new"] == _f1(m, held) and c["old"] == _f1(m, old) and c["base_seed"] == b
+                assert c["forgetting"] == c["old"] - t["f1"][kind]["base"]["s%d" % b]["old"]
+
+
+def test_trained_theta_variant_changes_nothing_else(planted, monkeypatch):
+    """The post hoc variant is an addition: with trained_theta replaced by any other rule, every other record key
+    (primary, by_k, bootstrap, the frozen theta and f1, ...) is byte-identical, so criterion (d) cannot read it."""
+    from pilot import fewshot_report as fr
+    ns, runs, sha, root = planted
+    rec = fr.build_record(ns.protocol, ns.pin)
+
+    def everything_at_005(Y, P, held):
+        return dict(metrics.select_theta(Y, P), **{"global": 0.05, "per_tag": {}})
+
+    monkeypatch.setattr(fr, "trained_theta", everything_at_005)
+    other = fr.build_record(ns.protocol, ns.pin)
+    assert other["theta_trained"] != rec["theta_trained"]
+    drop = {k: v for k, v in rec.items() if k != "theta_trained"}
+    assert fr.record_bytes(drop) == fr.record_bytes({k: v for k, v in other.items() if k != "theta_trained"})
+    assert rec["primary"] == fr.primary(ns.protocol, ns.pin, runs, sha)
+
+
+def test_trained_theta_excludes_untrained_rows_near_one_half():
+    """The CR-01 mechanism on hand-made val arrays: trained columns whose positives score 0.3 or 0.9 (so they separate
+    fully only at a low θ) and held-out columns stuck near P = 0.5 (an untrained BERTurk row). Over all 48 columns the val rule moves the global θ above 0.5 to
+    avoid the held-out false positives; over the trained columns it stays low, and a held-out tag gets no θ."""
+    from pilot import fewshot_report as fr
+    rng = np.random.default_rng(0)
+    n = 400
+    held = TAGS[:6]
+    Y = rng.random((n, len(TAGS))) < 0.05
+    P = np.where(Y, np.where(rng.random(Y.shape) < 0.5, 0.30, 0.90), 0.02) + rng.uniform(-0.01, 0.01, Y.shape)
+    j = [TAGS.index(t) for t in held]
+    Y[:, j] = rng.random((n, len(j))) < 0.02
+    P[:, j] = 0.5 + rng.uniform(-0.02, 0.02, (n, len(j)))
+    Y0, P0 = Y.copy(), P.copy()
+    frozen_sel, sel = metrics.select_theta(Y, P), fr.trained_theta(Y, P, held)
+    assert frozen_sel["global"] > 0.5 and sel["global"] < 0.3
+    assert sel["global"] == _trained_global(Y, P, held) and not set(held) & set(sel["per_tag"])
+    assert np.array_equal(Y, Y0) and np.array_equal(P, P0), "trained_theta modified its input arrays"
+
+
 def test_subset_micro_f1_is_zero_without_counts():
     from pilot import fewshot_report as fr
     zero = {t: {"tp": 0, "fp": 0, "fn": 0} for t in TAGS}
@@ -416,6 +509,15 @@ def test_render_markdown_is_deterministic_and_complete(planted):
     for needle in ("k = %d" % PRIMARY_K, "k = 1", "k = 0", "Forgetting", "descriptive", "Wall clock", "positives",
                    "primary", fr.NOTES[0][1:]):
         assert needle in md, needle
+    i = md.index("#### Post hoc, not frozen: micro-F1 at each masked base's val θ on its trained columns (test)")
+    assert md.index("#### Forgetting") < i < md.index("#### Bootstrap")
+    assert "**Post hoc, not frozen, descriptive; not a decision input.**" in md[i:]
+    assert fr.THETA_CAUSE in md and fr.THETA_TRAINED_RULE in md
+    for kind, name in (("laya", "Laya"), ("berturk", "BERTurk")):
+        for key, th in rec["theta"][kind].items():
+            same = "yes" if th == rec["theta_trained"]["theta"][kind][key] else "no"
+            assert "| %s | %s | %.2f | %.2f | %s |" % (name, key[1:], th["global"],
+                                                       rec["theta_trained"]["theta"][kind][key]["global"], same) in md
     assert "bank_" not in md
 
 

@@ -24,6 +24,11 @@ What it computes (D-12; protocol.json rules.primary_metric and rules.secondary_m
   columns; f1: new-tag (held-out columns) and old-tag (the other 42) micro-F1 = 2TP / (2TP + FP + FN) of the summed
   per-tag counts at that θ (0.0 when the denominator is 0), for every base and every continued run from it, and
   forgetting = the continued run's old-tag micro-F1 minus its base's
+- theta_trained (09-REVIEW CR-01, POST_HOC_LABEL: post hoc, not frozen, descriptive; not a decision input): the same
+  θ and f1 blocks with each masked base's θ chosen on its trained columns only (trained_theta, THETA_TRAINED_RULE),
+  and the cause it discloses (THETA_CAUSE: a masked BERTurk base's untrained held-out rows sit near P = 0.5 on val
+  and push its 48-column global θ up). The frozen reading (theta, f1) is unchanged; the primary block, by_k, the
+  bootstrap and so criterion (d) read neither
 - bootstrap (A3, BOOT_PAIRING): per k a descriptive paired percentile interval of the mean-over-draws macro-AP delta on
   one pilot.metrics.bootstrap_weights(n, B, seed) draw with the protocol's B, seed and level; a replicate in which a
   held-out tag has no positive is counted in n_undefined and left out, never scored as 0 (on the full split such a tag
@@ -67,6 +72,19 @@ THETA_RULE = ("A1: each masked base's θ is pilot.metrics.select_theta on its ow
               "held-out tags have fewer val positives, so they use the global θ; the base's θ is applied unchanged to "
               "the base and to every continued run from it (pilot.fewshot.base_seed_of); nothing is chosen on test"
               % metrics.MIN_VAL_POSITIVES)
+POST_HOC_LABEL = "post hoc, not frozen, descriptive; not a decision input"
+THETA_TRAINED_RULE = ("each masked base's θ is pilot.metrics.select_theta on its own val dump at T = 1 over its trained "
+                      "columns only: the held-out columns are excluded (gold False and P 0, so they add no TP, FP or "
+                      "FN), with the same grid, tie rule and per-tag eligibility; the base's θ is applied unchanged to "
+                      "the base and to every continued run from it, and the held-out tags use its global θ; nothing "
+                      "is chosen on test. It was added after the results were seen (09-REVIEW CR-01): the frozen "
+                      "reading (theta and f1, θ over all 48 columns, A1) stays the record's secondary numbers, and the "
+                      "primary metric and criterion (d) read neither")
+THETA_CAUSE = ("BERTurk's new-tag micro-F1 can be zero at the frozen reading because a masked BERTurk base's held-out "
+               "classifier rows get no gradient (masked BCE), so they score near sigmoid(0) = 0.5 on val; "
+               "a global θ below them adds false positives across every held-out column, so the 48-column val rule "
+               "pushes the BERTurk base's global θ up, and the new-tag scores its continued runs reach on test can stay "
+               "below it; the θ over the trained columns is set by the trained columns alone")
 BOOT_PAIRING = ("A3: one pilot.metrics.bootstrap_weights(n, B, seed) draw of test messages, shared by every model and "
                 "draw; each replicate's statistic is the mean over draws of (Laya - BERTurk) new-tag macro-AP on the "
                 "resampled messages; a replicate in which a held-out tag has no positive is undefined (AP is undefined "
@@ -228,6 +246,37 @@ def _f1(data, kind, key, sel, held, old):
     return {"new": subset_micro_f1(m, held), "old": subset_micro_f1(m, old)}
 
 
+def trained_theta(Y_val, P_val, held):
+    """THETA_TRAINED_RULE (post hoc, descriptive): pilot.metrics.select_theta of a masked base's val dump with the
+    held-out columns excluded (gold False, P 0.0: no TP, FP or FN at any grid θ), so the global θ is the val micro-F1
+    optimum of the trained columns and a held-out tag (no val positive left) gets no θ of its own."""
+    cols = [metrics.TAGS.index(t) for t in held]
+    Y, P = np.array(Y_val, dtype=bool), np.array(P_val, dtype=np.float64)
+    Y[:, cols], P[:, cols] = False, 0.0
+    return metrics.select_theta(Y, P)
+
+
+def _theta_row(sel):
+    return {"global": sel["global"], "per_tag": dict(sel["per_tag"]), "n_per_tag": len(sel["per_tag"])}
+
+
+def _f1_block(data, block, entries, mode, sels, held, old):
+    """{kind: {"base": {key: {new, old}}, "continued": {key: {new, old, forgetting, base_seed}}}} of the micro-F1 at
+    each masked base's θ in `sels` ({(kind, seed): select_theta result}), forgetting = old - the base's old."""
+    f1 = {kind: {"base": {}, "continued": {}} for kind in KINDS}
+    for e in entries:
+        if e["stage"] == "base":
+            f1[e["kind"]]["base"][run_key(e)] = _f1(data, e["kind"], run_key(e), sels[(e["kind"], e["seed"])], held,
+                                                    old)
+    for e in entries:
+        if e["stage"] == "continued":
+            b = fewshot.base_seed_of(block, e["draw"], mode)
+            row = _f1(data, e["kind"], run_key(e), sels[(e["kind"], b)], held, old)
+            row.update(forgetting=row["old"] - f1[e["kind"]]["base"]["s%d" % b]["old"], base_seed=b)
+            f1[e["kind"]]["continued"][run_key(e)] = row
+    return f1
+
+
 def ap_delta_bootstrap(Y, PA_by_draw, PB_by_draw, tags, B, seed, level):
     """BOOT_PAIRING: {"delta", "ci", "B", "seed", "level", "method", "n_undefined", "pairing"} of the mean over draws of
     (A - B) new-tag macro-AP. Y is the gold [n, 48], PA_by_draw / PB_by_draw the per-draw probabilities of A (Laya) and
@@ -297,23 +346,20 @@ def record_of(protocol, pin, runs, runs_sha256, runs_path, dump_root=None, manif
     old = [t for t in metrics.TAGS if t not in set(held)]
     ap = {kind: {"base": {}, "continued": {}} for kind in KINDS}
     theta, sels = {kind: {} for kind in KINDS}, {}
-    f1 = {kind: {"base": {}, "continued": {}} for kind in KINDS}
+    theta_tr, sels_tr = {kind: {} for kind in KINDS}, {}       # the post hoc variant (THETA_TRAINED_RULE)
     wall = {kind: {} for kind in KINDS}
     for e in entries:
         ap[e["kind"]][e["stage"]][run_key(e)] = _ap(data, block, e["kind"], run_key(e))
         if e["stage"] == "base":
-            sel = metrics.select_theta(data["Y"]["val"], data["P"][("val", e["kind"], run_key(e))])
-            sels[(e["kind"], e["seed"])] = sel
-            theta[e["kind"]][run_key(e)] = {"global": sel["global"], "per_tag": dict(sel["per_tag"]),
-                                            "n_per_tag": len(sel["per_tag"])}
-            f1[e["kind"]]["base"][run_key(e)] = _f1(data, e["kind"], run_key(e), sel, held, old)
-    for e in entries:
-        if e["stage"] == "continued":
-            b = fewshot.base_seed_of(block, e["draw"], mode)
-            row = _f1(data, e["kind"], run_key(e), sels[(e["kind"], b)], held, old)
-            row.update(forgetting=row["old"] - f1[e["kind"]]["base"]["s%d" % b]["old"], base_seed=b)
-            f1[e["kind"]]["continued"][run_key(e)] = row
+            Yv, Pv = data["Y"]["val"], data["P"][("val", e["kind"], run_key(e))]
+            sels[(e["kind"], e["seed"])] = sel = metrics.select_theta(Yv, Pv)          # A1, the frozen reading
+            theta[e["kind"]][run_key(e)] = _theta_row(sel)
+            sels_tr[(e["kind"], e["seed"])] = sel = trained_theta(Yv, Pv, held)
+            theta_tr[e["kind"]][run_key(e)] = _theta_row(sel)
+        else:
             wall[e["kind"]][run_key(e)] = e["wall_clock_s"]
+    f1 = _f1_block(data, block, entries, mode, sels, held, old)
+    f1_tr = _f1_block(data, block, entries, mode, sels_tr, held, old)
     by_k, boot = {}, {}
     for k in [0] + sorted(block["k_values"]):
         by_k[str(k)] = k_block(block, data, k, mode)
@@ -337,6 +383,8 @@ def record_of(protocol, pin, runs, runs_sha256, runs_path, dump_root=None, manif
                   for s in ("test", "val")},
         "primary": dict({"k": k_primary, "metric": PRIMARY_METRIC}, **by_k[str(k_primary)]),
         "by_k": by_k, "ap": ap, "theta": theta, "f1": f1, "bootstrap": boot,
+        "theta_trained": {"label": POST_HOC_LABEL, "rule": THETA_TRAINED_RULE, "cause": THETA_CAUSE,
+                          "theta": theta_tr, "f1": f1_tr},
         "wall_clock_s": wall, "wall_rule": runs["wall_rule"],
         "positives": {"d%d" % d["draw"]: d["positives"] for d in block["draws"]},
         "dumps": data["dumps"],
@@ -410,6 +458,22 @@ def _k_label(k):
     return "k = 0 (masked base)" if k == "0" else "k = %s" % k
 
 
+def _f1_table(f1):
+    """The micro-F1 and forgetting table of an f1 block ({kind: {"base", "continued"}})."""
+    rows = []
+    for kind, name in (("laya", "Laya"), ("berturk", "BERTurk")):
+        for key in sorted(f1[kind]["base"], key=lambda x: int(x[1:])):
+            f = f1[kind]["base"][key]
+            rows.append((name, "base seed %s, k = 0" % key[1:], "%.3f" % f["new"], "%.3f" % f["old"], ""))
+        for key in sorted(f1[kind]["continued"], key=lambda x: tuple(int(v[1:]) for v in x.split("-"))):
+            f = f1[kind]["continued"][key]
+            d, k = (int(v[1:]) for v in key.split("-"))
+            rows.append((name, "draw %d, k = %d" % (d, k), "%.3f" % f["new"], "%.3f" % f["old"],
+                         _points(f["forgetting"])))
+    return _md(("Model", "Run", "New-tag micro-F1", "Old-tag micro-F1", "Old-tag change vs base (negative = "
+                                                                       "forgetting)"), rows)
+
+
 def render_markdown(record):
     """The README Phase 9 block of a few-shot results record (deterministic; points with 2 decimals, AP and F1 with
     3)."""
@@ -451,18 +515,21 @@ def render_markdown(record):
     lines += _md(("Tag", "Laya", "BERTurk"), rows)
 
     lines += ["", "#### Forgetting: micro-F1 at each masked base's val θ (test)", ""]
+    lines += _f1_table(r["f1"])
+
+    t = r["theta_trained"]
+    lines += ["", "#### Post hoc, not frozen: micro-F1 at each masked base's val θ on its trained columns (test)", "",
+              "**%s%s.** Rule: %s. Cause: %s." % (t["label"][0].upper(), t["label"][1:], t["rule"].rstrip("."),
+                                                  t["cause"].rstrip(".")), ""]
     rows = []
     for kind, name in (("laya", "Laya"), ("berturk", "BERTurk")):
-        for key in sorted(r["f1"][kind]["base"], key=lambda x: int(x[1:])):
-            f = r["f1"][kind]["base"][key]
-            rows.append((name, "base seed %s, k = 0" % key[1:], "%.3f" % f["new"], "%.3f" % f["old"], ""))
-        for key in sorted(r["f1"][kind]["continued"], key=lambda x: tuple(int(v[1:]) for v in x.split("-"))):
-            f = r["f1"][kind]["continued"][key]
-            d, k = (int(v[1:]) for v in key.split("-"))
-            rows.append((name, "draw %d, k = %d" % (d, k), "%.3f" % f["new"], "%.3f" % f["old"],
-                         _points(f["forgetting"])))
-    lines += _md(("Model", "Run", "New-tag micro-F1", "Old-tag micro-F1", "Old-tag change vs base (negative = "
-                                                                          "forgetting)"), rows)
+        for key in sorted(r["theta"][kind], key=lambda x: int(x[1:])):
+            a, b = r["theta"][kind][key], t["theta"][kind][key]
+            rows.append((name, key[1:], "%.2f" % a["global"], "%.2f" % b["global"],
+                         "yes" if a == b else "no"))
+    lines += _md(("Model", "Base seed", "Global θ, all 48 columns (frozen reading)",
+                  "Global θ, trained columns (post hoc)", "Same θ under both rules"), rows)
+    lines += [""] + _f1_table(t["f1"])
 
     lines += ["", "#### Bootstrap of the mean-over-draws delta (descriptive, not gated)", ""]
     rows = []

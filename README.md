@@ -115,7 +115,7 @@ are hash-registered too, so later phases can trust the flag list.
 | `pilot/protocol.py` | builds, pins and reads the frozen protocol: `require_frozen` (every consumer's first call), the gated-split and final-seed checks of `score.py`'s gate, the README protocol block (`--render`) and `--check` |
 | `pilot/verdict.py` | the mechanical GO block: criteria (a) to (d) and the alternative GO from the frozen thresholds, the collapse rule, the overall verdict, the `verdict/1` record, the results table and the GO block markdown |
 | `pilot/fewshot.py` | the frozen few-shot protocol as code: held-out tags, k values, draw seeds, replay, the support-set sampler and its digests, the eligibility check; Phase 9: the row builders of both trainers (`masked_rows`, `laya_rows`, `berturk_rows`), the binding of every few-shot command to the frozen protocol (`binding`, `check_base`, `check_continued`, the compute mode `read_mode`), the runs manifest (`check_runs`, `read_runs`) and the test admission `score.py` calls (`admitted`) |
-| `pilot/fewshot_report.py` | Phase 9: the few-shot results record (`fewshot-results/1`) from the dumps the runs manifest lists, numpy only, no model: new-tag macro-AP per draw and k, forgetting at each masked base's val θ, the descriptive bootstrap; the README Phase 9 block |
+| `pilot/fewshot_report.py` | Phase 9: the few-shot results record (`fewshot-results/1`) from the dumps the runs manifest lists, numpy only, no model: new-tag macro-AP per draw and k, forgetting at each masked base's val θ, beside it a post hoc variant at the θ of each base's trained columns (descriptive, not a decision input), the descriptive bootstrap; the README Phase 9 block |
 | `fewshot.py` | the few-shot runner behind `require_frozen`: `--support-sets` re-checks the frozen draws against the verified `selection_train`; Phase 9 added `--counts` (row, item and step counts), `--projection` (the compute decision record), `--inspect` and `--runs-manifest` (the allow-list, from the checkpoints' own records), `--prune` and `--drop-storage` (guarded deletion), `--report` (the results record) and `--render` (the README Phase 9 block); training runs through `ray_train.py` and `berturk_train.py` |
 | `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`), postfit records (`postfit/`: `laya*.json`, and `berturk.json`, `berturk-reference.json`, `berturk-final.json`), the two discarded BERTurk selection runs kept as disclosed history (`superseded/berturk-tied-head-lr/`, `superseded/berturk-10-epoch-grid/`, never current), the Phase 7 val confidence records and reliability diagrams (`confidence/`) and latency reports (`latency/`); Phase 8: the final seeds' gated test and HOTELS dumps and the zero-shot HOTELS reference (`dumps/`), and the verdict, per-seed test reports and test/HOTELS confidence records with their diagrams (`final/`); Phase 9: `fewshot/` holds the compute decision record (`projection.json`), the runs manifest (`runs.json`, the allow-list) and the few-shot results record (`fewshot.json`), and `dumps/` the few-shot dumps (each masked base on val and test, each continued run on test) |
 | `tests/` | pytest suite (markers `unit`, `data`, `weights`, `ray`, `mps`) |
@@ -1340,7 +1340,7 @@ The GO block below is computed mechanically from the frozen thresholds and the c
 - Split test: n = 413 (15 no-intent).
 - Deltas: laya - berturk, seed-averaged, headline (T: laya 4.7698; berturk 0.7430; θ: laya theta.shipped; berturk theta.shipped); B = 10000, seed 0, 95% interval, percentile (numpy linear interpolation).
 - Units: deltas are Laya - BERTurk fractions in [0, 1] (points = fraction x 100), compared unrounded.
-- Few-shot path (Phase 9): k = 10, mean over 3 draws, mode primary; record results/fewshot/fewshot.json sha256 `dfdacc7fe510`.
+- Few-shot path (Phase 9): k = 10, mean over 3 draws, mode primary; record results/fewshot/fewshot.json sha256 `2eac0da66a2a`.
 
 | criterion | status | numbers |
 |---|---|---|
@@ -1559,8 +1559,12 @@ in this section comes from the generated block below, and a test fails if the bl
   from it, at that base's val θ, which was chosen on its own val dump and never on test. The bootstrap interval is
   descriptive and gates nothing.
 - **Caveats.** BERTurk's new-tag micro-F1 in the forgetting table is zero on every continued run: its new-tag
-  scores stay below its masked base's val θ, so at that θ it predicts none of the held-out tags. Average precision
-  needs no θ, which is why it is the primary metric. Step parity (continued training to the same number of optimizer
+  scores stay below its masked base's val θ, so at that θ it predicts none of the held-out tags. The cause is that θ,
+  not the model alone: the masked BERTurk base's held-out classifier rows were never trained, so they score near one
+  half on val, and choosing the global θ over all 48 columns pushes it up to avoid their false positives. Laya's θ is the same whether its held-out columns are counted or not. The record keeps the frozen
+  reading's numbers and adds, beside them, a variant that is post hoc, not frozen, descriptive and not a decision
+  input: each base's θ chosen on its trained columns only, with the new-tag and old-tag micro-F1 and forgetting at
+  that θ. Average precision needs no θ, which is why it is the primary metric. Step parity (continued training to the same number of optimizer
   steps) is not in the frozen protocol, so it was not run; it is deferred and disclosed here. Laya trains on neg8
   items against BERTurk's full label rows, as in the main experiment, and a continued Laya run starts from its masked
   base as saved (fp16-rounded weights, the same checkpoint that is scored as the masked base); the record's notes
@@ -1634,6 +1638,40 @@ Criterion (d)'s few-shot path reads the mean over draws of Laya - BERTurk at k =
 | BERTurk | draw 1, k = 10 | 0.000 | 0.769 | +1.84 points |
 | BERTurk | draw 2, k = 5 | 0.000 | 0.749 | +2.25 points |
 | BERTurk | draw 2, k = 10 | 0.000 | 0.751 | +2.50 points |
+
+#### Post hoc, not frozen: micro-F1 at each masked base's val θ on its trained columns (test)
+
+**Post hoc, not frozen, descriptive; not a decision input.** Rule: each masked base's θ is pilot.metrics.select_theta on its own val dump at T = 1 over its trained columns only: the held-out columns are excluded (gold False and P 0, so they add no TP, FP or FN), with the same grid, tie rule and per-tag eligibility; the base's θ is applied unchanged to the base and to every continued run from it, and the held-out tags use its global θ; nothing is chosen on test. It was added after the results were seen (09-REVIEW CR-01): the frozen reading (theta and f1, θ over all 48 columns, A1) stays the record's secondary numbers, and the primary metric and criterion (d) read neither. Cause: BERTurk's new-tag micro-F1 can be zero at the frozen reading because a masked BERTurk base's held-out classifier rows get no gradient (masked BCE), so they score near sigmoid(0) = 0.5 on val; a global θ below them adds false positives across every held-out column, so the 48-column val rule pushes the BERTurk base's global θ up, and the new-tag scores its continued runs reach on test can stay below it; the θ over the trained columns is set by the trained columns alone.
+
+| Model | Base seed | Global θ, all 48 columns (frozen reading) | Global θ, trained columns (post hoc) | Same θ under both rules |
+|---|---|---|---|---|
+| Laya | 0 | 0.58 | 0.58 | yes |
+| Laya | 1 | 0.50 | 0.50 | yes |
+| Laya | 2 | 0.93 | 0.93 | yes |
+| BERTurk | 0 | 0.69 | 0.21 | no |
+| BERTurk | 1 | 0.66 | 0.23 | no |
+| BERTurk | 2 | 0.72 | 0.29 | no |
+
+| Model | Run | New-tag micro-F1 | Old-tag micro-F1 | Old-tag change vs base (negative = forgetting) |
+|---|---|---|---|---|
+| Laya | base seed 0, k = 0 | 0.264 | 0.808 |  |
+| Laya | base seed 1, k = 0 | 0.321 | 0.792 |  |
+| Laya | base seed 2, k = 0 | 0.343 | 0.791 |  |
+| Laya | draw 0, k = 5 | 0.671 | 0.771 | -3.73 points |
+| Laya | draw 0, k = 10 | 0.691 | 0.814 | +0.58 points |
+| Laya | draw 1, k = 5 | 0.564 | 0.800 | +0.84 points |
+| Laya | draw 1, k = 10 | 0.816 | 0.809 | +1.69 points |
+| Laya | draw 2, k = 5 | 0.708 | 0.780 | -1.08 points |
+| Laya | draw 2, k = 10 | 0.786 | 0.806 | +1.48 points |
+| BERTurk | base seed 0, k = 0 | 0.059 | 0.826 |  |
+| BERTurk | base seed 1, k = 0 | 0.059 | 0.824 |  |
+| BERTurk | base seed 2, k = 0 | 0.058 | 0.820 |  |
+| BERTurk | draw 0, k = 5 | 0.090 | 0.837 | +1.10 points |
+| BERTurk | draw 0, k = 10 | 0.132 | 0.839 | +1.27 points |
+| BERTurk | draw 1, k = 5 | 0.126 | 0.823 | -0.13 points |
+| BERTurk | draw 1, k = 10 | 0.211 | 0.823 | -0.05 points |
+| BERTurk | draw 2, k = 5 | 0.140 | 0.824 | +0.40 points |
+| BERTurk | draw 2, k = 10 | 0.085 | 0.830 | +0.92 points |
 
 #### Bootstrap of the mean-over-draws delta (descriptive, not gated)
 

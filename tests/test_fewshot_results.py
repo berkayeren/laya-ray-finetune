@@ -63,6 +63,10 @@ and the once-only scoring, 09-12 the few-shot result record and the README block
 - the Phase 9 prose states the caveats a reader needs: BERTurk's new-tag micro-F1 is zero on every continued run
   because its new-tag scores stay below its base's val θ (checked against the committed record), AP is the primary
   metric because it needs no θ, and step parity is deferred.
+- 09-REVIEW CR-01: the prose names the cause (the masked BERTurk base's untrained held-out rows near one half on val
+  push its 48-column θ up; Laya's θ is the same under both rules) and the record's post hoc variant (θ on each base's
+  trained columns only, labelled post hoc, not frozen, descriptive and not a decision input), each claim checked
+  against the committed record and dumps; the frozen reading's numbers stay the record's.
 Offline except the `data` tests.
 """
 import json
@@ -739,7 +743,12 @@ def test_readme_names_the_phase9_files_and_commands():
 
 
 PHASE9_CAVEATS = ("new-tag micro-F1", "zero on every continued run", "below its masked base's val θ",
-                  "Average precision needs no θ", "primary metric", "Step parity", "deferred", "fp16-rounded")
+                  "Average precision needs no θ", "primary metric", "Step parity", "deferred", "fp16-rounded",
+                  "The cause is that θ", "held-out classifier rows were never trained", "score near one half on val",
+                  "choosing the global θ over all 48 columns pushes it up",
+                  "Laya's θ is the same whether its held-out columns are counted or not",
+                  "keeps the frozen reading's numbers", "post hoc, not frozen, descriptive and not a decision input",
+                  "trained columns only")
 
 
 def test_readme_phase9_prose_states_the_caveats():
@@ -764,4 +773,34 @@ def test_readme_phase9_prose_states_the_caveats():
         with np.load(os.path.join(REPO_ROOT, "results", "dumps", e["dump_run_id"], "test.npz")) as z:
             p = 1.0 / (1.0 + np.exp(-z["logits"][:, cols].astype(np.float64)))
         assert p.max() < theta["global"], "BERTurk %s scores a held-out tag at or above its base's val θ" % key
+
+
+def test_committed_post_hoc_theta_variant_matches_the_prose():
+    """09-REVIEW CR-01: the committed record keeps the frozen reading (theta, f1) and adds theta_trained beside it,
+    labelled post hoc, not frozen, descriptive and not a decision input. The prose's claims are the record's: Laya's θ
+    (global and per tag) is the same under both rules on every base, so its post hoc F1 rows are its frozen ones;
+    every BERTurk base's θ on its trained columns is below its 48-column θ; and the masked BERTurk bases' held-out
+    columns score near one half on val (mean P within 0.4 and 0.6, the untrained rows). Criterion (d) reads the
+    primary block only (report.fewshot_input), which the variant does not touch (test_fewshot_report)."""
+    import numpy as np
+    from intents import INTENTS
+    from pilot import fewshot_report as fr
+    rec, _, _ = committed_record()
+    t = rec["theta_trained"]
+    assert t["label"] == fr.POST_HOC_LABEL == "post hoc, not frozen, descriptive; not a decision input"
+    assert (t["rule"], t["cause"]) == (fr.THETA_TRAINED_RULE, fr.THETA_CAUSE)
+    for kind in fs.KINDS:
+        assert sorted(t["theta"][kind]) == sorted(rec["theta"][kind])
+        assert {s: sorted(v) for s, v in t["f1"][kind].items()} == {s: sorted(v) for s, v in rec["f1"][kind].items()}
+    assert t["theta"]["laya"] == rec["theta"]["laya"], "Laya's θ differs between the rules; the prose says it does not"
+    assert t["f1"]["laya"] == rec["f1"]["laya"]
+    for key, th in rec["theta"]["berturk"].items():
+        assert t["theta"]["berturk"][key]["global"] < th["global"], key
+    assert any(v["new"] > 0.0 for v in t["f1"]["berturk"]["continued"].values())
+    cols = [list(INTENTS).index(x) for x in rec["tags"]]
+    for e in load_json(RUNS)["entries"]:
+        if (e["kind"], e["stage"]) == ("berturk", "base"):
+            with np.load(os.path.join(REPO_ROOT, "results", "dumps", e["dump_run_id"], "val.npz")) as z:
+                p = 1.0 / (1.0 + np.exp(-z["logits"][:, cols].astype(np.float64)))
+            assert 0.4 < p.mean() < 0.6, (e["dump_run_id"], p.mean())
 

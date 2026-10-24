@@ -806,6 +806,241 @@
       }
     }
   },
+  "theta_trained": {
+    "cause": "BERTurk's new-tag micro-F1 can be zero at the frozen reading because a masked BERTurk base's held-out classifier rows get no gradient (masked BCE), so they score near sigmoid(0) = 0.5 on val; a global θ below them adds false positives across every held-out column, so the 48-column val rule pushes the BERTurk base's global θ up, and the new-tag scores its continued runs reach on test can stay below it; the θ over the trained columns is set by the trained columns alone",
+    "f1": {
+      "berturk": {
+        "base": {
+          "s0": {
+            "new": 0.05875440658049354,
+            "old": 0.8261376896149358
+          },
+          "s1": {
+            "new": 0.05875440658049354,
+            "old": 0.8239395700174317
+          },
+          "s2": {
+            "new": 0.058107577542206516,
+            "old": 0.8204225352112676
+          }
+        },
+        "continued": {
+          "d0-k10": {
+            "base_seed": 0,
+            "forgetting": 0.01272486962677033,
+            "new": 0.1319796954314721,
+            "old": 0.8388625592417062
+          },
+          "d0-k5": {
+            "base_seed": 0,
+            "forgetting": 0.011016925317456905,
+            "new": 0.09022556390977443,
+            "old": 0.8371546149323927
+          },
+          "d1-k10": {
+            "base_seed": 1,
+            "forgetting": -0.0005464026752197704,
+            "new": 0.21052631578947367,
+            "old": 0.8233931673422119
+          },
+          "d1-k5": {
+            "base_seed": 1,
+            "forgetting": -0.0013024638330676463,
+            "new": 0.1256544502617801,
+            "old": 0.822637106184364
+          },
+          "d2-k10": {
+            "base_seed": 2,
+            "forgetting": 0.009163263605300398,
+            "new": 0.0851063829787234,
+            "old": 0.829585798816568
+          },
+          "d2-k5": {
+            "base_seed": 2,
+            "forgetting": 0.004004945704762952,
+            "new": 0.13986013986013987,
+            "old": 0.8244274809160306
+          }
+        }
+      },
+      "laya": {
+        "base": {
+          "s0": {
+            "new": 0.26436781609195403,
+            "old": 0.8080593849416755
+          },
+          "s1": {
+            "new": 0.32142857142857145,
+            "old": 0.7917948717948718
+          },
+          "s2": {
+            "new": 0.3431952662721893,
+            "old": 0.7912423625254582
+          }
+        },
+        "continued": {
+          "d0-k10": {
+            "base_seed": 0,
+            "forgetting": 0.00580728172499112,
+            "new": 0.6906474820143885,
+            "old": 0.8138666666666666
+          },
+          "d0-k5": {
+            "base_seed": 0,
+            "forgetting": -0.03734255728534608,
+            "new": 0.6713286713286714,
+            "old": 0.7707168276563294
+          },
+          "d1-k10": {
+            "base_seed": 1,
+            "forgetting": 0.016919262105234423,
+            "new": 0.8163265306122449,
+            "old": 0.8087141339001063
+          },
+          "d1-k5": {
+            "base_seed": 1,
+            "forgetting": 0.008411101428609125,
+            "new": 0.5644171779141104,
+            "old": 0.800205973223481
+          },
+          "d2-k10": {
+            "base_seed": 2,
+            "forgetting": 0.014775907221989404,
+            "new": 0.7857142857142857,
+            "old": 0.8060182697474476
+          },
+          "d2-k5": {
+            "base_seed": 2,
+            "forgetting": -0.010829991391437588,
+            "new": 0.7080745341614907,
+            "old": 0.7804123711340206
+          }
+        }
+      }
+    },
+    "label": "post hoc, not frozen, descriptive; not a decision input",
+    "rule": "each masked base's θ is pilot.metrics.select_theta on its own val dump at T = 1 over its trained columns only: the held-out columns are excluded (gold False and P 0, so they add no TP, FP or FN), with the same grid, tie rule and per-tag eligibility; the base's θ is applied unchanged to the base and to every continued run from it, and the held-out tags use its global θ; nothing is chosen on test. It was added after the results were seen (09-REVIEW CR-01): the frozen reading (theta and f1, θ over all 48 columns, A1) stays the record's secondary numbers, and the primary metric and criterion (d) read neither",
+    "theta": {
+      "berturk": {
+        "s0": {
+          "global": 0.21,
+          "n_per_tag": 13,
+          "per_tag": {
+            "account": 0.24,
+            "affirm": 0.5,
+            "cancel_close_leave_freeze": 0.49,
+            "card": 0.5,
+            "change": 0.5,
+            "current": 0.15,
+            "deny": 0.22,
+            "how_much": 0.14,
+            "make_open_apply_setup_get_activate": 0.33,
+            "more_higher_after": 0.45,
+            "request_info": 0.22,
+            "transfer_payment_deposit": 0.45,
+            "wrong_notworking_notshowing": 0.27
+          }
+        },
+        "s1": {
+          "global": 0.23,
+          "n_per_tag": 13,
+          "per_tag": {
+            "account": 0.44,
+            "affirm": 0.23,
+            "cancel_close_leave_freeze": 0.57,
+            "card": 0.48,
+            "change": 0.27,
+            "current": 0.13,
+            "deny": 0.27,
+            "how_much": 0.12,
+            "make_open_apply_setup_get_activate": 0.21,
+            "more_higher_after": 0.5,
+            "request_info": 0.22,
+            "transfer_payment_deposit": 0.61,
+            "wrong_notworking_notshowing": 0.3
+          }
+        },
+        "s2": {
+          "global": 0.29,
+          "n_per_tag": 13,
+          "per_tag": {
+            "account": 0.37,
+            "affirm": 0.22,
+            "cancel_close_leave_freeze": 0.5,
+            "card": 0.5,
+            "change": 0.18,
+            "current": 0.06,
+            "deny": 0.3,
+            "how_much": 0.18,
+            "make_open_apply_setup_get_activate": 0.2,
+            "more_higher_after": 0.48,
+            "request_info": 0.27,
+            "transfer_payment_deposit": 0.29,
+            "wrong_notworking_notshowing": 0.25
+          }
+        }
+      },
+      "laya": {
+        "s0": {
+          "global": 0.58,
+          "n_per_tag": 13,
+          "per_tag": {
+            "account": 0.5,
+            "affirm": 0.84,
+            "cancel_close_leave_freeze": 0.5,
+            "card": 0.5,
+            "change": 0.5,
+            "current": 0.5,
+            "deny": 0.58,
+            "how_much": 0.5,
+            "make_open_apply_setup_get_activate": 0.5,
+            "more_higher_after": 0.5,
+            "request_info": 0.5,
+            "transfer_payment_deposit": 0.5,
+            "wrong_notworking_notshowing": 0.5
+          }
+        },
+        "s1": {
+          "global": 0.5,
+          "n_per_tag": 13,
+          "per_tag": {
+            "account": 0.5,
+            "affirm": 0.5,
+            "cancel_close_leave_freeze": 0.5,
+            "card": 0.5,
+            "change": 0.5,
+            "current": 0.5,
+            "deny": 0.5,
+            "how_much": 0.5,
+            "make_open_apply_setup_get_activate": 0.5,
+            "more_higher_after": 0.5,
+            "request_info": 0.5,
+            "transfer_payment_deposit": 0.5,
+            "wrong_notworking_notshowing": 0.5
+          }
+        },
+        "s2": {
+          "global": 0.93,
+          "n_per_tag": 13,
+          "per_tag": {
+            "account": 0.5,
+            "affirm": 0.5,
+            "cancel_close_leave_freeze": 0.5,
+            "card": 0.5,
+            "change": 0.5,
+            "current": 0.5,
+            "deny": 0.5,
+            "how_much": 0.5,
+            "make_open_apply_setup_get_activate": 0.5,
+            "more_higher_after": 0.5,
+            "request_info": 0.5,
+            "transfer_payment_deposit": 0.5,
+            "wrong_notworking_notshowing": 0.5
+          }
+        }
+      }
+    }
+  },
   "wall_clock_s": {
     "berturk": {
       "d0-k10": 61.4551095131319,
