@@ -49,4 +49,4 @@ Criterion (d)'s few-shot path reads the mean over draws of Laya - BERTurk at k =
 
 ## Audit, override and reproduce
 - Audit: protocol.json, results/final/verdict.json, results/fewshot/fewshot.json, results/final/confidence/, results/latency/ and results/dumps/ are the audit record; a reviewer may override the recommendation outside the repo.
-- Rebuild: `make memo` rebuilds this memo; `make final-reports` and `make fewshot-reports` rebuild the records it reads from the committed dumps, without a model.
+- Rebuild: `make report` rebuilds every report, the README blocks and this memo from the committed dumps, without training or scoring, and fails on any file that differs; `make reproduce` runs the whole pipeline in order and skips every step its committed artifacts prove done.

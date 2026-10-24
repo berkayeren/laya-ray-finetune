@@ -185,8 +185,9 @@ MEMO_OVERRIDE = ("- This is the frozen protocol's mechanical verdict, rendered a
 MEMO_AUDIT = ("- Audit: protocol.json, results/final/verdict.json, results/fewshot/fewshot.json, "
               "results/final/confidence/, results/latency/ and results/dumps/ are the audit record; a reviewer may "
               "override the recommendation outside the repo.")
-MEMO_REBUILD = ("- Rebuild: `make memo` rebuilds this memo; `make final-reports` and `make fewshot-reports` rebuild "
-                "the records it reads from the committed dumps, without a model.")
+MEMO_REBUILD = ("- Rebuild: `make report` rebuilds every report, the README blocks and this memo from the committed "
+                "dumps, without training or scoring, and fails on any file that differs; `make reproduce` runs the "
+                "whole pipeline in order and skips every step its committed artifacts prove done.")
 MEMO_MAX_LINES = 60                                         # one page (CONTEXT D-09: about sixty lines)
 MEMO_SOURCES = ("go", "table", "fewshot", "confidence", "latency")
 GO_TABLE_HEADER = "| criterion | status | numbers |"
