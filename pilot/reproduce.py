@@ -993,7 +993,7 @@ BUILDERS = {
     "berturk-reference": _fixed(("postfit.py", "--reference-check", "results/postfit/berturk.json", "--out", REFERENCE)),
     "berturk-final": _final_lines("berturk"),
     "confidence": _make("confidence-reports"),
-    "latency": _fixed(*latency_commands()),
+    "latency": lambda root, proto, pin: [(c, None) for c in latency_commands()],
     "final-scoring": _make("final-scoring"),
     "final-reports": lambda root, proto, pin: [(c, None) for c in final_report_commands(proto)],
     "fewshot-projection": _fixed(("fewshot.py", "--projection", "--out", PROJECTION)),
