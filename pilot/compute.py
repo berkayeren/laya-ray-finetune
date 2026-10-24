@@ -1,36 +1,42 @@
-"""Torch-free logic of the Phase 4 compute checkpoint (LAYA-07): the measured run record -> a projected runtime for the
-whole experiment matrix -> compute_checkpoint.json + compute_checkpoint.md.
+"""Torch-free logic of the compute checkpoint: the measured run record -> a projected runtime for the whole experiment
+matrix -> compute_checkpoint.json + compute_checkpoint.md, for the user to approve before the Laya and BERTurk runs.
 
 compute_checkpoint.py imports this module in the orchestrator, before its ray_train.py child sets the MPS env (torch
 reads PYTORCH_ENABLE_MPS_FALLBACK once, at import), so nothing here may import torch. The measurement itself happens in
 the child; this module only reads its checkpoint config (training.ray_train.record, pilot.runs.read_record), counts the
 items of the committed splits without a tokenizer (pilot.runs.neg_items) and projects.
 
-Projection rate (RESEARCH Pitfall 6): s_per_step is the LARGEST train_s / optimizer_steps over the measured epochs, so
-the MPS warm-up of epoch 1 (or any slower later epoch) makes the projection conservative, never optimistic. A Laya run
-of E epochs on n items costs E x (optimizer_steps(n) x s_per_step + save_s_per_epoch) + load_s + calib_s +
-final_save_s + run_overhead_s, every term measured by the probe run; calib_s is 0 for a record without calibration
-(None: Phase 5 runs no longer calibrate on training messages, LAYA-05), and the formula text then omits that term;
+Projection rate: s_per_step is the LARGEST train_s / optimizer_steps over the measured epochs, so the MPS warm-up of
+epoch 1 (or any slower later epoch) makes the projection conservative, never optimistic. A Laya run of E epochs on n
+items costs E x (optimizer_steps(n) x s_per_step + save_s_per_epoch) + load_s + calib_s + final_save_s +
+run_overhead_s, every term measured by the probe run; calib_s is 0 for a record without calibration (None: training no
+longer calibrates on training messages, T is fitted on val afterwards), and the formula text then omits that term;
 save_s_per_epoch includes Ray's persist of the epoch checkpoint (the train-state copy into storage) when the record
 says save_s_includes_persist, so that per-epoch cost is charged per epoch; run_overhead_s (run_overhead) is the probe
 child's wall clock minus the record's own terms (process and Ray start, the driver's checks, item building, the --out
-copy), charged once per run. A Laya scoring line
-adds, per score.py run, the scoring probe's run_overhead_s (its wall clock minus its inference seconds: process start,
-the weights' sha256 check, laya.load). A report from before a term was measured leaves it out (0), and assumptions()
-discloses each one left out (04-REVIEW IN-02).
+copy), charged once per run. A Laya scoring line adds, per score.py run, the scoring probe's run_overhead_s (its wall
+clock minus its inference seconds: process start, the weights' sha256 check, laya.load). A report from before a term
+was measured leaves it out (0), and assumptions() discloses each one left out.
 
-Transparency (T-04-17): every projection line names its basis and its source. basis is the weakest input of the line:
+Transparency: every projection line names its basis and its source. basis is the weakest input of the line:
 "estimate" when any of its rates is an estimate (ESTIMATES, used only when the BERTurk timing child did not finish
-ok), "provisional" for the few-shot lines (their protocol is frozen only in Phase 8), "measured (cpu, wall)" when a
-Laya scoring rate is the committed CPU zero-shot dump's wall clock per message (the scoring probe did not finish ok),
-"measured" otherwise. Every MATRIX value is provisional whatever the basis; assumptions() lists each one, with its
-source, for the user to confirm or trim at plan 04-08.
+ok), "provisional" for the few-shot lines (their protocol was not yet frozen when the matrix was projected),
+"measured (cpu, wall)" when a Laya scoring rate is the committed CPU zero-shot dump's wall clock per message (the
+scoring probe did not finish ok), "measured" otherwise. Every MATRIX value is provisional whatever the basis;
+assumptions() lists each one, with its source, for the user to confirm or trim at the approval.
 
-Phase 9 (09-04, D-08): fewshot_projection(measured, counts, block, n_scored) projects the frozen few-shot protocol
+Few-shot experiment: fewshot_projection(measured, counts, block, n_scored) projects the frozen few-shot protocol
 (protocol.json's fewshot block, fewshot.py --counts) on the committed compute record's measured rates through the same
-part builders, basis measured (the protocol is frozen), calib_s None (LAYA-05); fewshot_decision applies the frozen
-compute_fallback trigger exactly (fallback when the projection exceeds pilot.fewshot.FALLBACK_HOURS, or on a recorded
-LAYA-03 ladder failure) and carries the frozen disclosure on a fallback; fewshot.py --projection writes the record.
+part builders, basis measured (the protocol is frozen), calib_s None (no training-time calibration); fewshot_decision
+applies the frozen compute_fallback trigger exactly (fallback when the projection exceeds pilot.fewshot.FALLBACK_HOURS,
+or on a recorded failure of ray_train.py's fallback ladder) and carries the frozen disclosure on a fallback;
+fewshot.py --projection writes the record (results/fewshot/projection.json).
+
+Recorded texts: the committed reports hold the text of every MATRIX_SOURCES value, assumption, source, formula and
+note this module builds, and tests rebuild them from the code (tests/test_compute_report.py for
+compute_checkpoint.json, tests/test_fewshot_results.py for projection.json), so those strings stay byte for byte as
+written when the reports were made, references to the stage numbers and planning notes of that time included. Only
+the markdown labels in render_markdown are free to change (the committed .md is regenerated from the JSON).
 
 usage: from pilot import compute; start = compute.spike_start("results/spike/mps_spike.json")
        measured = compute.measured_from_checkpoint(ckpt_dir); counts = compute.split_counts(manifest)
@@ -44,6 +50,8 @@ usage: from pilot import compute; start = compute.spike_start("results/spike/mps
 import json
 import math
 import os
+from collections.abc import Callable
+from typing import Any
 
 from pilot import fewshot, runs, spike
 from pilot.data import REPO_ROOT, SPLITS, parse_jsonl, repo_relpath, verify_split_file, write_atomic
@@ -54,8 +62,10 @@ JSON_NAME, MD_NAME = "compute_checkpoint.json", "compute_checkpoint.md"
 # other values is off the protocol (compute_checkpoint.protocol_complete), since s/step depends on the thread count
 PROTOCOL = {"cpus": 4, "epochs": 2, "seed": 0}
 
-# The experiment matrix the projection covers. Every value is provisional (RESEARCH A2) until Phases 5, 6 and 8 freeze
-# it; the user confirms or trims them at the compute checkpoint (plan 04-08).
+# The experiment matrix the projection covers. Every value was provisional when the compute checkpoint ran (the Laya
+# val selection, the BERTurk baseline and the frozen protocol fixed the values actually used); the user confirmed or
+# trimmed them at the approval. MATRIX and MATRIX_SOURCES are recorded texts (see the module docstring): their
+# references to planning notes of that time stay as the committed report holds them.
 MATRIX = {"lr_grid": 3, "max_epochs": 4, "final_seeds": 3, "neg": 8, "effective_batch": 32, "berturk_epochs": 10,
           "berturk_batch": 32, "fewshot_tags": 6, "fewshot_k": [5, 10], "fewshot_draws": 3, "fewshot_neg_per_pos": 4,
           "fewshot_replay": 200, "fewshot_epochs": 10, "fewshot_base_runs": 3, "eval_seeds": 3}
@@ -81,19 +91,21 @@ MATRIX_SOURCES = {
 # finish ok
 ESTIMATES = {"berturk_s_per_step": 1.3, "berturk_s_per_msg": 0.01}
 ESTIMATE_SOURCES = {
-    "berturk_s_per_step": "about 30-60 s per BERTurk epoch of 46 batches of 32 on MPS, upper end [ASSUMED, RESEARCH "
-                          "Open Question 2]",
+    "berturk_s_per_step": "about 30-60 s per BERTurk epoch of 46 batches of 32 on MPS, upper end [ASSUMED]",
     "berturk_s_per_msg": "a 110M-parameter encoder scoring one message at max_len 128 on MPS [ASSUMED]",
 }
 # the committed CPU zero-shot scoring timing, the Laya scoring rate when no scoring probe (measured["scoring"]) ran ok
 SCORING_DUMP = os.path.join(REPO_ROOT, "results", "dumps", "laya-zeroshot-7b928d82", "val.json")
 SPLIT_NAMES = tuple(s["name"] for s in SPLITS)
 SCORED = ("val", "test", "hotels_probe")
+# the project stage each projection line's recorded "phase" number names, shown in the markdown
+STAGES = {5: "Laya val selection", 6: "BERTurk baseline", 8: "final scoring", 9: "few-shot experiment"}
 
 
-def spike_start(path):
-    """verdict.chosen of the Phase 2 spike report as {micro_batch, max_len, grad_accum, rung, fallback}; refuses any
-    verdict but FITS, and a chosen config that needs the MPS CPU fallback (ray_train.py trains strict only)."""
+def spike_start(path: str) -> dict[str, Any]:
+    """verdict.chosen of the MPS feasibility spike report as {micro_batch, max_len, grad_accum, rung, fallback};
+    refuses any verdict but FITS, and a chosen config that needs the MPS CPU fallback (ray_train.py trains strict
+    only)."""
     with open(path, encoding="utf-8") as f:
         report = json.load(f)
     v = report.get("verdict") or {}
@@ -108,7 +120,7 @@ def spike_start(path):
             "rung": c["rung"], "fallback": 0}
 
 
-def split_counts(manifest_path, names=SPLIT_NAMES):
+def split_counts(manifest_path: str, names: tuple[str, ...] = SPLIT_NAMES) -> dict[str, dict[str, int]]:
     """{split: {n_messages, n_items_neg8, n_items_full}} for the registered splits `names` (default all five), each
     verified on the exact bytes counted (pilot.data.verify_split_file) and counted torch-free (pilot.runs.neg_items)."""
     with open(manifest_path, encoding="utf-8") as f:
@@ -125,22 +137,23 @@ def split_counts(manifest_path, names=SPLIT_NAMES):
     return out
 
 
-def _largest(rows, key):
+def _largest(rows: list[dict[str, Any]], key: str) -> float | None:
+    """The largest non-None value of `key` over `rows`, or None."""
     vals = [r[key] for r in rows if r.get(key) is not None]
     return max(vals) if vals else None
 
 
-# ---- the probe protocol: interrupt after epoch 1, resume, and the LAYA-03 ladder in fresh children ----
+# ---- the probe protocol: interrupt after epoch 1, resume, and ray_train.py's fallback ladder in fresh children ----
 
 # Ray Train V2's internal checkpoint-manager snapshot (no public API; written before the previous checkpoint is
 # deleted, in place). Its format was read from ray SNAPSHOT_RAY: {"ray_version", "checkpoint_results":
 # [{"checkpoint_dir_name", "metrics", ...}], "latest_checkpoint_result", ...}; tests/test_compute_unit.py fails when the
-# lock moves ray, so a bump re-validates it (04-REVIEW IN-07)
+# lock moves ray, so a bump re-validates it
 SNAPSHOT = "checkpoint_manager_snapshot.json"
 SNAPSHOT_RAY = "2.59.0"
 
 
-def epoch_registered(storage, run_id, epoch):
+def epoch_registered(storage: str, run_id: str, epoch: int) -> bool:
     """True once Ray has registered the epoch checkpoint of `run_id`: an entry of the snapshot's checkpoint_results has
     checkpoint_dir_name epoch-NNN and that dir holds train_state.pt, so a kill from here on resumes from it
     (ray_train.py's epoch checkpoints). A missing or half-written snapshot reads as not registered."""
@@ -155,10 +168,10 @@ def epoch_registered(storage, run_id, epoch):
     return name in names and os.path.isfile(os.path.join(run_dir, name, "train_state.pt"))
 
 
-def attempt_chain(start_rung, launch):
+def attempt_chain(start_rung: str, launch: Callable[[str], dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
     """(attempts, status): launch(rung) runs one fresh child on `rung` and returns its attempt ({status: ok, oom or
-    failed, ...}); an oom moves to pilot.runs.next_rung (LAYA-03), ok and failed stop the chain, and an oom on the
-    last rung ends it as ladder_exhausted. Each attempt carries the rung it was launched on."""
+    failed, ...}); an oom moves to pilot.runs.next_rung (the fallback ladder), ok and failed stop the chain, and an
+    oom on the last rung ends it as ladder_exhausted. Each attempt carries the rung it was launched on."""
     attempts, rung = [], start_rung
     while True:
         attempt = dict(launch(rung), rung=rung)
@@ -172,8 +185,8 @@ def attempt_chain(start_rung, launch):
             return attempts, "ladder_exhausted"
 
 
-def resume_summary(record):
-    """{segments, resume_load_s, resume_peak_total_bytes, resume_demonstrated} of a run record (LAYA-04).
+def resume_summary(record: dict[str, Any]) -> dict[str, Any]:
+    """{segments, resume_load_s, resume_peak_total_bytes, resume_demonstrated} of a run record.
 
     resume_demonstrated: two or more segments, epoch rows numbered 1..E without a gap, and resumed flags that start
     False and turn True (the rows a resumed segment trained). The load seconds and peak memory are the largest over
@@ -191,9 +204,9 @@ def resume_summary(record):
                                         and all(seg_flags[1:]))}
 
 
-def measured_from_checkpoint(ckpt_dir):
+def measured_from_checkpoint(ckpt_dir: str) -> dict[str, Any]:
     """The probe run's measured inputs from a ray_train.py checkpoint dir: {"laya": rates, overheads, memory and run
-    config, "epochs": the record's epoch rows unchanged (LAYA-06)}."""
+    config, "epochs": the record's epoch rows unchanged}; SystemExit when the record holds no epoch row."""
     record = runs.read_record(ckpt_dir)
     with open(os.path.join(ckpt_dir, "rl_agent_config.json"), encoding="utf-8") as f:
         cfg = json.load(f)
@@ -217,13 +230,13 @@ def measured_from_checkpoint(ckpt_dir):
     return {"laya": laya, "epochs": rows}
 
 
-def run_overhead(wall_s, record):
+def run_overhead(wall_s: float, record: dict[str, Any]) -> float:
     """Seconds of one ray_train.py process outside its run record's terms: `wall_s` (the child's wall clock) minus the
     train and save seconds of the epochs its last segment trained, its load, resume-load, calibration (0 when the
-    record has none, LAYA-05) and final-save seconds; what is left (process and Ray start, the driver's split and
-    weight checks, item building, the --out copy) is paid once by every run (04-REVIEW IN-03). Ray's per-epoch persist of the epoch checkpoint is in the epochs'
-    save_s when the record says save_s_includes_persist, so it is charged per epoch, not here (04-REVIEW IN-02); in an
-    older record it stays in this residual. Never negative."""
+    record has none: training no longer calibrates) and final-save seconds; what is left (process and Ray start, the
+    driver's split and weight checks, item building, the --out copy) is paid once by every run. Ray's per-epoch
+    persist of the epoch checkpoint is in the epochs' save_s when the record says save_s_includes_persist, so it is
+    charged per epoch, not here; in an older record it stays in this residual. Never negative."""
     seg = record["segments"][-1]
     inside = sum(r["train_s"] + r["save_s"] for r in record["epochs"] if r["segment"] == seg["segment"])
     inside += record["load_s"] + (seg.get("resume_load_s") or 0.0) + (record["calib_s"] or 0.0) + \
@@ -231,14 +244,14 @@ def run_overhead(wall_s, record):
     return max(0.0, wall_s - inside)
 
 
-def laya_run_s(n_items, epochs, laya):
+def laya_run_s(n_items: int, epochs: int, laya: dict[str, Any]) -> float:
     """Seconds of one Laya run of `epochs` epochs on `n_items` items at the measured rate and overheads."""
     steps = spike.optimizer_steps(n_items, laya["micro_batch"], laya["grad_accum"])
     return epochs * (steps * laya["s_per_step"] + laya["save_s_per_epoch"]) + laya["load_s"] + \
         (laya["calib_s"] or 0.0) + laya["final_save_s"] + (laya.get("run_overhead_s") or 0.0)
 
 
-def laya_training_epochs(matrix):
+def laya_training_epochs(matrix: dict[str, Any]) -> int:
     """Laya training epochs in the matrix: selection, final seeds and few-shot base runs at max_epochs, plus the
     few-shot incremental runs (the count the per-epoch persist disclosure names)."""
     m = matrix
@@ -246,26 +259,26 @@ def laya_training_epochs(matrix):
         len(m["fewshot_k"]) * m["fewshot_draws"] * m["fewshot_epochs"]
 
 
-def laya_scoring_runs(matrix):
+def laya_scoring_runs(matrix: dict[str, Any]) -> int:
     """score.py runs of Laya in the matrix: one per selection epoch export on val, one per few-shot incremental model on
     test, and one per final seed on each of val, test and HOTELS."""
     m = matrix
     return m["lr_grid"] * m["max_epochs"] + len(m["fewshot_k"]) * m["fewshot_draws"] + m["eval_seeds"] * len(SCORED)
 
 
-def laya_scoring_overhead(measured):
+def laya_scoring_overhead(measured: dict[str, Any]) -> float | None:
     """Seconds of one score.py run outside its inference (the scoring probe's wall clock minus its inference seconds),
-    or None when the probe did not finish ok or predates the measurement (04-REVIEW IN-02)."""
+    or None when the probe did not finish ok or predates the measurement."""
     s = measured.get("scoring")
     return s.get("run_overhead_s") if s and s.get("status", "ok") == "ok" else None
 
 
 # ---- rates: measured when the probe measured them, else the committed CPU scoring rate or a labelled estimate ----
 
-def laya_scoring_rate(measured):
+def laya_scoring_rate(measured: dict[str, Any]) -> tuple[float, str, str]:
     """(s per message, basis, source) of Laya scoring: measured["scoring"] when present (inference seconds / messages),
     else the committed CPU zero-shot val timing, basis "measured (cpu, wall)": wall seconds / messages, Ray start and
-    actor loads included (04-REVIEW IN-03)."""
+    actor loads included."""
     s = measured.get("scoring")
     if s and s.get("status", "ok") == "ok":
         over = laya_scoring_overhead(measured)
@@ -282,7 +295,7 @@ def laya_scoring_rate(measured):
                                     sc["torch_threads"]))
 
 
-def berturk_rates(measured):
+def berturk_rates(measured: dict[str, Any]) -> tuple[float, float, str, str]:
     """(s per optimizer step, s per scored message, basis, source) of BERTurk: measured["berturk"] when its probe
     finished ok, else ESTIMATES."""
     b = measured.get("berturk")
@@ -293,7 +306,8 @@ def berturk_rates(measured):
             "ESTIMATES: %s; %s" % (ESTIMATE_SOURCES["berturk_s_per_step"], ESTIMATE_SOURCES["berturk_s_per_msg"]))
 
 
-def _laya_source(laya):
+def _laya_source(laya: dict[str, Any]) -> str:
+    """The source text of a Laya training line: where its s/step and overheads come from."""
     over = laya.get("run_overhead_s")
     return ("probe run on %s: s/step = the largest train_s / optimizer_steps over %d measured epoch(s); save, load%s "
             "final-save seconds from the same record%s%s"
@@ -306,27 +320,34 @@ def _laya_source(laya):
 
 # ---- lines and per-model parts ----
 
-def _line(id_, phase, what, runs_, epochs, units, unit, s_per_unit, basis, source, seconds, formula):
+def _line(id_: str, phase: int, what: str, runs_: int, epochs: int | None, units: int | None, unit: str | None,
+          s_per_unit: float | None, basis: str, source: str, seconds: float, formula: str) -> dict[str, Any]:
+    """One projection line. phase is the number of the project stage that runs the line, as the committed reports
+    record it (STAGES names each one)."""
     return {"id": id_, "phase": phase, "what": what, "runs": runs_, "epochs": epochs, "units_per_epoch": units,
             "unit": unit, "s_per_unit": s_per_unit, "basis": basis, "source": source, "seconds": seconds,
             "hours": seconds / 3600, "formula": formula}
 
 
-def _laya_part(runs_, epochs, n_items, laya, **extra):
+def _laya_part(runs_: int, epochs: int, n_items: int, laya: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    """The Laya part of a line: `runs_` runs of `epochs` epochs on `n_items` items; `extra` keys are added."""
     steps = spike.optimizer_steps(n_items, laya["micro_batch"], laya["grad_accum"])
     return dict({"model": "laya", "runs": runs_, "epochs": epochs, "units_per_epoch": steps,
                  "unit": "optimizer step", "s_per_unit": laya["s_per_step"], "basis": "measured",
                  "seconds": runs_ * laya_run_s(n_items, epochs, laya), "items": n_items}, **extra)
 
 
-def _berturk_part(runs_, epochs, n_messages, batch, s_step, basis, **extra):
+def _berturk_part(runs_: int, epochs: int, n_messages: int, batch: int, s_step: float, basis: str,
+                  **extra: Any) -> dict[str, Any]:
+    """The BERTurk part of a line: `runs_` runs of `epochs` epochs over `n_messages` messages in batches of `batch`."""
     steps = math.ceil(n_messages / batch)
     return dict({"model": "berturk", "runs": runs_, "epochs": epochs, "units_per_epoch": steps,
                  "unit": "optimizer step", "s_per_unit": s_step, "basis": basis,
                  "seconds": runs_ * epochs * steps * s_step}, **extra)
 
 
-def _scoring_part(model, runs_, n_messages, s_msg, basis, invocations=0, over=None):
+def _scoring_part(model: str, runs_: int, n_messages: int, s_msg: float, basis: str, invocations: int = 0,
+                  over: float | None = None) -> dict[str, Any]:
     """`runs_` models scored on `n_messages` each; `over` (a per-score.py-run overhead, None when not measured) is
     added once per invocation, and only then is it a key of the part."""
     part = {"model": model, "runs": runs_, "epochs": None, "units_per_epoch": n_messages, "unit": "message",
@@ -336,12 +357,14 @@ def _scoring_part(model, runs_, n_messages, s_msg, basis, invocations=0, over=No
     return part
 
 
-def _same(parts, key):
+def _same(parts: list[dict[str, Any]], key: str) -> Any:
+    """The parts' common value of `key`, or None when they differ."""
     vals = {json.dumps(p[key]) for p in parts}
     return parts[0][key] if len(vals) == 1 else None
 
 
-def _parts_line(id_, phase, what, parts, source, formula, provisional=False):
+def _parts_line(id_: str, phase: int, what: str, parts: list[dict[str, Any]], source: str, formula: str,
+                provisional: bool = False) -> dict[str, Any]:
     """A line made of per-model parts: runs and seconds are their sums; epochs, units, unit and s/unit are shown only
     when every part agrees; basis is the weakest part (estimate), else provisional for an unfrozen protocol, else a
     qualified measurement (measured (cpu, wall)) of any part, else measured."""
@@ -354,7 +377,8 @@ def _parts_line(id_, phase, what, parts, source, formula, provisional=False):
     return line
 
 
-def _items_key(matrix):
+def _items_key(matrix: dict[str, Any]) -> str:
+    """The counts key of the matrix's item mix (neg8 or full); ValueError for any other neg."""
     if matrix["neg"] == 8:
         return "n_items_neg8"
     if matrix["neg"] == 0:
@@ -362,7 +386,9 @@ def _items_key(matrix):
     raise ValueError("the projection counts neg8 or full items only, got neg %r" % (matrix["neg"],))
 
 
-def _laya_train_line(id_, phase, what, runs_, epochs, split, laya, counts, keys, items_key):
+def _laya_train_line(id_: str, phase: int, what: str, runs_: int, epochs: int, split: str, laya: dict[str, Any],
+                     counts: dict[str, dict[str, int]], keys: tuple[str, str], items_key: str) -> dict[str, Any]:
+    """A Laya training line: `runs_` runs of `epochs` epochs on `split`'s items; keys name the two matrix factors."""
     n = counts[split][items_key]
     part = _laya_part(runs_, epochs, n, laya)
     over = laya.get("run_overhead_s")
@@ -377,7 +403,10 @@ def _laya_train_line(id_, phase, what, runs_, epochs, split, laya, counts, keys,
                  "measured", _laya_source(laya), part["seconds"], formula)
 
 
-def _berturk_train_line(id_, phase, what, runs_, epochs, split, batch, rates, counts, keys):
+def _berturk_train_line(id_: str, phase: int, what: str, runs_: int, epochs: int, split: str, batch: int,
+                        rates: tuple[float, float, str, str], counts: dict[str, dict[str, int]],
+                        keys: tuple[str, ...]) -> dict[str, Any]:
+    """A BERTurk training line: `runs_` runs of `epochs` epochs over `split`'s messages at `rates`."""
     s_step, _, basis, source = rates
     n = counts[split]["n_messages"]
     part = _berturk_part(runs_, epochs, n, batch, s_step, basis)
@@ -387,7 +416,7 @@ def _berturk_train_line(id_, phase, what, runs_, epochs, split, batch, rates, co
                  part["seconds"], formula)
 
 
-def project(measured, counts, matrix):
+def project(measured: dict[str, Any], counts: dict[str, dict[str, int]], matrix: dict[str, Any]) -> dict[str, Any]:
     """{"lines": [...], "total_s", "total_h"}: one line per experiment-matrix item, each with its runs, epochs, units,
     seconds per unit, basis (measured, measured (cpu, wall), estimate or provisional), source and formula; the total is
     their sum."""
@@ -396,7 +425,7 @@ def project(measured, counts, matrix):
     s_over = laya_scoring_overhead(measured)
     n_exports = m["lr_grid"] * m["max_epochs"]
 
-    def plus_over(n_runs):
+    def plus_over(n_runs: int) -> str:
         return "" if s_over is None else " + %d score.py runs x %.1f s run overhead" % (n_runs, s_over)
     bert = berturk_rates(measured)
     b_step, b_msg, b_basis, b_source = bert
@@ -420,8 +449,9 @@ def project(measured, counts, matrix):
                             m["berturk_epochs"], "final_train", m["berturk_batch"], bert, counts, ("final_seeds",)),
     ]
 
-    # Phase 9 few-shot (protocol frozen only in Phase 8): base runs with the held-out labels masked, then incremental
-    # runs on k-shot support sets plus replay, then scoring of every incremental model on test
+    # the few-shot experiment (its protocol not yet frozen when the matrix was projected): base runs with the held-out
+    # labels masked, then incremental runs on k-shot support sets plus replay, then scoring of every incremental model
+    # on test
     base = [_laya_part(m["fewshot_base_runs"], m["max_epochs"], sel[ik], laya),
             _berturk_part(m["fewshot_base_runs"], m["berturk_epochs"], sel["n_messages"], m["berturk_batch"], b_step,
                           b_basis)]
@@ -475,12 +505,13 @@ def project(measured, counts, matrix):
     return {"lines": lines, "total_s": total, "total_h": total / 3600}
 
 
-# ---- Phase 9 (09-04, D-08): the few-shot projection on the frozen protocol and the compute-fallback decision ----
+# ---- the few-shot experiment: the projection on the frozen protocol and the compute-fallback decision ----
 
-def _fewshot_rates(measured, rules):
-    """(Laya terms, BERTurk rates) of the few-shot projection: the measured Laya terms with calib_s None (LAYA-05:
-    Phase 9 runs never calibrate on training messages); SystemExit when the measured micro-batch and grad-accum (or
-    the BERTurk probe's batch) are not the frozen recipe's, since s/step was measured at those."""
+def _fewshot_rates(measured: dict[str, Any],
+                   rules: dict[str, Any]) -> tuple[dict[str, Any], tuple[float, float, str, str]]:
+    """(Laya terms, BERTurk rates) of the few-shot projection: the measured Laya terms with calib_s None (few-shot runs
+    never calibrate on training messages); SystemExit when the measured micro-batch and grad-accum (or the BERTurk
+    probe's batch) are not the frozen recipe's, since s/step was measured at those."""
     laya = dict(measured["laya"], calib_s=None)
     want = rules["base_runs"]["laya"]
     for key in ("micro_batch", "grad_accum"):
@@ -494,13 +525,16 @@ def _fewshot_rates(measured, rules):
     return laya, berturk_rates(measured)
 
 
-def _check_steps(what, have, want):
+def _check_steps(what: str, have: int, want: int) -> None:
+    """Refuse when a part's optimizer steps per epoch differ from the frozen counts' (one step rule for both)."""
     if have != want:
         raise SystemExit("%s: %d optimizer steps per epoch here, %d in the frozen counts; the counts and the "
                          "projection must use one step rule" % (what, have, want))
 
 
-def _fewshot_lines(measured, counts, block, n_scored, n_bases):
+def _fewshot_lines(measured: dict[str, Any], counts: dict[str, Any], block: dict[str, Any], n_scored: dict[str, int],
+                   n_bases: int) -> list[dict[str, Any]]:
+    """The five few-shot projection lines for `n_bases` masked base runs per model (see fewshot_projection)."""
     rules = block["rules"]
     laya, bert = _fewshot_rates(measured, rules)
     b_step, b_msg, b_basis, b_source = bert
@@ -536,7 +570,7 @@ def _fewshot_lines(measured, counts, block, n_scored, n_bases):
           dict(_scoring_part("berturk", n_bases, n_val, b_msg, b_basis), split="val"),
           dict(_scoring_part("berturk", n_test_models, n_test, b_msg, b_basis), split="test")]
 
-    def plus_over(n_runs):
+    def plus_over(n_runs: int) -> str:
         return "" if s_over is None else " + %d score.py runs x %.1f s run overhead" % (n_runs, s_over)
     return [
         _parts_line("fewshot_laya_bases", 9, "Laya label-masked base runs on selection_train", [lp], l_src,
@@ -570,18 +604,20 @@ def _fewshot_lines(measured, counts, block, n_scored, n_bases):
     ]
 
 
-def fewshot_projection(measured, counts, block, n_scored):
-    """The Phase 9 projection (D-08) on the frozen few-shot protocol: {"lines", "total_s", "total_h",
+def fewshot_projection(measured: dict[str, Any], counts: dict[str, Any], block: dict[str, Any],
+                       n_scored: dict[str, int]) -> dict[str, Any]:
+    """The few-shot projection on the frozen few-shot protocol: {"lines", "total_s", "total_h",
     "fallback_total_s", "fallback_total_h", "base_runs_per_model", "fallback_base_runs_per_model", "n_scored"}.
 
-    Five lines through the Phase 4 part builders, every rate from the committed compute record `measured` (basis
-    measured: the protocol is frozen, so nothing is provisional): Laya masked bases (one per primary base seed,
-    rules.base_runs.laya.stop_after_epoch epochs on the counts' masked items), BERTurk masked bases (the same runs,
-    rules.base_runs.berturk.stop_after_epoch epochs on every selection_train message at the frozen batch), Laya and
-    BERTurk continued runs (one per (draw, k) of `counts`, rules.continued_training.epochs epochs each), and scoring
-    (every base on val and test, every continued model on test; `n_scored` = {"val": n, "test": n} from the
-    protocol's splits). The Laya terms carry calib_s None (LAYA-05). fallback_total_s is the same with the compute
-    fallback's one base per model. SystemExit when a step count differs from the frozen counts'."""
+    Five lines through the compute checkpoint's part builders, every rate from the committed compute record
+    `measured` (basis measured: the protocol is frozen, so nothing is provisional): Laya masked bases (one per primary
+    base seed, rules.base_runs.laya.stop_after_epoch epochs on the counts' masked items), BERTurk masked bases (the
+    same runs, rules.base_runs.berturk.stop_after_epoch epochs on every selection_train message at the frozen batch),
+    Laya and BERTurk continued runs (one per (draw, k) of `counts`, rules.continued_training.epochs epochs each), and
+    scoring (every base on val and test, every continued model on test; `n_scored` = {"val": n, "test": n} from the
+    protocol's splits). The Laya terms carry calib_s None (no training-time calibration). fallback_total_s is the
+    same with the compute fallback's one base per model. SystemExit when a step count differs from the frozen
+    counts'."""
     primary, fallback = len(fewshot.allowed_base_seeds(block, "primary")), \
         len(fewshot.allowed_base_seeds(block, "fallback"))
     lines = _fewshot_lines(measured, counts, block, n_scored, primary)
@@ -592,12 +628,14 @@ def fewshot_projection(measured, counts, block, n_scored):
             "fallback_base_runs_per_model": fallback, "n_scored": {"val": n_scored["val"], "test": n_scored["test"]}}
 
 
-def fewshot_decision(projection, block, ladder_failure=None):
-    """{"trigger", "decision"} of the frozen compute_fallback rule (D-08), applied exactly: the projection fires when
-    its total_s exceeds pilot.fewshot.FALLBACK_HOURS hours (strictly: exactly 10 h does not), and a recorded LAYA-03
-    ladder failure (`ladder_failure`, a non-empty text) fires the second trigger; mode fallback when either fires,
-    else primary. A fallback decision carries the frozen disclosure. trigger.ladder_failure is the boolean
-    pilot.fewshot.read_mode checks, trigger.ladder_failure_text the recorded failure (None without one)."""
+def fewshot_decision(projection: dict[str, Any], block: dict[str, Any],
+                     ladder_failure: str | None = None) -> dict[str, Any]:
+    """{"trigger", "decision"} of the frozen compute_fallback rule, applied exactly: the projection fires when
+    its total_s exceeds pilot.fewshot.FALLBACK_HOURS hours (strictly: exactly 10 h does not), and a recorded
+    fallback-ladder failure of a base run (`ladder_failure`, a non-empty text) fires the second trigger; mode
+    fallback when either fires, else primary. A fallback decision carries the frozen disclosure.
+    trigger.ladder_failure is the boolean pilot.fewshot.read_mode checks, trigger.ladder_failure_text the recorded
+    failure (None without one)."""
     fb = block["rules"]["compute_fallback"]
     if ladder_failure is not None and (not isinstance(ladder_failure, str) or not ladder_failure.strip()):
         raise SystemExit("a ladder failure needs a non-empty text naming the failed base run and its last rung")
@@ -612,8 +650,8 @@ def fewshot_decision(projection, block, ladder_failure=None):
                          "disclosure": fb["disclosure"] if mode == "fallback" else None}}
 
 
-def fewshot_notes(measured, projection):
-    """The disclosures of the few-shot projection record: the calibration term left out (LAYA-05), the overheads the
+def fewshot_notes(measured: dict[str, Any], projection: dict[str, Any]) -> list[str]:
+    """The disclosures of the few-shot projection record: the calibration term left out, the overheads the
     committed probe did not measure, and where each rate comes from."""
     laya, n_laya = measured["laya"], sum(line["runs"] for line in projection["lines"]
                                          if line["id"] in ("fewshot_laya_bases", "fewshot_laya_continued"))
@@ -636,7 +674,8 @@ def fewshot_notes(measured, projection):
     return out
 
 
-def what_if(measured, counts, matrix):
+def what_if(measured: dict[str, Any], counts: dict[str, dict[str, int]],
+            matrix: dict[str, Any]) -> list[dict[str, Any]]:
     """Total runtime for lr_grid 1-3 x max_epochs 2-4 (the rest of `matrix` unchanged), plus one row for the few-shot
     compute fallback (1 base run per model) at the matrix's own lr_grid and max_epochs."""
     rows = []
@@ -651,10 +690,11 @@ def what_if(measured, counts, matrix):
     return rows
 
 
-def disk_budget(model_bytes, matrix, train_state_bytes=None):
+def disk_budget(model_bytes: int, matrix: dict[str, Any], train_state_bytes: int | None = None) -> dict[str, Any]:
     """Disk the matrix needs on top of the code (bytes): the train state (6 x the fp16 weight bytes unless measured),
     one run's peak (three train states during checkpoint rotation, its per-epoch exports and its final checkpoint),
-    the selection runs' epoch exports kept until Phase 5 scores them on val, and the kept final checkpoints."""
+    the selection runs' epoch exports kept until the Laya val selection scores them on val, and the kept final
+    checkpoints."""
     ts = 6 * model_bytes if train_state_bytes is None else train_state_bytes
     return {"model_bytes": model_bytes, "train_state_bytes": ts,
             "train_state_basis": "6 x the fp16 weight bytes" if train_state_bytes is None else "measured",
@@ -664,14 +704,16 @@ def disk_budget(model_bytes, matrix, train_state_bytes=None):
             "laya_final_checkpoints_bytes": (matrix["lr_grid"] + matrix["final_seeds"]) * model_bytes}
 
 
-def swap_grew_epochs(measured):
-    """The measured epochs whose system swap grew (swap_delta_bytes > 0): the spike's D-01 memory gate counts any swap
-    growth during a measured step as memory pressure, so the report flags them (04-REVIEW WR-08)."""
+def swap_grew_epochs(measured: dict[str, Any] | None) -> list[int]:
+    """The measured epochs whose system swap grew (swap_delta_bytes > 0): the spike's memory gate counts any swap
+    growth during a measured step as memory pressure, so the report flags them."""
     return [r["epoch"] for r in (measured or {}).get("epochs") or [] if (r.get("swap_delta_bytes") or 0) > 0]
 
 
-def assumptions(matrix, measured=None, counts=None, interrupt=None):
-    """What the user must confirm or trim at the compute checkpoint (plan 04-08), one sentence each."""
+def assumptions(matrix: dict[str, Any], measured: dict[str, Any] | None = None,
+                counts: dict[str, dict[str, int]] | None = None, interrupt: dict[str, Any] | None = None) -> list[str]:
+    """What the user must confirm or trim at the compute checkpoint's approval, one sentence each (recorded texts: see
+    the module docstring)."""
     measured = measured or {}
     interrupted = bool(interrupt) and interrupt.get("mode") != "none" and not interrupt.get("missed")
     out = ["Matrix value %s = %s is provisional (RESEARCH A2): %s"
@@ -742,8 +784,12 @@ def assumptions(matrix, measured=None, counts=None, interrupt=None):
     return out
 
 
-def build_report(meta, measured, counts, matrix, projection, preflight, what_if=None, disk=None, assumptions=None,
-                 attempts=None, status="ok", interrupt=None, resume=None):
+def build_report(meta: dict[str, Any], measured: dict[str, Any] | None, counts: dict[str, dict[str, int]] | None,
+                 matrix: dict[str, Any], projection: dict[str, Any] | None, preflight: dict[str, Any] | None,
+                 what_if: list[dict[str, Any]] | None = None, disk: dict[str, Any] | None = None,
+                 assumptions: list[str] | None = None, attempts: list[dict[str, Any]] | None = None,
+                 status: str = "ok", interrupt: dict[str, Any] | None = None,
+                 resume: dict[str, Any] | None = None) -> dict[str, Any]:
     """The report dict. status other than ok (failed, ladder_exhausted) comes with measured and projection None: the
     attempts are the whole result."""
     return {"schema": SCHEMA, "meta": meta, "status": status, "preflight": preflight, "attempts": attempts,
@@ -753,15 +799,15 @@ def build_report(meta, measured, counts, matrix, projection, preflight, what_if=
 
 # ---- markdown ----
 
-def _fmt(v, scale=1.0, digits=3):
+def _fmt(v: float | None, scale: float = 1.0, digits: int = 3) -> str:
     return "-" if v is None else ("%." + str(digits) + "f") % (v / scale)
 
 
-def _dash(v):
+def _dash(v: Any) -> Any:
     return "-" if v is None else v
 
 
-def _measured_lines(measured):
+def _measured_lines(measured: dict[str, Any]) -> list[str]:
     m = measured["laya"]
     lines = ["", "## Measured run", "",
              "- Device %s (parameters on %s), rung %s%s, neg %d, micro-batch %d, max_len %d, grad-accum %d, gradient "
@@ -775,8 +821,8 @@ def _measured_lines(measured):
                  "" if m.get("run_overhead_s") is None else ", run overhead %s s (the child's wall clock minus these "
                  "and the epochs' terms)" % _fmt(m["run_overhead_s"], digits=1)),
              "- Projection rate: %s s per optimizer step, the largest train_s / optimizer_steps over %d measured "
-             "epoch(s) (epoch 1: %s s; RESEARCH Pitfall 6)" % (_fmt(m["s_per_step"], digits=4), m["epochs_measured"],
-                                                               _fmt(m["s_per_step_epoch1"], digits=4)),
+             "epoch(s) (epoch 1: %s s)" % (_fmt(m["s_per_step"], digits=4), m["epochs_measured"],
+                                          _fmt(m["s_per_step_epoch1"], digits=4)),
              "",
              "| epoch | train min | s/step | optimizer steps | items | peak GiB (driver + RSS) | driver GiB | RSS GiB "
              "| swap delta MiB | save s |",
@@ -790,7 +836,7 @@ def _measured_lines(measured):
     return lines
 
 
-def _probe_lines(measured):
+def _probe_lines(measured: dict[str, Any]) -> list[str]:
     """The BERTurk timing probe and the scoring probe, when they ran: their numbers, or why a line keeps its
     estimate."""
     lines, g = [], 2**30
@@ -832,18 +878,19 @@ def _probe_lines(measured):
     return lines
 
 
-def _projection_lines(projection):
+def _projection_lines(projection: dict[str, Any]) -> list[str]:
     lines = ["", "## Projection", "",
              "Basis is the weakest input of a line: estimate (a labelled estimate, not measured), provisional "
-             "(few-shot, protocol frozen only in Phase 8), measured (cpu, wall) (the committed CPU zero-shot "
+             "(few-shot, its protocol not yet frozen when this ran), measured (cpu, wall) (the committed CPU zero-shot "
              "scoring rate, wall clock per message with Ray start and model loads, used when the scoring probe did "
              "not finish ok) or measured. Every matrix value is provisional; see Assumptions to confirm.", "",
-             "| line | phase | what | runs | epochs | units / epoch | unit | s / unit | basis | hours |",
+             "| line | stage | what | runs | epochs | units / epoch | unit | s / unit | basis | hours |",
              "|---|---|---|---|---|---|---|---|---|---|"]
     for l in projection["lines"]:
         lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
-            l["id"], l["phase"], l["what"], l["runs"], _dash(l["epochs"]), _dash(l["units_per_epoch"]),
-            _dash(l["unit"]), _fmt(l["s_per_unit"], digits=4), l["basis"], _fmt(l["hours"], digits=2)))
+            l["id"], STAGES.get(l["phase"], l["phase"]), l["what"], l["runs"], _dash(l["epochs"]),
+            _dash(l["units_per_epoch"]), _dash(l["unit"]), _fmt(l["s_per_unit"], digits=4), l["basis"],
+            _fmt(l["hours"], digits=2)))
     lines += ["", "**Total: %.2f h** (%.0f s, the sum of the lines above)" % (projection["total_h"],
                                                                            projection["total_s"])]
     parted = [l for l in projection["lines"] if l.get("parts")]
@@ -864,7 +911,7 @@ def _projection_lines(projection):
     return lines
 
 
-def _what_if_lines(rows):
+def _what_if_lines(rows: list[dict[str, Any]]) -> list[str]:
     lines = ["", "## What-if", "", "Total projected hours when the matrix is trimmed (everything else unchanged):", "",
              "| option | lr_grid | max_epochs | few-shot base runs | total h |", "|---|---|---|---|---|"]
     for r in rows:
@@ -873,7 +920,7 @@ def _what_if_lines(rows):
     return lines
 
 
-def _disk_lines(d):
+def _disk_lines(d: dict[str, Any]) -> list[str]:
     g = 2**30
     return ["", "## Disk", "",
             "- Base model (fp16 safetensors): %s GiB; train state: %s GiB (%s)"
@@ -881,18 +928,19 @@ def _disk_lines(d):
             "- One run's peak: %s GiB (three train states during checkpoint rotation, its per-epoch exports, its final "
             "checkpoint); ray_train.py refuses below %s GiB free" % (_fmt(d["per_run_peak_bytes"], g, 2),
                                                                    _fmt(d["run_floor_bytes"], g, 2)),
-            "- Selection epoch exports kept until Phase 5 scores them on val: %s GiB; Laya final checkpoints kept: "
-            "%s GiB" % (_fmt(d["selection_exports_bytes"], g, 2), _fmt(d["laya_final_checkpoints_bytes"], g, 2))]
+            "- Selection epoch exports kept until the Laya val selection scores them on val: %s GiB; Laya final "
+            "checkpoints kept: %s GiB" % (_fmt(d["selection_exports_bytes"], g, 2),
+                                          _fmt(d["laya_final_checkpoints_bytes"], g, 2))]
 
 
-def _attempt_lines(attempts, status):
+def _attempt_lines(attempts: list[dict[str, Any]], status: str) -> list[str]:
     lines = ["", "## Attempts", "",
              "Every probe attempt runs in a fresh process; an MPS out-of-memory attempt is followed by the next rung "
-             "of the LAYA-03 ladder. Chain status: **%s**." % status, "",
+             "of ray_train.py's fallback ladder. Chain status: **%s**." % status, "",
              "| # | rung | status | run id | detail |", "|---|---|---|---|---|"]
     for i, a in enumerate(attempts):
         # a failed attempt's reason wins over the child's line: after a resume-stage OOM the line says "rerun the
-        # same command to resume", which the orchestrator's deleted storage makes untrue (04-REVIEW IN-06)
+        # same command to resume", which the orchestrator's deleted storage makes untrue
         detail = a.get("reason") or a.get("line") or ("weaker: head-only" if runs.weaker(a["rung"]) else "")
         lines.append("| %d | %s | %s | %s | %s |" % (i, a["rung"], a["status"], _dash(a.get("run_id")),
                                                      detail.replace("|", "/") or "-"))
@@ -903,7 +951,7 @@ def _attempt_lines(attempts, status):
     return lines
 
 
-def _resume_lines(interrupt, resume):
+def _resume_lines(interrupt: dict[str, Any] | None, resume: dict[str, Any] | None) -> list[str]:
     lines = ["", "## Interruption and resume", ""]
     if not interrupt or interrupt.get("mode") == "none":
         lines.append("- No interruption (--interrupt none).")
@@ -928,7 +976,7 @@ def _resume_lines(interrupt, resume):
     return lines
 
 
-def _provenance_lines(meta):
+def _provenance_lines(meta: dict[str, Any]) -> list[str]:
     split, man, model, versions, plat, proto = (meta["split"], meta["manifest"], meta["model"], meta["versions"],
                                                 meta["platform"], meta["protocol"])
     model_text = ("`%s/%s@%s`" % (model["repo"], model["subfolder"], model["revision"]) if "repo" in model
@@ -947,11 +995,11 @@ def _provenance_lines(meta):
                start["max_len"], start["grad_accum"], start["rung"], start["fallback"], proto["protocol_complete"])]
 
 
-def render_markdown(report):
+def render_markdown(report: dict[str, Any]) -> str:
     """Human-readable compute_checkpoint.md: banners, provenance, the measured run, the projection with every line's
     basis, source and formula, the what-if table, the disk budget and the assumptions to confirm."""
     meta = report["meta"]
-    lines = ["# Compute checkpoint (Phase 4, LAYA-07)", ""]
+    lines = ["# Compute checkpoint", ""]
     if not meta["protocol"]["protocol_complete"]:
         lines += ["**SMOKE RUN: not a compute checkpoint.** The run left the protocol (not mps, not the pinned "
                   "weights, not the committed selection_train, a start config other than the spike's, --cpus, "
@@ -966,7 +1014,7 @@ def render_markdown(report):
     grew = swap_grew_epochs(report.get("measured"))
     if grew:
         lines += ["**Swap grew during measured epoch(s) %s** (largest %s MiB): the run was under memory pressure (the "
-                  "spike's D-01 gate); confirm the rate before approval."
+                  "spike's memory gate); confirm the rate before approval."
                   % (", ".join(map(str, grew)),
                      _fmt(max(r["swap_delta_bytes"] for r in report["measured"]["epochs"]), 2**20, 0)), ""]
     lines += _provenance_lines(meta)
@@ -992,7 +1040,7 @@ def render_markdown(report):
     return "\n".join(lines) + "\n"
 
 
-def write_report(out_dir, report):
+def write_report(out_dir: str, report: dict[str, Any]) -> str:
     """Write compute_checkpoint.json, then render compute_checkpoint.md from the re-parsed JSON (so the committed
     markdown always equals render_markdown(json.load(the committed JSON))); returns the markdown path."""
     os.makedirs(out_dir, exist_ok=True)

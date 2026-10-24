@@ -1,9 +1,13 @@
-"""Torch-free logic of the Phase 2 MPS feasibility spike (LAYA-09).
+"""Torch-free logic of the MPS feasibility spike: does a full-encoder Laya fine-tune fit on a 16 GB Mac's MPS device?
 
 mps_spike.py imports this module in the orchestrator, before any child process sets PYTORCH_ENABLE_MPS_FALLBACK
 (torch reads it once, at import), so nothing here may import torch. It holds the grid and protocol constants, the
 worker env, neg8 sampling, worst-case padding, the timing summary, the swap readers, the child outcome mapping and
-the report builders. Every measurement itself happens in mps_spike.py's worker.
+the verdict and the report builders. Every measurement itself happens in mps_spike.py's worker.
+
+The verdict's gates are named in RULES: memory (every measured padded step without an OOM or system swap growth),
+time (a projected neg8 epoch within TIME_GATE_S), choice (the fastest FITS config, truncation and tie-break), rung
+(a full encoder or frozen embeddings only) and preference (rung none before embeddings_frozen).
 
 usage: imported by mps_spike.py and tests/test_spike_unit.py
 """
@@ -13,29 +17,30 @@ import os
 import random
 import re
 import subprocess
+from typing import Any
 
 import psutil
 
 from pilot.data import write_atomic
 
-# D-07: (micro_batch, max_len) grid, warm-up and measured optimizer steps per regime; the effective batch is held at
-# ray_train.py's defaults (8 x 4) so every grid config projects over the same number of optimizer steps
+# the spike protocol: (micro_batch, max_len) grid, warm-up and measured optimizer steps per regime; the effective batch
+# is held at ray_train.py's defaults (8 x 4) so every grid config projects over the same number of optimizer steps
 DEFAULT_GRID = ((4, 128), (4, 256), (8, 128), (8, 256))
 WARMUP_STEPS = 5
 MEASURED_STEPS = 20
 EFFECTIVE_BATCH = 32
-# D-02: projected selection-train neg8 epoch limit, seconds
+# the time gate: projected selection_train neg8 epoch limit, seconds
 TIME_GATE_S = 7200
-# D-04/D-08: the only rungs that may count as FITS, in preference order (embedding freeze is a fallback rung only)
+# the rung rule: the only rungs that may count as FITS, in preference order (embedding freeze is a fallback rung only)
 RUNGS = ("none", "embeddings_frozen")
-# D-03 tie-break: configs within this fraction of the fastest projected epoch count as tied
+# the choice rule's tie-break: configs within this fraction of the fastest projected epoch count as tied
 TIE_TOLERANCE = 0.05
-# quiet-machine preflight (RESEARCH Pitfall 2, Open Question 2): about 7.5 GiB projected need for the largest grid
-# config plus margin; plan 02-06's run-policy checkpoint confirms the value with the user
+# quiet-machine preflight default (--min-available-gib): about 7.5 GiB projected need for the largest grid config plus
+# margin; the committed run was measured at --min-available-gib 7.0 (its meta.policy records it)
 MIN_AVAILABLE_GIB = 9.0
 
 
-def parse_grid(text):
+def parse_grid(text: str | None) -> list[tuple[int, int]]:
     """"4x128,8x256" -> [(4, 128), (8, 256)]; ValueError on an empty, malformed, non-positive or duplicate entry."""
     out = []
     for tok in (text or "").split(","):
@@ -51,25 +56,25 @@ def parse_grid(text):
     return out
 
 
-def spike_env(fallback, cpus):
-    """Env every spike worker must see (ray.init runtime_env and the child process env)."""
+def spike_env(fallback: str, cpus: int) -> dict[str, str]:
+    """Env every spike worker must see (ray.init runtime_env and the child process env); fallback is "0" or "1"."""
     if fallback not in ("0", "1"):
         raise ValueError("fallback must be '0' or '1', got %r" % (fallback,))
     return {"PYTORCH_ENABLE_MPS_FALLBACK": fallback,
             "PYTORCH_MPS_HIGH_WATERMARK_RATIO": "1.0",
             # LOW must be set too: HIGH=1.0 alone crashes the first MPS call with "invalid low watermark ratio 1.4"
-            # (the unified-memory LOW default exceeds HIGH; RESEARCH Pitfall 1)
+            # (the unified-memory LOW default exceeds HIGH)
             "PYTORCH_MPS_LOW_WATERMARK_RATIO": "1.0",
             "OMP_NUM_THREADS": str(cpus),
             "TOKENIZERS_PARALLELISM": "false",
             "HF_HUB_OFFLINE": "1"}
 
 
-def neg8_rows(rows, seed, k=8):
+def neg8_rows(rows: list[dict[str, Any]], seed: int, k: int = 8) -> list[dict[str, Any]]:
     """Copies of `rows` that label every positive tag plus k random negatives (one random.Random(seed) per pass).
 
     laya.train.items_from_rows skips questions with no `expected` entry without counting them, so the dropped
-    negatives simply produce no item (D-06b). The input rows are never mutated.
+    negatives simply produce no item. The input rows are never mutated.
     """
     rng = random.Random(seed)
     out = []
@@ -81,7 +86,7 @@ def neg8_rows(rows, seed, k=8):
     return out
 
 
-def pad_item_to(item, max_len):
+def pad_item_to(item: dict[str, Any], max_len: int) -> dict[str, Any]:
     """Copy of a laya item whose state is long enough that build_sequence emits exactly max_len tokens.
 
     Real tokens repeated, not pad tokens, so the attention mask stays all ones (the honest long-message worst case).
@@ -90,7 +95,7 @@ def pad_item_to(item, max_len):
     return dict(item, state_ids=(ids * (max_len // len(ids) + 1))[:max_len])
 
 
-def summarize(times):
+def summarize(times: list[float]) -> dict[str, Any]:
     """{"n", "median_s", "p90_s", "min_s", "max_s"} of step durations (p90 nearest-rank); {"n": 0} when empty."""
     if not times:
         return {"n": 0}
@@ -101,7 +106,7 @@ def summarize(times):
             "min_s": round(s[0], 4), "max_s": round(s[-1], 4)}
 
 
-def _ranks(values):
+def _ranks(values: list[int]) -> dict[str, int]:
     """{min, median, p90, p99, max} of `values`, nearest-rank (an actual length, never an interpolated one)."""
     s = sorted(values)
     n = len(s)
@@ -109,12 +114,13 @@ def _ranks(values):
             "p99": s[math.ceil(0.99 * n) - 1], "max": s[-1]}
 
 
-def token_stats(seq_lens_by_message, state_lens, thresholds=(128, 256)):
-    """D-09b token lengths of a split, counts and percentiles only (never text or uids).
+def token_stats(seq_lens_by_message: list[list[int]], state_lens: list[int],
+                thresholds: tuple[int, ...] = (128, 256)) -> dict[str, Any]:
+    """Token lengths of a split, counts and percentiles only (never text or uids).
 
     seq_lens_by_message: per message, the untruncated (message, question) sequence lengths of its items; a message is
     over L when its longest sequence exceeds L. state_lens: per message, the untruncated state length. The verdict's
-    D-03 truncation rule reads pct_messages_over_128.
+    truncation clause (the choice rule) reads pct_messages_over_128. ValueError without a message holding an item.
     """
     seqs = [n for lens in seq_lens_by_message for n in lens]
     if not seq_lens_by_message or not seqs or not state_lens:
@@ -129,12 +135,12 @@ def token_stats(seq_lens_by_message, state_lens, thresholds=(128, 256)):
     return out
 
 
-def swap_used():
-    """System swap in use, bytes (psutil equals sysctl vm.swapusage "used"); the D-01 gate value."""
+def swap_used() -> int:
+    """System swap in use, bytes (psutil equals sysctl vm.swapusage "used"); the value the memory gate reads."""
     return psutil.swap_memory().used
 
 
-def swapouts():
+def swapouts() -> int | None:
     """Monotonic macOS swap-out counter, or None where sysctl is missing or fails (a corroborating signal only).
 
     Never psutil.swap_memory().sout: on macOS it counts file-backed pageouts, not swap.
@@ -147,11 +153,13 @@ def swapouts():
         return None
 
 
-def preflight(available_bytes, swap_samples, swapouts_samples, min_available_gib):
+def preflight(available_bytes: int, swap_samples: list[int], swapouts_samples: list[int | None],
+              min_available_gib: float) -> dict[str, Any]:
     """Quiet-machine check before any measurement: enough available memory, and whether swap grew while idle.
 
-    Background apps move the system-wide swap the D-01 gate reads, so a memory-starved machine could fake a DOES NOT
-    FIT. min_available_gib 0 is the explicit override (a busy-machine run, flagged in the report).
+    Background apps move the system-wide swap the memory gate reads, so a memory-starved machine could fake a DOES NOT
+    FIT. min_available_gib 0 is the explicit override (a busy-machine run, flagged in the report). Returns the
+    preflight record; the caller refuses when its "passed" is False.
     """
     available_gib = round(available_bytes / 2**30, 2)
     return {"available_gib": available_gib, "min_available_gib": min_available_gib,
@@ -162,12 +170,12 @@ def preflight(available_bytes, swap_samples, swapouts_samples, min_available_gib
             "passed": available_gib >= min_available_gib, "override": min_available_gib == 0}
 
 
-def busy_machine(pf):
-    """True when the preflight was overridden or swap grew while the machine sat idle (RESEARCH Pitfall 2)."""
+def busy_machine(pf: dict[str, Any] | None) -> bool:
+    """True when the preflight was overridden or swap grew while the machine sat idle (False without a preflight)."""
     return bool(pf) and (pf["override"] or pf["swap_grew_while_idle"])
 
 
-def scrub(text):
+def scrub(text: object) -> str:
     """Exception text safe for a tracked report: the home directory becomes "~", cut to 300 characters."""
     home = os.path.expanduser("~")
     text = str(text)
@@ -176,7 +184,7 @@ def scrub(text):
     return text[:300]
 
 
-def child_outcome(returncode, payload):
+def child_outcome(returncode: int, payload: Any) -> dict[str, Any]:
     """Map a child run to its attempt: a measurement passes through, a refusal stops the spike, anything else crashed.
 
     Refusals are configuration errors (wrong env, params off the device, tampered input), never measurements.
@@ -188,7 +196,7 @@ def child_outcome(returncode, payload):
     return {"status": "crashed", "returncode": returncode}
 
 
-def optimizer_steps(n_items, micro_batch, grad_accum):
+def optimizer_steps(n_items: int, micro_batch: int, grad_accum: int) -> int:
     """Optimizer steps per epoch, the count laya.train.optimizer_updates(n, mb, accum, 1) gives (the last partial
     accumulation window still steps once)."""
     if n_items < 1:
@@ -196,18 +204,18 @@ def optimizer_steps(n_items, micro_batch, grad_accum):
     return math.ceil(math.ceil(n_items / micro_batch) / grad_accum)
 
 
-def project_epoch_s(median_step_s, steps):
-    """D-02 projection: real-batch median optimizer-step time x optimizer steps per epoch, seconds."""
+def project_epoch_s(median_step_s: float, steps: int) -> float:
+    """The time gate's projection: real-batch median optimizer-step time x optimizer steps per epoch, seconds."""
     return round(median_step_s * steps, 1)
 
 
-def is_mps_oom(text):
+def is_mps_oom(text: object) -> bool:
     """True for the MPS allocator's out-of-memory text (a plain RuntimeError; torch.OutOfMemoryError misses it)."""
     return str(text).lstrip().startswith("MPS backend out of memory")
 
 
-def memory_ok(attempt, measured_steps):
-    """D-01 memory gate -> (ok, reason): every measured padded step ran without OOM and system swap did not grow."""
+def memory_ok(attempt: dict[str, Any], measured_steps: int) -> tuple[bool, str]:
+    """The memory gate -> (ok, reason): every measured padded step ran without OOM and system swap did not grow."""
     status = attempt.get("status")
     if status != "ok":
         if status == "oom":
@@ -226,11 +234,11 @@ def memory_ok(attempt, measured_steps):
     if swap is None:
         return False, "no swap reading for the measured padded steps"
     if swap > 0:
-        return False, "system swap grew by %.1f MiB during the measured padded steps (D-01)" % (swap / 2**20)
+        return False, "system swap grew by %.1f MiB during the measured padded steps (memory gate)" % (swap / 2**20)
     return True, "completed %d measured padded steps without OOM or swap growth" % measured_steps
 
 
-# D-10: torch names the op the same way in both texts (verified on this torch build):
+# torch names the op the same way in both texts (verified on the locked torch build):
 #   strict (fallback 0) NotImplementedError: "The operator 'aten::linalg_eig' is not currently implemented for the MPS
 #   device. ..."; fallback 1 UserWarning: "The operator 'aten::linalg_eig' is not currently supported on the MPS
 #   backend and will fall back to run on the CPU. ..."
@@ -238,18 +246,18 @@ OP_RE = re.compile(r"operator '([^']+)'")
 FALLBACK_MARK = "will fall back to run on the CPU"
 
 
-def op_name(text):
+def op_name(text: object) -> str | None:
     """The op an MPS NotImplementedError or fallback warning names ("aten::..."), or None."""
     m = OP_RE.search(str(text))
     return m.group(1) if m else None
 
 
-def is_fallback_warning(text):
+def is_fallback_warning(text: object) -> bool:
     """True for torch's "falls back to the CPU" UserWarning (PYTORCH_ENABLE_MPS_FALLBACK=1)."""
     return FALLBACK_MARK in str(text)
 
 
-def tag_fallback_ops(messages, marks):
+def tag_fallback_ops(messages: list[str], marks: list[tuple[int, str]]) -> list[dict[str, str]]:
     """[{"op", "stage"}] for the fallback warnings among `messages`, deduplicated by (op, stage), first appearance.
 
     marks: (index, stage) pairs in ascending index order, recorded as len(caught) when the worker enters a stage, so
@@ -271,36 +279,39 @@ def tag_fallback_ops(messages, marks):
     return out
 
 
-def blocks(stage, fallback_median_s, mps_median_s, time_ok):
-    """D-11 -> (blocks, reason): a step-path op blocks when its fallback run is more than 10% slower than an all-MPS
-    run of the same config and rung or, with no all-MPS baseline, when the fallback run fails the D-02 time gate."""
+def blocks(stage: str, fallback_median_s: float | None, mps_median_s: float | None,
+           time_ok: bool) -> tuple[bool, str]:
+    """The fallback-op rule -> (blocks, reason): an op seen in the training step blocks when its fallback run is more
+    than 10% slower than an all-MPS run of the same config and rung or, with no all-MPS baseline, when the fallback
+    run fails the time gate. Setup and tokenization ops never block."""
     if stage != "step":
-        return False, "seen only in %s; setup and tokenization ops never block (D-11)" % stage
+        return False, "seen only in %s; setup and tokenization ops never block" % stage
     if mps_median_s is not None:
         if fallback_median_s is None:
-            return True, "the fallback attempt measured no real-batch step to compare with all-MPS %.3f s" % mps_median_s
+            return True, ("the fallback attempt measured no real-batch step to compare with all-MPS %.3f s"
+                          % mps_median_s)
         slower = fallback_median_s > 1.10 * mps_median_s
         return slower, "fallback step %.3f s vs all-MPS %.3f s (%+.1f%%)" % (
             fallback_median_s, mps_median_s, (fallback_median_s / mps_median_s - 1) * 100)
-    return not time_ok, "no all-MPS baseline; the config %s the D-02 time gate" % ("passes" if time_ok else "fails")
+    return not time_ok, "no all-MPS baseline; the config %s the time gate" % ("passes" if time_ok else "fails")
 
 
-def followup(chain, policy):
+def followup(chain: list[dict[str, Any]], policy: dict[str, Any]) -> dict[str, str] | None:
     """The next attempt a config's chain needs, as {"rung", "fallback", "purpose"}, or None when the chain is done.
 
     Rules, in order, on the last attempt (policy: {"measured_steps", "swap_rerun"}):
-    1. D-10: a strict (fallback 0) attempt that raised NotImplementedError is rerun once with fallback 1, in a fresh
+    1. A strict (fallback 0) attempt that raised NotImplementedError is rerun once with fallback 1, in a fresh
        process, to inventory every op that falls back.
-    2. Swap-only rerun (RESEARCH Open Question 2): an ok attempt that completed every measured padded step but grew
-       system swap is rerun once at the same rung and fallback when policy["swap_rerun"] is on, so one burst of
-       background swapping does not decide the verdict. At most one per (rung, fallback).
-    3. D-08: an attempt at rung none that failed the D-01 memory gate (OOM, crash, swap growth, short run) is retried
-       with only encoder.embeddings.tok_embeddings frozen, keeping its fallback setting.
+    2. Swap-only rerun: an ok attempt that completed every measured padded step but grew system swap is rerun once
+       at the same rung and fallback when policy["swap_rerun"] is on, so one burst of background swapping does not
+       decide the verdict. At most one per (rung, fallback).
+    3. An attempt at rung none that failed the memory gate (OOM, crash, swap growth, short run) is retried with only
+       encoder.embeddings.tok_embeddings frozen, keeping its fallback setting.
     4. Otherwise the chain is done; an error status always ends it.
 
     The last attempt stands whatever it shows (standing), and every attempt stays in the report, so a rerun can never
-    cherry-pick a measurement. A frozen encoder is never scheduled (D-04). LAYA-03's smaller-batch rung is covered by
-    the grid's micro-batch 4 configs, not by this chain.
+    cherry-pick a measurement. A frozen encoder is never scheduled (the rung rule). The smaller-batch rung of
+    ray_train.py's fallback ladder is covered by the grid's micro-batch 4 configs, not by this chain.
     """
     last = chain[-1]
     status, rung, fallback = last.get("status"), last.get("rung"), last.get("fallback")
@@ -317,34 +328,37 @@ def followup(chain, policy):
     return None
 
 
-def standing(chain):
+def standing(chain: list[dict[str, Any]]) -> int:
     """Index of the attempt the verdict reads: the last one of the chain."""
     return len(chain) - 1
 
 
-def _median(a, regime):
+def _median(a: dict[str, Any], regime: str) -> float | None:
+    """The regime's median step seconds of an attempt, or None when it measured no step."""
     t = ((a.get("regimes") or {}).get(regime) or {}).get("times") or {}
     return t.get("median_s") if t.get("n") else None
 
 
-def _real_median(a):
+def _real_median(a: dict[str, Any]) -> float | None:
     return _median(a, "real")
 
 
-def _projected(a, micro_batch, grad_accum):
-    """Projected neg8 epoch seconds of an attempt (D-02), or None without a real-batch timing or an item count."""
+def _projected(a: dict[str, Any], micro_batch: int, grad_accum: int) -> float | None:
+    """Projected neg8 epoch seconds of an attempt (the time gate's projection), or None without a real-batch timing or
+    an item count."""
     median, n_items = _real_median(a), a.get("n_neg8_items")
     if median is None or not n_items:
         return None
     return project_epoch_s(median, optimizer_steps(n_items, micro_batch, grad_accum))
 
 
-def _delta_pct(ray_s, inprocess_s):
+def _delta_pct(ray_s: float | None, inprocess_s: float | None) -> float | None:
     return None if ray_s is None or not inprocess_s else round((ray_s - inprocess_s) / inprocess_s * 100, 1)
 
 
-def ray_overhead(ray_attempt, inprocess_attempt, basis):
-    """D-09a: Ray vs in-process median optimizer-step times of one config, per regime, and their % delta.
+def ray_overhead(ray_attempt: dict[str, Any] | None, inprocess_attempt: dict[str, Any] | None,
+                 basis: str) -> dict[str, Any]:
+    """Ray vs in-process median optimizer-step times of one config, per regime, and their % delta.
 
     basis: "chosen" (the verdict's config) or "reference" (4x128 when nothing FITS). delta = (ray - inprocess) /
     inprocess x 100, None when either side has no timing. Informational only: it never feeds the verdict.
@@ -362,8 +376,9 @@ def ray_overhead(ray_attempt, inprocess_attempt, basis):
     return out
 
 
-def op_inventory(configs):
-    """D-10/D-11 inventory: every op a strict attempt raised on or its fallback rerun fell back on, with blocks/reason.
+def op_inventory(configs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fallback-op inventory: every op a strict attempt raised on or its fallback rerun fell back on, with the
+    fallback-op rule's blocks/reason (a strict failure without a fallback rerun blocks).
 
     Returns {"entries": [{op, stage, micro_batch, max_len, rung, blocks, reason}], "note"}.
     """
@@ -403,7 +418,7 @@ def op_inventory(configs):
     return {"entries": entries, "note": note}
 
 
-def blocking_ops(inventory):
+def blocking_ops(inventory: dict[str, Any]) -> dict[tuple[int, int, str], list[str]]:
     """{(micro_batch, max_len, rung): [op, ...]} of the blocking entries, the verdict's `blocking` argument."""
     out = {}
     for e in inventory["entries"]:
@@ -414,8 +429,9 @@ def blocking_ops(inventory):
     return out
 
 
-def protocol_complete(protocol):
-    """True only for the full D-07 protocol; anything else is a smoke run that can never decide Phase 2."""
+def protocol_complete(protocol: dict[str, Any]) -> bool:
+    """True only for the full spike protocol (DEFAULT_GRID, WARMUP_STEPS, MEASURED_STEPS, EFFECTIVE_BATCH); anything
+    else is a smoke run that can never decide the spike."""
     grid = protocol["grid"]
     if isinstance(grid, str):
         grid = parse_grid(grid)
@@ -423,6 +439,9 @@ def protocol_complete(protocol):
             and protocol["measured_steps"] == MEASURED_STEPS and protocol["effective_batch"] == EFFECTIVE_BATCH)
 
 
+# The verdict's gate rules, copied into every report's verdict.rules. Each text starts with the rule's name (memory,
+# time, choice, rung, preference); the keys are the labels the committed results/spike/mps_spike.json records, kept so
+# a new report reads like it.
 RULES = {
     "D-01": "memory: every measured padded step completes on MPS with no OOM and no system swap growth",
     "D-02": "time: real-batch median optimizer step x optimizer steps per neg8 epoch <= %d s" % TIME_GATE_S,
@@ -434,7 +453,9 @@ RULES = {
 }
 
 
-def _assess(c, measured_steps, blocking):
+def _assess(c: dict[str, Any], measured_steps: int,
+            blocking: dict[tuple[int, int, str], list[str]]) -> dict[str, Any]:
+    """One config's verdict row, read from its standing attempt: every gate, the projection and the reasons."""
     a = c["attempts"][c.get("standing", 0)]
     mb, max_len, accum = c["micro_batch"], c["max_len"], c["grad_accum"]
     rung, fallback = a.get("rung"), a.get("fallback")
@@ -450,17 +471,17 @@ def _assess(c, measured_steps, blocking):
     blocked = list(blocking.get((mb, max_len, rung), []))
     fails = [] if mem else [mem_reason]
     if projected is None:
-        fails.append("no real-batch step timing to project an epoch (D-02)")
+        fails.append("no real-batch step timing to project an epoch (time gate)")
     elif not time_ok:
-        fails.append("projected epoch %.1f min exceeds %d min (D-02)" % (projected / 60, TIME_GATE_S // 60))
+        fails.append("projected epoch %.1f min exceeds %d min (time gate)" % (projected / 60, TIME_GATE_S // 60))
     if not device_ok:
-        fails.append("parameters on %s, not mps (D-04)" % a.get("param_device"))
+        fails.append("parameters on %s, not mps (rung rule)" % a.get("param_device"))
     if not rung_ok and rung is not None:
-        fails.append("rung %s never counts as FITS (D-04)" % rung)
+        fails.append("rung %s never counts as FITS (rung rule)" % rung)
     elif rung is None:
-        fails.append("rung not recorded (D-04)")
+        fails.append("rung not recorded (rung rule)")
     if blocked:
-        fails.append("blocking fallback ops: %s (D-11)" % ", ".join(blocked))
+        fails.append("blocking fallback ops: %s" % ", ".join(blocked))
     fits = not fails
     return {"micro_batch": mb, "max_len": max_len, "grad_accum": accum, "rung": rung, "fallback": fallback,
             "status": a.get("status"), "memory_ok": mem, "memory_reason": mem_reason, "steps_per_epoch": steps,
@@ -469,12 +490,15 @@ def _assess(c, measured_steps, blocking):
             "reason": "FITS: all gates passed" if fits else "; ".join(fails)}
 
 
-def verdict(configs, protocol, token_stats=None, tie_tolerance=TIE_TOLERANCE, blocking=None):
-    """The Phase 2 outcome (LAYA-09 criterion 4) from the standing attempt of every grid config.
+def verdict(configs: list[dict[str, Any]], protocol: dict[str, Any], token_stats: dict[str, Any] | None = None,
+            tie_tolerance: float = TIE_TOLERANCE,
+            blocking: dict[tuple[int, int, str], list[str]] | None = None) -> dict[str, Any]:
+    """The spike's outcome (FITS or DOES NOT FIT) from the standing attempt of every grid config.
 
-    FITS needs the D-01 memory gate, the D-02 time gate, parameters on mps, an allowed rung (D-04) and no blocking
-    fallback op. The Phase 4 start config is chosen by D-08 (rung none first), D-03 (truncation, fastest) and the
-    tie-break. A run off the D-07 protocol is a smoke run and never asks for a Kaggle plan.
+    FITS needs the memory gate, the time gate, parameters on mps, an allowed rung (the rung rule) and no blocking
+    fallback op. The start config of every training run is chosen by the preference rule (rung none first), the
+    choice rule (truncation, fastest) and the tie-break. A run off the spike protocol is a smoke run and never asks
+    for a Kaggle plan.
     """
     blocking = blocking or {}
     complete = protocol_complete(protocol)
@@ -506,24 +530,24 @@ def verdict(configs, protocol, token_stats=None, tie_tolerance=TIE_TOLERANCE, bl
             "truncation_rule": truncation, "untrusted_attempts": untrusted, "per_config": per, "rules": dict(RULES)}
 
 
-def verdict_line(v):
-    """The last line of mps_spike.md (and of the spike's stdout); a smoke run can never pass for the Phase 2 verdict."""
+def verdict_line(v: dict[str, Any]) -> str:
+    """The last line of mps_spike.md (and of the spike's stdout); a smoke run can never pass for the spike verdict."""
     c = v["chosen"]
     if c:
-        line = ("**Verdict: FITS** — Phase 4 starts from micro-batch %d, max_len %d, grad-accum %d, rung %s, "
+        line = ("**Verdict: FITS** — training starts from micro-batch %d, max_len %d, grad-accum %d, rung %s, "
                 "PYTORCH_ENABLE_MPS_FALLBACK=%s (projected neg8 epoch %.1f min)"
                 % (c["micro_batch"], c["max_len"], c["grad_accum"], c["rung"], c["fallback"],
                    c["projected_epoch_s"] / 60))
     else:
-        line = "**Verdict: DOES NOT FIT** — no grid config passed the D-01 memory and D-02 time gates"
-    return line if v["protocol_complete"] else "SMOKE RUN (not the Phase 2 verdict): " + line
+        line = "**Verdict: DOES NOT FIT** — no grid config passed the memory and time gates"
+    return line if v["protocol_complete"] else "SMOKE RUN (not the spike verdict): " + line
 
 
-def _yn(ok):
+def _yn(ok: object) -> str:
     return "yes" if ok else "no"
 
 
-def _verdict_lines(v):
+def _verdict_lines(v: dict[str, Any]) -> list[str]:
     lines = ["", "## Verdict", "",
              "| micro-batch | max_len | rung | memory ok | projected epoch min | time ok | device ok | FITS |",
              "|---|---|---|---|---|---|---|---|"]
@@ -535,18 +559,18 @@ def _verdict_lines(v):
     lines += ["",
               "- Tie-break: FITS configs within %.0f%% of the fastest projected epoch resolve to the smaller max_len, "
               "then the larger micro-batch" % (v["tie_tolerance"] * 100),
-              "- Truncation rule (D-03): %s" % v["truncation_rule"]]
-    lines += ["- %s: %s" % (k, v["rules"][k]) for k in sorted(v["rules"])]
+              "- Truncation rule: %s" % v["truncation_rule"]]
+    lines += ["- %s" % v["rules"][k] for k in sorted(v["rules"])]       # each rule text starts with its name
     if v["untrusted_attempts"]:
         lines += ["", "%d attempts ended in an unexpected error or crash; investigate before trusting this verdict"
                   % v["untrusted_attempts"]]
     if v["kaggle_plan_required"]:
         lines += ["", "Kaggle plan required: kaggle_plan.md next to this report, plus the user's explicit "
-                      "self-hosting exception before Phase 3 (D-12)"]
+                      "self-hosting exception before any training run"]
     return lines + ["", verdict_line(v)]
 
 
-def _inventory_lines(inv):
+def _inventory_lines(inv: dict[str, Any]) -> list[str]:
     lines = ["", "## Fallback-op inventory", "", inv["note"]]
     if inv["entries"]:
         lines += ["", "| op | stage | config | rung | blocks | reason |", "|---|---|---|---|---|---|"]
@@ -556,8 +580,8 @@ def _inventory_lines(inv):
     return lines
 
 
-def _token_lines(ts, neg8):
-    lines = ["", "## Token lengths (D-09b)", "",
+def _token_lines(ts: dict[str, Any], neg8: dict[str, Any] | None) -> list[str]:
+    lines = ["", "## Token lengths", "",
              "Laya's own tokenizer, untruncated (message, question) sequences over all %d messages and %d items:"
              % (ts["n_messages"], ts["n_items"])]
     for t in sorted(int(k.rsplit("_", 1)[1]) for k in ts if k.startswith("pct_messages_over_")):
@@ -573,7 +597,7 @@ def _token_lines(ts, neg8):
     return lines
 
 
-def _preflight_lines(pf):
+def _preflight_lines(pf: dict[str, Any]) -> list[str]:
     outs = "-" if None in pf["swapouts"] else " -> ".join(str(v) for v in pf["swapouts"])
     return ["", "## Preflight", "",
             "- Available memory: %.2f GiB (threshold %.1f GiB%s): %s"
@@ -585,16 +609,16 @@ def _preflight_lines(pf):
                                                   else _yn(pf["swapouts_grew_while_idle"]))]
 
 
-def _overhead_lines(o):
-    def side(d):
+def _overhead_lines(o: dict[str, Any]) -> list[str]:
+    def side(d: dict[str, Any]) -> str:
         return "padded median %s s, real median %s s, %s torch threads" % (
             _fmt(d.get("padded_median_s")), _fmt(d.get("real_median_s")), d.get("torch_threads") or "-")
 
-    def pct(v):
+    def pct(v: float | None) -> str:
         return "-" if v is None else "%+.1f%%" % v
     label = ("the verdict's chosen config" if o["basis"] == "chosen" else
              "reference config (nothing FITS; the delta is informational only)")
-    return ["", "## Ray vs in-process (D-09a)", "",
+    return ["", "## Ray vs in-process", "",
             "- Basis: %s, %sx%s, rung %s, PYTORCH_ENABLE_MPS_FALLBACK=%s"
             % (label, o["micro_batch"], o["max_len"], o["rung"], o["fallback"]),
             "- Ray (1-worker TorchTrainer): %s" % side(o["ray"]),
@@ -603,21 +627,23 @@ def _overhead_lines(o):
             % (pct(o["delta_padded_pct"]), pct(o["delta_real_pct"]))]
 
 
-def build_report(meta, configs):
+def build_report(meta: dict[str, Any], configs: list[dict[str, Any]]) -> dict[str, Any]:
+    """The report dict (schema mps_spike/1); mps_spike.py adds the preflight, token stats, inventory, verdict and
+    Ray overhead."""
     return {"schema": "mps_spike/1", "meta": meta, "configs": configs}
 
 
-def _fmt(v, scale=1.0, digits=3):
+def _fmt(v: float | None, scale: float = 1.0, digits: int = 3) -> str:
     return "-" if v is None else ("%." + str(digits) + "f") % (v / scale)
 
 
-def render_markdown(report):
+def render_markdown(report: dict[str, Any]) -> str:
     """Human-readable mps_spike.md: provenance lines and the run policy, one table row per attempt, the preflight,
     token lengths, the fallback-op inventory, the Ray vs in-process overhead, the busy-machine flag, then the verdict
     section."""
     m = report["meta"]
     split, model, versions, plat, proto = m["split"], m["model"], m["versions"], m["platform"], m["protocol"]
-    lines = ["# MPS feasibility spike (Phase 2, LAYA-09)", "",
+    lines = ["# MPS feasibility spike", "",
              "- Split: `%s` sha256 `%s` (%d messages)" % (split["path"], split["sha256"], split["n_messages"]),
              "- Model: `%s/%s@%s`" % (model["repo"], model["subfolder"], model["revision"]),
              "- Versions: %s" % ", ".join("%s %s" % (k, versions[k]) for k in sorted(versions)),
@@ -642,8 +668,8 @@ def render_markdown(report):
             outs = [r.get("swapouts_delta") for r in (pad, real) if r.get("swapouts_delta") is not None]
             lines.append("| %d | %d | %d | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 c["micro_batch"], c["max_len"], c["grad_accum"], a.get("rung", "-"), a.get("fallback", "-"),
-                a.get("purpose", "-"), a.get("status", "-"), _fmt(pt.get("median_s")), _fmt(pt.get("p90_s")), _fmt(rt.get("median_s")),
-                _fmt(rt.get("p90_s")), _fmt(a.get("peak_memory_bytes"), 2**30, 2),
+                a.get("purpose", "-"), a.get("status", "-"), _fmt(pt.get("median_s")), _fmt(pt.get("p90_s")),
+                _fmt(rt.get("median_s")), _fmt(rt.get("p90_s")), _fmt(a.get("peak_memory_bytes"), 2**30, 2),
                 _fmt(max(swap) if swap else None, 2**20, 1), max(outs) if outs else "-"))
     if report.get("preflight"):
         lines += _preflight_lines(report["preflight"])
@@ -661,7 +687,7 @@ def render_markdown(report):
     return "\n".join(lines) + "\n"
 
 
-def write_report(out_dir, report):
+def write_report(out_dir: str, report: dict[str, Any]) -> str:
     """Write mps_spike.json and mps_spike.md atomically under out_dir; returns the markdown path."""
     os.makedirs(out_dir, exist_ok=True)
     write_atomic(os.path.join(out_dir, "mps_spike.json"),

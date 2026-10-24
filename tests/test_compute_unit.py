@@ -1,10 +1,13 @@
-"""pilot.compute (LAYA-07): the compute checkpoint's projection math, spike start config, report and markdown, on toy
+"""pilot.compute: the compute checkpoint's projection math, spike start config, report and markdown, on toy
 inputs (offline, no torch, no Ray). The orchestrator end to end is tests/test_compute_ray.py.
 """
 import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import Any, NoReturn
 
 import pytest
 
@@ -35,18 +38,21 @@ LINE_IDS = ["laya_selection", "laya_val_scoring", "laya_final", "berturk_selecti
 ZEROSHOT_VAL = os.path.join(REPO_ROOT, "results", "dumps", "laya-zeroshot-7b928d82", "val.json")
 
 
-def toy_rows():
+def toy_rows() -> list[dict[str, Any]]:
+    """Two measured epoch rows of 465 optimizer steps each."""
     return [{"epoch": e, "loss": 0.5, "train_s": 930.0, "save_s": 10.0, "optimizer_steps": 465, "n_items": 14444,
              "peak_total_bytes": 9 * 2**30, "peak_driver_bytes": 8 * 2**30, "peak_rss_bytes": 2**30,
              "current_allocated_bytes": 7 * 2**30, "swap_delta_bytes": 0, "segment": 0, "resumed": False}
             for e in (1, 2)]
 
 
-def toy_measured():
+def toy_measured() -> dict[str, Any]:
+    """measured_from_checkpoint's shape on TOY_LAYA and toy_rows (no BERTurk or scoring probe)."""
     return {"laya": dict(TOY_LAYA), "epochs": toy_rows()}
 
 
-def toy_meta(protocol_complete=True):
+def toy_meta(protocol_complete: bool = True) -> dict[str, Any]:
+    """A report meta block (build_meta's shape)."""
     return {"generated_utc": "2026-10-14T00:00:00Z",
             "split": {"path": "splits/selection_train.jsonl", "sha256": "a" * 64, "n_messages": 1450},
             "manifest": {"path": "data/splits.json", "sha256": "b" * 64, "is_committed": True},
@@ -62,17 +68,19 @@ def toy_meta(protocol_complete=True):
                          "protocol_complete": protocol_complete}}
 
 
-def toy_preflight(override=False):
+def toy_preflight(override: bool = False) -> dict[str, Any]:
+    """A passed preflight record; override=True is a busy-machine run."""
     return {"available_gib": 9.5, "min_available_gib": 0 if override else 7.0, "swap_used_bytes": [0, 0],
             "swap_grew_while_idle": False, "swapouts": [1, 1], "swapouts_grew_while_idle": False, "passed": True,
             "override": override}
 
 
-def line(projection, id_):
+def line(projection: dict[str, Any], id_: str) -> dict[str, Any]:
+    """The projection line `id_`."""
     return next(l for l in projection["lines"] if l["id"] == id_)
 
 
-def test_projection_toy_numbers():
+def test_projection_toy_numbers() -> None:
     p = compute.project(toy_measured(), TOY_COUNTS, TOY_MATRIX)
     sel, fin = line(p, "laya_selection"), line(p, "laya_final")
     # 3 x [4 x (465 steps x 2.0 s + 10 s) + 20 + 5 + 3] and 3 x [4 x (532 x 2.0 + 10) + 28]
@@ -84,7 +92,7 @@ def test_projection_toy_numbers():
     assert p["total_s"] == pytest.approx(sum(l["seconds"] for l in p["lines"]))
 
 
-def test_measured_from_checkpoint_takes_the_largest_rate(tmp_path):
+def test_measured_from_checkpoint_takes_the_largest_rate(tmp_path: Path) -> None:
     rows = toy_rows()
     rows[0]["train_s"], rows[1]["train_s"] = 1000.0, 930.0  # epoch 1 includes the MPS warm-up
     record = {"device": "mps", "param_device": "mps", "env": ["PYTORCH_ENABLE_MPS_FALLBACK=0"],
@@ -97,15 +105,15 @@ def test_measured_from_checkpoint_takes_the_largest_rate(tmp_path):
     assert m["laya"]["s_per_step_epoch1"] == pytest.approx(1000.0 / 465)
     assert m["laya"]["epochs_measured"] == 2 and m["laya"]["max_len"] == 128 and m["laya"]["neg"] == 8
     assert m["laya"]["peak_total_bytes"] == 9 * 2**30 and m["laya"]["peak_driver_bytes"] == 8 * 2**30
-    assert m["epochs"] == rows                              # LAYA-06: the rows reach the report unchanged
+    assert m["epochs"] == rows                              # the rows reach the report unchanged
 
 
-def test_spike_start_reads_the_committed_spike_report():
+def test_spike_start_reads_the_committed_spike_report() -> None:
     s = compute.spike_start(SPIKE_REPORT)
     assert s == {"micro_batch": 8, "max_len": 128, "grad_accum": 4, "rung": "none", "fallback": 0}
 
 
-def test_spike_start_refuses_a_does_not_fit_report(tmp_path):
+def test_spike_start_refuses_a_does_not_fit_report(tmp_path: Path) -> None:
     with open(SPIKE_REPORT, encoding="utf-8") as f:
         report = json.load(f)
     report["verdict"] = dict(report["verdict"], result="DOES NOT FIT", chosen=None)
@@ -115,7 +123,7 @@ def test_spike_start_refuses_a_does_not_fit_report(tmp_path):
         compute.spike_start(str(path))
 
 
-def test_spike_start_refuses_a_fallback_config(tmp_path):
+def test_spike_start_refuses_a_fallback_config(tmp_path: Path) -> None:
     with open(SPIKE_REPORT, encoding="utf-8") as f:
         report = json.load(f)
     report["verdict"]["chosen"]["fallback"] = "1"
@@ -125,18 +133,18 @@ def test_spike_start_refuses_a_fallback_config(tmp_path):
         compute.spike_start(str(path))
 
 
-def test_torch_free_import():
+def test_torch_free_import() -> None:
     code = "import sys, compute_checkpoint, pilot.compute; assert 'torch' not in sys.modules, 'torch imported'"
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
 
-def test_markdown_banners_and_round_trip(tmp_path):
+def test_markdown_banners_and_round_trip(tmp_path: Path) -> None:
     p = compute.project(toy_measured(), TOY_COUNTS, TOY_MATRIX)
     smoke = compute.build_report(toy_meta(False), toy_measured(), TOY_COUNTS, TOY_MATRIX, p, toy_preflight(True))
     md = compute.render_markdown(smoke)
-    assert md.startswith("# Compute checkpoint (Phase 4, LAYA-07)") and "SMOKE RUN" in md and "Busy-machine" in md
+    assert md.startswith("# Compute checkpoint\n") and "SMOKE RUN" in md and "Busy-machine" in md
     real = compute.build_report(toy_meta(True), toy_measured(), TOY_COUNTS, TOY_MATRIX, p, toy_preflight(False))
     md = compute.render_markdown(real)
     assert "SMOKE RUN" not in md and "Busy-machine" not in md and "laya_selection" in md and "Total" in md
@@ -147,9 +155,10 @@ def test_markdown_banners_and_round_trip(tmp_path):
         assert f.read() == compute.render_markdown(parsed)
 
 
-# ---- Task 2: the whole experiment matrix, what-if, disk, assumptions, path-free report ----
+# ---- the whole experiment matrix, what-if, disk, assumptions, path-free report ----
 
-def full_report(protocol_complete=True, override=False):
+def full_report(protocol_complete: bool = True, override: bool = False) -> dict[str, Any]:
+    """A complete toy report: projection, what-if, disk budget and assumptions."""
     measured = toy_measured()
     p = compute.project(measured, TOY_COUNTS, TOY_MATRIX)
     return compute.build_report(toy_meta(protocol_complete), measured, TOY_COUNTS, TOY_MATRIX, p,
@@ -158,7 +167,7 @@ def full_report(protocol_complete=True, override=False):
                                 assumptions=compute.assumptions(TOY_MATRIX, measured, TOY_COUNTS))
 
 
-def test_matrix_lines_and_total():
+def test_matrix_lines_and_total() -> None:
     p = compute.project(toy_measured(), TOY_COUNTS, TOY_MATRIX)
     assert [l["id"] for l in p["lines"]] == LINE_IDS
     for l in p["lines"]:
@@ -175,11 +184,11 @@ def test_matrix_lines_and_total():
     assert line(p, "berturk_selection")["seconds"] == pytest.approx(3 * 10 * 46 * est)
     assert line(p, "berturk_final")["seconds"] == pytest.approx(3 * 10 * 52 * est)
     assert line(p, "laya_selection")["basis"] == "measured"
-    # few-shot depends on a protocol Phase 8 freezes, and its BERTurk part on the estimate
+    # the few-shot protocol was not frozen at the compute checkpoint (provisional); its BERTurk part is an estimate
     assert line(p, "fewshot_incremental")["basis"] in ("estimate", "provisional")
 
 
-def test_fewshot_line_counts():
+def test_fewshot_line_counts() -> None:
     matrix = dict(TOY_MATRIX, fewshot_tags=6, fewshot_k=[5, 10], fewshot_neg_per_pos=4, fewshot_replay=200,
                   fewshot_draws=3, fewshot_epochs=10)
     p = compute.project(toy_measured(), TOY_COUNTS, matrix)
@@ -199,13 +208,13 @@ def test_fewshot_line_counts():
     assert all(part["units_per_epoch"] == 413 for part in scoring["parts"])
 
 
-def test_scoring_rate_falls_back_to_the_committed_cpu_rate():
+def test_scoring_rate_falls_back_to_the_committed_cpu_rate() -> None:
     with open(ZEROSHOT_VAL, encoding="utf-8") as f:
         side = json.load(f)
     rate = side["timing"]["seconds"] / side["split"]["n_messages"]
     p = compute.project(toy_measured(), TOY_COUNTS, TOY_MATRIX)
     val = line(p, "laya_val_scoring")
-    assert val["s_per_unit"] == pytest.approx(rate) and val["basis"] == "measured (cpu, wall)"     # IN-03
+    assert val["s_per_unit"] == pytest.approx(rate) and val["basis"] == "measured (cpu, wall)"
     assert "cpu" in val["source"] and "2 Ray actors" in val["source"]
     measured = dict(toy_measured(), berturk={"status": "ok", "s_per_step": 0.5, "s_per_msg_infer": 0.004})
     assert line(compute.project(measured, TOY_COUNTS, TOY_MATRIX), "final_scoring")["basis"] == "measured (cpu, wall)"
@@ -217,7 +226,7 @@ def test_scoring_rate_falls_back_to_the_committed_cpu_rate():
     assert laya["runs"] == 3
 
 
-def test_what_if_table():
+def test_what_if_table() -> None:
     rows = compute.what_if(toy_measured(), TOY_COUNTS, TOY_MATRIX)
     assert len(rows) == 10
     grid = [(r["lr_grid"], r["max_epochs"]) for r in rows if r["fewshot_base_runs"] == TOY_MATRIX["fewshot_base_runs"]]
@@ -230,7 +239,7 @@ def test_what_if_table():
     assert fallback[0]["total_s"] < same["total_s"]
 
 
-def test_disk_budget():
+def test_disk_budget() -> None:
     m = 600 * 2**20
     d = compute.disk_budget(model_bytes=m, matrix=TOY_MATRIX)
     assert d["model_bytes"] == m and d["train_state_bytes"] == 6 * m
@@ -239,7 +248,7 @@ def test_disk_budget():
     assert compute.disk_budget(m, TOY_MATRIX, train_state_bytes=5 * m)["train_state_bytes"] == 5 * m
 
 
-def test_report_is_path_and_text_free():
+def test_report_is_path_and_text_free() -> None:
     import re
     from test_repo_hygiene import text_problems
     report = full_report()
@@ -248,7 +257,7 @@ def test_report_is_path_and_text_free():
     assert text_problems(parsed, home, {"1", "3", "40", "nan"}) == []
     number_like = re.compile(r"^[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$|^(nan|inf|-inf)$", re.I)
 
-    def strings(obj):
+    def strings(obj: Any) -> Iterator[str]:
         if isinstance(obj, dict):
             for v in obj.values():
                 yield from strings(v)
@@ -263,7 +272,7 @@ def test_report_is_path_and_text_free():
         assert parsed[key], key
 
 
-def test_markdown_lists_everything():
+def test_markdown_lists_everything() -> None:
     report = full_report(protocol_complete=True)
     md = compute.render_markdown(report)
     for l in report["projection"]["lines"]:
@@ -276,7 +285,8 @@ def test_markdown_lists_everything():
     assert "SMOKE RUN" in compute.render_markdown(full_report(protocol_complete=False))
 
 
-def _synthetic(tmp_path):
+def _synthetic(tmp_path: Path) -> str:
+    """The synthetic splits of tests/conftest.py, prepared under tmp_path; returns the data dir."""
     from conftest import make_raw
     import pilot.data
     root, raw_sha256 = make_raw(str(tmp_path / "raw"))
@@ -285,7 +295,7 @@ def _synthetic(tmp_path):
     return out
 
 
-def test_split_counts_on_synthetic_splits(tmp_path):
+def test_split_counts_on_synthetic_splits(tmp_path: Path) -> None:
     from pilot import runs
     from pilot.data import parse_jsonl
     out = _synthetic(tmp_path)
@@ -298,7 +308,7 @@ def test_split_counts_on_synthetic_splits(tmp_path):
                      "n_items_full": runs.neg_items(rows, 0)}, name
 
 
-def test_split_counts_refuse_a_tampered_split(tmp_path):
+def test_split_counts_refuse_a_tampered_split(tmp_path: Path) -> None:
     out = _synthetic(tmp_path)
     with open(os.path.join(out, "splits", "test.jsonl"), "ab") as f:
         f.write(b"\n")
@@ -307,7 +317,7 @@ def test_split_counts_refuse_a_tampered_split(tmp_path):
 
 
 @pytest.mark.data
-def test_split_counts_on_the_committed_splits():
+def test_split_counts_on_the_committed_splits() -> None:
     counts = compute.split_counts(os.path.join(REPO_ROOT, "data", "splits.json"))
     assert {k: v["n_items_neg8"] for k, v in counts.items()} == {
         "selection_train": 14854, "final_train": 17001, "val": 2147, "test": 4228, "hotels_probe": 8072}
@@ -315,16 +325,16 @@ def test_split_counts_on_the_committed_splits():
         "selection_train": 1450, "final_train": 1658, "val": 208, "test": 413, "hotels_probe": 1009}
 
 
-# ---- plan 04-06 Task 1: the probe protocol (registration, ladder chain, resume summary, kill and reap) ----
+# ---- the probe protocol (registration, ladder chain, resume summary, kill and reap) ----
 
-def test_epoch_registered(tmp_path):
+def test_epoch_registered(tmp_path: Path) -> None:
     rid = "laya-selection_train-neg8-s0-12345678"
     run_dir = tmp_path / rid
     run_dir.mkdir()
     assert compute.epoch_registered(str(tmp_path), rid, 1) is False          # no snapshot yet
     snap = run_dir / compute.SNAPSHOT
 
-    def write(names, **extra):                                               # Ray 2.59's snapshot layout
+    def write(names: list[str], **extra: Any) -> None:                      # Ray 2.59's snapshot layout
         snap.write_text(json.dumps(dict({"ray_version": compute.SNAPSHOT_RAY, "checkpoint_results": [
             {"version": 0, "checkpoint_dir_name": n, "metrics": {"epoch": 1}} for n in names]}, **extra)),
             encoding="utf-8")
@@ -345,16 +355,17 @@ def test_epoch_registered(tmp_path):
     assert compute.epoch_registered(str(tmp_path), rid, 2) is False
 
 
-def _fake_launcher(statuses):
+def _fake_launcher(statuses: list[str]) -> tuple[Callable[[str], dict[str, Any]], list[str]]:
+    """(launch, seen): launch returns the next status of `statuses`; seen collects the rungs it was called on."""
     seen, todo = [], list(statuses)
 
-    def launch(rung):
+    def launch(rung: str) -> dict[str, Any]:
         seen.append(rung)
         return {"status": todo.pop(0), "run_id": "laya-%d" % len(seen)}
     return launch, seen
 
 
-def test_attempt_chain_walks_the_ladder_on_oom():
+def test_attempt_chain_walks_the_ladder_on_oom() -> None:
     launch, seen = _fake_launcher(["oom", "ok"])
     attempts, status = compute.attempt_chain("none", launch)
     assert status == "ok" and seen == ["none", "embeddings_frozen"]
@@ -362,7 +373,7 @@ def test_attempt_chain_walks_the_ladder_on_oom():
     assert [a["status"] for a in attempts] == ["oom", "ok"]
 
 
-def test_attempt_chain_ladder_exhausted():
+def test_attempt_chain_ladder_exhausted() -> None:
     launch, seen = _fake_launcher(["oom"] * 4)
     attempts, status = compute.attempt_chain("none", launch)
     assert status == "ladder_exhausted"
@@ -370,21 +381,21 @@ def test_attempt_chain_ladder_exhausted():
                                              "encoder_frozen"]
 
 
-def test_attempt_chain_stops_on_failure():
+def test_attempt_chain_stops_on_failure() -> None:
     launch, seen = _fake_launcher(["failed", "ok"])
     attempts, status = compute.attempt_chain("none", launch)
     assert status == "failed" and seen == ["none"] and attempts[0]["rung"] == "none"
 
 
-def test_an_oom_after_the_last_epoch_does_not_walk_the_ladder():
-    """04-REVIEW WR-01: a final-save OOM ends the chain as failed (rerun to resume), not on a weaker rung that would
+def test_an_oom_after_the_last_epoch_does_not_walk_the_ladder() -> None:
+    """A final-save OOM ends the chain as failed (rerun to resume), not on a weaker rung that would
     retrain under another run_id and record a fallback; a training-step OOM still walks it."""
     import compute_checkpoint as cc
     from pilot import runs
     final = runs.oom_message(None, None, "none", runs.STAGE_FINAL_SAVE)
     a = cc.oom_attempt({"run_id": "laya-a"}, runs.failure_line("[Rank 0]\nRuntimeError: " + final), {"mode": "kill"})
     assert a["status"] == "failed" and a["line"] == final
-    # 04-REVIEW IN-06: the report never advises a resume whose storage the orchestrator deletes
+    # the report never advises a resume whose storage the orchestrator deletes
     assert final.split("; ")[0] in a["reason"] and "rerun the same command" not in a["reason"]
     assert "rerun compute_checkpoint.py" in a["reason"]
     md = "\n".join(compute._attempt_lines([dict(a, rung="none")], "failed"))
@@ -397,12 +408,13 @@ def test_an_oom_after_the_last_epoch_does_not_walk_the_ladder():
     assert status == "failed" and seen == ["none"]
 
 
-def _segment(i, start, load=None, peak=None):
+def _segment(i: int, start: int, load: float | None = None, peak: int | None = None) -> dict[str, Any]:
+    """A run-record segment starting at epoch index `start` (resumed when start > 0)."""
     return {"segment": i, "start_epoch": start, "resumed": start > 0, "git_sha": "a" * 40, "git_dirty": False,
             "device": "mps", "resume_load_s": load, "resume_peak_total_bytes": peak}
 
 
-def test_resume_summary_two_segments():
+def test_resume_summary_two_segments() -> None:
     rows = toy_rows()
     rows[1].update(segment=1, resumed=True)
     record = {"segments": [_segment(0, 0), _segment(1, 1, 42.5, 9 * 2**30)], "epochs": rows}
@@ -411,7 +423,7 @@ def test_resume_summary_two_segments():
                  "resume_demonstrated": True}
 
 
-def test_resume_summary_one_segment_is_not_a_resume():
+def test_resume_summary_one_segment_is_not_a_resume() -> None:
     record = {"segments": [_segment(0, 0)], "epochs": toy_rows()}
     s = compute.resume_summary(record)
     assert s["segments"] == 1 and s["resume_demonstrated"] is False and s["resume_load_s"] is None
@@ -421,7 +433,7 @@ def test_resume_summary_one_segment_is_not_a_resume():
     assert s["resume_demonstrated"] is False
 
 
-def test_markdown_shows_attempts_and_a_missed_kill():
+def test_markdown_shows_attempts_and_a_missed_kill() -> None:
     measured = toy_measured()
     p = compute.project(measured, TOY_COUNTS, TOY_MATRIX)
     attempts = [{"rung": "none", "status": "oom", "run_id": "laya-a", "line": "MPS out of memory at epoch 1"},
@@ -439,7 +451,7 @@ def test_markdown_shows_attempts_and_a_missed_kill():
     assert "ladder is exhausted" in md and "## Projection" not in md
 
 
-def test_kill_after_registration_reaps_the_tree(tmp_path):
+def test_kill_after_registration_reaps_the_tree(tmp_path: Path) -> None:
     import time
     import psutil
     import compute_checkpoint
@@ -451,7 +463,7 @@ def test_kill_after_registration_reaps_the_tree(tmp_path):
     proc = subprocess.Popen([sys.executable, "-c", code, str(pidfile)], start_new_session=True)
     t0 = time.monotonic()
 
-    def registered():
+    def registered() -> bool:
         return pidfile.exists() and pidfile.read_text() != "" and time.monotonic() - t0 > 1.0
     out = compute_checkpoint.kill_after_registration(proc, registered, 0, poll_s=0.1)
     grandchild = int(pidfile.read_text())
@@ -463,16 +475,16 @@ def test_kill_after_registration_reaps_the_tree(tmp_path):
     assert not psutil.pid_exists(proc.pid) and not psutil.pid_exists(grandchild)
 
 
-def test_kill_after_registration_records_a_missed_kill():
+def test_kill_after_registration_records_a_missed_kill() -> None:
     import compute_checkpoint
     proc = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
     out = compute_checkpoint.kill_after_registration(proc, lambda: False, 0, poll_s=0.05)
     assert out["missed"] is True and out["leftover_processes"] is None and proc.returncode == 0
 
 
-# ---- plan 04-06 Task 2: measured BERTurk step and inference times, measured scoring rate ----
+# ---- measured BERTurk step and inference times, measured scoring rate ----
 
-def test_berturk_child_on_tiny_cpu(tmp_path):
+def test_berturk_child_on_tiny_cpu(tmp_path: Path) -> None:
     out_json = tmp_path / "berturk.json"
     cfg = {"source": "tiny", "device": "cpu", "cpus": 1, "seed": 0, "warmup_steps": 1, "measured_steps": 3,
            "infer_msgs": 8, "out_json": str(out_json)}
@@ -491,7 +503,7 @@ def test_berturk_child_on_tiny_cpu(tmp_path):
     assert "plain PyTorch loop" in p["basis"]
 
 
-def test_berturk_child_refuses_tampered_weights(tmp_path, monkeypatch):
+def test_berturk_child_refuses_tampered_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import hashlib
     import compute_checkpoint
     bert = tmp_path / "bert"
@@ -513,7 +525,7 @@ def test_berturk_child_refuses_tampered_weights(tmp_path, monkeypatch):
     assert p["status"] == "refused" and "model.safetensors" in p["reason"] and "sha256" in p["reason"]
 
 
-def test_project_uses_measured_berturk_and_scoring():
+def test_project_uses_measured_berturk_and_scoring() -> None:
     measured = dict(toy_measured(), berturk={"status": "ok", "device": "mps", "s_per_step": 0.5,
                                              "s_per_msg_infer": 0.004},
                     scoring={"device": "mps", "dtype": "torch.float32", "amp_enabled": False, "n": 32,
@@ -529,7 +541,7 @@ def test_project_uses_measured_berturk_and_scoring():
     assert {part["model"]: part["s_per_unit"] for part in final["parts"]} == {"laya": 0.2, "berturk": 0.004}
 
 
-def test_markdown_and_assumptions_label_the_measured_probes():
+def test_markdown_and_assumptions_label_the_measured_probes() -> None:
     measured = dict(toy_measured(), berturk={"status": "ok", "device": "mps", "param_device": "mps",
                                              "s_per_step": 0.5, "p90_s": 0.6, "n_steps": 20,
                                              "s_per_msg_infer": 0.004, "peak_total_bytes": 3 * 2**30,
@@ -552,8 +564,9 @@ def test_markdown_and_assumptions_label_the_measured_probes():
     assert any("BERTurk rates are estimates" in x for x in compute.assumptions(TOY_MATRIX, failed, TOY_COUNTS))
 
 
-def test_probe_storage_is_dropped_when_a_step_after_the_chain_raises(tmp_path, monkeypatch):
-    """04-REVIEW WR-06: a failure after a successful probe (here the split count) still deletes the probe's Ray run dir
+def test_probe_storage_is_dropped_when_a_step_after_the_chain_raises(tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure after a successful probe (here the split count) still deletes the probe's Ray run dir
     and temp checkpoint unless --keep-run."""
     import compute_checkpoint as cc
     base, storage, seen = tmp_path / "base", tmp_path / "storage", {}
@@ -569,7 +582,7 @@ def test_probe_storage_is_dropped_when_a_step_after_the_chain_raises(tmp_path, m
     monkeypatch.setattr(cc, "disk_preflight", lambda *a: None)
     monkeypatch.setattr(cc, "build_meta", lambda *a: {})
 
-    def launch(rung, ctx):
+    def launch(rung: str, ctx: dict[str, Any]) -> dict[str, Any]:
         os.makedirs(os.path.join(ctx["storage"], "laya-x", "epoch-002"))
         ckpt = os.path.join(ctx["tmp"], "attempt-0", "ckpt")
         os.makedirs(ckpt)
@@ -578,7 +591,7 @@ def test_probe_storage_is_dropped_when_a_step_after_the_chain_raises(tmp_path, m
         seen["tmp"] = ctx["tmp"]
         return {"run_id": "laya-x", "status": "ok", "interrupt": {}, "resume": {}}
 
-    def boom(manifest):
+    def boom(manifest: str) -> NoReturn:
         raise RuntimeError("split count failed")
     monkeypatch.setattr(cc, "launch_rung", launch)
     monkeypatch.setattr(cc.compute, "split_counts", boom)
@@ -588,8 +601,9 @@ def test_probe_storage_is_dropped_when_a_step_after_the_chain_raises(tmp_path, m
     assert not (storage / "laya-x").exists() and not os.path.exists(seen["tmp"])
 
 
-def test_keep_run_prints_a_resume_command_that_survives_spaces(tmp_path, monkeypatch, capsys):
-    """04-REVIEW IN-02: after an out-of-memory exit past the last epoch, --keep-run prints the probe's ray_train.py
+def test_keep_run_prints_a_resume_command_that_survives_spaces(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                capsys: pytest.CaptureFixture[str]) -> None:
+    """After an out-of-memory exit past the last epoch, --keep-run prints the probe's ray_train.py
     command for copy-paste; it is shell-quoted, so a path with a space splits back into the same argv."""
     import shlex
     import compute_checkpoint as cc
@@ -610,7 +624,7 @@ def test_keep_run_prints_a_resume_command_that_survives_spaces(tmp_path, monkeyp
     monkeypatch.setattr(cc.compute, "write_report", lambda out, report: os.path.join(out, "compute_checkpoint.md"))
     cmd = [sys.executable, "ray_train.py", "--base", str(base), "--storage", str(storage), "--out", "o"]
 
-    def launch(rung, ctx):
+    def launch(rung: str, ctx: dict[str, Any]) -> dict[str, Any]:
         log = os.path.join(ctx["tmp"], "attempt-0.log")
         with open(log, "w", encoding="utf-8") as f:
             f.write("probe log\n")
@@ -629,8 +643,8 @@ def test_keep_run_prints_a_resume_command_that_survives_spaces(tmp_path, monkeyp
     assert shlex.split(printed) == cmd and printed == shlex.join(cmd)
 
 
-def test_protocol_complete_pins_the_timing_basis():
-    """04-REVIEW WR-07: --cpus (the torch thread count s/step depends on), --epochs and --seed are part of the protocol;
+def test_protocol_complete_pins_the_timing_basis() -> None:
+    """--cpus (the torch thread count s/step depends on), --epochs and --seed are part of the protocol;
     a run off compute.PROTOCOL is a SMOKE RUN."""
     import argparse
     import compute_checkpoint as cc
@@ -645,8 +659,8 @@ def test_protocol_complete_pins_the_timing_basis():
     assert "--cpus, --epochs or --seed other than cpus 4, epochs 2, seed 0" in md
 
 
-def test_swap_growth_in_a_measured_epoch_is_bannered():
-    """04-REVIEW WR-08: swap growth during a measured epoch (the spike's D-01 memory gate) gets a banner and an
+def test_swap_growth_in_a_measured_epoch_is_bannered() -> None:
+    """Swap growth during a measured epoch (the spike's memory gate) gets a banner and an
     assumption, not just a table cell; none without growth."""
     quiet = full_report()
     assert "Swap grew during measured epoch" not in compute.render_markdown(quiet)
@@ -663,8 +677,8 @@ def test_swap_growth_in_a_measured_epoch_is_bannered():
     assert any(x.startswith("Swap grew during measured epoch(s) 2 (largest 423 MiB)") for x in swapped["assumptions"])
 
 
-def test_run_overhead_enters_every_laya_run():
-    """04-REVIEW IN-03: the fixed cost of one ray_train.py process (the child's wall clock minus the record's terms)
+def test_run_overhead_enters_every_laya_run() -> None:
+    """The fixed cost of one ray_train.py process (the child's wall clock minus the record's terms)
     is added once per Laya run; a report without it says so in its assumptions."""
     rows = toy_rows()
     rows[1].update(segment=1, resumed=True)
@@ -687,10 +701,10 @@ def test_run_overhead_enters_every_laya_run():
         toy_meta(), with_, TOY_COUNTS, TOY_MATRIX, p1, toy_preflight()))
 
 
-def test_a_record_without_calibration():
-    """LAYA-05: a Phase 5 run record carries calib_s None (training no longer calibrates). Every sum treats it as 0 s,
-    the formula text drops the calibration term, and the report still renders; the committed Phase 4 report (calib_s
-    12.6) keeps its term (tests/test_compute_report.py)."""
+def test_a_record_without_calibration() -> None:
+    """A run record without calibration carries calib_s None (training no longer calibrates). Every sum treats it as
+    0 s, the formula text drops the calibration term, and the report still renders; the committed compute checkpoint
+    report (calib_s 12.6, measured while training still calibrated) keeps its term (tests/test_compute_report.py)."""
     rows = toy_rows()
     record = {"segments": [_segment(0, 0)], "epochs": rows, "load_s": 20.0, "calib_s": None, "final_save_s": 3.0}
     assert compute.run_overhead(2000.0, record) == pytest.approx(compute.run_overhead(2000.0, dict(record,
@@ -714,8 +728,8 @@ def test_a_record_without_calibration():
     assert md.startswith("# Compute checkpoint") and "- Load 20.0 s, calibration - s, final save 3.0 s" in md
 
 
-def test_per_epoch_persist_and_scoring_overhead_are_charged_where_they_occur():
-    """04-REVIEW IN-02: Ray's persist of each epoch checkpoint is inside save_s (charged per epoch) when the record says
+def test_per_epoch_persist_and_scoring_overhead_are_charged_where_they_occur() -> None:
+    """Ray's persist of each epoch checkpoint is inside save_s (charged per epoch) when the record says
     so, else disclosed; a score.py run's own overhead (the scoring probe's wall clock minus its inference seconds) is
     added once per Laya scoring run, else disclosed. A report without either keeps its numbers."""
     assert compute.laya_training_epochs(TOY_MATRIX) == 96 and compute.laya_scoring_runs(TOY_MATRIX) == 27
@@ -746,8 +760,8 @@ def test_per_epoch_persist_and_scoring_overhead_are_charged_where_they_occur():
     assert "run overhead 15.0 s per score.py run" in md
 
 
-def test_a_stalled_child_is_killed_at_the_probe_timeout():
-    """04-REVIEW IN-04: no child wait is unbounded; a child past --probe-timeout-s is killed (its whole tree)."""
+def test_a_stalled_child_is_killed_at_the_probe_timeout() -> None:
+    """No child wait is unbounded; a child past --probe-timeout-s is killed (its whole tree)."""
     import compute_checkpoint
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"], start_new_session=True)
     out = compute_checkpoint.kill_after_registration(proc, lambda: False, 0, poll_s=0.05, timeout_s=0.5)
@@ -760,8 +774,8 @@ def test_a_stalled_child_is_killed_at_the_probe_timeout():
         compute_checkpoint.main(["--probe-timeout-s", "0"])
 
 
-def test_the_snapshot_format_was_validated_for_the_locked_ray():
-    """04-REVIEW IN-07: epoch_registered reads Ray Train's private snapshot; a lock bump of ray must re-validate it."""
+def test_the_snapshot_format_was_validated_for_the_locked_ray() -> None:
+    """epoch_registered reads Ray Train's private snapshot; a lock bump of ray must re-validate it."""
     import importlib.metadata
     assert importlib.metadata.version("ray") == compute.SNAPSHOT_RAY, (
         "ray moved: check %s's layout (checkpoint_results[].checkpoint_dir_name) in the new ray, then bump "

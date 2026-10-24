@@ -7,6 +7,8 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -18,7 +20,7 @@ pytestmark = pytest.mark.ray
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def run_child(tmp_path, mode, device="cpu", cpus=1):
+def run_child(tmp_path: Path, mode: str, device: str = "cpu", cpus: int = 1) -> tuple[dict[str, Any], dict[str, str]]:
     """Write a tiny-source child config and run `mps_spike.py --child MODE CONFIG` the way the orchestrator does."""
     expect_env = spike.spike_env("0", cpus)
     cfg = {"source": "tiny", "device": device, "micro_batch": 2, "max_len": 32, "grad_accum": 2, "rung": "none",
@@ -35,7 +37,7 @@ def run_child(tmp_path, mode, device="cpu", cpus=1):
 
 
 @pytest.mark.timeout(600)
-def test_ray_worker_gets_env_and_returns_result_via_checkpoint(tmp_path):
+def test_ray_worker_gets_env_and_returns_result_via_checkpoint(tmp_path: Path) -> None:
     payload, expect_env = run_child(tmp_path, "ray")
     assert payload["status"] == "ok", payload
     assert payload["transport"] == "checkpoint"

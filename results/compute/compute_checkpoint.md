@@ -1,6 +1,6 @@
-# Compute checkpoint (Phase 4, LAYA-07)
+# Compute checkpoint
 
-**Swap grew during measured epoch(s) 2** (largest 423 MiB): the run was under memory pressure (the spike's D-01 gate); confirm the rate before approval.
+**Swap grew during measured epoch(s) 2** (largest 423 MiB): the run was under memory pressure (the spike's memory gate); confirm the rate before approval.
 
 - Generated 2026-10-14T16:55:33Z
 - Split: `splits/selection_train.jsonl` sha256 `a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331` (1450 messages)
@@ -13,7 +13,7 @@
 
 ## Attempts
 
-Every probe attempt runs in a fresh process; an MPS out-of-memory attempt is followed by the next rung of the LAYA-03 ladder. Chain status: **ok**.
+Every probe attempt runs in a fresh process; an MPS out-of-memory attempt is followed by the next rung of ray_train.py's fallback ladder. Chain status: **ok**.
 
 | # | rung | status | run id | detail |
 |---|---|---|---|---|
@@ -30,7 +30,7 @@ Every probe attempt runs in a fresh process; an MPS out-of-memory attempt is fol
 - Device mps (parameters on mps), rung none, neg 8, micro-batch 8, max_len 128, grad-accum 4, gradient checkpointing on, AMP off
 - Worker env: `HF_HUB_OFFLINE=1`, `OMP_NUM_THREADS=4`, `PYTORCH_ENABLE_MPS_FALLBACK=0`, `PYTORCH_MPS_HIGH_WATERMARK_RATIO=1.0`, `PYTORCH_MPS_LOW_WATERMARK_RATIO=1.0`, `TOKENIZERS_PARALLELISM=false`
 - Load 3.9 s, calibration 12.6 s, final save 0.4 s
-- Projection rate: 1.8355 s per optimizer step, the largest train_s / optimizer_steps over 2 measured epoch(s) (epoch 1: 1.8355 s; RESEARCH Pitfall 6)
+- Projection rate: 1.8355 s per optimizer step, the largest train_s / optimizer_steps over 2 measured epoch(s) (epoch 1: 1.8355 s)
 
 | epoch | train min | s/step | optimizer steps | items | peak GiB (driver + RSS) | driver GiB | RSS GiB | swap delta MiB | save s |
 |---|---|---|---|---|---|---|---|---|---|
@@ -51,19 +51,19 @@ Every probe attempt runs in a fresh process; an MPS out-of-memory attempt is fol
 
 ## Projection
 
-Basis is the weakest input of a line: estimate (a labelled estimate, not measured), provisional (few-shot, protocol frozen only in Phase 8), measured (cpu, wall) (the committed CPU zero-shot scoring rate, wall clock per message with Ray start and model loads, used when the scoring probe did not finish ok) or measured. Every matrix value is provisional; see Assumptions to confirm.
+Basis is the weakest input of a line: estimate (a labelled estimate, not measured), provisional (few-shot, its protocol not yet frozen when this ran), measured (cpu, wall) (the committed CPU zero-shot scoring rate, wall clock per message with Ray start and model loads, used when the scoring probe did not finish ok) or measured. Every matrix value is provisional; see Assumptions to confirm.
 
-| line | phase | what | runs | epochs | units / epoch | unit | s / unit | basis | hours |
+| line | stage | what | runs | epochs | units / epoch | unit | s / unit | basis | hours |
 |---|---|---|---|---|---|---|---|---|---|
-| laya_selection | 5 | Laya selection runs (LR grid x val-selected epoch ceiling) | 3 | 4 | 465 | optimizer step | 1.8355 | measured | 2.88 |
-| laya_val_scoring | 5 | Laya val scoring of every selection epoch export | 12 | - | 208 | message | 0.3206 | measured | 0.22 |
-| laya_final | 5 | Laya final seeds on final_train (projected at the epoch ceiling) | 3 | 4 | 532 | optimizer step | 1.8355 | measured | 3.29 |
-| berturk_selection | 6 | BERTurk selection runs (LR grid) | 3 | 10 | 46 | optimizer step | 0.3955 | measured | 0.15 |
-| berturk_final | 6 | BERTurk final seeds on final_train | 3 | 10 | 52 | optimizer step | 0.3955 | measured | 0.17 |
-| fewshot_base | 9 | Few-shot base runs, held-out labels masked (both models) | 6 | - | - | optimizer step | - | provisional | 3.03 |
-| fewshot_incremental | 9 | Few-shot incremental runs on k-shot support sets plus replay (both models) | 12 | 10 | - | optimizer step | - | provisional | 4.41 |
-| fewshot_scoring | 9 | Few-shot scoring of every incremental model on test (both models) | 12 | - | 413 | message | - | provisional | 0.22 |
-| final_scoring | 8 | Final scoring: every seed of both models on val, test and HOTELS | 6 | - | 1630 | message | - | measured | 0.44 |
+| laya_selection | Laya val selection | Laya selection runs (LR grid x val-selected epoch ceiling) | 3 | 4 | 465 | optimizer step | 1.8355 | measured | 2.88 |
+| laya_val_scoring | Laya val selection | Laya val scoring of every selection epoch export | 12 | - | 208 | message | 0.3206 | measured | 0.22 |
+| laya_final | Laya val selection | Laya final seeds on final_train (projected at the epoch ceiling) | 3 | 4 | 532 | optimizer step | 1.8355 | measured | 3.29 |
+| berturk_selection | BERTurk baseline | BERTurk selection runs (LR grid) | 3 | 10 | 46 | optimizer step | 0.3955 | measured | 0.15 |
+| berturk_final | BERTurk baseline | BERTurk final seeds on final_train | 3 | 10 | 52 | optimizer step | 0.3955 | measured | 0.17 |
+| fewshot_base | few-shot experiment | Few-shot base runs, held-out labels masked (both models) | 6 | - | - | optimizer step | - | provisional | 3.03 |
+| fewshot_incremental | few-shot experiment | Few-shot incremental runs on k-shot support sets plus replay (both models) | 12 | 10 | - | optimizer step | - | provisional | 4.41 |
+| fewshot_scoring | few-shot experiment | Few-shot scoring of every incremental model on test (both models) | 12 | - | 413 | message | - | provisional | 0.22 |
+| final_scoring | final scoring | Final scoring: every seed of both models on val, test and HOTELS | 6 | - | 1630 | message | - | measured | 0.44 |
 
 **Total: 14.81 h** (53326 s, the sum of the lines above)
 
@@ -115,7 +115,7 @@ Total projected hours when the matrix is trimmed (everything else unchanged):
 
 - Base model (fp16 safetensors): 0.60 GiB; train state: 3.60 GiB (measured)
 - One run's peak: 13.79 GiB (three train states during checkpoint rotation, its per-epoch exports, its final checkpoint); ray_train.py refuses below 14.79 GiB free
-- Selection epoch exports kept until Phase 5 scores them on val: 7.20 GiB; Laya final checkpoints kept: 3.60 GiB
+- Selection epoch exports kept until the Laya val selection scores them on val: 7.20 GiB; Laya final checkpoints kept: 3.60 GiB
 
 ## Assumptions to confirm
 

@@ -1,4 +1,4 @@
-"""compute_checkpoint.py end to end on CPU (LAYA-07, LAYA-04): preflight -> spike start config -> a fresh ray_train.py
+"""compute_checkpoint.py end to end on CPU: preflight -> spike start config -> a fresh ray_train.py
 child on the tiny offline checkpoint, interrupted after epoch 1 (--interrupt fail, ray_train.py's --fail-after-epoch 1)
 and resumed by rerunning the same command -> run record -> projection -> compute_checkpoint.json/.md, then the probe is
 cleaned up.
@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -25,7 +26,7 @@ TIMEOUT = 600
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_compute_checkpoint_on_cpu(tmp_path):
+def test_compute_checkpoint_on_cpu(tmp_path: Path) -> None:
     root, raw_sha256 = make_raw(str(tmp_path / "raw"))
     data = str(tmp_path / "data")
     pilot.data.prepare(root, data, raw_sha256)
@@ -49,7 +50,7 @@ def test_compute_checkpoint_on_cpu(tmp_path):
     laya = report["measured"]["laya"]
     assert laya["s_per_step"] > 0 and laya["device"] == "cpu" and laya["rung"] == "none"
     assert laya["micro_batch"] == 8 and laya["max_len"] == 128 and laya["grad_accum"] == 4 and laya["neg"] == 8
-    assert laya["calib_s"] is None                          # training no longer calibrates (LAYA-05)
+    assert laya["calib_s"] is None                          # training no longer calibrates
     assert report["projection"]["total_h"] > 0
     assert [row["epoch"] for row in report["measured"]["epochs"]] == [1, 2]
     assert [row["resumed"] for row in report["measured"]["epochs"]] == [False, True]
@@ -61,7 +62,7 @@ def test_compute_checkpoint_on_cpu(tmp_path):
     assert report["resume"]["resume_load_s"] > 0 and report["resume"]["resume_peak_total_bytes"] > 0
     lines = {l["id"]: l for l in report["projection"]["lines"]}
     assert lines["laya_selection"]["seconds"] > 0 and lines["laya_final"]["seconds"] > 0
-    # the resumed child's fixed cost outside its record (process and Ray start, ...), once per run (04-REVIEW IN-03)
+    # the resumed child's fixed cost outside its record (process and Ray start, ...), once per run
     assert report["measured"]["laya"]["run_overhead_s"] > 0 and "run overhead" in lines["laya_selection"]["formula"]
     assert not any("fixed overhead" in x for x in report["assumptions"])
     assert sorted(lines) == sorted(["laya_selection", "laya_val_scoring", "laya_final", "berturk_selection",
@@ -77,7 +78,7 @@ def test_compute_checkpoint_on_cpu(tmp_path):
     assert lines["berturk_selection"]["s_per_unit"] == berturk["s_per_step"]
     assert lines["laya_val_scoring"]["s_per_unit"] == scoring["s_per_msg"]
     assert "scoring probe" in lines["laya_val_scoring"]["source"]
-    # per-epoch persist inside save_s, a per-score.py-run overhead from the scoring probe (04-REVIEW IN-02)
+    # per-epoch persist inside save_s, a per-score.py-run overhead from the scoring probe
     assert report["measured"]["laya"]["save_s_includes_persist"] is True
     assert scoring["wall_s"] > scoring["run_overhead_s"] > 0
     assert "score.py runs x" in lines["laya_val_scoring"]["formula"]

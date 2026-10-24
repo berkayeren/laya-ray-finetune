@@ -1,4 +1,4 @@
-"""Phase 2 MPS feasibility spike (LAYA-09): does a full-encoder Laya fine-tune fit on this Mac's MPS device?
+"""MPS feasibility spike: does a full-encoder Laya fine-tune fit on this Mac's MPS device?
 
 Design: the orchestrator (this script without --child) imports no torch. It verifies the selection_train split
 against data/splits.json, fetches the pinned Laya weights, and then starts one fresh subprocess per run
@@ -11,26 +11,27 @@ for real neg8 batches while sampling MPS driver memory + RSS and system swap. It
 Checkpoint (Ray Train V2 drops metrics reported without one); the child reads it back and the orchestrator writes
 mps_spike.json + mps_spike.md.
 
-Fallback ops (D-10, D-11): every config first runs with PYTORCH_ENABLE_MPS_FALLBACK=0. The worker records every warning
+Fallback ops: every config first runs with PYTORCH_ENABLE_MPS_FALLBACK=0. The worker records every warning
 from before the model exists, tagged by stage (setup, tokenize, step), and turns a NotImplementedError into an attempt
 with status not_implemented naming the op. Only such a config is rerun, in a fresh process, with fallback 1, so the
-report can list every op that falls back to the CPU and whether it blocks training.
+report can list every op that falls back to the CPU and whether it blocks training (spike.blocks).
 
 Quiet-machine preflight: right after argument validation the orchestrator records available memory, two swap-used
 samples 5 s apart and the swapouts counter, and refuses below --min-available-gib (0 records an override); an override
 or idle swap growth is flagged in the markdown as a busy-machine run.
 
-Token lengths (D-09b): before the grid, a `--child stats` subprocess (CPU, no Ray) loads Laya's tokenizer from the
+Token lengths: before the grid, a `--child stats` subprocess (CPU, no Ray) loads Laya's tokenizer from the
 re-verified pinned weights and reports, counts and percentiles only, how many selection_train messages exceed 128 and
-256 tokens untruncated; D-03's truncation rule reads that number. The same child counts the neg8 items, and the
+256 tokens untruncated; the verdict's truncation clause reads that number. The same child counts the neg8 items, and the
 orchestrator refuses a report whose measured attempts saw a different count (the projection's basis).
 
-Attempt chain (D-08): after the strict attempt and any fallback rerun, an attempt that completed every measured step
-but grew system swap gets one immediate rerun at the same rung (--swap-rerun, default on), and a rung-none attempt
-that fails the D-01 memory gate is retried with only tok_embeddings frozen (rung embeddings_frozen), keeping its
-fallback setting. The last attempt stands; every attempt stays in the report; meta.policy records the run policy.
+Attempt chain (spike.followup): after the strict attempt and any fallback rerun, an attempt that completed every
+measured step but grew system swap gets one immediate rerun at the same rung (--swap-rerun, default on), and a
+rung-none attempt that fails the memory gate is retried with only tok_embeddings frozen (rung embeddings_frozen),
+keeping its fallback setting. The last attempt stands; every attempt stays in the report; meta.policy records the run
+policy.
 
-Ray overhead (D-09a): after the verdict, the chosen config (or 4x128 as a labelled reference when nothing FITS) reruns
+Ray overhead: after the verdict, the chosen config (or 4x128 as a labelled reference when nothing FITS) reruns
 in-process without Ray, in a fresh process with the same env and --cpus threads; the report gives both median step
 times per regime and their % delta. This run never changes the verdict.
 
@@ -59,6 +60,8 @@ import sys
 import tempfile
 import time
 import warnings
+from collections.abc import Callable
+from typing import Any
 
 from pilot import laya_adapter as la
 from pilot import pins, spike
@@ -77,10 +80,12 @@ LAYA_INTERNALS = ["lt.load_checkpoint", "lt.items_from_rows", "lt.encode_item", 
 VERSIONED = ("torch", "ray", "laya", "transformers", "psutil")
 
 
-def configure_model(model, rung):
-    """Gradient checkpointing on (encoder and head, whatever the device) and the D-08 rung; returns trainable params.
+def configure_model(model: Any, rung: str) -> int:
+    """Gradient checkpointing on (encoder and head, whatever the device) and the attempt's rung; returns the number of
+    trainable parameters.
 
-    A frozen encoder never counts as FITS (D-04), so the spike refuses to measure any rung but these two.
+    A frozen encoder never counts as FITS (the rung rule), so the spike refuses to measure any rung but none and
+    embeddings_frozen.
     """
     if rung not in ("none", "embeddings_frozen"):
         raise SystemExit("rung %r is not measured; use 'none' or 'embeddings_frozen' (a frozen encoder never FITS)"
@@ -92,15 +97,20 @@ def configure_model(model, rung):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def _pinned_source(c, max_len, mark):
-    """Pinned Laya model + two batch makers (real neg8, padded to max_len) over the verified selection_train split.
+# a batch source: (model, real batch maker, padded batch maker, item count, skipped items by reason)
+Source = tuple[Any, Callable[[], Any], Callable[[], Any], int, dict[str, int]]
 
-    mark(stage) tags the warnings that follow with their stage (load = setup, item building = tokenize; D-11).
+
+def _pinned_source(c: dict[str, Any], max_len: int, mark: Callable[[str], None]) -> Source:
+    """(model, real batch maker, padded batch maker, item count, skipped) of the pinned Laya model over the verified
+    selection_train split: real neg8 batches, and batches padded to exactly max_len.
+
+    mark(stage) tags the warnings that follow with their stage (load = setup, item building = tokenize).
     """
     from pilot.weights import verify_files
     from ray_train import read_verified_rows
 
-    # the worker re-checks the bytes the driver verified minutes ago (T-02-01)
+    # the worker re-checks the bytes the driver verified minutes ago
     verify_files(c["base_dir"], c["base_sha256"], "base checkpoint")
     model, tok, cfg = la.load_checkpoint(c["base_dir"])
     head_max_len = cfg.get("head_max_len", 192)
@@ -110,10 +120,10 @@ def _pinned_source(c, max_len, mark):
     items, skipped = la.items_from_rows(tok, spike.neg8_rows(rows, c["seed"]), max_len, head_max_len)
     random.Random(c["seed"]).shuffle(items)
 
-    def maker(pad):
+    def maker(pad: bool) -> Callable[[], Any]:
         pool = itertools.cycle(items)
 
-        def make():
+        def make() -> Any:
             chunk = [next(pool) for _ in range(c["micro_batch"])]
             if pad:
                 chunk = [spike.pad_item_to(it, max_len) for it in chunk]
@@ -127,14 +137,14 @@ def _pinned_source(c, max_len, mark):
 UNTRUNCATED = 100000
 
 
-def stats_cfg(base_dir, data_sha256, seed, cpus):
+def stats_cfg(base_dir: str, data_sha256: str, seed: int, cpus: int) -> dict[str, Any]:
     """Config of the `--child stats` run (CPU, no Ray) over the verified selection_train split."""
     return {"base_dir": base_dir, "base_sha256": dict(pins.LAYA["sha256"]), "data": SPLIT, "data_sha256": data_sha256,
             "seed": seed, "cpus": cpus, "expect_env": spike.spike_env("0", cpus)}
 
 
-def token_lengths(c):
-    """--child stats payload: D-09b token stats with Laya's tokenizer and the neg8 item count, no text or uids.
+def token_lengths(c: dict[str, Any]) -> dict[str, Any]:
+    """--child stats payload: token-length stats with Laya's tokenizer and the neg8 item count, no text or uids.
 
     Only the tokenizer is needed, so the model is dropped right after the load; the child exits before any measured
     run, so its memory never overlaps the grid.
@@ -161,8 +171,9 @@ def token_lengths(c):
             "n_positives": sum(1 for r in rows for v in r["expected"].values() if v), "n_messages": len(rows)}
 
 
-def check_neg8(configs, n_items):
-    """Refuse when a measured attempt built a different neg8 item count than the stats child (the D-02 basis)."""
+def check_neg8(configs: list[dict[str, Any]], n_items: int) -> None:
+    """Refuse when a measured attempt built a different neg8 item count than the stats child (the time gate's
+    projection basis)."""
     for c in configs:
         for i, att in enumerate(c["attempts"]):
             if att.get("status") == "ok" and att.get("n_neg8_items") != n_items:
@@ -171,7 +182,7 @@ def check_neg8(configs, n_items):
                                                      "%dx%d #%d" % (c["micro_batch"], c["max_len"], i), n_items))
 
 
-def tiny_model():
+def tiny_model() -> Any:
     """Tiny ModernBERT encoder + Laya head (random init, CPU, no download) for the offline self-tests."""
     from transformers import ModernBertConfig, ModernBertModel
 
@@ -181,7 +192,7 @@ def tiny_model():
     return la.decision_model(ModernBertModel(cfg), 2, 2)
 
 
-def tiny_items(n, min_len, max_len, seed):
+def tiny_items(n: int, min_len: int, max_len: int, seed: int) -> list[dict[str, Any]]:
     """n synthetic encoded noul items for tiny_model: [CLS] body [SEP], lengths uniform in [min_len, max_len]."""
     rng = random.Random(seed)
     out = []
@@ -192,9 +203,10 @@ def tiny_items(n, min_len, max_len, seed):
     return out
 
 
-def _tiny_source(c, max_len, mark):
-    """Offline self-test source used by tests/test_spike_*.py (the orchestrator always launches "pinned")."""
-    def maker(items):
+def _tiny_source(c: dict[str, Any], max_len: int, mark: Callable[[str], None]) -> Source:
+    """Offline self-test source used by tests/test_spike_*.py (the orchestrator always launches "pinned"); the same
+    tuple as _pinned_source."""
+    def maker(items: list[dict[str, Any]]) -> Callable[[], Any]:
         pool = itertools.cycle(items)
         return lambda: la.collate_items([[next(pool) for _ in range(c["micro_batch"])]], 0)
     model = tiny_model()
@@ -204,12 +216,14 @@ def _tiny_source(c, max_len, mark):
     return model, real, padded, 64, {}
 
 
-def _identity(c):
+def _identity(c: dict[str, Any]) -> dict[str, Any]:
     """The config fields every attempt carries, whatever its status (ok, oom, error, crashed)."""
     return {k: c[k] for k in ("purpose", "micro_batch", "max_len", "grad_accum", "rung", "fallback", "device")}
 
 
-def _measure(c):
+def _measure(c: dict[str, Any]) -> dict[str, Any]:
+    """One config's attempt payload: the env and device checks, the timed steps (_steps), and the fallback warnings
+    captured from before the model exists; a strict NotImplementedError becomes status not_implemented."""
     import torch
     # one definition each, in ray_train.py (imported here, never in the torch-free orchestrator)
     from ray_train import check_env, require_driver_node
@@ -221,13 +235,13 @@ def _measure(c):
     device = torch.device(c["device"])
     if device.type == "mps" and not torch.backends.mps.is_available():
         raise SystemExit("MPS is not available in this process; the spike cannot run")
-    # D-10: record every warning before the model exists. Each MPS fallback op warns once per process, so a capture
-    # opened after the first MPS op would miss it (RESEARCH Pitfall 3); strict and fallback never share a process.
+    # record every warning before the model exists. Each MPS fallback op warns once per process, so a capture opened
+    # after the first MPS op would miss it; strict and fallback never share a process.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         marks, got = [(0, "setup")], {"stage": "setup"}
 
-        def mark(stage):
+        def mark(stage: str) -> None:
             got["stage"] = stage
             marks.append((len(caught), stage))
         try:
@@ -247,7 +261,7 @@ def _measure(c):
     return payload
 
 
-def _steps(c, device, mark, got):
+def _steps(c: dict[str, Any], device: Any, mark: Callable[[str], None], got: dict[str, Any]) -> dict[str, Any]:
     """Load, configure, move and time one config; `got` collects what was measured so far (for a strict failure)."""
     import psutil
     import torch
@@ -265,7 +279,7 @@ def _steps(c, device, mark, got):
         raise SystemExit("unknown model source %r" % (c["source"],))
     got.update(n_neg8_items=n_items, items_skipped=skipped)
 
-    def padded_maker():
+    def padded_maker() -> Any:
         batch = pad_maker()
         if tuple(batch["input_ids"].shape) != (mb, max_len) or not bool(batch["attention_mask"].all()):
             raise SystemExit("padded batch shape %s, expected (%d, %d) with a full attention mask"
@@ -280,7 +294,7 @@ def _steps(c, device, mark, got):
         model = ray.train.torch.prepare_model(model, move_to_device=device)
     else:
         model = model.to(device)
-    gc.collect()                                            # drop the CPU copy before any sampling (Pitfall 8)
+    gc.collect()                                            # drop the CPU copy before any sampling
     require_param_device(model, device.type)
     got["param_device"] = device.type
     model.train()
@@ -295,11 +309,11 @@ def _steps(c, device, mark, got):
     proc = psutil.Process()
     peak = {"total": 0, "driver": 0, "rss": 0}
 
-    def sync():
+    def sync() -> None:
         if is_mps:
             torch.mps.synchronize()
 
-    def sample():
+    def sample() -> None:
         driver = torch.mps.driver_allocated_memory() if is_mps else 0
         rss = proc.memory_info().rss
         peak["total"], peak["driver"], peak["rss"] = (max(peak["total"], driver + rss), max(peak["driver"], driver),
@@ -307,7 +321,7 @@ def _steps(c, device, mark, got):
 
     last = {"loss": None, "shape": None}
 
-    def step(maker, measured):
+    def step(maker: Callable[[], Any], measured: bool) -> float:
         # one optimizer step = accum micro-batches (encoded inside the clock, like the real loop) + clip + AdamW
         sync()
         t0 = time.perf_counter()
@@ -339,7 +353,7 @@ def _steps(c, device, mark, got):
             for idx in range(c["warmup_steps"]):
                 step(maker, False)
             stage, idx = "measured", 0
-            # swap brackets the measured steps only, never warm-up or the model load (Pitfall 8)
+            # swap brackets the measured steps only, never warm-up or the model load
             s0, o0 = spike.swap_used(), spike.swapouts()
             for idx in range(c["measured_steps"]):
                 times.append(step(maker, True))
@@ -370,8 +384,9 @@ def _steps(c, device, mark, got):
     return payload
 
 
-def spike_worker(c):
-    """Ray Train worker loop (transport "checkpoint") and in-process runner (transport "return")."""
+def spike_worker(c: dict[str, Any]) -> dict[str, Any] | None:
+    """Ray Train worker loop (transport "checkpoint": the payload travels in a Ray Checkpoint, returns None) and
+    in-process runner (transport "return": returns the payload)."""
     try:
         payload = _measure(c)
     except SystemExit as e:
@@ -392,7 +407,7 @@ def spike_worker(c):
     return None
 
 
-def run_ray(cfg):
+def run_ray(cfg: dict[str, Any]) -> dict[str, Any]:
     """Start Ray with the spike env and run spike_worker in a 1-worker TorchTrainer; returns the worker's run.json."""
     import ray
     from ray.train import RunConfig, ScalingConfig
@@ -418,7 +433,7 @@ def run_ray(cfg):
         ray.shutdown()
 
 
-def run_child(mode, path):
+def run_child(mode: str, path: str) -> None:
     """--child entry point: run one config (ray | inprocess) or the token stats (stats); payload to cfg["out_json"]."""
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
@@ -438,7 +453,7 @@ def run_child(mode, path):
     write_atomic(cfg["out_json"], (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
-def launch(cfg, mode):
+def launch(cfg: dict[str, Any], mode: str) -> dict[str, Any]:
     """Run one config in a fresh subprocess with the spike env; returns its attempt (see spike.child_outcome)."""
     d = tempfile.mkdtemp(prefix="mps-spike-")
     try:
@@ -457,7 +472,8 @@ def launch(cfg, mode):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def run_config(base, cpus, policy, launcher=launch):
+def run_config(base: dict[str, Any], cpus: int, policy: dict[str, Any],
+               launcher: Callable[[dict[str, Any], str], dict[str, Any]] = launch) -> dict[str, Any]:
     """One grid config's attempt chain: the strict (fallback 0) attempt, then whatever spike.followup asks for.
 
     Every attempt runs in its own fresh subprocess with its own env (the fallback flag is read at `import torch`),
@@ -481,9 +497,9 @@ def run_config(base, cpus, policy, launcher=launch):
             "attempts": chain, "standing": spike.standing(chain)}
 
 
-def overhead_target(v, configs):
-    """D-09a target -> (basis, config entry, rung, fallback): the verdict's chosen config or, when nothing FITS, the
-    4x128 reference (the first grid config if 4x128 is not in the grid) at rung none, fallback 0."""
+def overhead_target(v: dict[str, Any], configs: list[dict[str, Any]]) -> tuple[str, dict[str, Any], str, str]:
+    """The Ray-overhead target -> (basis, config entry, rung, fallback): the verdict's chosen config or, when nothing
+    FITS, the 4x128 reference (the first grid config if 4x128 is not in the grid) at rung none, fallback 0."""
     c = v.get("chosen")
     if c:
         entry = next(e for e in configs if (e["micro_batch"], e["max_len"]) == (c["micro_batch"], c["max_len"]))
@@ -492,9 +508,10 @@ def overhead_target(v, configs):
     return "reference", entry, "none", "0"
 
 
-def measure_overhead(v, configs, bases, cpus, launcher=launch):
-    """D-09a: rerun the target config in-process (no Ray) in a fresh process with the same env and thread count, and
-    compare its step times with the Ray attempt of the same config, rung and fallback.
+def measure_overhead(v: dict[str, Any], configs: list[dict[str, Any]], bases: dict[tuple[int, int], dict[str, Any]],
+                     cpus: int, launcher: Callable[[dict[str, Any], str], dict[str, Any]] = launch) -> dict[str, Any]:
+    """Ray overhead: rerun the target config in-process (no Ray) in a fresh process with the same env and thread
+    count, and compare its step times with the Ray attempt of the same config, rung and fallback.
 
     Runs after the verdict and is stored only under report["ray_overhead"], never in any config's attempts, so it
     cannot change the verdict. A refused or crashed in-process run is recorded, not raised: the grid's report survives.
@@ -506,7 +523,7 @@ def measure_overhead(v, configs, bases, cpus, launcher=launch):
                expect_env=spike.spike_env(fallback, cpus),
                run_name="mps-spike-%dx%d-%s-f%s-inprocess-%s" % (entry["micro_batch"], entry["max_len"], rung,
                                                                   fallback, time.strftime("%Y%m%d-%H%M%S")))
-    print("ray overhead (D-09a, %s): micro-batch %d, max_len %d, rung %s, fallback %s, in-process"
+    print("ray overhead (%s): micro-batch %d, max_len %d, rung %s, fallback %s, in-process"
           % (basis, cfg["micro_batch"], cfg["max_len"], rung, fallback), flush=True)
     try:
         inprocess = dict(launcher(cfg, "inprocess"), **_identity(cfg))
@@ -515,8 +532,8 @@ def measure_overhead(v, configs, bases, cpus, launcher=launch):
     return spike.ray_overhead(ray_attempt, inprocess, basis)
 
 
-def main():
-    ap = argparse.ArgumentParser(description="MPS feasibility spike for a full-encoder Laya fine-tune (LAYA-09)")
+def main() -> None:
+    ap = argparse.ArgumentParser(description="MPS feasibility spike for a full-encoder Laya fine-tune")
     ap.add_argument("--out", default="results/spike", help="report dir (mps_spike.json + mps_spike.md)")
     ap.add_argument("--grid", default="4x128,4x256,8x128,8x256", help="MICRO_BATCHxMAX_LEN entries, comma-separated")
     ap.add_argument("--warmup-steps", type=int, default=spike.WARMUP_STEPS)
@@ -527,7 +544,7 @@ def main():
                     help="OMP_NUM_THREADS, the worker's CPU resource and torch threads (the M4's performance cores)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tie-tolerance", type=float, default=spike.TIE_TOLERANCE,
-                    help="FITS configs within this fraction of the fastest projected epoch count as tied (D-03)")
+                    help="FITS configs within this fraction of the fastest projected epoch count as tied")
     ap.add_argument("--storage", default=os.path.abspath("ray_results"), help="Ray run storage (local dir)")
     ap.add_argument("--min-available-gib", type=float, default=spike.MIN_AVAILABLE_GIB,
                     help="refuse to measure below this much available memory; 0 records a busy-machine run")
@@ -559,8 +576,8 @@ def main():
     if not a.min_available_gib >= 0:
         ap.error("--min-available-gib must not be negative")
 
-    # quiet-machine preflight (RESEARCH Pitfall 2), before the split check, the fetch or any child: background apps
-    # move the system swap the D-01 gate reads, so a memory-starved machine could fake a DOES NOT FIT
+    # quiet-machine preflight, before the split check, the fetch or any child: background apps move the system swap
+    # the memory gate reads, so a memory-starved machine could fake a DOES NOT FIT
     import psutil
     refuse = ("%.1f GiB available, below --min-available-gib %.1f: quit heavy apps (browsers, IDE indexers, Docker, "
               "other Python processes), connect AC power and run under `caffeinate -i`, then retry; or pass "
@@ -578,11 +595,11 @@ def main():
           % (pf["available_gib"], a.min_available_gib, ", overridden" if pf["override"] else "",
              pf["swap_grew_while_idle"]), flush=True)
 
-    # D-05: the main checkout's locked venv, the hash-verified split and the pinned weights, before any child runs
+    # the locked venv, the hash-verified split and the pinned weights, before any child runs
     entry = verify_split_file(SPLIT, roles=("train",))
-    la.check_version()                                      # the adapter's laya pin, before the fetch (IN-05)
+    la.check_version()                                      # the adapter's laya pin, before the fetch
     base_dir = fetch(pins.LAYA)
-    # D-09b: token lengths and the neg8 item count, in a CPU child that exits before the first measured run
+    # token lengths and the neg8 item count, in a CPU child that exits before the first measured run
     stats = launch(stats_cfg(base_dir, entry["sha256"], a.seed, a.cpus), "stats")
     if stats.get("status") != "ok":
         raise SystemExit("the token-stats child failed (%s, exit %s); run `python mps_spike.py --child stats CONFIG` "
@@ -613,7 +630,7 @@ def main():
             # the pin identifies the weights; base_dir (a local HF cache path) never enters the report
             "model": {"repo": pins.LAYA["repo"], "subfolder": pins.LAYA["subfolder"],
                       "revision": pins.LAYA["revision"], "model_sha256": pins.LAYA["sha256"]["model.safetensors"]},
-            # D-05: these match the lock by construction; the report records them anyway
+            # these match the lock by construction; the report records them anyway
             "versions": dict({k: importlib.metadata.version(k) for k in VERSIONED},
                              python=platform.python_version()),
             "platform": {"macos": platform.mac_ver()[0], "machine": platform.machine(),
@@ -624,19 +641,21 @@ def main():
             "projection_basis": "real neg8 median optimizer step x optimizer steps per epoch over all 1,450 "
                                 "selection_train messages at effective batch 32; conservative: ray_train holds out "
                                 "up to 40 messages for calibration and Phase 5 calibrates on val (LAYA-05)",
+            # (the text above is kept byte for byte as the committed results/spike/mps_spike.json records it; it
+            # predates the removal of ray_train.py's calibration holdout, so today every selected message trains)
             "hparams": HPARAMS, "laya_internals": LAYA_INTERNALS}
     report = spike.build_report(meta, configs)
     report["preflight"] = pf
     report["token_stats"] = stats["token_stats"]
     report["neg8"] = {"n_items": stats["n_neg8_items"], "n_positives": stats["n_positives"],
                       "n_messages": stats["n_messages"], "seed": a.seed}
-    # D-10/D-11: every op a strict attempt raised on, from its fallback rerun; a blocking op keeps its config from FITS
+    # every op a strict attempt raised on, from its fallback rerun; a blocking op keeps its config from FITS
     inventory = spike.op_inventory(configs)
     report["op_inventory"] = inventory
-    # D-03: the truncation rule reads pct_messages_over_128 from the stats child
+    # the choice rule's truncation clause reads pct_messages_over_128 from the stats child
     report["verdict"] = spike.verdict(configs, protocol, token_stats=stats["token_stats"],
                                       tie_tolerance=a.tie_tolerance, blocking=spike.blocking_ops(inventory))
-    # D-09a, after the verdict: Ray vs in-process step times of the chosen (or reference) config; informational
+    # after the verdict: Ray vs in-process step times of the chosen (or reference) config; informational only
     report["ray_overhead"] = measure_overhead(report["verdict"], configs, bases, a.cpus)
     md = spike.write_report(a.out, report)
     print("report -> %s" % md)

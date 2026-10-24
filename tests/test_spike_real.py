@@ -1,10 +1,11 @@
 """MPS spike numbers on the real selection_train split and the pinned Laya tokenizer (data and weights markers).
 
-The verdict projects an epoch over the neg8 item count and reads D-03's truncation rule from token-length stats; these
-tests prove both on the real data: 14,854 neg8 items (3,254 positives + 8 x 1,450), no message over 128 or 256 tokens
-(D-09b), and a padded batch that is exactly (micro_batch, max_len) with a full attention mask.
+The verdict projects an epoch over the neg8 item count and reads its truncation clause from token-length stats; these
+tests prove both on the real data: 14,854 neg8 items (3,254 positives + 8 x 1,450), no message over 128 or 256
+tokens, and a padded batch that is exactly (micro_batch, max_len) with a full attention mask.
 """
 import os
+from typing import Any
 
 import pytest
 
@@ -16,7 +17,8 @@ from pilot.data import parse_jsonl, verify_split_file
 SPLIT = mps_spike.SPLIT
 
 
-def _rows():
+def _rows() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """(manifest entry, rows) of the verified selection_train split."""
     with open(SPLIT, "rb") as f:
         raw = f.read()
     entry = verify_split_file(SPLIT, roles=("train",), data=raw)
@@ -24,13 +26,13 @@ def _rows():
 
 
 @pytest.fixture(scope="module")
-def laya_dir():
+def laya_dir() -> str:
     from pilot.weights import fetch
     return fetch(pins.LAYA)
 
 
 @pytest.mark.data
-def test_neg8_count_on_real_split():
+def test_neg8_count_on_real_split() -> None:
     entry, rows = _rows()
     assert len(rows) == entry["n_messages"] == 1450
     assert sum(1 for r in rows for v in r["expected"].values() if v) == 3254
@@ -39,7 +41,7 @@ def test_neg8_count_on_real_split():
 
 @pytest.mark.data
 @pytest.mark.weights
-def test_stats_child_on_real_split(laya_dir):
+def test_stats_child_on_real_split(laya_dir: str) -> None:
     entry, _ = _rows()
     payload = mps_spike.launch(mps_spike.stats_cfg(laya_dir, entry["sha256"], 0, 1), "stats")
     assert payload["status"] == "ok", payload
@@ -52,7 +54,7 @@ def test_stats_child_on_real_split(laya_dir):
 
 @pytest.mark.data
 @pytest.mark.weights
-def test_padded_batch_is_exactly_mb_by_max_len(laya_dir):
+def test_padded_batch_is_exactly_mb_by_max_len(laya_dir: str) -> None:
     _, rows = _rows()
     model, tok, cfg = la.load_checkpoint(laya_dir)
     del model

@@ -1,6 +1,7 @@
 """MPS spike worker on Apple MPS with the tiny offline model: in-process (strict fallback 0) and inside a 1-worker
-Ray Train run, the parameters land on MPS and the MPS memory readings are live. On this torch build the D-10 capture
-path names a real unsupported op (aten::linalg_eig) under both PYTORCH_ENABLE_MPS_FALLBACK=0 and =1.
+Ray Train run, the parameters land on MPS and the MPS memory readings are live. On the locked torch build the
+fallback-op capture path names a real unsupported op (aten::linalg_eig) under both PYTORCH_ENABLE_MPS_FALLBACK=0 and
+=1.
 
 Needs Apple MPS: `pytest -m mps tests/test_spike_mps.py` (excluded from `make test`).
 """
@@ -8,6 +9,8 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,7 +22,7 @@ pytestmark = pytest.mark.mps
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def run_child(tmp_path, mode, device="mps", cpus=2):
+def run_child(tmp_path: Path, mode: str, device: str = "mps", cpus: int = 2) -> dict[str, Any]:
     """Write a tiny-source child config and run `mps_spike.py --child MODE CONFIG` the way the orchestrator does."""
     expect_env = spike.spike_env("0", cpus)
     cfg = {"source": "tiny", "device": device, "micro_batch": 2, "max_len": 32, "grad_accum": 2, "rung": "none",
@@ -36,7 +39,7 @@ def run_child(tmp_path, mode, device="mps", cpus=2):
 
 
 @pytest.mark.timeout(600)
-def test_tiny_inprocess_strict_on_mps(tmp_path):
+def test_tiny_inprocess_strict_on_mps(tmp_path: Path) -> None:
     payload = run_child(tmp_path, "inprocess")
     assert payload["status"] == "ok", payload
     assert payload["param_device"] == "mps" and payload["env_seen"]["PYTORCH_ENABLE_MPS_FALLBACK"] == "0"
@@ -46,7 +49,7 @@ def test_tiny_inprocess_strict_on_mps(tmp_path):
 
 
 @pytest.mark.timeout(600)
-def test_tiny_ray_worker_on_mps(tmp_path):
+def test_tiny_ray_worker_on_mps(tmp_path: Path) -> None:
     payload = run_child(tmp_path, "ray")
     assert payload["status"] == "ok", payload
     assert payload["param_device"] == "mps" and payload["transport"] == "checkpoint"
@@ -74,8 +77,8 @@ print(json.dumps(spike.tag_fallback_ops([str(w.message) for w in caught], [(0, "
 """
 
 
-def probe(script, fallback):
-    """Run a probe in a fresh interpreter: the fallback flag is read once, at `import torch` (RESEARCH Pitfall 3)."""
+def probe(script: str, fallback: str) -> str:
+    """Run a probe in a fresh interpreter (the fallback flag is read once, at `import torch`); its last stdout line."""
     r = subprocess.run([sys.executable, "-c", script], cwd=REPO_ROOT, capture_output=True, text=True, timeout=300,
                        env=dict(os.environ, PYTORCH_ENABLE_MPS_FALLBACK=fallback))
     assert r.returncode == 0, r.stderr[-4000:]
@@ -83,6 +86,6 @@ def probe(script, fallback):
 
 
 @pytest.mark.timeout(600)
-def test_strict_and_fallback_capture_name_linalg_eig():
+def test_strict_and_fallback_capture_name_linalg_eig() -> None:
     assert probe(STRICT_PROBE, "0") == "aten::linalg_eig"
     assert json.loads(probe(FALLBACK_PROBE, "1")) == [{"op": "aten::linalg_eig", "stage": "step"}]

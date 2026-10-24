@@ -1,5 +1,5 @@
-"""Phase 4 compute checkpoint (LAYA-07): measure a real Laya training run from the Phase 2 spike's start config and
-project the runtime of the whole experiment matrix, for the user to approve before any Phase 5/6 run.
+"""Compute checkpoint: measure a real Laya training run from the MPS feasibility spike's start config and project the
+runtime of the whole experiment matrix, for the user to approve before the Laya val selection and the BERTurk baseline.
 
 Design (like mps_spike.py): this orchestrator imports no torch. It runs the spike's quiet-machine preflight (available
 memory, swap growth while idle), verifies the training split, reads the start config from the committed spike report
@@ -11,9 +11,10 @@ checkpoint carries the per-epoch run record (pilot.runs.read_record); pilot.comp
 the whole experiment matrix (s_per_step = the largest train_s / optimizer_steps over the measured epochs; item counts
 of all five verified splits; the fixed per-run overhead = the measuring child's wall clock minus its record's terms,
 compute.run_overhead), a what-if table, a disk budget and the assumptions to confirm, and writes
-compute_checkpoint.json and compute_checkpoint.md. The probe's checkpoint and Ray storage are deleted afterwards unless --keep-run.
+compute_checkpoint.json and compute_checkpoint.md. The probe's checkpoint and Ray storage are deleted afterwards
+unless --keep-run.
 
-Probe protocol (RESEARCH Open Question 1): a 2-epoch probe that is interrupted and resumed (LAYA-04 on the real
+Probe protocol: a 2-epoch probe that is interrupted and resumed (ray_train.py's per-epoch resume, shown on the real
 hardware). The orchestrator learns the run_id from `ray_train.py ... --print-run-id`, starts the child in its own
 session, waits until storage/<run_id> registers the epoch-001 checkpoint (compute.epoch_registered), waits
 --kill-delay-s into epoch 2, SIGKILLs the child's process group, reaps the captured process tree (survivors get a
@@ -21,16 +22,16 @@ SIGKILL after 120 s), waits for available memory to recover and reruns the ident
 epoch-001. --interrupt fail uses ray_train.py's hidden --fail-after-epoch 1 instead (deterministic; the CPU test);
 --interrupt none runs once. A kill that comes too late is recorded as missed, and the report then says the resume was
 not demonstrated. An attempt that ends with the MPS out-of-memory line is followed by a fresh child on the next rung of
-the LAYA-03 ladder (pilot.runs.next_rung), each with its own run_id (compute.attempt_chain), except an out-of-memory
-after the last epoch (the final save; pilot.runs.resume_oom), which ends the chain as failed with a reason
-that fits this orchestrator: the storage is deleted, so rerun compute_checkpoint.py (a fresh probe), or, with
---keep-run, the console prints the ray_train.py command that resumes the kept run; every attempt
-stays in the report, and an exhausted ladder is reported as status ladder_exhausted. Before any child, the disk under --storage
-must hold pilot.runs.disk_need_bytes for the run. Every child (the probe run, its resume, the BERTurk child, the scoring
+ray_train.py's fallback ladder (pilot.runs.next_rung), each with its own run_id (compute.attempt_chain), except an
+out-of-memory after the last epoch (the final save; pilot.runs.resume_oom), which ends the chain as failed with a
+reason that fits this orchestrator: the storage is deleted, so rerun compute_checkpoint.py (a fresh probe), or, with
+--keep-run, the console prints the ray_train.py command that resumes the kept run; every attempt stays in the report,
+and an exhausted ladder is reported as status ladder_exhausted. Before any child, the disk under --storage must hold
+pilot.runs.disk_need_bytes for the run. Every child (the probe run, its resume, the BERTurk child, the scoring
 probe) is killed after --probe-timeout-s (default 3 h) and its attempt or probe recorded as failed or timeout, so a
 stalled Ray scheduler or an MPS hang never blocks the orchestrator.
 
-Measured BERTurk and scoring rates (RESEARCH Open Question 2): after the Laya probe, a BERTurk timing child
+Measured BERTurk and scoring rates: after the Laya probe, a BERTurk timing child
 (`--child berturk CONFIG`, a fresh process with the same MPS env) loads the pinned BERTurk weights, fetched and
 verified on the driver and re-verified (sha256) in the child before any load, and times 3 warm-up + 20 AdamW optimizer
 steps on real selection_train batches of 32 at max_len 128 in fp32, plus a 64-message inference pass. A scoring probe
@@ -66,6 +67,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
+from typing import Any
 
 import psutil
 
@@ -85,16 +88,18 @@ REAP_S = 120                # a killed tree's processes get this long to exit be
 PROBE_TIMEOUT_S = 3 * 3600  # --probe-timeout-s default: a child (probe run, resume, BERTurk, scoring) running longer
 #                             is killed and its attempt recorded as failed (a stalled Ray scheduler or an MPS hang)
 RECOVER_S, RECOVER_POLL_S = 120, 5   # wait for available memory to recover after an interrupt, before the rerun
-# the BERTurk timing child (RESEARCH Open Question 2): real selection_train batches of 32 at max_len 128, AdamW, fp32
+# the BERTurk timing child: real selection_train batches of 32 at max_len 128, AdamW, fp32
 BERTURK = {"batch": 32, "max_len": 128, "lr": 3e-5, "weight_decay": 0.01, "clip_grad_norm": 1.0, "warmup_steps": 3,
            "measured_steps": 20, "infer_msgs": 64}
+# recorded as measured.berturk.basis and in the projection sources; the text is kept byte for byte as the committed
+# compute_checkpoint.json holds it ("Phase 6" there is the BERTurk baseline, berturk_train.py)
 BERTURK_BASIS = "plain PyTorch loop, fp32, AdamW, batch 32, max_len 128; Phase 6 trains with the HF Trainer"
 SCORE_PROBE_N = 32
 SCORING_BASIS = ("--n 32 val subset of the --base weights (the pinned zero-shot model in the real run; same "
                  "architecture as a fine-tuned checkpoint), in-process, fp32")
 
 
-def preflight(min_available_gib):
+def preflight(min_available_gib: float) -> dict[str, Any]:
     """The spike's quiet-machine preflight (mps_spike.main): refuse below --min-available-gib, sample swap twice 5 s
     apart while idle; 0 records an override (a busy-machine run)."""
     refuse = ("%.1f GiB available, below --min-available-gib %.1f: quit heavy apps (browsers, IDE indexers, Docker, "
@@ -115,7 +120,7 @@ def preflight(min_available_gib):
     return pf
 
 
-def child_command(a, start, base, ckpt, storage):
+def child_command(a: argparse.Namespace, start: dict[str, Any], base: str, ckpt: str, storage: str) -> list[str]:
     """The ray_train.py probe command: the spike's start config on its rung, neg 8, one worker."""
     cmd = [sys.executable, os.path.join(REPO_ROOT, "ray_train.py"), "--data", os.path.abspath(a.data),
            "--manifest", os.path.abspath(a.manifest), "--base", base, "--out", ckpt, "--storage", storage,
@@ -128,7 +133,7 @@ def child_command(a, start, base, ckpt, storage):
     return cmd
 
 
-def run_id_of(cmd, env):
+def run_id_of(cmd: list[str], env: dict[str, str]) -> str:
     """The run id the probe command trains under (ray_train.py --print-run-id; no Ray started)."""
     r = subprocess.run(cmd + ["--print-run-id"], cwd=REPO_ROOT, env=env, capture_output=True, text=True, shell=False)
     lines = r.stdout.strip().splitlines()
@@ -138,27 +143,30 @@ def run_id_of(cmd, env):
     return lines[-1]
 
 
-def tail(path, n=TAIL_LINES):
+def tail(path: str, n: int = TAIL_LINES) -> str:
+    """The last n lines of a log file."""
     with open(path, encoding="utf-8", errors="replace") as f:
         return "".join(f.readlines()[-n:])
 
 
-def read_text(path):
+def read_text(path: str) -> str:
+    """A log file's text (undecodable bytes replaced)."""
     with open(path, encoding="utf-8", errors="replace") as f:
         return f.read()
 
 
-def last_text_line(text, default=""):
+def last_text_line(text: str, default: str = "") -> str:
     """The last non-empty line of a child's output (runs.last_line), scrubbed for the report (the child's own
     SystemExit line)."""
     return spike.scrub(runs.last_line(text, default))
 
 
-def last_line(path):
+def last_line(path: str) -> str:
+    """last_text_line of a log file."""
     return last_text_line(read_text(path))
 
 
-def protocol_complete(a, start):
+def protocol_complete(a: argparse.Namespace, start: dict[str, Any]) -> bool:
     """True only for the real compute checkpoint: mps, the pinned weights, the committed selection_train under the
     committed manifest, no test hook (--max-messages, --interrupt fail), a kill-and-resume probe, the
     spike's start config at rung none, and the timing basis compute.PROTOCOL (--cpus 4, the spike's thread count;
@@ -171,7 +179,7 @@ def protocol_complete(a, start):
             and {k: start[k] for k in runs.SPIKE_START} == runs.SPIKE_START and start["rung"] == "none")
 
 
-def disk_preflight(storage, model_bytes, epochs):
+def disk_preflight(storage: str, model_bytes: int, epochs: int) -> dict[str, int]:
     """Refuse before any child when the disk under --storage cannot hold the probe run (pilot.runs.disk_need_bytes
     with per-epoch exports on, the ray_train.py floor)."""
     need = runs.disk_need_bytes(model_bytes, epochs, True)
@@ -185,10 +193,10 @@ def disk_preflight(storage, model_bytes, epochs):
 
 # ---- the interrupt: kill the probe's whole process tree once epoch 1 is registered ----
 
-def kill_tree(proc):
+def kill_tree(proc: subprocess.Popen) -> int:
     """SIGKILL the process group of `proc` (started with start_new_session=True), reap `proc`, then wait up to REAP_S
-    for every process of its captured tree and SIGKILL the survivors (T-04-19: no Ray worker may keep holding MPS
-    memory into the resumed run). Returns the number of survivors that needed the extra SIGKILL."""
+    for every process of its captured tree and SIGKILL the survivors (no Ray worker may keep holding MPS memory into
+    the resumed run). Returns the number of survivors that needed the extra SIGKILL."""
     try:
         children = psutil.Process(proc.pid).children(recursive=True)
     except psutil.NoSuchProcess:
@@ -211,11 +219,12 @@ def kill_tree(proc):
     return len(alive)
 
 
-def kill_after_registration(proc, registered, delay_s, poll_s=1.0, timeout_s=None):
+def kill_after_registration(proc: subprocess.Popen, registered: Callable[[], bool], delay_s: float,
+                            poll_s: float = 1.0, timeout_s: float | None = None) -> dict[str, Any]:
     """Wait until registered() (epoch 1's checkpoint is in Ray's snapshot), then delay_s more into epoch 2, then kill
     the child's process tree (kill_tree). missed is True when the child exited first: it finished (or failed) before
     the kill, so nothing was interrupted. A child still unregistered after timeout_s (a stalled scheduler or MPS hang)
-    is killed too and the result carries timed_out True (04-REVIEW IN-04)."""
+    is killed too and the result carries timed_out True."""
     out = {"mode": "kill", "after_epoch": 1, "delay_s": delay_s, "missed": False, "leftover_processes": None}
     deadline = None if timeout_s is None else time.monotonic() + timeout_s
     while not registered():
@@ -237,7 +246,7 @@ def kill_after_registration(proc, registered, delay_s, poll_s=1.0, timeout_s=Non
     return out
 
 
-def wait_or_kill(proc, timeout_s):
+def wait_or_kill(proc: subprocess.Popen, timeout_s: float) -> int | None:
     """The return code of `proc` (started in its own session), or None after killing its process tree (kill_tree) when
     it runs past timeout_s; Ctrl-C (which never reaches a child in its own session) kills the tree too."""
     try:
@@ -251,14 +260,15 @@ def wait_or_kill(proc, timeout_s):
         raise
 
 
-def timed_out(attempt, interrupt, a, log, what):
+def timed_out(attempt: dict[str, Any], interrupt: dict[str, Any], a: argparse.Namespace, log: str,
+              what: str) -> dict[str, Any]:
     """The failed attempt of a probe child killed at --probe-timeout-s, with its log's last line."""
     return dict(attempt, status="failed", interrupt=interrupt, timed_out=True,
                 reason="%s ran past --probe-timeout-s %.0f s and was killed: %s" % (what, a.probe_timeout_s,
                                                                                     last_line(log) or "no output"))
 
 
-def wait_for_memory(min_available_gib, timeout_s=RECOVER_S, poll_s=RECOVER_POLL_S):
+def wait_for_memory(min_available_gib: float, timeout_s: float = RECOVER_S, poll_s: float = RECOVER_POLL_S) -> float:
     """Available GiB once it is back at --min-available-gib, or after timeout_s (the rerun then starts anyway and the
     report shows the number)."""
     end = time.monotonic() + timeout_s
@@ -269,11 +279,12 @@ def wait_for_memory(min_available_gib, timeout_s=RECOVER_S, poll_s=RECOVER_POLL_
         time.sleep(poll_s)
 
 
-def drop_run(storage, rid):
+def drop_run(storage: str, rid: str) -> None:
+    """Delete one run's dir under the Ray storage (missing is fine)."""
     shutil.rmtree(os.path.join(storage, rid), ignore_errors=True)
 
 
-def drop_storage(storage, own_storage, rids):
+def drop_storage(storage: str, own_storage: bool, rids: list[str]) -> None:
     """Delete the probe's Ray storage: the whole dir the orchestrator created, else only the probe's run dirs."""
     if own_storage:
         shutil.rmtree(storage, ignore_errors=True)
@@ -282,14 +293,15 @@ def drop_storage(storage, own_storage, rids):
             drop_run(storage, rid)
 
 
-def oom_attempt(attempt, line, interrupt, keep_run=False):
+def oom_attempt(attempt: dict[str, Any], line: str, interrupt: dict[str, Any],
+                keep_run: bool = False) -> dict[str, Any]:
     """The attempt of a child that ended in the MPS out-of-memory line: status oom (attempt_chain moves to the next
     rung), or failed for an OOM after the last epoch (runs.resume_oom): every epoch is saved there, and the next rung
-    would retrain under another run_id and record a fallback for a config that trained (04-REVIEW WR-01).
+    would retrain under another run_id and record a fallback for a config that trained.
 
     The child's line (kept in `line`) says to rerun the same command to resume, which holds for ray_train.py but not
     here: without --keep-run the orchestrator deletes the probe's Ray storage, and a rerun of compute_checkpoint.py
-    starts a fresh probe (04-REVIEW IN-06). The reason, which the report shows, says what does work."""
+    starts a fresh probe. The reason, which the report shows, says what does work."""
     line = spike.scrub(line)
     if runs.resume_oom(line):
         then = ("--keep-run kept the probe's Ray storage, so the probe's ray_train.py command (printed on the console) "
@@ -301,7 +313,7 @@ def oom_attempt(attempt, line, interrupt, keep_run=False):
     return dict(attempt, status="oom", line=line, interrupt=interrupt)
 
 
-def launch_rung(rung, ctx):
+def launch_rung(rung: str, ctx: dict[str, Any]) -> dict[str, Any]:
     """One probe attempt on `rung` in fresh children: the first launch (its own session) interrupted per --interrupt,
     then, after an interrupt that landed, the identical command again, which resumes from epoch 1. Returns the attempt
     ({run_id, status ok|oom|failed, interrupt, resume | line | reason}); an ok attempt leaves its measurement in
@@ -370,16 +382,16 @@ def launch_rung(rung, ctx):
             return dict(attempt, status="failed", returncode=rc, interrupt=interrupt,
                         reason="the resumed run failed: %s" % last_line(log))
     measured = compute.measured_from_checkpoint(ckpt)
-    # the fixed cost every run pays outside its record's terms, from the child that wrote the checkpoint (IN-03)
+    # the fixed cost every run pays outside its record's terms, from the child that wrote the checkpoint
     measured["laya"]["run_overhead_s"] = compute.run_overhead(wall, runs.read_record(ckpt))
     ctx["result"] = {"measured": measured, "ckpt": ckpt, "rid": rid}
     return dict(attempt, status="ok", interrupt=interrupt, resume=compute.resume_summary(runs.read_record(ckpt)))
 
 
-def oom_dropping(launch, ctx):
+def oom_dropping(launch: Callable[[str], dict[str, Any]], ctx: dict[str, Any]) -> Callable[[str], dict[str, Any]]:
     """launch, but an oom attempt's Ray run dir is deleted at once (unless --keep-run), so the next rung has the disk
     the preflight checked for one run."""
-    def run(rung):
+    def run(rung: str) -> dict[str, Any]:
         attempt = launch(rung)
         if attempt["status"] == "oom" and not ctx["a"].keep_run:
             drop_run(ctx["storage"], attempt["run_id"])
@@ -387,9 +399,9 @@ def oom_dropping(launch, ctx):
     return run
 
 
-# ---- the BERTurk timing child and the scoring probe (measured inputs of the projection, LAYA-07) ----
+# ---- the BERTurk timing child and the scoring probe (measured inputs of the projection) ----
 
-def berturk_child(cfg):
+def berturk_child(cfg: dict[str, Any]) -> dict[str, Any]:
     """Time BERTurk fine-tuning and inference in this (fresh) process: warm-up + measured AdamW optimizer steps on
     batches of 32 at max_len 128 (forward with labels -> loss -> backward -> clip -> step), then one no_grad pass over
     infer_msgs messages, each timed with a device sync, memory sampled after every backward and step as in the trainer.
@@ -424,7 +436,7 @@ def berturk_child(cfg):
         random.Random(cfg["seed"]).shuffle(rows)
         labels = torch.tensor([[1.0 if r["expected"][t] else 0.0 for t in INTENTS] for r in rows])
 
-        def make(i, n, with_labels=True):
+        def make(i: int, n: int, with_labels: bool = True) -> dict[str, Any]:
             idx = [(i * n + j) % len(rows) for j in range(n)]
             enc = dict(tok([rows[k]["state"] for k in idx], padding="longest", truncation=True, max_length=max_len,
                            return_tensors="pt"))
@@ -435,7 +447,7 @@ def berturk_child(cfg):
             num_labels=len(INTENTS), problem_type="multi_label_classification"))
         gen = torch.Generator().manual_seed(cfg["seed"])
 
-        def make(i, n, with_labels=True):
+        def make(i: int, n: int, with_labels: bool = True) -> dict[str, Any]:
             ids = torch.randint(0, 128, (n, 24), generator=gen)
             out = {"input_ids": ids, "attention_mask": torch.ones_like(ids)}
             return dict(out, labels=(torch.rand(n, len(INTENTS), generator=gen) > 0.9).float()) if with_labels \
@@ -447,7 +459,7 @@ def berturk_child(cfg):
     _, sync, sample, _, peak = memory_sampler(device)
     model.train()
 
-    def step(i):
+    def step(i: int) -> float:
         b = make(i, batch_n)
         sync()
         t0 = time.perf_counter()
@@ -486,7 +498,7 @@ def berturk_child(cfg):
             "basis": BERTURK_BASIS}
 
 
-def run_child(mode, path):
+def run_child(mode: str, path: str) -> None:
     """--child entry point: run the BERTurk timing child and write its payload to cfg["out_json"]; a refusal, an MPS
     out-of-memory error or any other failure becomes a payload status (refused, oom, error), never a lost run."""
     with open(path, encoding="utf-8") as f:
@@ -503,7 +515,8 @@ def run_child(mode, path):
     write_atomic(cfg["out_json"], (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
-def run_berturk(a, entry, berturk_dir, env):
+def run_berturk(a: argparse.Namespace, entry: dict[str, Any], berturk_dir: str | None,
+                env: dict[str, str]) -> dict[str, Any]:
     """The BERTurk timing child in a fresh process with the probe's MPS env; its payload (status ok, or why not)."""
     d = tempfile.mkdtemp(prefix="compute-berturk-")
     try:
@@ -529,10 +542,10 @@ def run_berturk(a, entry, berturk_dir, env):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def run_score_probe(a, base, env):
+def run_score_probe(a: argparse.Namespace, base: str, env: dict[str, str]) -> dict[str, Any]:
     """Score a --n 32 subset of the manifest's val split with the --base weights on --device, in-process, into a temp
-    out-root that is deleted afterwards; only the sidecar's timing and scorer fields are read (T-04-21: never test,
-    HOTELS or a fine-tuned checkpoint, never a metric)."""
+    out-root that is deleted afterwards; only the sidecar's timing and scorer fields are read (never test, HOTELS or a
+    fine-tuned checkpoint, never a metric)."""
     with open(a.manifest, encoding="utf-8") as f:
         val = json.load(f)["splits"]["val"]
     split = os.path.join(os.path.dirname(os.path.abspath(a.manifest)), val["path"])
@@ -558,7 +571,7 @@ def run_score_probe(a, base, env):
             side = json.load(f)
         n, sc, infer = side["n_subset"], side["scorer"], side["timing"]["inference_seconds"]
         # the per-run cost outside inference (process start, the weights' sha256 check, laya.load), which every
-        # score.py run of the matrix pays once (04-REVIEW IN-02)
+        # score.py run of the matrix pays once
         return {"status": "ok", "device": sc["device"], "dtype": sc["dtype"], "amp_enabled": sc["amp_enabled"],
                 "n": n, "s_per_msg": infer / n, "wall_s": wall, "run_overhead_s": max(0.0, wall - infer),
                 "basis": SCORING_BASIS}
@@ -566,7 +579,9 @@ def run_score_probe(a, base, env):
         shutil.rmtree(root, ignore_errors=True)
 
 
-def build_meta(a, entry, start, model, rid):
+def build_meta(a: argparse.Namespace, entry: dict[str, Any], start: dict[str, Any], model: dict[str, Any],
+               rid: str) -> dict[str, Any]:
+    """The report's meta block: provenance (split, manifest, spike report, model), versions, platform and protocol."""
     return {"generated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "split": {"path": entry["path"], "sha256": entry["sha256"], "n_messages": entry["n_messages"]},
             "manifest": {"path": repo_relpath(a.manifest), "sha256": sha256_file(a.manifest),
@@ -585,7 +600,7 @@ def build_meta(a, entry, start, model, rid):
                          "protocol_complete": protocol_complete(a, start)}}
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", default=DEFAULT_OUT, help="report dir (default results/compute)")
     ap.add_argument("--device", choices=("mps", "cpu"), default="mps")
@@ -598,7 +613,7 @@ def main(argv=None):
     ap.add_argument("--storage", default=None,
                     help="Ray run storage (default: a fresh compute-* dir under the repo's ray_results/)")
     ap.add_argument("--min-available-gib", type=float, default=7.0,
-                    help="refuse to measure below this much available memory (the Phase 2 run policy); 0 records a "
+                    help="refuse to measure below this much available memory (the spike's run policy); 0 records a "
                          "busy-machine run")
     ap.add_argument("--interrupt", choices=("kill", "fail", "none"), default="kill",
                     help="kill (default): SIGKILL the probe's process tree --kill-delay-s into epoch 2 and rerun the "
@@ -611,7 +626,8 @@ def main(argv=None):
                          "why (default 3 h; one epoch of the real probe takes about 14 min)")
     ap.add_argument("--keep-run", action="store_true",
                     help="keep the probe's checkpoint and Ray storage instead of deleting them after the report")
-    ap.add_argument("--spike-report", default=DEFAULT_SPIKE, help="the Phase 2 spike report holding verdict.chosen")
+    ap.add_argument("--spike-report", default=DEFAULT_SPIKE, help="the MPS feasibility spike report holding "
+                                                                  "verdict.chosen")
     ap.add_argument("--berturk", action=argparse.BooleanOptionalAction, default=True,
                     help="time BERTurk in a fresh child on the pinned weights (default on; off keeps the estimates)")
     ap.add_argument("--score-probe", action=argparse.BooleanOptionalAction, default=True,
@@ -679,7 +695,7 @@ def main(argv=None):
         raise
 
     # everything after the chain under one finally: the probe's Ray storage and temp checkpoint (GBs) go even when a
-    # later step raises or is interrupted (04-REVIEW WR-06); a failed chain keeps only its logs (tmp) for the user
+    # later step raises or is interrupted; a failed chain keeps only its logs (tmp) for the user
     keep_logs = False
     try:
         rid = attempts[-1]["run_id"]
@@ -690,7 +706,7 @@ def main(argv=None):
             md = compute.write_report(a.out, report)
             keep_logs = True
             if a.keep_run and runs.resume_oom(attempts[-1].get("line")) and ctx["cmds"]:
-                # console only: the command holds local paths, which never enter the report (IN-06)
+                # console only: the command holds local paths, which never enter the report
                 print("every epoch of run %s is saved under %s; to resume it (write the final checkpoint): %s"
                       % (rid, storage, shlex.join(ctx["cmds"][-1])), flush=True)   # quoted: paths may hold spaces
             raise SystemExit("probe %s after %d attempt(s) (last rung %s); report -> %s; logs kept in %s. Last %d "

@@ -1,4 +1,4 @@
-# MPS feasibility spike (Phase 2, LAYA-09)
+# MPS feasibility spike
 
 - Split: `splits/selection_train.jsonl` sha256 `a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331` (1450 messages)
 - Model: `convaiinnovations/laya/multilingual@7b928d828b7b0e022f929d9bd2e44165aa270148`
@@ -20,7 +20,7 @@
 - System swap used while idle (5 s apart): 807.0 -> 807.0 MiB; grew: no
 - Swapouts counter: 3168236 -> 3168236; grew: no
 
-## Token lengths (D-09b)
+## Token lengths
 
 Laya's own tokenizer, untruncated (message, question) sequences over all 1450 messages and 69600 items:
 - 0.00% of messages over 128 tokens; 0 items over 128
@@ -33,7 +33,7 @@ Laya's own tokenizer, untruncated (message, question) sequences over all 1450 me
 
 strict PYTORCH_ENABLE_MPS_FALLBACK=0 pass raised nowhere: no op falls back from MPS
 
-## Ray vs in-process (D-09a)
+## Ray vs in-process
 
 - Basis: the verdict's chosen config, 8x128, rung none, PYTORCH_ENABLE_MPS_FALLBACK=0
 - Ray (1-worker TorchTrainer): padded median 3.043 s, real median 1.849 s, 4 torch threads
@@ -50,11 +50,11 @@ strict PYTORCH_ENABLE_MPS_FALLBACK=0 pass raised nowhere: no op falls back from 
 | 8 | 256 | none | yes (completed 20 measured padded steps without OOM or swap growth) | 14.3 | yes | yes | yes |
 
 - Tie-break: FITS configs within 5% of the fastest projected epoch resolve to the smaller max_len, then the larger micro-batch
-- Truncation rule (D-03): applied: 0.0% of messages over 128 tokens (<= 1%, max_len 128 is allowed)
-- D-01: memory: every measured padded step completes on MPS with no OOM and no system swap growth
-- D-02: time: real-batch median optimizer step x optimizer steps per neg8 epoch <= 7200 s
-- D-03: choice: fastest projected epoch among FITS configs with max_len >= 128; configs within the tie tolerance resolve to the smaller max_len, then the larger micro-batch; > 1% of messages over 128 tokens prefers a passing max_len 256
-- D-04: rung: only a full-encoder or embeddings-frozen run on MPS counts; a frozen encoder never FITS
-- D-08: preference: rung none configs win over embeddings_frozen ones (embedding freeze is a fallback rung only)
+- Truncation rule: applied: 0.0% of messages over 128 tokens (<= 1%, max_len 128 is allowed)
+- memory: every measured padded step completes on MPS with no OOM and no system swap growth
+- time: real-batch median optimizer step x optimizer steps per neg8 epoch <= 7200 s
+- choice: fastest projected epoch among FITS configs with max_len >= 128; configs within the tie tolerance resolve to the smaller max_len, then the larger micro-batch; > 1% of messages over 128 tokens prefers a passing max_len 256
+- rung: only a full-encoder or embeddings-frozen run on MPS counts; a frozen encoder never FITS
+- preference: rung none configs win over embeddings_frozen ones (embedding freeze is a fallback rung only)
 
-**Verdict: FITS** — Phase 4 starts from micro-batch 8, max_len 128, grad-accum 4, rung none, PYTORCH_ENABLE_MPS_FALLBACK=0 (projected neg8 epoch 14.3 min)
+**Verdict: FITS** — training starts from micro-batch 8, max_len 128, grad-accum 4, rung none, PYTORCH_ENABLE_MPS_FALLBACK=0 (projected neg8 epoch 14.3 min)
