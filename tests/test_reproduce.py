@@ -1169,7 +1169,149 @@ def test_full_mode_refuses_before_any_command_on_an_out_of_order_tree(tree, monk
     assert r.events == []
 
 
+# ---- full mode over the REAL registry (10-REVIEW CR-01): STEPS, their evidence and after_check on a scratch tree
+# whose git HEAD lacks a todo tail; stub runners write the committed bytes each command's outputs hold ----
+
+def fewshot_tail():
+    """The repo-relative paths of the few-shot tail: results/fewshot/ and the 18 few-shot dump dirs."""
+    import json
+    with open(os.path.join(REPO_ROOT, "results", "fewshot", "runs.json"), encoding="utf-8") as f:
+        ids = sorted({e["dump_run_id"] for e in json.load(f)["entries"]})
+    assert len(ids) == 18
+    return ["results/fewshot"] + ["results/dumps/%s" % rid for rid in ids]
+
+
+@pytest.fixture
+def scratch(tmp_path, monkeypatch):
+    """make(tail): a tmp git repo holding protocol.json, the Makefile, data/splits.json and results/ without the tail
+    paths (files or dirs), committed, so git HEAD does not track the tail; the data step stubbed done."""
+    import shutil
+    _git_env(monkeypatch)
+    _data_done(monkeypatch)
+
+    def make(tail, name="scratch"):
+        root = tmp_path / name
+        for rel in ("protocol.json", "Makefile", "data/splits.json"):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(os.path.join(REPO_ROOT, rel), root / rel)
+        shutil.copytree(os.path.join(REPO_ROOT, "results"), root / "results")
+        for rel in tail:
+            p = root / rel
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+        git_in(root, "init", "-q")
+        git_in(root, "add", "-A")
+        git_in(root, "commit", "-q", "-m", "scratch")
+        return str(root)
+    return make
+
+
+class Committed:
+    """A stub run(cmd, root) that writes, under root, the committed bytes (REPO_ROOT's) of every results/ file the
+    command writes: its --out path (plus a confidence record's reliability SVG), every few-shot dump for
+    `make fewshot-scoring`, fewshot.json for `make fewshot-reports` and memo.md for `make memo`; trainers, --inspect,
+    --drop-storage and --prune write nothing under results/. override(cmd, rel) -> bytes or None replaces a file's
+    bytes; skip holds commands that write nothing."""
+
+    def __init__(self, override=None, skip=()):
+        self.override, self.skip, self.calls = override or (lambda cmd, rel: None), set(skip), []
+
+    @staticmethod
+    def outputs(cmd):
+        import glob
+        cmd = tuple(cmd)
+        if cmd == ("make", "fewshot-scoring"):
+            return sorted(os.path.relpath(p, REPO_ROOT) for d in fewshot_tail()[1:]
+                          for p in glob.glob(os.path.join(REPO_ROOT, d, "*")))
+        if cmd == ("make", "fewshot-reports"):
+            return ["results/fewshot/fewshot.json"]
+        if cmd == ("make", "memo"):
+            return ["results/final/memo.md"]
+        if "--out" in cmd and cmd[cmd.index("--out") + 1].startswith("results/"):
+            rel = cmd[cmd.index("--out") + 1]
+            svg = rel[:-len(".json")] + ".svg"
+            return [rel] + ([svg] if rel.endswith(".json") and os.path.isfile(os.path.join(REPO_ROOT, svg)) else [])
+        return []
+
+    def run(self, cmd, root):
+        self.calls.append(tuple(cmd))
+        if tuple(cmd) in self.skip:
+            return 0
+        for rel in self.outputs(cmd):
+            data = self.override(tuple(cmd), rel)
+            if data is None:
+                with open(os.path.join(REPO_ROOT, rel), "rb") as f:
+                    data = f.read()
+            os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+            with open(os.path.join(root, rel), "wb") as f:
+                f.write(data)
+        return 0
+
+
+def real_full(root, runner, lines=None):
+    reports = []
+
+    def capture(cmd, root):
+        raise AssertionError("no step of a few-shot or final-reports tail prints a run id: %r" % (cmd,))
+
+    def report(root, run, blocks, precheck=True, out=print):
+        reports.append(precheck)
+    rp.run_full(root, run=runner.run, capture=capture, blocks=None, report=report,
+                out=(lines.append if lines is not None else (lambda s: None)))
+    return reports
+
+
+def test_full_mode_completes_the_real_fewshot_tail(scratch):
+    """CR-01: with the few-shot tail todo, every tail step runs in D-01 order and passes its after-check (the bases are
+    verified with fewshot-continued, which writes their runs.json), then the report step runs."""
+    root = scratch(fewshot_tail())
+    st = states(rp.plan(root))
+    assert [n for n in D01[13:18] if st[n] != "todo"] == [], st
+    runner, lines = Committed(), []
+    assert real_full(root, runner, lines) == [False]
+    assert [l for l in lines if l.startswith("skip ")] == ["skip %s (done)" % n for n in D01[:13]]
+    assert lines.count(rp.DISCLOSURE) == 1
+    ran = [c for c in runner.calls]
+    assert ran == [c for n in D01[13:18] for c in rp.commands(n, root)], ran
+    assert states(rp.plan(root)) == states(rp.plan(REPO_ROOT))
+    assert rp.tree_changes(root) == sorted(rel for t in fewshot_tail() for rel in _files_under(t))
+
+
+def _files_under(rel):
+    out = []
+    for d, _, fs in os.walk(os.path.join(REPO_ROOT, rel)):
+        out += [os.path.relpath(os.path.join(d, n), REPO_ROOT) for n in fs]
+    return out
+
+
+def test_full_mode_names_the_step_whose_output_diverges(scratch):
+    """CR-01: a runs manifest the continued runs never wrote stops the run at fewshot-continued (its writer), never
+    at fewshot-bases; a few-shot dump that differs stops it at fewshot-scoring."""
+    root = scratch(fewshot_tail())
+    manifest = [c for c in rp.commands("fewshot-continued", REPO_ROOT) if c[:2] == ("fewshot.py", "--runs-manifest")]
+    assert len(manifest) == 1
+    runner = Committed(skip=manifest)
+    msg = _stop(lambda: real_full(root, runner))
+    assert msg.startswith("step fewshot-continued ran, but results/fewshot/runs.json is missing; "), msg
+    assert "(D-04)" in msg
+    assert runner.calls[-1] == manifest[0]                        # every bases and continued command ran first
+    root = scratch(fewshot_tail(), "scratch2")
+    dump = fewshot_tail()[1] + "/test.npz"
+
+    def flip(cmd, rel):
+        if rel != dump:
+            return None
+        with open(os.path.join(REPO_ROOT, rel), "rb") as f:
+            raw = bytearray(f.read())
+        raw[len(raw) // 2] ^= 0xFF
+        return bytes(raw)
+    runner = Committed(override=flip)
+    msg = _stop(lambda: real_full(root, runner))
+    assert msg.startswith("step fewshot-scoring ran, but "), msg
+    assert "(D-04)" in msg and runner.calls[-1][:2] == ("fewshot.py", "--prune")
+
+
 def test_memo_names_the_one_command_rebuild():
+
     """The memo's rebuild bullet names `make report` (every report, the README blocks and the memo from the committed
     dumps) and `make reproduce` (the whole pipeline, skipping every finished step), digit-free (plan 10-06)."""
     from pilot import memo

@@ -58,8 +58,11 @@ feeds the next step's commands), and ends with report_step, the eval-only rebuil
 DISCLOSURE prints once before the first model step; a selection run id is resolved with the step's --print-run-id
 command (capture_command) and substituted for RUN_ID; the first non-zero exit stops the run in one line naming the
 step and the command (a protocol gate refusal from score.py is final). After every step it ran, after_check re-reads
-the step's evidence: an artifact that is missing, fails its reader, differs from its protocol.json pin or differs
-from the bytes git HEAD holds for it (committed_bytes) stops the run with the D-04 reason. A gated scoring step
+the outputs that step itself writes (after_items): its evidence, except an item whose committed file a later step
+writes (LATER_OUTPUT: the bases' slots are recorded in the runs.json that fewshot-continued writes, so they are
+verified with fewshot-continued), plus the deferred items of earlier steps whose file it writes. An artifact that is
+missing, fails its reader, differs from its protocol.json pin or differs from the bytes git HEAD holds for it
+(committed_bytes) stops the run with the D-04 reason, naming the step that wrote it. A gated scoring step
 (GATE_PRODUCERS) runs only when the steps that train its checkpoints ran in the same invocation; otherwise it is
 refused before any command, because the gated dumps are the exactly-once audit record. No command passes --force.
 On a finished tree every step through fewshot-reports is done, so only the report regenerates.
@@ -1081,6 +1084,9 @@ D04_STOP = ("a from-scratch run stops at the first output that differs from the 
             "pin (D-04): the protocol gate admits only the frozen record's checkpoints; `git checkout -- results/` "
             "restores the audit record")
 DEFERRED_RE = re.compile(r"once (\S+) exists")
+# a committed file that is one step's evidence but a later step's output: the after-check of the step that writes it
+# verifies it (fewshot-bases' slots are recorded in the runs manifest that fewshot-continued writes)
+LATER_OUTPUT = {RUNS: "fewshot-continued"}
 
 
 def capture_command(cmd, root):
@@ -1106,15 +1112,44 @@ def committed_bytes(root, rel):
     return r.stdout if r is not None and r.returncode == 0 else None
 
 
+def _writer(name, item, order):
+    """The later step (a name in order, after name) that writes a file of item, or None: the item is the evidence of
+    step name, but its committed bytes are that later step's output (LATER_OUTPUT)."""
+    for f in item["files"]:
+        w = LATER_OUTPUT.get(f)
+        if w and w != name and w in order and name in order and order.index(w) > order.index(name):
+            return w
+    return None
+
+
+def after_items(step, root, proto, pin):
+    """[(step name, item)] that after_check verifies once step ran: the step's own evidence items, except those whose
+    committed file a later step writes (LATER_OUTPUT: fewshot-bases' slots live in the runs.json that
+    fewshot-continued writes), plus the deferred items of earlier steps whose file this step writes."""
+    manifest, order = os.path.join(root, "data", "splits.json"), [s["name"] for s in STEPS]
+    name, out = step["name"], []
+    for s in STEPS:
+        if s["name"] == name:
+            out += [(name, it) for it in s["evidence"](root, proto, pin, manifest) if _writer(name, it, order) is None]
+        elif name in order and s["name"] in order and order.index(s["name"]) < order.index(name):
+            out += [(s["name"], it) for it in s["evidence"](root, proto, pin, manifest)
+                    if _writer(s["name"], it, order) == name]
+    if all(s["name"] != name for s in STEPS):                # a step outside the registry: its own evidence only
+        out = [(name, it) for it in step["evidence"](root, proto, pin, manifest)]
+    return out
+
+
 def after_check(step, root, proto, pin):
-    """After a step ran: its evidence again, every item present and verified (the readers and the protocol.json pins
-    of the evidence functions), and every file of each item (a dump's npz and sidecar) equal to the bytes git HEAD
-    holds for it when HEAD tracks it; SystemExit (one line, the D-04 reason) at the first failure."""
+    """After a step ran: the items of after_items (its own outputs, never a file a later step writes), every item
+    present and verified (the readers and the protocol.json pins of the evidence functions), and every file of each
+    item (a dump's npz and sidecar) equal to the bytes git HEAD holds for it when HEAD tracks it; SystemExit (one
+    line, the D-04 reason) at the first failure. A step whose every evidence item is a later step's output (the
+    masked bases, recorded by fewshot-continued's runs manifest) is verified with that step."""
     name = step["name"]
-    items = step["evidence"](root, proto, pin, os.path.join(root, "data", "splits.json"))
-    if not items:
+    manifest = os.path.join(root, "data", "splits.json")
+    if not step["evidence"](root, proto, pin, manifest):
         raise SystemExit("step %s ran, but it left no evidence to verify; %s" % (name, D04_STOP))
-    for it in items:
+    for _, it in after_items(step, root, proto, pin):
         if not it["present"]:
             raise SystemExit("step %s ran, but %s is missing; %s" % (name, it["label"], D04_STOP))
         if not it["ok"]:
