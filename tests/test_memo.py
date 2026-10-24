@@ -5,7 +5,7 @@
   still PENDING and an unknown verdict word, each in one SystemExit line naming the fix
 - pilot.memo.facts reads the block's numbers from the records: test n and no-intent n from the verdict's split block,
   the final_train folds from pilot.data.SPLITS, machine and memory from results/spike/mps_spike.json meta.platform, the
-  scorer device from protocol.json scoring
+  scorer device of every test and HOTELS dump from its sidecar (the final seeds' must be protocol.json scoring's)
 - `report.py --recommendation VERDICT_JSON` prints pilot.memo.render_recommendation only after
   pilot.protocol.require_frozen and pilot.verdict.check_record pass, so a missing, edited or unfrozen verdict is
   refused before anything is printed; render_recommendation refuses a verdict block that disagrees with its own
@@ -135,24 +135,74 @@ def test_cli_recommendation_matches_render(capsys, tmp_path):
     assert memo.render_recommendation(v, VERDICT_REL, sha, memo.facts(v, proto)) == want      # identical input
 
 
+def sidecar_device(rid, split, root=REPO_ROOT):
+    with open(os.path.join(root, "results", "dumps", rid, split + ".json"), encoding="utf-8") as f:
+        return json.load(f)["scorer"]["device"]
+
+
+def scored_dumps(v):
+    """[(run id, split)] of every test and HOTELS dump the verdict reports: the final seeds on both, each reference on
+    test and, where it has one, HOTELS."""
+    out = [(s["dump_run_id"], split) for kind in V.KINDS for s in v["systems"][kind]["per_seed"]
+           for split in ("test", "hotels_probe")]
+    for r in v["references"]:
+        out.append((r["run_id"], "test"))
+        if os.path.isfile(os.path.join(REPO_ROOT, "results", "dumps", r["run_id"], "hotels_probe.json")):
+            out.append((r["run_id"], "hotels_probe"))
+    return out
+
+
 def test_recommendation_facts_are_the_records(monkeypatch, tmp_path):
+    import shutil
     want, v, sha, proto = rendered()
     f = memo.facts(v, proto)
     final = next(s for s in pilot.data.SPLITS if s["name"] == "final_train")["folds"]
     with open(SPIKE, encoding="utf-8") as fh:
         plat = json.load(fh)["meta"]["platform"]
+    refs = {r["run_id"]: sorted({sidecar_device(rid, split) for rid, split in scored_dumps(v) if rid == r["run_id"]},
+                                key=str) for r in v["references"]}
+    assert refs == {"majority": [None], "prior": [None], pilot.protocol.ZEROSHOT: ["cpu"]}, refs   # WR-06
+    assert {sidecar_device(s["dump_run_id"], split) for kind in V.KINDS for s in v["systems"][kind]["per_seed"]
+            for split in ("test", "hotels_probe")} == {proto["scoring"]["device"]}
     assert f == {"n": v["split"]["n"], "n_no_intent": v["split"]["n_no_intent"],
                  "folds": "%d-%d" % (min(final), max(final)), "machine": plat["machine"],
-                 "memory_gib": plat["total_memory_bytes"] // 2 ** 30, "device": proto["scoring"]["device"]}
+                 "memory_gib": plat["total_memory_bytes"] // 2 ** 30, "device": proto["scoring"]["device"],
+                 "scorers": [(proto["scoring"]["device"], ["the laya final seeds", "the berturk final seeds"]),
+                             (None, ["majority", "prior"]), ("cpu", [pilot.protocol.ZEROSHOT])]}
     assert "n = %d (%d no-intent)" % (v["split"]["n"], v["split"]["n_no_intent"]) in want
     assert "banking folds %d-%d" % (min(final), max(final)) in want
-    assert "%s, %d GiB unified memory (results/spike/mps_spike.json)" % (
-        plat["machine"], plat["total_memory_bytes"] // 2 ** 30) in want
-    assert "test and HOTELS scored on %s (protocol.json scoring)" % proto["scoring"]["device"] in want
+    assert ("- Hardware: %s, %d GiB unified memory (results/spike/mps_spike.json). Scorer device of the test and HOTELS "
+            "dumps (their sidecars): %s for the laya final seeds and the berturk final seeds (protocol.json scoring), "
+            "no model for majority and prior, cpu for %s.\n" % (plat["machine"], plat["total_memory_bytes"] // 2 ** 30,
+                                                                  proto["scoring"]["device"], pilot.protocol.ZEROSHOT)
+            ) in want
+    assert "M4" not in want and "test and HOTELS scored on" not in want
+    # the sidecars facts reads, under tmp_path: a final seed scored off the protocol device or a missing sidecar refused
+    for rid, split in scored_dumps(v):
+        dst = tmp_path / "results" / "dumps" / rid
+        dst.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(os.path.join(REPO_ROOT, "results", "dumps", rid, split + ".json"), dst / (split + ".json"))
+    spike_dir = tmp_path / "results" / "spike"
+    spike_dir.mkdir(parents=True)
+    shutil.copyfile(SPIKE, spike_dir / "mps_spike.json")
+    assert memo.facts(v, proto, root=str(tmp_path)) == f
+    seed = v["systems"]["berturk"]["per_seed"][1]["dump_run_id"]
+    side = tmp_path / "results" / "dumps" / seed / "hotels_probe.json"
+    raw = side.read_bytes()
+    obj = json.loads(raw)
+    obj["scorer"]["device"] = "cpu"
+    side.write_text(json.dumps(obj), encoding="utf-8")
+    with pytest.raises(SystemExit, match="berturk final seeds' dump sidecars record scorer devices"):
+        memo.facts(v, proto, root=str(tmp_path))
+    side.unlink()
+    with pytest.raises(SystemExit, match="git checkout -- results/dumps/%s/hotels_probe.json" % seed):
+        memo.facts(v, proto, root=str(tmp_path))
+    side.write_bytes(raw)
+    os.remove(spike_dir / "mps_spike.json")
+    spike_dir.rmdir()
     # a missing spike record or key, a memory that is not a whole number of GiB, non-contiguous folds: refused
     with pytest.raises(SystemExit, match="git checkout -- results/spike/mps_spike.json"):
         memo.facts(v, proto, root=str(tmp_path))
-    spike_dir = tmp_path / "results" / "spike"
     spike_dir.mkdir(parents=True)
     (spike_dir / "mps_spike.json").write_text(json.dumps({"meta": {}}), encoding="utf-8")
     with pytest.raises(SystemExit, match="git checkout -- results/spike/mps_spike.json"):
@@ -243,6 +293,29 @@ def phase10_section(text):
     i = text.index("\n" + PHASE10_HEADING + "\n") + 1
     j = text.find("\n## ", i + len(PHASE10_HEADING))
     return i, (len(text) if j < 0 else j)
+
+
+def test_hardware_caveat_holds_for_every_scored_dump():
+    """WR-06: the hardware caveat names no chip (no record holds one), and its device statements hold for every test
+    and HOTELS dump the memo reports, by their sidecars: the final seeds on protocol.json's scoring device, zero-shot
+    Laya on CPU, majority and prior with no model."""
+    v, _ = committed()
+    proto, _ = pilot.protocol.require_frozen()
+    hw = [c for c in memo.CAVEATS if c.startswith("Hardware: ")]
+    assert len(hw) == 1 and "laptop hardware" in hw[0], memo.CAVEATS
+    assert "M4" not in hw[0] and "M4" not in memo_text()
+    with open(memo.__file__, encoding="utf-8") as f:
+        assert "M4" not in f.read(), "pilot/memo.py types a chip name no record holds"
+    assert "the final seeds were trained and scored on MPS in fp32 (protocol.json scoring)" in hw[0]
+    assert proto["scoring"]["device"] == "mps" and proto["scoring"]["dtype"] == "torch.float32", proto["scoring"]
+    assert "zero-shot Laya was scored on CPU" in hw[0] and "the majority and prior baselines run no model" in hw[0]
+    for rid, split in scored_dumps(v):
+        if rid == pilot.protocol.ZEROSHOT:
+            assert sidecar_device(rid, split) == "cpu", (rid, split)
+        elif rid in ("majority", "prior"):
+            assert sidecar_device(rid, split) is None, (rid, split)
+        else:
+            assert sidecar_device(rid, split) == "mps", (rid, split)
 
 
 def test_caveats_cover_every_key_without_numbers():

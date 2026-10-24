@@ -39,7 +39,7 @@ Criterion (d)'s few-shot path reads the mean over draws of Laya - BERTurk at k =
 
 ## Caveats
 - Data: Multi3NLU++ Turkish is translated data, a small dataset and a single split; no bank data was used.
-- Hardware: laptop hardware, one Apple M4 laptop with unified memory, trained and scored on MPS in fp32.
+- Hardware: laptop hardware, one Apple laptop with unified memory; the final seeds were trained and scored on MPS in fp32 (protocol.json scoring), zero-shot Laya was scored on CPU and the majority and prior baselines run no model, as each dump's sidecar records.
 - No-intent: the no-intent test set is small, so every no-intent false-positive rate is uncertain; its size is on the test split line.
 - Settings carried over: each model's epoch, T and θ were chosen on val by one selection run and carried over to the final_train retrains; the seed-averaged systems use that θ, transferred and never re-selected.
 - Rule order: the frozen rule order reads criterion (a) before (d), so a few-shot edge cannot change an INCONCLUSIVE verdict, and the alternative GO fires before an (a) FAIL; changing either needs a new protocol.

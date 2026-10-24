@@ -9,9 +9,11 @@ never rendered. A provisional verdict and a verdict whose few-shot path of (d) i
 not final, and a recommendation is only ever the final verdict's mapping. Humans can audit and override the
 recommendation outside the repo, from the records the block names; no override is written into the repo.
 
-The block's numbers are read from the records (facts): the test split's size and its no-intent count from the
+The block's facts are read from the records (facts): the test split's size and its no-intent count from the
 verdict's split block, the final_train folds from pilot.data.SPLITS, the machine and its memory from the spike
-record's meta.platform, the scorer device from protocol.json's scoring block. The module holds no threshold and no
+record's meta.platform, and the scorer device of every test and HOTELS dump from its sidecar (scorer.device): the
+final seeds' must be protocol.json's scoring device, zero-shot Laya's is the CPU it was scored on, and the majority
+and prior baselines run no model (10-REVIEW WR-06). No hardware name is typed here: the chip is in no record. The module holds no threshold and no
 float literal (a test walks its AST), and imports the stdlib, pilot.verdict and pilot.data only, so report.py stays
 numpy only.
 
@@ -55,7 +57,9 @@ CAVEAT_KEYS = ("translated", "small dataset", "single split", "laptop hardware",
 # the caveats in the order the memo (10-02) prints them; no number: the sizes and settings live in the records
 CAVEATS = (
     "Data: Multi3NLU++ Turkish is translated data, a small dataset and a single split; no bank data was used.",
-    "Hardware: laptop hardware, one Apple M4 laptop with unified memory, trained and scored on MPS in fp32.",
+    "Hardware: laptop hardware, one Apple laptop with unified memory; the final seeds were trained and scored on MPS "
+    "in fp32 (protocol.json scoring), zero-shot Laya was scored on CPU and the majority and prior baselines run no "
+    "model, as each dump's sidecar records.",
     "No-intent: the no-intent test set is small, so every no-intent false-positive rate is uncertain; its size is on "
     "the test split line.",
     "Settings carried over: each model's epoch, T and θ were chosen on val by one selection run and carried over to "
@@ -93,10 +97,71 @@ def recommendation(v):
     return RECOMMENDATION[word]
 
 
+def scorer_device(root, run_id, split):
+    """The scorer.device of results/dumps/<run_id>/<split>.json under root (None: a baseline that runs no model);
+    SystemExit for a missing or malformed sidecar."""
+    rel = "results/dumps/%s/%s.json" % (run_id, split)
+    try:
+        with open(os.path.join(root, rel), encoding="utf-8") as f:
+            device = json.load(f)["scorer"]["device"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise SystemExit("%s holds no scorer.device (%s: %s); restore it with `git checkout -- %s`"
+                         % (rel, type(e).__name__, e, rel))
+    if device is not None and (not isinstance(device, str) or not device):
+        raise SystemExit("%s records scorer device %r, not a device name or null; restore it with `git checkout -- %s`"
+                         % (rel, device, rel))
+    return device
+
+
+def scorers(v, protocol, root=REPO_ROOT):
+    """[(device or None, [label])] of every test and HOTELS dump the verdict reports, grouped by the scorer.device of
+    its sidecar in first-seen order: each fine-tuned model's final seeds (the verdict's per_seed dump run ids, label
+    "the KIND final seeds"; every one must be protocol.json's scoring device), then the references in the results
+    table's order (label: the run id; a HOTELS sidecar read when the reference has one); SystemExit otherwise."""
+    want = (protocol.get("scoring") or {}).get("device") if isinstance(protocol, dict) else None
+    out, rows = [], []
+    for kind in pilot.verdict.KINDS:
+        seeds = ((v.get("systems") or {}).get(kind) or {}).get("per_seed") or []
+        if not seeds:
+            raise SystemExit("the verdict lists no %s final seed; %s" % (kind, pilot.verdict.FEWSHOT_FIX))
+        devices = {scorer_device(root, s["dump_run_id"], split) for s in seeds for split in ("test", "hotels_probe")}
+        if devices != {want}:
+            raise SystemExit("the %s final seeds' dump sidecars record scorer devices %s, protocol.json scoring is %r; "
+                             "restore the gated dumps with `git checkout -- results/dumps/`" % (kind, sorted(
+                                 map(str, devices)), want))
+        rows.append((want, "the %s final seeds" % kind))
+    for r in pilot.verdict._references(v):              # the results table's order; a malformed row is refused
+        splits = ["test"] + (["hotels_probe"] if os.path.isfile(os.path.join(
+            root, "results", "dumps", r["run_id"], "hotels_probe.json")) else [])
+        for device in sorted({scorer_device(root, r["run_id"], split) for split in splits}, key=str):
+            rows.append((device, r["run_id"]))
+    for device, label in rows:
+        for d, labels in out:
+            if d == device:
+                labels.append(label)
+                break
+        else:
+            out.append((device, [label]))
+    return out
+
+
+def _and(labels):
+    return labels[0] if len(labels) == 1 else "%s and %s" % (", ".join(labels[:-1]), labels[-1])
+
+
+def render_scorers(groups, device):
+    """The scorer-device clause of the Hardware line: "mps for A and B (protocol.json scoring), cpu for C, no model for
+    D and E"."""
+    return ", ".join("%s for %s%s" % (d if d is not None else "no model", _and(labels),
+                                     " (protocol.json scoring)" if d == device and d is not None else "")
+                     for d, labels in groups)
+
+
 def facts(v, protocol, root=REPO_ROOT):
     """The block's record facts: {n, n_no_intent} of the verdict's split block, the final_train folds as "first-last"
-    (pilot.data.SPLITS, one contiguous range), the machine and its memory in whole GiB (SPIKE_RECORD meta.platform) and
-    the scorer device (protocol.json scoring); SystemExit for anything missing or malformed."""
+    (pilot.data.SPLITS, one contiguous range), the machine and its memory in whole GiB (SPIKE_RECORD meta.platform),
+    the scorer device (protocol.json scoring) and scorers(v, protocol, root), the scorer device of every test and
+    HOTELS dump from its sidecar; SystemExit for anything missing or malformed."""
     sp = v.get("split") or {}
     n, n_no = sp.get("n"), sp.get("n_no_intent")
     if not all(isinstance(x, int) and not isinstance(x, bool) for x in (n, n_no)):
@@ -121,7 +186,7 @@ def facts(v, protocol, root=REPO_ROOT):
     if not isinstance(device, str) or not device:
         raise SystemExit("protocol.json has no scoring device; restore it with `git checkout -- protocol.json`")
     return {"n": n, "n_no_intent": n_no, "folds": "%d-%d" % (folds[0], folds[-1]), "machine": machine,
-            "memory_gib": mem // GIB, "device": device}
+            "memory_gib": mem // GIB, "device": device, "scorers": scorers(v, protocol, root)}
 
 
 def _one(lines, test, what):
@@ -167,8 +232,9 @@ def render_recommendation(v, verdict_path, verdict_sha256, facts):
            "- Test split: n = %d (%d no-intent)." % (facts["n"], facts["n_no_intent"]),
            "- Final seeds: retrained on final_train, banking folds %s, with each model's epoch, T and θ carried over "
            "from its val selection." % facts["folds"],
-           "- Hardware: %s, %d GiB unified memory (%s); test and HOTELS scored on %s (protocol.json scoring)." % (
-               facts["machine"], facts["memory_gib"], SPIKE_RECORD, facts["device"])]
+           "- Hardware: %s, %d GiB unified memory (%s). Scorer device of the test and HOTELS dumps (their sidecars): "
+           "%s." % (facts["machine"], facts["memory_gib"], SPIKE_RECORD, render_scorers(facts["scorers"],
+                                                                                        facts["device"]))]
     return "\n".join(out) + "\n"
 
 

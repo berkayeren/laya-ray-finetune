@@ -1772,8 +1772,9 @@ this section comes from the generated block below, and a test fails if the block
 - **Caveats.** None of them is softened by the verdict:
   - Multi3NLU++ Turkish is translated data, not customer messages: a small dataset and a single split, with no bank
     data.
-  - The runs used laptop hardware: one Apple M4 laptop with unified memory, trained and scored on MPS; the block names
-    the memory and the scorer device.
+  - The runs used laptop hardware: one Apple laptop with unified memory. The final seeds were trained and scored on
+    MPS, zero-shot Laya was scored on CPU and the majority and prior baselines run no model; the block names the
+    memory and each dump's scorer device, read from its sidecar.
   - The no-intent test set is small, so every no-intent false-positive rate is uncertain; its size is in the block.
   - Each model's val settings (epoch, T and θ) were chosen on val and carried over to the final_train retrains; θ is
     transferred and never re-selected, and the seed-averaged systems use each record's θ.
@@ -1799,7 +1800,7 @@ Regenerate with `python report.py --recommendation results/final/verdict.json` (
 - Records: results/final/verdict.json sha256 `a409aff73b46`, protocol.json sha256 `0d337d2019f9`, few-shot record results/fewshot/fewshot.json sha256 `2eac0da66a2a`. The verdict is computed mechanically by the frozen rule; humans can audit and override this recommendation from these records.
 - Test split: n = 413 (15 no-intent).
 - Final seeds: retrained on final_train, banking folds 0-15, with each model's epoch, T and θ carried over from its val selection.
-- Hardware: arm64, 16 GiB unified memory (results/spike/mps_spike.json); test and HOTELS scored on mps (protocol.json scoring).
+- Hardware: arm64, 16 GiB unified memory (results/spike/mps_spike.json). Scorer device of the test and HOTELS dumps (their sidecars): mps for the laya final seeds and the berturk final seeds (protocol.json scoring), no model for majority and prior, cpu for laya-zeroshot-7b928d82.
 <!-- recommendation:end -->
 
 ## Results (Phase 3: baselines and zero-shot, full test split)
