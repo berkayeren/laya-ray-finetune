@@ -1310,6 +1310,37 @@ def test_full_mode_names_the_step_whose_output_diverges(scratch):
     assert "(D-04)" in msg and runner.calls[-1][:2] == ("fewshot.py", "--prune")
 
 
+def test_full_mode_completes_a_from_scratch_final_reports_tail(scratch):
+    """WR-01: with results/final/ and the few-shot tail todo, final-reports writes the verdict without --fewshot (its
+    from-scratch form, here bytes that differ from the committed verdict) and passes its after-check, because the
+    committed verdict and the first-time memo are fewshot-reports' outputs; that step writes and verifies both."""
+    root = scratch(["results/final"] + fewshot_tail())
+    st = states(rp.plan(root))
+    assert [n for n in D01[12:18] if st[n] != "todo"] == [], st
+    pending = ("report.py", "--verdict", "--out", rp.VERDICT)
+    assert pending in rp.commands("final-reports", root)
+    assert rp.commands("fewshot-reports", root) == [
+        ("make", "fewshot-reports"), ("report.py", "--verdict", "--fewshot", rp.FEWSHOT_RECORD, "--out", rp.VERDICT),
+        ("make", "memo")]
+    runner = Committed(override=lambda cmd, rel: b'{"few-shot path": "PENDING"}\n' if cmd == pending else None)
+    assert real_full(root, runner) == [False]
+    assert runner.calls == [c for n in D01[12:18] for c in rp.commands(n, root)]
+    for rel in (rp.VERDICT, rp.MEMO):
+        with open(os.path.join(root, rel), "rb") as f, open(os.path.join(REPO_ROOT, rel), "rb") as g:
+            assert f.read() == g.read(), rel
+    assert states(rp.plan(root)) == states(rp.plan(REPO_ROOT))
+
+
+def test_full_mode_names_fewshot_reports_for_a_memo_that_differs(scratch):
+    """WR-01: the memo is fewshot-reports' output; a memo that differs from git HEAD's stops the run there."""
+    root = scratch(fewshot_tail())
+    runner = Committed(override=lambda cmd, rel: b"another memo\n" if rel == rp.MEMO else None)
+    msg = _stop(lambda: real_full(root, runner))
+    assert msg.startswith("step fewshot-reports ran, but results/final/memo.md differs from the bytes git HEAD holds "
+                          "for it; "), msg
+    assert runner.calls[-1] == ("make", "memo")
+
+
 def test_memo_names_the_one_command_rebuild():
 
     """The memo's rebuild bullet names `make report` (every report, the README blocks and the memo from the committed

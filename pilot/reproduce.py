@@ -45,7 +45,9 @@ runs from protocol.json's fewshot block (rules.base_runs, the frozen epochs, the
 base_seed_of under the recorded mode), the final seeds from pilot.postfit.final_command and
 pilot.berturk.final_command of the hash-verified postfit records, the baselines as the Makefile's score.py lines
 without --force, final-reports as final_report_commands (the Makefile recipe; the from-scratch form without the
-verdict's --fewshot, since fewshot.json comes later in D-01). No command passes --force or runs `make baselines`, and
+verdict's --fewshot, since fewshot.json comes later in D-01), and fewshot-reports as `make fewshot-reports`, then the
+verdict with --fewshot and `make memo` (fewshot_report_commands), so the committed verdict and the memo are that
+step's outputs. No command passes --force or runs `make baselines`, and
 the gated scoring targets appear only in their own steps. dry_run prints the plan, then each todo step's commands (every
 step's with --all), with DISCLOSURE once before the first model step listed; it runs nothing. A from-scratch run is
 disclosed, not run here: MPS retraining is not bit-identical, so it stops at the first output that differs from the
@@ -96,6 +98,8 @@ MODEL_STEPS = ("baselines", "laya-selection", "laya-final", "berturk-selection",
                "final-scoring", "fewshot-bases", "fewshot-continued", "fewshot-scoring")
 RUNS = "results/fewshot/runs.json"
 VERDICT = "results/final/verdict.json"
+MEMO = "results/final/memo.md"
+FEWSHOT_RECORD = "results/fewshot/fewshot.json"
 CONFIDENCE_SCHEMA = "confidence/1"
 MAKEFILE_VAR_RE = re.compile(r"^([A-Z_][A-Z0-9_]*) [:?]= (.*)$")     # `NAME := value` and the `NAME ?= default`
 
@@ -384,8 +388,11 @@ def ev_report(root, proto, pin, manifest):
     return []
 
 
-def _step(name, evidence, fix):
-    return {"name": name, "model": name in MODEL_STEPS, "gated": name in GATED, "evidence": evidence, "fix": fix}
+def _step(name, evidence, fix, outputs=()):
+    """One registry step; outputs are the committed files it writes that are no step's plan evidence (the memo):
+    after_check requires them present and equal to the bytes git HEAD holds for them."""
+    return {"name": name, "model": name in MODEL_STEPS, "gated": name in GATED, "evidence": evidence, "fix": fix,
+            "outputs": tuple(outputs)}
 
 
 _DUMPS_FIX = "restore the committed dumps with `git checkout -- results/dumps/`"
@@ -416,7 +423,8 @@ STEPS = [
           "results/fewshot/runs.json`"),
     _step("fewshot-scoring", ev_fewshot_scoring, "restore the gated dumps with `git checkout -- results/dumps/`; a "
           "gated split is scored once and never rescored"),
-    _step("fewshot-reports", ev_fewshot_reports, "restore it with `git checkout -- results/fewshot/fewshot.json`"),
+    _step("fewshot-reports", ev_fewshot_reports, "restore it with `git checkout -- results/fewshot/fewshot.json`",
+          outputs=(MEMO,)),
     _step("report", ev_report, "it always runs"),
 ]
 
@@ -773,7 +781,6 @@ FINAL_PREFIX = {"laya": "ckpt-final", "berturk": "ckpt-berturk-final"}
 SELECTION_OUT = "ckpt-sel"
 REFERENCE = "results/postfit/berturk-reference.json"
 PROJECTION = "results/fewshot/projection.json"
-FEWSHOT_RECORD = "results/fewshot/fewshot.json"
 LATENCY_DEVICES = ("mps", "cpu")
 
 
@@ -915,6 +922,14 @@ def final_report_commands(proto, fewshot=None):
                    "results/final/confidence/prior-test.json")]
 
 
+def fewshot_report_commands():
+    """The fewshot-reports step (10-REVIEW WR-01): the few-shot record (`make fewshot-reports`), then the verdict that
+    binds it (the Makefile final-reports line with --fewshot) and the memo (`make memo`), the committed forms of
+    results/final/verdict.json and results/final/memo.md, which need the few-shot record."""
+    return [("make", "fewshot-reports"), ("report.py", "--verdict", "--fewshot", FEWSHOT_RECORD, "--out", VERDICT),
+            ("make", "memo")]
+
+
 def fewshot_checkpoint(slot):
     """The checkpoint dir name of a few-shot slot (kind, stage, seed, draw, k), as runs.json lists it."""
     kind, stage, seed, draw, k = slot
@@ -1021,7 +1036,7 @@ BUILDERS = {
     "fewshot-bases": _fewshot_stage_lines("base"),
     "fewshot-continued": _fewshot_stage_lines("continued"),
     "fewshot-scoring": _fewshot_scoring_lines,
-    "fewshot-reports": _make("fewshot-reports"),
+    "fewshot-reports": lambda root, proto, pin: [(c, None) for c in fewshot_report_commands()],
     "report": _fixed(*REBUILD),
 }
 
@@ -1085,8 +1100,9 @@ D04_STOP = ("a from-scratch run stops at the first output that differs from the 
             "restores the audit record")
 DEFERRED_RE = re.compile(r"once (\S+) exists")
 # a committed file that is one step's evidence but a later step's output: the after-check of the step that writes it
-# verifies it (fewshot-bases' slots are recorded in the runs manifest that fewshot-continued writes)
-LATER_OUTPUT = {RUNS: "fewshot-continued"}
+# verifies it (fewshot-bases' slots are recorded in the runs manifest that fewshot-continued writes; final-reports
+# writes the verdict without --fewshot, and the committed verdict, with --fewshot, is fewshot-reports' output)
+LATER_OUTPUT = {RUNS: "fewshot-continued", VERDICT: "fewshot-reports"}
 
 
 def capture_command(cmd, root):
@@ -1125,7 +1141,8 @@ def _writer(name, item, order):
 def after_items(step, root, proto, pin):
     """[(step name, item)] that after_check verifies once step ran: the step's own evidence items, except those whose
     committed file a later step writes (LATER_OUTPUT: fewshot-bases' slots live in the runs.json that
-    fewshot-continued writes), plus the deferred items of earlier steps whose file this step writes."""
+    fewshot-continued writes; the verdict, whose committed form fewshot-reports writes), plus the deferred items of
+    earlier steps whose file this step writes and the step's outputs that are no step's evidence (the memo)."""
     manifest, order = os.path.join(root, "data", "splits.json"), [s["name"] for s in STEPS]
     name, out = step["name"], []
     for s in STEPS:
@@ -1136,7 +1153,7 @@ def after_items(step, root, proto, pin):
                     if _writer(s["name"], it, order) == name]
     if all(s["name"] != name for s in STEPS):                # a step outside the registry: its own evidence only
         out = [(name, it) for it in step["evidence"](root, proto, pin, manifest)]
-    return out
+    return out + [(name, _file(root, rel, proto)) for rel in step.get("outputs", ())]
 
 
 def after_check(step, root, proto, pin):
