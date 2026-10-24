@@ -91,8 +91,11 @@ final_seed_allowed), on test or HOTELS, or (Phase 9, D-09) a few-shot checkpoint
 allow-list results/fewshot/runs.json, on test only. pilot.fewshot.admitted reads and checks that file at the call
 (pilot.fewshot.check_runs: this protocol's pin, the recorded D-08 mode, one entry per base seed and per (draw, k), the
 frozen draw digests and the base pairing, the masking proofs); a dump run id hashes the weights, the config or record
-and the tokenizer files, so a retrained or edited checkpoint is not listed. A selection export, a retrained or an
-edited checkpoint, an unlisted few-shot checkpoint, a listed one on HOTELS (fewshot.rules.test_admission) and any run
+and the tokenizer files, so a retrained or edited checkpoint is not listed. The listed entry is then re-derived from
+the checkpoint being scored, by the function `fewshot.py --runs-manifest` built it with (fewshot.entry_of, from the
+record bytes the identity hashed, before any model loads), and must equal it but for checkpoint_name (09-REVIEW
+WR-01), so a well-formed entry whose dump_run_id was swapped for another checkpoint's is refused. A selection export,
+a retrained or an edited checkpoint, an unlisted few-shot checkpoint, a listed one on HOTELS (fewshot.rules.test_admission) and any run
 under a runs manifest of another protocol never reach test or HOTELS. Once means once: an existing gated dump is
 refused (and --force with it), and an npz an interrupted gated run left without its sidecar is refused naming the
 recovery (load_dump never read it: delete it and rerun the one command). An admitted dump's sidecar carries
@@ -276,17 +279,47 @@ def protocol_gate(a, kind, checkpoint, entry, manifest_path, device, trigger):
     return proto, pin, split
 
 
-def require_admitted(proto, pin, kind, rid, split, head):
+# a listed entry's checkpoint_name is the dir name --runs-manifest saw; the dump run id binds the files, not the name
+REDERIVE_IGNORED = ("checkpoint_name",)
+
+
+def rederive_entry(checkpoint, proto, pin, listed, head):
+    """None when the few-shot checkpoint `checkpoint` re-derives the runs-manifest entry `listed` (09-REVIEW WR-01):
+    fewshot.entry_of, the function `fewshot.py --runs-manifest` builds each entry with, run on the checkpoint being
+    scored (its own record, binding and masking proof, read from the bytes its identity hashed; no model load), must
+    give `listed` but for REDERIVE_IGNORED, after a JSON round trip. SystemExit (head + the reason) when the checkpoint
+    no longer binds, or when any other key differs (a well-formed entry whose dump_run_id was swapped for another
+    checkpoint's, or a retrained run's)."""
+    import fewshot as runner                                    # the CLI at the repo root (not pilot.fewshot)
+    if checkpoint is None:
+        raise SystemExit(head + "no checkpoint to re-derive its results/fewshot/runs.json entry from")
+    try:
+        mine, _ = runner.entry_of(checkpoint, proto, pin, fewshot.read_mode(pin))
+    except SystemExit as e:
+        raise SystemExit(head + "its own record does not re-derive a results/fewshot/runs.json entry: %s"
+                         % " ".join(str(e.code).split())) from None
+    mine = json.loads(json.dumps(mine))
+    diff = sorted(k for k in set(mine) | set(listed) if k not in REDERIVE_IGNORED and mine.get(k) != listed.get(k))
+    if diff:
+        raise SystemExit(head + "its own record gives another results/fewshot/runs.json entry than the one listed as "
+                                "%s (%s differ); an entry is the checkpoint's own (fewshot.py --runs-manifest), so "
+                                "score the checkpoint that entry was built from" % (listed.get("checkpoint_name"),
+                                                                                 ", ".join(diff)))
+
+
+def require_admitted(proto, pin, kind, rid, split, head, checkpoint=None):
     """("final", None) for a protocol final seed, ("fewshot", runs manifest sha256) for a few-shot checkpoint the
     committed allow-list lists on test; SystemExit (head + the reason) otherwise. Runs after the identity is hashed
-    and before any checkpoint file is parsed or any model loads (D-09).
+    and before any model loads (D-09); a few-shot checkpoint's own record is read only from the bytes its identity
+    hashed, to re-derive its listed entry (rederive_entry, 09-REVIEW WR-01).
 
     A final seed is the dump run id `rid` among the protocol's final seeds of system `kind` (Phase 8,
     pilot.protocol.final_seed_allowed), admitted on test and HOTELS exactly as before. A few-shot checkpoint is `rid`
     listed for `kind` in results/fewshot/runs.json, which pilot.fewshot.admitted reads and checks (pilot.fewshot.
     check_runs: this pin, the recorded mode, the frozen draws and pairing, the masking proofs) at this call; it is
-    scored on test only (the frozen fewshot.rules.test_admission), never on HOTELS. A refused or unreadable runs
-    manifest, an unlisted checkpoint and a listed one on another split are refused in one line."""
+    scored on test only (the frozen fewshot.rules.test_admission), never on HOTELS, and only when `checkpoint`
+    re-derives the listed entry (rederive_entry). A refused or unreadable runs manifest, an unlisted checkpoint, a
+    listed one on another split and one whose own record gives another entry are refused in one line."""
     if protocol.final_seed_allowed(proto, kind, rid):
         return "final", None
     try:
@@ -298,6 +331,7 @@ def require_admitted(proto, pin, kind, rid, split, head):
             raise SystemExit(head + "it is the few-shot checkpoint %s of results/fewshot/runs.json, and a few-shot "
                                     "checkpoint is scored on test only (fewshot.rules.test_admission); HOTELS is never "
                                     "opened for it" % got[0]["checkpoint_name"])
+        rederive_entry(checkpoint, proto, pin, got[0], head)
         return "fewshot", got[1]
     have = (proto.get("systems") or {}).get(kind)
     ids = [s.get("dump_run_id") for s in have.get("final_seeds") or []] if isinstance(have, dict) else []
@@ -767,7 +801,7 @@ def main(argv=None, roles=None):
     head = _gate_head(a.model, checkpoint, entry, trigger) if gate else None
     admission = None
     if gate:                                                 # the hashed identity in an allow-list, before any load
-        admission = require_admitted(gate[0], gate[1], a.model, rid, gate[2], head)
+        admission = require_admitted(gate[0], gate[1], a.model, rid, gate[2], head, checkpoint)
     if a.model == "laya":
         seed, training = training_block(checkpoint, ident)   # WR-05: the training seed and recipe, bound by ident
     if a.n is None:

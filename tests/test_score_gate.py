@@ -6,8 +6,10 @@ It triggers for a fine-tuned checkpoint on the same content as they did, extende
 admits a run only when pilot.protocol.require_frozen passes, no --n, --force or --out-root other than results/dumps is
 given, the manifest is the committed one and names a gated split, the device and worker count are the protocol's, and
 the hashed dump run id is one of the protocol's final seeds of that system or a listed few-shot checkpoint on test
-(score.require_admitted). An admitted dump carries protocol_sha256; an existing gated dump, or an npz an interrupted gated run left without its sidecar, is
-refused.
+(score.require_admitted). A listed few-shot checkpoint must re-derive its runs.json entry (score.rederive_entry,
+09-REVIEW WR-01): a well-formed entry swapped to point at a retrained run or at a checkpoint without a Phase 9 binding
+is refused, a byte-identical copy under another dir name is admitted. An admitted dump carries protocol_sha256; an
+existing gated dump, or an npz an interrupted gated run left without its sidecar, is refused.
 
 Every test runs on the synthetic snapshot with pilot.data.DEFAULT_MANIFEST, pilot.protocol.PROTOCOL_PATH and
 PROTOCOL_SHA256 and pilot.dumps.DUMP_ROOT monkeypatched to temporary stand-ins (fake_protocol writes a minimal
@@ -16,6 +18,7 @@ tiny BERTurk export of tests/test_score_berturk.py. Offline, no Ray: runs in `ma
 """
 import json
 import os
+import re
 import shutil
 
 import pytest
@@ -545,6 +548,70 @@ def test_fewshot_gate_scores_a_listed_checkpoint_once(fsnap):
     text = refused(fs_argv(fsnap, "test"), "already exists", "once per split")
     assert "listed few-shot checkpoint" in text
     assert files(fsnap.root) == before
+
+
+def _copy_with_config(ns, name, edit=None):
+    """A copy of the listed continued checkpoint under `name`, its rl_agent_config.json changed by edit(cfg)."""
+    dst = str(ns.tmp / name)
+    shutil.copytree(ns.cont, dst)
+    if edit is not None:
+        path = os.path.join(dst, "rl_agent_config.json")
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        edit(cfg)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+    return dst, dumps.run_id("laya", pilot.weights.identity(dst))
+
+
+def _list_as_the_continued_entry(ns, rid):
+    """Swap the listed laya d0-k2 entry's dump_run_id for `rid`: the entry stays well formed (check_runs passes)."""
+    def edit(runs):
+        for e in runs["entries"]:
+            if (e["kind"], e["stage"], e["draw"], e["k"]) == ("laya", "continued", 0, 2):
+                e["dump_run_id"] = rid
+    rewrite_runs(ns, edit)
+    assert ns.fs.admitted(ns.protocol, ns.pin, "laya", rid) is not None
+
+
+def test_fewshot_gate_refuses_a_swapped_entry_of_a_retrained_run(fsnap, monkeypatch):
+    """09-REVIEW WR-01: a well-formed runs.json entry whose dump_run_id was swapped for another run of the same recipe
+    (its own record gives other losses) is refused before any load: the gate re-derives the entry from the checkpoint
+    (fewshot.entry_of) and names the keys that differ."""
+    def retrain(cfg):
+        for row in cfg["training"]["ray_train"]["record"]["epochs"]:
+            row["loss"] = row["loss"] + 1.0
+    ckpt, rid = _copy_with_config(fsnap, "retrained", retrain)
+    assert rid != fsnap.rid
+    _list_as_the_continued_entry(fsnap, rid)
+    no_laya_load(monkeypatch)
+    text = refused(fs_argv(fsnap, "test", ckpt=ckpt), "its own record gives another results/fewshot/runs.json entry",
+                   "loss_by_epoch", "laya-d0-k2")
+    differ = re.search(r"\(([^()]*) differ\)", text).group(1).split(", ")
+    assert "loss_by_epoch" in differ and "dump_run_id" not in differ, differ   # the swapped id is the checkpoint's
+    assert files(fsnap.root) == []
+
+
+def test_fewshot_gate_refuses_a_swapped_entry_of_a_non_fewshot_checkpoint(fsnap, monkeypatch):
+    """09-REVIEW WR-01: an entry swapped to point at a checkpoint without a Phase 9 binding (here its canonical config
+    lost the few-shot binding, as a selection export has none) is refused: the checkpoint re-derives no entry."""
+    def unbind(cfg):
+        cfg["training"]["ray_train"]["canonical"].pop("fewshot")
+    ckpt, rid = _copy_with_config(fsnap, "unbound", unbind)
+    _list_as_the_continued_entry(fsnap, rid)
+    no_laya_load(monkeypatch)
+    refused(fs_argv(fsnap, "test", ckpt=ckpt), "its own record does not re-derive a results/fewshot/runs.json entry")
+    assert files(fsnap.root) == []
+
+
+def test_fewshot_gate_admits_a_listed_checkpoint_under_another_dir_name(fsnap):
+    """The re-derived entry may differ from the listed one only in checkpoint_name (score.REDERIVE_IGNORED): a
+    byte-identical copy has the same dump run id, so it is the listed checkpoint."""
+    assert score.REDERIVE_IGNORED == ("checkpoint_name",)
+    ckpt, rid = _copy_with_config(fsnap, "renamed")
+    assert rid == fsnap.rid
+    run_dir, _ = score.main(fs_argv(fsnap, "test", ckpt=ckpt))
+    assert os.path.basename(run_dir) == fsnap.rid
 
 
 def test_fewshot_gate_without_a_runs_manifest_refuses_as_in_phase_8(fsnap, monkeypatch):
