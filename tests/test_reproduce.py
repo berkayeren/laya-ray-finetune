@@ -728,3 +728,192 @@ def test_dry_run_prints_the_disclosure_before_the_first_model_step(tree):
     assert text.index(header("fewshot-projection")) < text.index(projection) < text.index(rp.DISCLOSURE) \
         < text.index(header("fewshot-bases"))
     assert "# the mode is primary until results/fewshot/projection.json records the D-08 decision" in text
+
+
+# ---- the command bindings (plan 10-05): each command is the record, recipe or protocol field it reproduces ----
+
+def committed(rel):
+    import json
+    with open(os.path.join(REPO_ROOT, rel), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def flags(cmd):
+    """{--flag: value or True} of an argv tuple (a flag followed by another flag, or last, is a switch)."""
+    out, c = {}, list(cmd)
+    for i, a in enumerate(c):
+        if a.startswith("--"):
+            nxt = c[i + 1] if i + 1 < len(c) else None
+            out[a] = True if nxt is None or nxt.startswith("--") else nxt
+    return out
+
+
+def expand(line, v):
+    """A Makefile recipe line as an argv list: $(NAME) expanded from v, "$(PYTHON) " and " > /dev/null" dropped."""
+    import shlex
+    line = line.replace(" > /dev/null", "")
+    assert line.startswith("$(PYTHON) "), line
+    line = re.sub(r"\$\(([A-Z_]+)\)", lambda m: v[m.group(1)], line[len("$(PYTHON) "):])
+    return shlex.split(line)
+
+
+def test_baselines_commands_are_the_makefile_lines_without_force():
+    import shlex
+    lines = recipe("baselines")
+    assert len(lines) == 7 and all(" --force" in l for l in lines[:6]) and lines[6].startswith("$(MAKE) baseline-reports")
+    want = [shlex.split(l.replace(" --force", "").replace("$(SCORE_WORKERS)", "2").replace("$(SCORE_CPUS)", "4")
+                        .replace("$(PYTHON) ", "")) for l in lines[:6]]
+    v = rp.makefile_vars(REPO_ROOT)
+    assert (v["SCORE_WORKERS"], v["SCORE_CPUS"]) == ("2", "4")
+    cmds = rp.commands("baselines")
+    assert [list(c) for c in cmds[:6]] == want
+    assert cmds[6:] == [("make", "baseline-reports")]
+
+
+def test_selection_commands_match_the_chosen_canonical():
+    keys = {"laya": {"--device": "device", "--workers": "workers", "--micro-batch": "micro_batch",
+                     "--grad-accum": "grad_accum", "--max-len": "max_len", "--epochs": "epochs", "--neg": "neg",
+                     "--seed": "seed", "--encoder-lr": "encoder_lr", "--head-lr": "head_lr"},
+            "berturk": {"--device": "device", "--epochs": "epochs", "--lr": "encoder_lr", "--head-lr": "head_lr",
+                        "--seed": "seed"}}
+    for kind, script, storage in (("laya", "ray_train.py", "ray_results"), ("berturk", "berturk_train.py",
+                                                                             "berturk_runs")):
+        rec = committed("results/postfit/%s.json" % kind)
+        c, chosen = rec["chosen"]["canonical"], rec["chosen"]
+        cmds = rp.commands("%s-selection" % kind)
+        assert cmds[0] == cmds[1] + ("--print-run-id",) and cmds[1][0] == script
+        f = flags(cmds[1])
+        for flag, key in keys[kind].items():
+            have = float(f[flag]) if isinstance(c[key], float) else (int(f[flag]) if isinstance(c[key], int) else f[flag])
+            assert have == c[key], (kind, flag, f[flag], c[key])
+        assert f["--data"] == "data/splits/%s.jsonl" % c["split"] and f["--storage"] == storage
+        assert f["--base"] == ("multilingual" if kind == "laya" else "berturk")
+        run_id = chosen["train_run_id"]
+        assert {x["train_run_id"] for x in rec["candidates"]} == {run_id}
+        exports = ["%s/%s/exports/epoch-%03d" % (storage, run_id, e) for e in range(1, chosen["epochs_schedule"] + 1)]
+        scored = [flags(x)["--checkpoint"] for x in cmds if x[0] == "score.py"]
+        pruned = [x[2] for x in cmds if x[:2] == ("postfit.py", "--prune")]
+        assert scored == exports and pruned == exports, kind
+        assert len(exports) == len(rec["candidates"]) and len(cmds) == 2 + 2 * len(exports)
+        assert all(flags(x)["--model"] == kind and x[1] == "data/splits/val.jsonl" for x in cmds if x[0] == "score.py")
+
+
+def test_final_seed_commands_are_the_records(bare):
+    from pilot import berturk, postfit
+    for kind, prefix, storage in (("laya", "ckpt-final", "ray_results"), ("berturk", "ckpt-berturk-final",
+                                                                          "berturk_runs")):
+        rel = "results/postfit/%s.json" % kind
+        rec, _ = postfit.read_record(os.path.join(REPO_ROOT, rel))
+        seeds = rec["final"]["seeds"]
+        want = [tuple(postfit.final_command(rec, s, rel, storage, prefix)) if kind == "laya" else
+                tuple(berturk.final_command(rec, s, rel, "results/postfit/berturk-reference.json", storage, prefix))
+                for s in seeds]
+        cmds = rp.commands("%s-final" % kind)
+        assert cmds[:-1] == want
+        manifest = committed("results/postfit/%s-final.json" % kind)
+        names = [s["checkpoint_name"] for s in sorted(manifest["seeds"], key=lambda s: s["seed"])]
+        assert [flags(c)["--out"] for c in cmds[:-1]] == names
+        assert [int(flags(c)["--seed"]) for c in cmds[:-1]] == [s["seed"] for s in manifest["seeds"]] == seeds
+        assert cmds[-1] == ("postfit.py", "--final-manifest", rel) + tuple(names) + ("--out",
+                                                                                    "results/postfit/%s-final.json" % kind)
+        printed = rp.commands("%s-final" % kind, bare)                 # no record: the printer, then the same manifest
+        assert printed[1] == cmds[-1] and printed[0][:3] == ("postfit.py", "--print-final-commands", rel)
+
+
+def test_final_reports_commands_match_the_makefile():
+    proto, _ = pilot.protocol.require_frozen()
+    v = rp.makefile_vars(REPO_ROOT)
+    lines = recipe("final-reports")
+    assert lines[:2] == ["mkdir -p $(FINAL)/reports", "mkdir -p $(FINAL)/confidence"]
+    want = [expand(l, v) for l in lines[2:]]
+    with_fewshot = rp.final_report_commands(proto, "results/fewshot/fewshot.json")
+    assert [list(c) for c in with_fewshot] == want and len(want) == 22
+    scratch = rp.final_report_commands(proto)
+    assert len(scratch) == len(with_fewshot)
+    differ = [i for i, (a, b) in enumerate(zip(scratch, with_fewshot)) if a != b]
+    assert differ == [6] and scratch[6] == ("report.py", "--verdict", "--out", "results/final/verdict.json")
+    assert with_fewshot[6] == ("report.py", "--verdict", "--fewshot", "results/fewshot/fewshot.json", "--out",
+                               "results/final/verdict.json")
+    assert rp.commands("final-reports") == scratch
+
+
+def test_latency_commands_write_the_pinned_reports():
+    proto, _ = pilot.protocol.require_frozen()
+    cmds = rp.commands("latency")
+    runs = [c for c in cmds if "--system" in c]
+    assert len(runs) == 4 and cmds[-1] == ("latency.py", "--render", "results/latency", "--out",
+                                           "results/latency/latency.md")
+    outs = [flags(c)["--out"] for c in runs]
+    assert sorted(outs) == sorted(p for p in proto["inputs"] if p.startswith("results/latency/"))
+    assert outs == ["results/latency/%s-%s.json" % (flags(c)["--system"], flags(c)["--device"]) for c in runs]
+
+
+def test_fewshot_commands_match_the_runs_manifest():
+    runs = committed("results/fewshot/runs.json")
+    entries = runs["entries"]
+    assert len(entries) == 18 and runs["mode"] == "primary"
+    bases, continued = rp.commands("fewshot-bases"), rp.commands("fewshot-continued")
+    train = [c for c in bases + continued if c[0] in TRAINERS]
+    assert len(train) == 18
+    by_out = {flags(c)["--out"]: c for c in train}
+    for e in entries:
+        c = by_out[e["checkpoint_name"]]
+        f = flags(c)
+        assert c[0] == ("ray_train.py" if e["kind"] == "laya" else "berturk_train.py"), e["checkpoint_name"]
+        assert int(f["--seed"]) == e["seed"] and f["--no-export-epochs"] is True
+        assert f["--storage"] == ("ray_results" if e["kind"] == "laya" else "berturk_runs")
+        if e["stage"] == "base":
+            assert f["--fewshot-base"] is True and f["--base"] == ("multilingual" if e["kind"] == "laya" else "berturk")
+            assert "--fewshot-draw" not in f and c in bases
+        else:
+            assert (int(f["--fewshot-draw"]), int(f["--fewshot-k"])) == (e["draw"], e["k"]) and c in continued
+            assert f["--base"] == "ckpt-fewshot-%s-base-s%d" % (e["kind"], e["base_seed"])
+            assert "--fewshot-base" not in f and f["--epochs"] == "10"
+        i = (bases + continued).index(c)                                 # each run is inspected, Laya storage dropped
+        nxt = (bases + continued)[i + 1:i + 3]
+        assert nxt[0] == ("fewshot.py", "--inspect", e["checkpoint_name"])
+        if e["kind"] == "laya":
+            assert nxt[1] == ("fewshot.py", "--drop-storage", e["checkpoint_name"], "--storage", "ray_results")
+    names = tuple(e["checkpoint_name"] for e in entries)
+    assert continued[-1] == ("fewshot.py", "--runs-manifest") + names + ("--out", "results/fewshot/runs.json")
+    assert rp.commands("fewshot-scoring") == [("make", "fewshot-scoring"), ("fewshot.py", "--prune") + names]
+
+
+@pytest.mark.data
+@pytest.mark.weights
+@pytest.mark.mps
+def test_print_run_id_reproduces_the_recorded_run_ids(tmp_path):
+    """The 14 training commands that can print one (the 2 selections, the 6 final seeds, the 6 few-shot bases), with
+    --storage and --out moved under tmp_path and --print-run-id appended, print the train run ids the committed
+    records hold (the run id keeps paths out of the identity; nothing starts Ray or trains)."""
+    _need_data()
+    runs = committed("results/fewshot/runs.json")["entries"]
+    cases = []
+    for kind in ("laya", "berturk"):
+        rec = committed("results/postfit/%s.json" % kind)
+        cases.append(("%s selection" % kind, rp.commands("%s-selection" % kind)[1], rec["chosen"]["train_run_id"]))
+        manifest = committed("results/postfit/%s-final.json" % kind)
+        for c, s in zip(rp.commands("%s-final" % kind)[:-1], manifest["seeds"]):
+            cases.append(("%s final seed %d" % (kind, s["seed"]), c, s["train_run_id"]))
+    want_base = {(e["kind"], e["seed"]): e["train_run_id"] for e in runs if e["stage"] == "base"}
+    for c in rp.commands("fewshot-bases"):
+        if c[0] in TRAINERS:
+            kind = "laya" if c[0] == "ray_train.py" else "berturk"
+            seed = int(flags(c)["--seed"])
+            cases.append(("%s few-shot base seed %d" % (kind, seed), c, want_base[(kind, seed)]))
+    assert len(cases) == 14 and len(want_base) == 6
+    env = dict(os.environ, HF_HUB_OFFLINE="1")
+    got = []
+    for label, cmd, want in cases:
+        argv = list(cmd)
+        for flag in ("--storage", "--out"):
+            if flag in argv:
+                i = argv.index(flag)
+                argv[i + 1] = str(tmp_path / flag.strip("-") / os.path.basename(argv[i + 1]))
+        out = subprocess.run([sys.executable] + argv + ["--print-run-id"], cwd=REPO_ROOT, env=env,
+                             capture_output=True, text=True, timeout=180)
+        assert out.returncode == 0, (label, out.stderr[-2000:])
+        printed = [l for l in out.stdout.splitlines() if l.strip()][-1].strip()
+        got.append((label, printed, want))
+    assert [g for g in got if g[1] != g[2]] == [], got
+    assert not os.listdir(tmp_path) or all(not os.listdir(tmp_path / d) for d in os.listdir(tmp_path))
