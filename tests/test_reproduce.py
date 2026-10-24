@@ -205,4 +205,4 @@ def test_data_step_is_local(tree):
         f.write(b'{"uid": "x", "state": "y"}\n'[:-1] + b"!")
     msg = refusal(tree)
     assert msg.startswith("data: ") and "registered in" in msg, msg
-    assert msg.endswith("regenerate it with `make data`"), msg
+    assert msg.endswith("regenerate with `make data`") and msg.count("make data") == 1, msg

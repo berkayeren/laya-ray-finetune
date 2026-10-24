@@ -115,6 +115,10 @@ def _dump(root, run_id, split, manifest, proto, keys=None):
         return _item(rel, present, ok, reason, files=[npz, js])
     if not any(have):
         return item(False, False, "")
+    if not all(have):                                 # an orphan: never "run score.py", a gated split is scored once
+        there, gone = (npz, js) if have[0] else (js, npz)
+        return item(True, False, "%s is present without %s (an orphan: a dump is its npz and its sidecar, committed "
+                                 "together)" % (there, gone))
     if js in proto["inputs"] and have[1]:
         pinned = _file(root, js, proto)
         if not pinned["ok"]:
@@ -382,7 +386,10 @@ def state(step, items):
         return "run"
     for it in items:
         if it["present"] and not it["ok"]:
-            raise SystemExit("%s: %s; %s" % (name, it["reason"], _restore(step, it)))
+            fix = _restore(step, it)
+            if "`make data`" in fix and "`make data`" in it["reason"]:
+                raise SystemExit("%s: %s" % (name, it["reason"]))     # the verifier's own fix already ends it
+            raise SystemExit("%s: %s; %s" % (name, it["reason"], fix))
     counted = [it for it in items if not it.get("anchor")]
     if not any(it["present"] for it in counted):
         return "todo"
@@ -407,11 +414,11 @@ def plan(root=REPO_ROOT):
                 first_todo = (step, items)
             elif st == "done" and first_todo is not None:
                 earlier, its = first_todo
-                gone = [it for it in its if not it["present"]] or its
+                gone = [it["label"] for it in its if not it["present"]]
                 raise SystemExit("step %s is done but the earlier step %s is not (missing %s); the committed record is "
-                                 "incomplete: restore it with `git checkout -- %s`"
-                                 % (step["name"], earlier["name"], gone[0]["label"] if gone else "its artifacts",
-                                    " ".join(gone[0]["files"]) if gone else "results/"))
+                                 "incomplete, never work to redo: %s"
+                                 % (step["name"], earlier["name"], gone[0] if gone else "its artifacts",
+                                    earlier["fix"]))
         rows.append((step, st, items))
     return rows
 
