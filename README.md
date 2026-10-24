@@ -98,25 +98,26 @@ are hash-registered too, so later phases can trust the flag list.
 | `pilot/dumps.py` | the logit dump format: writer, the one hard-failing reader, gold labels, run ids |
 | `pilot/metrics.py` | torch-free metrics, the val θ rule and the paired bootstrap, the same for every system; Phase 7: Brier, NLL, classwise ECE and reliability bins, the message-confidence rule, coverage and AURC, the false-positive rate and its Wilson interval |
 | `pilot/runs.py` | torch-free run-record schema of `ray_train.py`, the run id, the neg-K item count, the MPS fallback ladder |
-| `pilot/compute.py` | torch-free compute-checkpoint logic: projection, what-if table, disk budget, report and markdown |
-| `ray_train.py` | Ray Train `TorchTrainer` (DDP) fine-tune using Laya's own loss and checkpoint format, uncalibrated (T = 1) checkpoints; cpu, cuda or one MPS worker; resumes by rerunning |
-| `score.py` | the only place a model runs: one system on one val, test or hotels_probe split → a logit dump (in-process or Ray Data actors); Phase 8: a fine-tuned checkpoint reaches test or HOTELS only through the protocol gate (one of the frozen protocol's final seeds, once) |
-| `report.py` | dumps → metrics (numpy only, no model); `--compare` paired bootstrap; `--table` results table; `--confidence` the Phase 7 confidence record (calibration, abstention, no-intent and, on `--split hotels_probe`, out-of-domain false positives) with its reliability diagram; `--confidence-table` its markdown; Phase 8: `RUN_DIR --split test --postfit RECORD` reports a final seed at its postfit record's θ, `--verdict` writes the verdict record of the frozen protocol, `--final-table` and `--go-block` print the results table and the GO block |
+| `pilot/compute.py` | torch-free compute-checkpoint logic: projection, what-if table, disk budget, report and markdown; Phase 9: the few-shot projection on the committed rates and the frozen compute-fallback decision (`fewshot_projection`, `fewshot_decision`) |
+| `ray_train.py` | Ray Train `TorchTrainer` (DDP) fine-tune using Laya's own loss and checkpoint format, uncalibrated (T = 1) checkpoints; cpu, cuda or one MPS worker; resumes by rerunning; Phase 9: `--fewshot-base` trains a label-masked base (the held-out tags deleted from every row before negative sampling; `--mask-tags` only names them) and `--fewshot-draw D --fewshot-k K` continues a masked base on a frozen support set plus its replay set, both bound to the frozen protocol by refusal |
+| `score.py` | the only place a model runs: one system on one val, test or hotels_probe split → a logit dump (in-process or Ray Data actors); Phase 8: a fine-tuned checkpoint reaches test or HOTELS only through the protocol gate (one of the frozen protocol's final seeds, once); Phase 9: a few-shot checkpoint listed in `results/fewshot/runs.json` reaches test only, once, its sidecar bound to that manifest (`fewshot_runs_sha256`) |
+| `report.py` | dumps → metrics (numpy only, no model); `--compare` paired bootstrap; `--table` results table; `--confidence` the Phase 7 confidence record (calibration, abstention, no-intent and, on `--split hotels_probe`, out-of-domain false positives) with its reliability diagram; `--confidence-table` its markdown; Phase 8: `RUN_DIR --split test --postfit RECORD` reports a final seed at its postfit record's θ, `--verdict` writes the verdict record of the frozen protocol, `--final-table` and `--go-block` print the results table and the GO block; Phase 9: `--verdict --fewshot RECORD` decides criterion (d)'s few-shot path from the few-shot results record, recomputed from the dumps |
 | `evaluate.py` | one-step wrapper: `score.py --model laya`, then `report.py`'s report of that dump |
 | `mps_spike.py` | Phase 2 MPS feasibility spike (`results/spike/`) |
 | `compute_checkpoint.py` | Phase 4 compute checkpoint: a measured MPS fine-tune probe and the projected experiment-matrix runtime (`results/compute/`) |
 | `pilot/postfit.py` | torch-free Phase 5 postfit: the val-fitted T, θ and the chosen epoch in one byte-reproducible record; the final-seed binding and manifest; the README Phase 5 block |
 | `postfit.py` | Phase 5 and 6 CLI: val dumps → `results/postfit/laya.json` or `berturk.json` (the protocol by system kind), `--prune`, `--print-final-commands`, `--final-manifest`, `--render`, `--reference-check` and `--render-berturk` (BERTurk) |
-| `berturk_train.py` | Phase 6 BERTurk trainer: the HF Trainer, masked BCE, encoder LR `--lr` and head LR `--head-lr` in their own param groups, `--epochs` (default 30), a per-epoch export, `--stop-after-epoch`, `--postfit` and `--reference` for the final seeds; one process, no Ray |
+| `berturk_train.py` | Phase 6 BERTurk trainer: the HF Trainer, masked BCE, encoder LR `--lr` and head LR `--head-lr` in their own param groups, `--epochs` (default 30), a per-epoch export, `--stop-after-epoch`, `--postfit` and `--reference` for the final seeds; one process, no Ray; Phase 9: `--fewshot-base` trains a label-masked base (the held-out label columns masked, so they get no gradient) and `--fewshot-draw D --fewshot-k K` continues a masked base from its own fine-tuned head on a frozen support set plus its replay set |
 | `pilot/berturk.py` | torch-free BERTurk bookkeeping: the recipe and run id, labels in `INTENTS` order, the checkpoint identity, the postfit protocol, the BASE-03 reference check, the final commands and manifest, the superseded chain (`SUPERSEDED`, `load_superseded`) and the README Phase 6 block |
 | `latency.py` | Phase 7 latency harness: times every final seed of one system per message on one device, in-process at batch 1, fp32, through the load path that scored the dumps; `--render` the markdown; reported, not gated |
 | `pilot/latency.py` | torch-free latency logic: the timing contract and loop, nearest-rank percentiles, the final-manifest reader, the `latency/1` report and its markdown |
 | `protocol.json` | Phase 8: the frozen decision protocol (criteria and thresholds, verdict rules, seed averaging and bootstrap, collapse rule, systems, splits and inputs, the few-shot protocol); frozen once, its sha256 pinned in `pilot/protocol.py`, never rewritten |
 | `pilot/protocol.py` | builds, pins and reads the frozen protocol: `require_frozen` (every consumer's first call), the gated-split and final-seed checks of `score.py`'s gate, the README protocol block (`--render`) and `--check` |
 | `pilot/verdict.py` | the mechanical GO block: criteria (a) to (d) and the alternative GO from the frozen thresholds, the collapse rule, the overall verdict, the `verdict/1` record, the results table and the GO block markdown |
-| `pilot/fewshot.py` | the frozen few-shot protocol as code: held-out tags, k values, draw seeds, replay, the support-set sampler and its digests, the eligibility check |
-| `fewshot.py` | the few-shot runner behind `require_frozen`: `--support-sets` re-checks the frozen draws against the verified `selection_train`; Phase 9 adds the training and scoring modes |
-| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`), postfit records (`postfit/`: `laya*.json`, and `berturk.json`, `berturk-reference.json`, `berturk-final.json`), the two discarded BERTurk selection runs kept as disclosed history (`superseded/berturk-tied-head-lr/`, `superseded/berturk-10-epoch-grid/`, never current), the Phase 7 val confidence records and reliability diagrams (`confidence/`) and latency reports (`latency/`); Phase 8: the final seeds' gated test and HOTELS dumps and the zero-shot HOTELS reference (`dumps/`), and the verdict, per-seed test reports and test/HOTELS confidence records with their diagrams (`final/`) |
+| `pilot/fewshot.py` | the frozen few-shot protocol as code: held-out tags, k values, draw seeds, replay, the support-set sampler and its digests, the eligibility check; Phase 9: the row builders of both trainers (`masked_rows`, `laya_rows`, `berturk_rows`), the binding of every few-shot command to the frozen protocol (`binding`, `check_base`, `check_continued`, the compute mode `read_mode`), the runs manifest (`check_runs`, `read_runs`) and the test admission `score.py` calls (`admitted`) |
+| `pilot/fewshot_report.py` | Phase 9: the few-shot results record (`fewshot-results/1`) from the dumps the runs manifest lists, numpy only, no model: new-tag macro-AP per draw and k, forgetting at each masked base's val θ, the descriptive bootstrap; the README Phase 9 block |
+| `fewshot.py` | the few-shot runner behind `require_frozen`: `--support-sets` re-checks the frozen draws against the verified `selection_train`; Phase 9 added `--counts` (row, item and step counts), `--projection` (the compute decision record), `--inspect` and `--runs-manifest` (the allow-list, from the checkpoints' own records), `--prune` and `--drop-storage` (guarded deletion), `--report` (the results record) and `--render` (the README Phase 9 block); training runs through `ray_train.py` and `berturk_train.py` |
+| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`), postfit records (`postfit/`: `laya*.json`, and `berturk.json`, `berturk-reference.json`, `berturk-final.json`), the two discarded BERTurk selection runs kept as disclosed history (`superseded/berturk-tied-head-lr/`, `superseded/berturk-10-epoch-grid/`, never current), the Phase 7 val confidence records and reliability diagrams (`confidence/`) and latency reports (`latency/`); Phase 8: the final seeds' gated test and HOTELS dumps and the zero-shot HOTELS reference (`dumps/`), and the verdict, per-seed test reports and test/HOTELS confidence records with their diagrams (`final/`); Phase 9: `fewshot/` holds the compute decision record (`projection.json`), the runs manifest (`runs.json`, the allow-list) and the few-shot results record (`fewshot.json`), and `dumps/` the few-shot dumps (each masked base on val and test, each continued run on test) |
 | `tests/` | pytest suite (markers `unit`, `data`, `weights`, `ray`, `mps`) |
 
 ## Run
@@ -183,14 +184,39 @@ python report.py results/dumps/RUN_ID --split test --postfit results/postfit/lay
 python report.py --verdict --out results/final/verdict.json
 python report.py --final-table results/final/verdict.json    # the README results table
 python report.py --go-block results/final/verdict.json       # the README GO block
-python fewshot.py --support-sets           # re-check the frozen few-shot draws (Phase 9 adds the training modes)
+python fewshot.py --support-sets           # re-check the frozen few-shot draws
+
+# Phase 9: the few-shot experiment under the frozen protocol (every command refuses a missing or changed protocol.json)
+python fewshot.py --counts                 # the masked-base and per-(draw, k) row, item and step counts
+python fewshot.py --projection --out results/fewshot/projection.json   # the compute decision record (written once)
+python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --device mps --workers 1 \
+    --micro-batch 8 --grad-accum 4 --max-len 128 --epochs 4 --stop-after-epoch 3 --neg 8 --seed 0 \
+    --encoder-lr 2e-05 --head-lr 0.0001 --fewshot-base --no-export-epochs --out ckpt-fewshot-laya-base-s0
+python ray_train.py --data data/splits/selection_train.jsonl --base ckpt-fewshot-laya-base-s0 --device mps \
+    --workers 1 --micro-batch 8 --grad-accum 4 --max-len 128 --epochs 10 --neg 8 --seed 0 --encoder-lr 2e-05 \
+    --head-lr 0.0001 --fewshot-draw 0 --fewshot-k 10 --no-export-epochs --out ckpt-fewshot-laya-d0-k10
+python berturk_train.py --data data/splits/selection_train.jsonl --base berturk --device mps --epochs 30 \
+    --stop-after-epoch 29 --lr 2e-05 --head-lr 0.0001 --seed 0 --fewshot-base --no-export-epochs \
+    --out ckpt-fewshot-berturk-base-s0
+python berturk_train.py --data data/splits/selection_train.jsonl --base ckpt-fewshot-berturk-base-s0 --device mps \
+    --epochs 10 --lr 2e-05 --head-lr 0.0001 --seed 0 --fewshot-draw 0 --fewshot-k 10 --no-export-epochs \
+    --out ckpt-fewshot-berturk-d0-k10
+python fewshot.py --drop-storage ckpt-fewshot-laya-base-s0 --storage ray_results   # free a finished run's Ray storage
+python fewshot.py --inspect CKPT...        # one runs-manifest entry per checkpoint: its binding and masking proof
+python fewshot.py --runs-manifest CKPT... --out results/fewshot/runs.json   # the allow-list, written once
+make fewshot-scoring        # ran once in Phase 9; never rerun: the gate refuses an existing dump
+python fewshot.py --prune CKPT...          # delete listed checkpoints once their verified dumps exist
+make fewshot-reports        # rebuild results/fewshot/fewshot.json from the committed dumps, no model
+python fewshot.py --render results/fewshot/fewshot.json   # the README Phase 9 block
+python report.py --verdict --fewshot results/fewshot/fewshot.json --out results/final/verdict.json   # (d) few-shot path
 ```
 
 `--checkpoint` (score, evaluate) and `--base` (train) accept `multilingual`, which loads the pinned,
 sha256-verified Laya weights, or a local Laya checkpoint dir. Nothing downloads an unpinned
 revision. `ray_train.py --data` only accepts a registered split with role `train`; `score.py` only
 a registered `val`, `test` or `hotels_probe` split (`hotels_probe` for `--model laya` and `berturk` only), and a
-fine-tuned checkpoint on test or HOTELS only through the Phase 8 protocol gate.
+fine-tuned checkpoint on test or HOTELS only through the Phase 8 protocol gate (a Phase 9 few-shot checkpoint
+listed in `results/fewshot/runs.json` on test only).
 
 Useful flags: `--neg K` (negatives kept per training message, default 8; 0 = all 48 labels),
 `--freeze-embeddings` / `--freeze-encoder` (the MPS out-of-memory fallback rungs; `--freeze-encoder`
@@ -1532,6 +1558,13 @@ in this section comes from the generated block below, and a test fails if the bl
   threshold or temperature. Forgetting is the change in old-tag micro-F1 from each masked base to the runs continued
   from it, at that base's val θ, which was chosen on its own val dump and never on test. The bootstrap interval is
   descriptive and gates nothing.
+- **Caveats.** BERTurk's new-tag micro-F1 in the forgetting table is zero on every continued run: its new-tag
+  scores stay below its masked base's val θ, so at that θ it predicts none of the held-out tags. Average precision
+  needs no θ, which is why it is the primary metric. Step parity (continued training to the same number of optimizer
+  steps) is not in the frozen protocol, so it was not run; it is deferred and disclosed here. Laya trains on neg8
+  items against BERTurk's full label rows, as in the main experiment, and a continued Laya run starts from its masked
+  base as saved (fp16-rounded weights, the same checkpoint that is scored as the masked base); the record's notes
+  state both.
 - **Compute fallback.** The compute fallback was not used: the decision record reads mode primary, so every draw
   continued from its own masked base seed and the base-model variance is captured.
 - **The GO block.** Criterion (d)'s few-shot path in the GO block reads this record's primary block at the frozen

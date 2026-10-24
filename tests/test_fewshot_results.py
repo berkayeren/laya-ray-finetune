@@ -52,6 +52,17 @@ and the once-only scoring, 09-12 the few-shot result record and the README block
   once-only scoring behind the allow-list, how to read the primary metric and forgetting, the record's compute mode
   and how the GO block uses the record, and holds no metric value (test_final_results.PROSE_NUMBER_RE).
 - data-marked: pilot.fewshot_report.build_record rebuilds the committed record byte for byte from the dumps.
+
+09-13 (the Phase 9 docs):
+- README.md's Files table has a row for every Phase 9 file (pilot/fewshot.py with its row builders, binding, runs
+  manifest and admission, pilot/fewshot_report.py, fewshot.py with every mode, the few-shot flags of ray_train.py and
+  berturk_train.py, score.py's few-shot allow-list, report.py --verdict --fewshot, results/fewshot/ and the few-shot
+  dumps), its Run block every Phase 9 command (each fewshot.py mode, both trainers' base and continued commands,
+  make fewshot-scoring marked as run once, make fewshot-reports, the --render and --verdict --fewshot lines), and the
+  phrase "Phase 9 adds" appears nowhere.
+- the Phase 9 prose states the caveats a reader needs: BERTurk's new-tag micro-F1 is zero on every continued run
+  because its new-tag scores stay below its base's val θ (checked against the committed record), AP is the primary
+  metric because it needs no θ, and step parity is deferred.
 Offline except the `data` tests.
 """
 import json
@@ -646,3 +657,111 @@ def test_fewshot_record_rebuilds():
     proto, pin = frozen()
     _, _, raw = committed_record()
     assert fr.record_bytes(fr.build_record(proto, pin)) == raw, "results/fewshot/fewshot.json does not rebuild"
+
+
+# ---- 09-13: the README Files table and Run block name every Phase 9 file and command ----
+
+PHASE9_FILES = {
+    "pilot/fewshot.py": ("masked_rows", "laya_rows", "berturk_rows", "binding", "check_base", "check_continued",
+                         "read_mode", "check_runs", "read_runs", "admitted"),
+    "pilot/fewshot_report.py": ("fewshot-results/1", "new-tag macro-AP", "forgetting", "bootstrap"),
+    "fewshot.py": ("--support-sets", "--counts", "--projection", "--inspect", "--runs-manifest", "--prune",
+                   "--drop-storage", "--report", "--render"),
+    "ray_train.py": ("--fewshot-base", "--mask-tags", "--fewshot-draw", "--fewshot-k"),
+    "berturk_train.py": ("--fewshot-base", "--fewshot-draw", "--fewshot-k"),
+    "score.py": ("results/fewshot/runs.json", "test only", "fewshot_runs_sha256"),
+    "report.py": ("--verdict --fewshot",),
+    "pilot/compute.py": ("fewshot_projection", "fewshot_decision"),
+    "results/": ("fewshot/", "projection.json", "runs.json", "fewshot.json", "few-shot dumps"),
+}
+PHASE9_RUN = (
+    "python fewshot.py --support-sets",
+    "python fewshot.py --counts",
+    "python fewshot.py --projection --out results/fewshot/projection.json",
+    "--fewshot-base --no-export-epochs --out ckpt-fewshot-laya-base-s0",
+    "--fewshot-draw 0 --fewshot-k 10 --no-export-epochs --out ckpt-fewshot-laya-d0-k10",
+    "--fewshot-base --no-export-epochs \\\n    --out ckpt-fewshot-berturk-base-s0",
+    "--fewshot-draw 0 --fewshot-k 10 --no-export-epochs \\\n    --out ckpt-fewshot-berturk-d0-k10",
+    "python fewshot.py --drop-storage",
+    "python fewshot.py --inspect",
+    "python fewshot.py --runs-manifest CKPT... --out results/fewshot/runs.json",
+    "make fewshot-scoring        # ran once in Phase 9; never rerun: the gate refuses an existing dump",
+    "python fewshot.py --prune",
+    "make fewshot-reports",
+    "python fewshot.py --render results/fewshot/fewshot.json",
+    "python report.py --verdict --fewshot results/fewshot/fewshot.json --out results/final/verdict.json",
+)
+
+
+def readme_part(text, heading, end):
+    """The README text from `heading` to the next `end` heading after it (exactly one of each)."""
+    assert text.count(heading) == 1, "README.md must hold one %r" % heading
+    i = text.index(heading)
+    j = text.index(end, i + len(heading))
+    return text[i:j]
+
+
+def files_rows(text):
+    """{file: description} of the README Files table (a row is | `file` | description |)."""
+    rows = {}
+    for line in readme_part(text, "\n## Files\n", "\n## Run\n").splitlines():
+        m = re.match(r"^\| `([^`]+)` \| (.*) \|$", line)
+        if m:
+            assert m.group(1) not in rows, "the Files table lists %s twice" % m.group(1)
+            rows[m.group(1)] = m.group(2)
+    return rows
+
+
+def run_block(text):
+    """The README Run block's fenced code."""
+    part = readme_part(text, "\n## Run\n", "\n## Scoring path\n")
+    i = part.index("```bash\n")
+    return part[i:part.index("\n```", i + 8)]
+
+
+def test_readme_names_the_phase9_files_and_commands():
+    text = readme_text()
+    assert "Phase 9 adds" not in text, "the README still says \"Phase 9 adds\": Phase 9 ran; state it in the past tense"
+    rows = files_rows(text)
+    for path, wants in PHASE9_FILES.items():
+        assert path in rows, "the README Files table has no row for %s" % path
+        missing = [w for w in wants if w not in rows[path]]
+        assert not missing, "the README Files row of %s does not name %s" % (path, ", ".join(missing))
+    run = run_block(text)
+    missing = [c for c in PHASE9_RUN if c not in run]
+    assert not missing, "the README Run block does not hold %r" % missing
+    i, j = run.index("python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --device mps"), \
+        run.index("python berturk_train.py --data data/splits/selection_train.jsonl --base berturk --device mps")
+    assert run.index("python fewshot.py --projection") < i < j < run.index("make fewshot-scoring") \
+        < run.index("make fewshot-reports"), "the Run block's Phase 9 commands must be in the order they ran"
+    for target in ("fewshot-scoring:", "fewshot-reports:"):
+        assert re.search(r"^%s$" % re.escape(target), makefile(), re.M), "the Makefile has no %s target" % target
+
+
+PHASE9_CAVEATS = ("new-tag micro-F1", "zero on every continued run", "below its masked base's val θ",
+                  "Average precision needs no θ", "primary metric", "Step parity", "deferred", "fp16-rounded")
+
+
+def test_readme_phase9_prose_states_the_caveats():
+    """The caveats Phase 10 carries are in the Phase 9 prose, and the BERTurk new-tag F1 statement is the record's."""
+    prose = phase9_prose()
+    for want in PHASE9_CAVEATS:
+        assert want in prose, "the README Phase 9 prose must state %r" % want
+    rec, _, _ = committed_record()
+    cont = {k: v for k, v in rec["f1"]["berturk"]["continued"].items()}
+    assert cont and all(v["new"] == 0.0 for v in cont.values()), \
+        "the prose says BERTurk's new-tag micro-F1 is zero on every continued run; the record disagrees"
+    import numpy as np
+    from intents import INTENTS
+    tags = list(INTENTS)
+    cols = [tags.index(t) for t in rec["tags"]]
+    by_key = {"d%d-k%d" % (e["draw"], e["k"]): e for e in load_json(RUNS)["entries"]
+              if e["kind"] == "berturk" and e["stage"] == "continued"}
+    assert set(by_key) == set(cont)
+    for key, e in by_key.items():
+        theta = rec["theta"]["berturk"]["s%d" % e["base_seed"]]
+        assert not set(rec["tags"]) & set(theta["per_tag"]), "a held-out tag has its own θ; the prose says the base θ"
+        with np.load(os.path.join(REPO_ROOT, "results", "dumps", e["dump_run_id"], "test.npz")) as z:
+            p = 1.0 / (1.0 + np.exp(-z["logits"][:, cols].astype(np.float64)))
+        assert p.max() < theta["global"], "BERTurk %s scores a held-out tag at or above its base's val θ" % key
+
