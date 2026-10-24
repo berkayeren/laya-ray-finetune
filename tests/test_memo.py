@@ -1,7 +1,7 @@
-"""The recommendation of REP-04 (Phase 10, plan 10-01): the frozen verdict rendered mechanically, never a judgement.
+"""The recommendation and the decision memo (pilot.memo): the frozen verdict rendered mechanically, never a judgement.
 
 - pilot.memo.recommendation maps the verdict/1 record's verdict field (GO -> GO, NO-GO -> NO-GO, INCONCLUSIVE -> NO-GO;
-  collect bank data, D-07) and refuses another schema, a provisional verdict, a verdict whose few-shot path of (d) is
+  collect bank data) and refuses another schema, a provisional verdict, a verdict whose few-shot path of (d) is
   still PENDING and an unknown verdict word, each in one SystemExit line naming the fix
 - pilot.memo.facts reads the block's numbers from the records: test n and no-intent n from the verdict's split block,
   the final_train folds from pilot.data.SPLITS, machine and memory from results/spike/mps_spike.json meta.platform, the
@@ -10,12 +10,18 @@
   pilot.protocol.require_frozen and pilot.verdict.check_record pass, so a missing, edited or unfrozen verdict is
   refused before anything is printed; render_recommendation refuses a verdict block that disagrees with its own
   render_go text
+- the README Recommendation section: its number-free prose states every caveat key, and its generated block equals
+  `report.py --recommendation`
+- results/final/memo.md equals pilot.memo.render_memo of the committed records (`make memo`): every line holding a
+  number is a whole line of a generated render, the memo fits one page and is bound to the verdict's records
 """
 import copy
 import hashlib
 import json
 import os
 import re
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -35,26 +41,27 @@ SPIKE = os.path.join(REPO_ROOT, "results", "spike", "mps_spike.json")
 V = pilot.verdict
 
 
-def committed():
+def committed() -> tuple[dict[str, Any], str]:
     with open(VERDICT, "rb") as f:
         raw = f.read()
     return json.loads(raw.decode("utf-8")), hashlib.sha256(raw).hexdigest()
 
 
-def planted(a, b, d, alt):
+def planted(a: str, b: str, d: str, alt: str) -> dict[str, Any]:
     """A deep copy of the committed verdict with only its verdict block replaced by pilot.verdict.decide's output."""
     v = copy.deepcopy(committed()[0])
     v["verdict"] = json.loads(json.dumps(V.decide(a, b, d, alt)))
     return v
 
 
-def rendered():
+def rendered() -> tuple[str, dict[str, Any], str, dict[str, Any]]:
+    """(the recommendation block, the committed verdict, its sha256, the frozen protocol)."""
     v, sha = committed()
     proto, _ = pilot.protocol.require_frozen()
     return memo.render_recommendation(v, VERDICT_REL, sha, memo.facts(v, proto)), v, sha, proto
 
 
-def test_recommendation_maps_the_verdict():
+def test_recommendation_maps_the_verdict() -> None:
     v, _ = committed()
     assert v["verdict"]["verdict"] == V.INCONCLUSIVE and v["verdict"]["rule"] == 4
     assert memo.recommendation(v) == "NO-GO; collect bank data"
@@ -70,7 +77,7 @@ def test_recommendation_maps_the_verdict():
         assert memo.recommendation(p) == memo.RECOMMENDATION[p["verdict"]["verdict"]]
 
 
-def test_recommendation_quotes_the_frozen_meaning():
+def test_recommendation_quotes_the_frozen_meaning() -> None:
     assert "counts as " + memo.RECOMMENDATION[V.INCONCLUSIVE] == V.INCONCLUSIVE_MEANS
     v, _ = committed()
     assert v["verdict"]["means"] == V.INCONCLUSIVE_MEANS
@@ -82,7 +89,7 @@ def test_recommendation_quotes_the_frozen_meaning():
     assert floats == [], "pilot/memo.py holds float literals %r; it may hold no threshold" % floats
 
 
-def test_recommendation_refuses_a_provisional_or_pending_verdict():
+def test_recommendation_refuses_a_provisional_or_pending_verdict() -> None:
     p = planted(V.PASS, V.PASS, V.PENDING, V.NOT_MET)
     assert p["verdict"]["provisional"] is True
     with pytest.raises(SystemExit, match="provisional"):
@@ -107,7 +114,7 @@ def test_recommendation_refuses_a_provisional_or_pending_verdict():
     assert "\n" not in str(info.value) and V.FEWSHOT_FIX in str(info.value)
 
 
-def test_cli_recommendation_matches_render(capsys, tmp_path):
+def test_cli_recommendation_matches_render(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     want, v, sha, proto = rendered()
     capsys.readouterr()
     got = report.main(["--recommendation", VERDICT])
@@ -135,12 +142,12 @@ def test_cli_recommendation_matches_render(capsys, tmp_path):
     assert memo.render_recommendation(v, VERDICT_REL, sha, memo.facts(v, proto)) == want      # identical input
 
 
-def sidecar_device(rid, split, root=REPO_ROOT):
+def sidecar_device(rid: str, split: str, root: str = REPO_ROOT) -> str | None:
     with open(os.path.join(root, "results", "dumps", rid, split + ".json"), encoding="utf-8") as f:
         return json.load(f)["scorer"]["device"]
 
 
-def scored_dumps(v):
+def scored_dumps(v: dict[str, Any]) -> list[tuple[str, str]]:
     """[(run id, split)] of every test and HOTELS dump the verdict reports: the final seeds on both, each reference on
     test and, where it has one, HOTELS."""
     out = [(s["dump_run_id"], split) for kind in V.KINDS for s in v["systems"][kind]["per_seed"]
@@ -152,7 +159,7 @@ def scored_dumps(v):
     return out
 
 
-def test_recommendation_facts_are_the_records(monkeypatch, tmp_path):
+def test_recommendation_facts_are_the_records(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import shutil
     want, v, sha, proto = rendered()
     f = memo.facts(v, proto)
@@ -161,7 +168,7 @@ def test_recommendation_facts_are_the_records(monkeypatch, tmp_path):
         plat = json.load(fh)["meta"]["platform"]
     refs = {r["run_id"]: sorted({sidecar_device(rid, split) for rid, split in scored_dumps(v) if rid == r["run_id"]},
                                 key=str) for r in v["references"]}
-    assert refs == {"majority": [None], "prior": [None], pilot.protocol.ZEROSHOT: ["cpu"]}, refs   # WR-06
+    assert refs == {"majority": [None], "prior": [None], pilot.protocol.ZEROSHOT: ["cpu"]}, refs
     assert {sidecar_device(s["dump_run_id"], split) for kind in V.KINDS for s in v["systems"][kind]["per_seed"]
             for split in ("test", "hotels_probe")} == {proto["scoring"]["device"]}
     assert f == {"n": v["split"]["n"], "n_no_intent": v["split"]["n_no_intent"],
@@ -220,7 +227,9 @@ def test_recommendation_facts_are_the_records(monkeypatch, tmp_path):
         memo.facts(v, proto)
 
 
-def test_cli_recommendation_refuses_an_edited_or_missing_verdict(capsys, monkeypatch, tmp_path):
+def test_cli_recommendation_refuses_an_edited_or_missing_verdict(capsys: pytest.CaptureFixture[str],
+                                                                  monkeypatch: pytest.MonkeyPatch,
+                                                                  tmp_path: Path) -> None:
     capsys.readouterr()
     with pytest.raises(SystemExit, match="not found; write the verdict with report.py --verdict --fewshot"):
         report.main(["--recommendation", str(tmp_path / "missing.json")])
@@ -250,7 +259,7 @@ def test_cli_recommendation_refuses_an_edited_or_missing_verdict(capsys, monkeyp
     assert not (tmp_path / "rec.md").exists()
 
 
-def test_recommendation_refuses_a_go_render_that_disagrees(monkeypatch):
+def test_recommendation_refuses_a_go_render_that_disagrees(monkeypatch: pytest.MonkeyPatch) -> None:
     want, v, sha, proto = rendered()
     f = memo.facts(v, proto)
     real = V.render_go
@@ -269,34 +278,47 @@ def test_recommendation_refuses_a_go_render_that_disagrees(monkeypatch):
     assert memo.render_recommendation(v, VERDICT_REL, sha, f) == want
 
 
-# ---- Task 3: the README "## Recommendation (Phase 10)" section (number-free prose, every D-08 caveat, the block) ----
+# ---- the README Recommendation section (number-free prose, every caveat key, the generated block) ----
 
-PHASE10_HEADING = "## Recommendation (Phase 10)"
-PHASE10_PROSE = ("mechanical", "frozen", "INCONCLUSIVE", "NO-GO", "collect bank data", "audit", "override",
-                 "results/final/memo.md", "make memo")
+REC_HEADING = "## Recommendation"                   # the section heading starts with this (the next level-2 heading)
+REC_PROSE = ("mechanical", "frozen", "INCONCLUSIVE", "NO-GO", "collect bank data", "audit", "override",
+             "results/final/memo.md", "make memo")
 REC_START, REC_END = "<!-- recommendation:start -->", "<!-- recommendation:end -->"
 FEWSHOT_END = "<!-- fewshot:end -->"
-PHASE3_HEADING = "## Results (Phase 3: baselines and zero-shot, full test split)"
 REGEN_LINE = ("Regenerate with `python report.py --recommendation results/final/verdict.json` (a test fails if it "
               "differs).")
-POINTER = "(#recommendation-phase-10)"
 
 
-def readme_text():
+def readme_text() -> str:
     with open(README, encoding="utf-8") as f:
         return f.read()
 
 
-def phase10_section(text):
+def rec_heading(text: str) -> str:
+    """The README's one level-2 heading line starting with REC_HEADING."""
+    hits = [l for l in text.split("\n") if l == REC_HEADING or l.startswith(REC_HEADING + " ")]
+    assert len(hits) == 1, "README.md has no single %r section: %r" % (REC_HEADING, hits)
+    return hits[0]
+
+
+def pointer(text: str) -> str:
+    """The markdown link target "(#anchor)" of the Recommendation heading, by GitHub's anchor rule (lower case,
+    punctuation dropped, spaces to hyphens)."""
+    title = rec_heading(text)[len("## "):].lower()
+    return "(#%s)" % re.sub(r"[^\w\- ]", "", title).replace(" ", "-")
+
+
+def recommendation_section(text: str) -> tuple[int, int]:
     """(start, end) offsets of the README's Recommendation section: its heading to the next "\\n## "."""
-    assert text.count("\n" + PHASE10_HEADING + "\n") == 1, "README.md has no single %r section" % PHASE10_HEADING
-    i = text.index("\n" + PHASE10_HEADING + "\n") + 1
-    j = text.find("\n## ", i + len(PHASE10_HEADING))
+    heading = rec_heading(text)
+    assert text.count("\n" + heading + "\n") == 1, "README.md has no single %r section" % heading
+    i = text.index("\n" + heading + "\n") + 1
+    j = text.find("\n## ", i + len(heading))
     return i, (len(text) if j < 0 else j)
 
 
-def test_hardware_caveat_holds_for_every_scored_dump():
-    """WR-06: the hardware caveat names no chip (no record holds one), and its device statements hold for every test
+def test_hardware_caveat_holds_for_every_scored_dump() -> None:
+    """The hardware caveat names no chip (no record holds one), and its device statements hold for every test
     and HOTELS dump the memo reports, by their sidecars: the final seeds on protocol.json's scoring device, zero-shot
     Laya on CPU, majority and prior with no model."""
     v, _ = committed()
@@ -318,7 +340,7 @@ def test_hardware_caveat_holds_for_every_scored_dump():
             assert sidecar_device(rid, split) == "mps", (rid, split)
 
 
-def test_caveats_cover_every_key_without_numbers():
+def test_caveats_cover_every_key_without_numbers() -> None:
     assert len(memo.CAVEATS) == 8 and len(set(memo.CAVEATS)) == 8
     for key in memo.CAVEAT_KEYS:
         assert any(key in c for c in memo.CAVEATS), "no pilot.memo.CAVEATS bullet states %r" % key
@@ -326,18 +348,19 @@ def test_caveats_cover_every_key_without_numbers():
     for c in memo.CAVEATS:
         hits = [m.group(0) for m in memo.NUMBER_RE.finditer(c)]
         assert hits == [], "the caveat %r holds numbers %r; numbers come from the records" % (c, hits)
-    for planted in ("k = 10", "+65.87", "DEC-01", "n = 413", "0.707", "-1.72 points"):
+    for planted in ("k = 10", "+65.87", "rule 4", "n = 413", "0.707", "-1.72 points"):
         assert memo.NUMBER_RE.search(planted), planted
     for clean in ("fp16", "neg8", "v2", "fp32", "Multi3NLU++", "Apple M4", "micro-F1", "θ", "rule_4"):
         assert not memo.NUMBER_RE.search(clean), clean
 
 
-def test_readme_recommendation_block_matches_render(capsys):
+def test_readme_recommendation_block_matches_render(capsys: pytest.CaptureFixture[str]) -> None:
     text = readme_text()
-    lo, hi = phase10_section(text)
-    assert text.index(FEWSHOT_END) < lo, "the Recommendation section must follow the Phase 9 section"
-    assert text.count(PHASE3_HEADING) == 1 and text[hi:].startswith("\n" + PHASE3_HEADING), (
-        "the Recommendation section must sit right before %r" % PHASE3_HEADING)
+    lo, hi = recommendation_section(text)
+    assert text.index(FEWSHOT_END) < lo, "the Recommendation section must follow the few-shot section"
+    following = text[hi + 1:].split("\n", 1)[0]
+    assert following.startswith("## ") and "baselines" in following, (
+        "the Recommendation section must sit right before the baselines results section, not %r" % following)
     assert text.count(REC_START) == 1 and text.count(REC_END) == 1, "README.md must hold exactly one %s pair" % REC_START
     i, j = text.index(REC_START), text.index(REC_END)
     assert lo < i < j < hi, "the recommendation block must sit inside the Recommendation section"
@@ -351,17 +374,17 @@ def test_readme_recommendation_block_matches_render(capsys):
         "regenerate it")
 
 
-def test_readme_phase10_prose():
+def test_readme_recommendation_prose() -> None:
     """The prose (heading to the first generated block) states the recommendation is the frozen protocol's mechanical
     verdict, INCONCLUSIVE counts as NO-GO and means collect bank data, humans can audit and override it, and every
-    D-08 caveat keyword; it holds no metric value of its own (PROSE_NUMBER_RE)."""
+    caveat keyword (pilot.memo.CAVEAT_KEYS); it holds no metric value of its own (PROSE_NUMBER_RE)."""
     from test_final_results import PROSE_NUMBER_RE
     text = readme_text()
-    lo, hi = phase10_section(text)
+    lo, hi = recommendation_section(text)
     k = text.find("<!--", lo)
     assert lo < k < hi, "the Recommendation section holds no generated block"
     prose = " ".join(text[lo:k].split())
-    for want in PHASE10_PROSE + memo.CAVEAT_KEYS:
+    for want in REC_PROSE + memo.CAVEAT_KEYS:
         assert want in prose, "the README Recommendation prose must state %r before its generated block" % want
     for want in ("protocol.json", "results/final/verdict.json", "results/fewshot/fewshot.json", "results/dumps/"):
         assert want in prose, "the README Recommendation prose must name the record %r" % want
@@ -369,19 +392,20 @@ def test_readme_phase10_prose():
     assert hits == [], "the README Recommendation prose holds metric values %r; numbers belong in the block" % hits
 
 
-def test_readme_points_to_the_recommendation():
+def test_readme_points_to_the_recommendation() -> None:
     from test_final_results import PROSE_NUMBER_RE
     text = readme_text()
+    link = pointer(text)
     intro = text[:text.index("\n## ")]
-    lines = [l for l in intro.split("\n") if POINTER in l]
-    assert len(lines) == 1, "the README intro must hold exactly one line linking to %s" % POINTER
+    lines = [l for l in intro.split("\n") if link in l]
+    assert len(lines) == 1, "the README intro must hold exactly one line linking to %s" % link
     first_paragraph_end = intro.index("\n\n", intro.index("\n\n") + 2)
     assert intro.index(lines[0]) > first_paragraph_end, "the pointer line must follow the intro's first paragraph"
     assert not PROSE_NUMBER_RE.search(lines[0]) and "Recommendation" in lines[0]
-    assert text.count(POINTER) == 1
+    assert text.count(link) == 1
 
 
-# ---- 10-02 Task 1: the one-page decision memo results/final/memo.md (REP-05, D-09, D-10) ----
+# ---- the one-page decision memo results/final/memo.md ----
 
 MEMO = os.path.join(REPO_ROOT, "results", "final", "memo.md")
 MAKEFILE = os.path.join(REPO_ROOT, "Makefile")
@@ -390,12 +414,13 @@ MEMO_HEADER = ("#   make memo  write results/final/memo.md, the one-page decisio
                "(no model)")
 
 
-def memo_text():
+def memo_text() -> str:
+    """pilot.memo.render_memo of the committed verdict and the renders report.memo_inputs builds."""
     v, _ = committed()
     return memo.render_memo(v, *report.memo_inputs(v))
 
 
-def test_memo_matches_render():
+def test_memo_matches_render() -> None:
     want = memo_text()
     assert os.path.isfile(MEMO), "results/final/memo.md is missing; write it with `make memo`"
     with open(MEMO, "rb") as f:
@@ -407,7 +432,7 @@ def test_memo_matches_render():
     assert "**Recommendation: NO-GO; collect bank data**" in lines
 
 
-def test_cli_memo_prints_the_memo(capsys, tmp_path):
+def test_cli_memo_prints_the_memo(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     want = memo_text()
     capsys.readouterr()
     assert report.main(["--memo", VERDICT]) == want
@@ -423,7 +448,7 @@ def test_cli_memo_prints_the_memo(capsys, tmp_path):
     assert "--memo VERDICT_JSON" in capsys.readouterr().err
 
 
-def test_makefile_memo_target():
+def test_makefile_memo_target() -> None:
     from test_final_results import recipe
     with open(MAKEFILE, encoding="utf-8") as f:
         text = f.read()
@@ -431,16 +456,16 @@ def test_makefile_memo_target():
     phony = re.search(r"^\.PHONY: (.+)$", text, re.M)
     assert phony and "memo" in phony.group(1).split(), "memo is not in .PHONY"
     assert MEMO_HEADER in text.split("\n"), "the Makefile header has no `make memo` line"
-    assert "memo.md" not in "\n".join(recipe(text, "final-reports")), "final-reports writes no memo (10-RESEARCH)"
+    assert "memo.md" not in "\n".join(recipe(text, "final-reports")), "final-reports writes no memo (`make memo` does)"
 
 
-# ---- 10-02 Task 2: the memo writes no number of its own, fits one page, is bound to the verdict's records ----
+# ---- the memo writes no number of its own, fits one page, is bound to the verdict's records ----
 
 DECIMAL_RE = re.compile(r"[-+]?\d+\.\d+")
 POINTS_RE = re.compile(r"[-+]?\d+(?:\.\d+)? points")
 
 
-def renders():
+def renders() -> dict[str, str]:
     """{source: text} of the five renders the memo may copy lines from, built here exactly as report.memo_inputs
     builds them (the few-shot record the verdict binds, results/final/confidence, results/latency)."""
     import pilot.fewshot_report
@@ -460,7 +485,7 @@ def renders():
                 os.path.join(REPO_ROOT, "results", "latency")))}
 
 
-def test_memo_numbers_are_render_lines():
+def test_memo_numbers_are_render_lines() -> None:
     src = renders()
     assert tuple(src) == memo.MEMO_SOURCES
     v, _ = committed()
@@ -488,7 +513,7 @@ def test_memo_numbers_are_render_lines():
     assert [t for t in got_pts if t not in points] == [], "memo points values outside the GO block and results table"
 
 
-def test_memo_fits_one_page(monkeypatch):
+def test_memo_fits_one_page(monkeypatch: pytest.MonkeyPatch) -> None:
     text = memo_text()
     assert memo.MEMO_MAX_LINES == 60
     n = len(text.splitlines())
@@ -503,7 +528,7 @@ def test_memo_fits_one_page(monkeypatch):
         memo.render_memo(v, *inputs)
 
 
-def test_memo_module_holds_no_number_literal():
+def test_memo_module_holds_no_number_literal() -> None:
     import ast
     with open(memo.__file__, encoding="utf-8") as f:
         tree = ast.parse(f.read())
@@ -514,7 +539,7 @@ def test_memo_module_holds_no_number_literal():
         assert not memo.NUMBER_RE.search(value), "the memo text %r holds a number" % value
 
 
-def test_memo_states_the_recommendation_and_caveats():
+def test_memo_states_the_recommendation_and_caveats() -> None:
     v, _ = committed()
     text = memo_text()
     lines = text.split("\n")
@@ -530,13 +555,13 @@ def test_memo_states_the_recommendation_and_caveats():
     assert at == sorted(at) and all(lines[i - 1] == "" for i in at), "the memo headings are out of order"
     assert [l for l in lines if l.startswith("## ")] == list(memo.MEMO_HEADINGS)
     for want in ("- Protocol: ", "- Split test: ", "| criterion | status | numbers |", "| alternative GO",
-                 "| system | run | micro-F1 | macro-F1 | exact match | top-1 |", "- Few-shot path (Phase ",
+                 "| system | run | micro-F1 | macro-F1 | exact match | top-1 |", "- Few-shot path",
                  "Criterion (d)'s few-shot path reads", "The test no-intent set holds",
                  "Latency is reported, not gated:"):
         assert sum(l.startswith(want) for l in lines) == 1, "the memo must hold one line starting %r" % want
 
 
-def test_memo_inputs_refuse_an_unbound_fewshot_record():
+def test_memo_inputs_refuse_an_unbound_fewshot_record() -> None:
     v, _ = committed()
     inputs = report.memo_inputs(v)
     bad = copy.deepcopy(v)
@@ -561,7 +586,7 @@ def test_memo_inputs_refuse_an_unbound_fewshot_record():
         memo.render_memo(p, *inputs)
 
 
-def test_memo_holds_no_text_or_paths():
+def test_memo_holds_no_text_or_paths() -> None:
     text = memo_text()
     assert "bank_" not in text and "hotel_" not in text, "the memo holds a message uid"
     assert os.path.expanduser("~") not in text, "the memo holds a local home path"

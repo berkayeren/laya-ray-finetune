@@ -1,6 +1,6 @@
-"""The recommendation (REP-04) and the decision memo (REP-05) of Phase 10: renders of the frozen verdict, no judgement.
+"""The go/no-go recommendation and the one-page decision memo: renders of the frozen verdict, no judgement.
 
-The go/no-go recommendation is a mapping of the verdict/1 record's verdict field (D-07): GO -> GO, NO-GO -> NO-GO,
+The recommendation is a mapping of the verdict/1 record's verdict field (RECOMMENDATION): GO -> GO, NO-GO -> NO-GO,
 INCONCLUSIVE -> NO-GO; collect bank data, which is pilot.verdict.INCONCLUSIVE_MEANS without its "counts as ". Nothing
 here decides, re-derives or overrides a status: every status and the verdict are computed by pilot.verdict from the
 record's own numbers at the frozen thresholds, and the caller (report.py --recommendation) runs
@@ -13,13 +13,13 @@ The block's facts are read from the records (facts): the test split's size and i
 verdict's split block, the final_train folds from pilot.data.SPLITS, the machine and its memory from the spike
 record's meta.platform, and the scorer device of every test and HOTELS dump from its sidecar (scorer.device): the
 final seeds' must be protocol.json's scoring device, zero-shot Laya's is the CPU it was scored on, and the majority
-and prior baselines run no model (10-REVIEW WR-06). No hardware name is typed here: the chip is in no record. The module holds no threshold and no
-float literal (a test walks its AST), and imports the stdlib, pilot.verdict and pilot.data only, so report.py stays
-numpy only.
+and prior baselines run no model. No hardware name is typed here: the chip is in no record. The module holds no
+threshold and no float literal (a test walks its AST), and imports the stdlib, pilot.verdict and pilot.data only, so
+report.py stays numpy only.
 
-The decision memo (REP-05, D-09, D-10) is render_memo: results/final/memo.md, at most MEMO_MAX_LINES lines, written
-by `make memo` (report.py --memo, after require_frozen and check_record). It writes no number of its own: every line
-that holds a number is a whole line selected from a generated README render (MEMO_SOURCES: pilot.verdict.render_go,
+The decision memo is render_memo: results/final/memo.md, at most MEMO_MAX_LINES lines, written by `make memo`
+(report.py --memo, after require_frozen and check_record). It writes no number of its own: every line that holds a
+number is a whole line selected from a generated README render (MEMO_SOURCES: pilot.verdict.render_go,
 pilot.verdict.render_final_table, the few-shot block, the final confidence block, the latency block), and the
 connective text, the headings and the CAVEATS are digit-free constants. The few-shot per-draw table is not copied:
 the memo carries the few-shot result through the GO block's few-shot path line and (d) row, and the README few-shot
@@ -35,6 +35,7 @@ usage: from pilot import memo
 import json
 import os
 import re
+from typing import Any, Callable
 
 import pilot.data
 import pilot.verdict
@@ -45,16 +46,17 @@ RECOMMENDATION = {pilot.verdict.GO: "GO", pilot.verdict.NO_GO: "NO-GO",
 RECOMMENDATION_HEADING = "### Recommendation (mechanical, from the frozen verdict)"
 SPIKE_RECORD = "results/spike/mps_spike.json"
 SPIKE_FIX = "restore it with `git checkout -- %s`" % SPIKE_RECORD
+# the few-shot block of a verdict built without the few-shot results record ("phase" is a key of the committed record)
 PENDING_FEWSHOT = {"status": pilot.verdict.PENDING, "phase": 9}
 GIB = 2 ** 30
 # a number token: digits with an optional sign and decimal part, not glued to a letter, digit or underscore ("fp16",
-# "neg8" and "v2" are not numbers; "k = 10", "+65.87" and DEC-01's "01" are)
+# "neg8" and "v2" are not numbers; "k = 10", "+65.87" and "rule 4" are)
 NUMBER_RE = re.compile(r"(?<![A-Za-z0-9_])[-+]?\d+(?:\.\d+)?(?![A-Za-z0-9_])")
-# the D-08 caveats as digit-free keys: each is stated by a CAVEATS bullet and by the README Recommendation prose
+# the caveats as digit-free keys: each is stated by a CAVEATS bullet and by the README Recommendation prose
 CAVEAT_KEYS = ("translated", "small dataset", "single split", "laptop hardware", "no-intent test set", "carried over",
                "rule order", "never re-selected", "new-tag micro-F1", "post hoc", "epoch parity", "sampled negatives",
                "fp16", "no fallback", "descriptive", "reported, not gated", "bank-name review")
-# the caveats in the order the memo (10-02) prints them; no number: the sizes and settings live in the records
+# the caveats in the order the memo prints them; no number: the sizes and settings live in the records
 CAVEATS = (
     "Data: Multi3NLU++ Turkish is translated data, a small dataset and a single split; no bank data was used.",
     "Hardware: laptop hardware, one Apple laptop with unified memory; the final seeds were trained and scored on MPS "
@@ -77,7 +79,7 @@ CAVEATS = (
 )
 
 
-def recommendation(v):
+def recommendation(v: Any) -> str:
     """The recommendation of a final verdict/1 record: RECOMMENDATION[v["verdict"]["verdict"]]; SystemExit for another
     schema, a provisional verdict, a few-shot path of (d) still PENDING or an unknown verdict word."""
     fix = pilot.verdict.FEWSHOT_FIX
@@ -89,7 +91,7 @@ def recommendation(v):
         raise SystemExit("the verdict is provisional (%r); a recommendation is only the final verdict's mapping, %s"
                          % (dec.get("verdict"), fix))
     if v.get("fewshot") == PENDING_FEWSHOT:
-        raise SystemExit("the verdict's few-shot path of (d) is PENDING; a recommendation needs the Phase 9 few-shot "
+        raise SystemExit("the verdict's few-shot path of (d) is PENDING; a recommendation needs the few-shot results "
                          "record, %s" % fix)
     word = dec.get("verdict")
     if not isinstance(word, str) or word not in RECOMMENDATION:
@@ -97,7 +99,7 @@ def recommendation(v):
     return RECOMMENDATION[word]
 
 
-def scorer_device(root, run_id, split):
+def scorer_device(root: str, run_id: str, split: str) -> str | None:
     """The scorer.device of results/dumps/<run_id>/<split>.json under root (None: a baseline that runs no model);
     SystemExit for a missing or malformed sidecar."""
     rel = "results/dumps/%s/%s.json" % (run_id, split)
@@ -113,7 +115,7 @@ def scorer_device(root, run_id, split):
     return device
 
 
-def scorers(v, protocol, root=REPO_ROOT):
+def scorers(v: dict[str, Any], protocol: dict[str, Any], root: str = REPO_ROOT) -> list[tuple[str | None, list[str]]]:
     """[(device or None, [label])] of every test and HOTELS dump the verdict reports, grouped by the scorer.device of
     its sidecar in first-seen order: each fine-tuned model's final seeds (the verdict's per_seed dump run ids, label
     "the KIND final seeds"; every one must be protocol.json's scoring device), then the references in the results
@@ -145,11 +147,12 @@ def scorers(v, protocol, root=REPO_ROOT):
     return out
 
 
-def _and(labels):
+def _and(labels: list[str]) -> str:
+    """The labels joined as English: "A", "A and B", "A, B and C"."""
     return labels[0] if len(labels) == 1 else "%s and %s" % (", ".join(labels[:-1]), labels[-1])
 
 
-def render_scorers(groups, device):
+def render_scorers(groups: list[tuple[str | None, list[str]]], device: str) -> str:
     """The scorer-device clause of the Hardware line: "mps for A and B (protocol.json scoring), cpu for C, no model for
     D and E"."""
     return ", ".join("%s for %s%s" % (d if d is not None else "no model", _and(labels),
@@ -157,7 +160,7 @@ def render_scorers(groups, device):
                      for d, labels in groups)
 
 
-def facts(v, protocol, root=REPO_ROOT):
+def facts(v: dict[str, Any], protocol: dict[str, Any], root: str = REPO_ROOT) -> dict[str, Any]:
     """The block's record facts: {n, n_no_intent} of the verdict's split block, the final_train folds as "first-last"
     (pilot.data.SPLITS, one contiguous range), the machine and its memory in whole GiB (SPIKE_RECORD meta.platform),
     the scorer device (protocol.json scoring) and scorers(v, protocol, root), the scorer device of every test and
@@ -189,7 +192,8 @@ def facts(v, protocol, root=REPO_ROOT):
             "memory_gib": mem // GIB, "device": device, "scorers": scorers(v, protocol, root)}
 
 
-def _one(lines, test, what):
+def _one(lines: list[str], test: Callable[[str], bool], what: str) -> str:
+    """The one line of lines for which test holds; SystemExit when there is none or more than one."""
     hits = [l for l in lines if test(l)]
     if len(hits) != 1:
         raise SystemExit("the GO render holds %d %s lines, not exactly one; the verdict disagrees with its own GO "
@@ -197,7 +201,7 @@ def _one(lines, test, what):
     return hits[0]
 
 
-def render_recommendation(v, verdict_path, verdict_sha256, facts):
+def render_recommendation(v: dict[str, Any], verdict_path: str, verdict_sha256: str, facts: dict[str, Any]) -> str:
     """The README recommendation block (markdown, level-3 heading) of a final verdict/1 record: the recommendation
     (recommendation(v)), the verdict and the frozen rule line that fired (VERDICT_RULES verbatim), the GO render's
     Statuses line, the records with their sha256 prefixes (verdict_path is repo-relative), and the record facts
@@ -238,7 +242,7 @@ def render_recommendation(v, verdict_path, verdict_sha256, facts):
     return "\n".join(out) + "\n"
 
 
-# ---- the one-page decision memo (REP-05, D-09, D-10): whole render lines plus digit-free text ----
+# ---- the one-page decision memo: whole render lines plus digit-free text ----
 
 MEMO_TITLE = "# Decision memo: Laya vs BERTurk on Turkish banking intents"
 MEMO_GENERATED = ("Generated by `make memo` from results/final/verdict.json, results/fewshot/fewshot.json, "
@@ -254,14 +258,14 @@ MEMO_AUDIT = ("- Audit: protocol.json, results/final/verdict.json, results/fewsh
 MEMO_REBUILD = ("- Rebuild: `make report` rebuilds every report, the README blocks and this memo from the committed "
                 "dumps, without training or scoring, and fails on any file that differs; `make reproduce` runs the "
                 "whole pipeline in order and skips every step its committed artifacts prove done.")
-MEMO_MAX_LINES = 60                                         # one page (CONTEXT D-09: about sixty lines)
+MEMO_MAX_LINES = 60                                         # one page: about sixty lines
 MEMO_SOURCES = ("go", "table", "fewshot", "confidence", "latency")
 GO_TABLE_HEADER = "| criterion | status | numbers |"
 GO_TABLE_LAST = "| alternative GO"
 RESULTS_TABLE_HEADER = "| system | run | micro-F1 | macro-F1 | exact match | top-1 |"
 
 
-def _line(text, prefix, what):
+def _line(text: str, prefix: str, what: str) -> str:
     """The one line of text starting with prefix; SystemExit when there is none or more than one."""
     hits = [l for l in text.split("\n") if l.startswith(prefix)]
     if len(hits) != 1:
@@ -270,7 +274,7 @@ def _line(text, prefix, what):
     return hits[0]
 
 
-def _table(text, header, what):
+def _table(text: str, header: str, what: str) -> list[str]:
     """The contiguous run of lines starting "|" from the one line equal to header; SystemExit otherwise."""
     lines = text.split("\n")
     at = [i for i, l in enumerate(lines) if l == header]
@@ -285,7 +289,7 @@ def _table(text, header, what):
     return out
 
 
-def render_memo(v, fewshot_md, confidence_md, latency_md):
+def render_memo(v: dict[str, Any], fewshot_md: str, confidence_md: str, latency_md: str) -> str:
     """The one-page decision memo (markdown) of a final verdict/1 record: the recommendation (recommendation(v)) and
     the GO block's fired rule line, the evidence (the GO block's protocol and split lines, the final confidence
     block's no-intent line, the GO criteria table, the latency block's label line), the results table, the few-shot
@@ -319,7 +323,7 @@ def render_memo(v, fewshot_md, confidence_md, latency_md):
            _line(src["confidence"], "The test no-intent set holds", "confidence"), ""] + criteria + [
            "", _line(src["latency"], "Latency is reported, not gated:", "latency"),
            "", h[2], ""] + _table(src["table"], RESULTS_TABLE_HEADER, "table") + [
-           "", h[3], _line(src["go"], "- Few-shot path (Phase", "go"),
+           "", h[3], _line(src["go"], "- Few-shot path", "go"),
            _line(src["fewshot"], "Criterion (d)'s few-shot path reads", "fewshot"),
            "", h[4]] + ["- " + c for c in CAVEATS] + [
            "", h[5], MEMO_AUDIT, MEMO_REBUILD]

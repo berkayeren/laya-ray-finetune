@@ -1,10 +1,14 @@
-"""The step registry of the one-command reproduction (ENV-03, plan 10-03): the D-01 step order, the done state of the
-committed tree from its hash-verified records only (D-02), the fail-closed refusals of partial, tampered, orphan and
-out-of-order trees on synthetic copies (D-03), and the torch-free import contract."""
+"""The one-command reproduction (pilot.reproduce, reproduce.py): the pipeline step order, the done state of the
+committed tree from its hash-verified records only, the fail-closed refusals of partial, tampered, orphan and
+out-of-order trees on synthetic copies, the torch-free import contract, eval-only (no model, the tree checks before
+and after the rebuild), --verify-checkpoints, the command layer and dry run, full mode on synthetic registries and on
+the real registry, and the README Files rows, Run commands and reproduction rules."""
 import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any, Callable, Iterable, Sequence
 
 import pytest
 
@@ -14,34 +18,36 @@ from pilot.data import REPO_ROOT
 
 pytestmark = pytest.mark.unit
 
-D01 = ("data", "baselines", "laya-selection", "laya-postfit", "laya-final", "berturk-selection", "berturk-postfit",
+ORDER = ("data", "baselines", "laya-selection", "laya-postfit", "laya-final", "berturk-selection", "berturk-postfit",
        "berturk-reference", "berturk-final", "confidence", "latency", "final-scoring", "final-reports",
        "fewshot-projection", "fewshot-bases", "fewshot-continued", "fewshot-scoring", "fewshot-reports", "report")
-SCORED = D01[1:18]                                # baselines .. fewshot-reports: done on the committed tree
+SCORED = ORDER[1:18]                                # baselines .. fewshot-reports: done on the committed tree
 PLAN_LINE = re.compile(r"^ ?([0-9]+) (\S+) +(done|todo|run)\b")
+Registry = tuple[str, dict[str, bytes], Callable[..., None]]     # (root, recorded bytes, set_commands)
 
 
-def states(rows):
+def states(rows: list[rp.Row]) -> dict[str, str]:
+    """{step name: state} of plan rows."""
     return {step["name"]: st for step, st, _ in rows}
 
 
-def test_steps_are_the_d01_order():
-    assert rp.STEP_NAMES == D01
-    assert tuple(s["name"] for s in rp.STEPS) == D01
+def test_steps_are_the_pipeline_order() -> None:
+    assert rp.STEP_NAMES == ORDER
+    assert tuple(s["name"] for s in rp.STEPS) == ORDER
     assert rp.LOCAL == ("data",) and rp.ALWAYS == ("report",)
     assert rp.GATED == ("final-scoring", "fewshot-scoring")
     assert all(s["gated"] == (s["name"] in rp.GATED) and s["model"] == (s["name"] in rp.MODEL_STEPS)
                for s in rp.STEPS)
 
 
-def test_committed_tree_is_done():
+def test_committed_tree_is_done() -> None:
     st = states(rp.plan(REPO_ROOT))
     assert [n for n in SCORED if st[n] != "done"] == [], st
     assert st["report"] == "run"
     assert st["data"] in ("done", "todo")
 
 
-def test_every_protocol_input_is_one_steps_evidence():
+def test_every_protocol_input_is_one_steps_evidence() -> None:
     proto, pin = pilot.protocol.require_frozen()
     manifest = os.path.join(REPO_ROOT, "data", "splits.json")
     owners = {}
@@ -54,7 +60,7 @@ def test_every_protocol_input_is_one_steps_evidence():
     assert bad == {}, bad
 
 
-def test_plan_reads_only_committed_paths():
+def test_plan_reads_only_committed_paths() -> None:
     proto, pin = pilot.protocol.require_frozen()
     manifest = os.path.join(REPO_ROOT, "data", "splits.json")
     paths = [f for step in rp.STEPS for it in step["evidence"](REPO_ROOT, proto, pin, manifest)
@@ -65,20 +71,20 @@ def test_plan_reads_only_committed_paths():
     assert bad == [], bad
 
 
-def test_cli_plan_prints_every_step():
+def test_cli_plan_prints_every_step() -> None:
     out = subprocess.run([sys.executable, "-m", "pilot.reproduce", "--plan"], cwd=REPO_ROOT, capture_output=True,
                          text=True)
     assert out.returncode == 0, out.stderr
     rows = [m.groups() for m in (PLAN_LINE.match(l) for l in out.stdout.splitlines()) if m]
     assert [int(i) for i, _, _ in rows] == list(range(1, 20))
-    assert tuple(n for _, n, _ in rows) == D01
+    assert tuple(n for _, n, _ in rows) == ORDER
     assert all(s == "done" for _, n, s in rows if n in SCORED) and rows[-1][2] == "run", out.stdout
     assert pilot.protocol.PROTOCOL_SHA256[:12] in out.stdout.splitlines()[0]
     bare = subprocess.run([sys.executable, "-m", "pilot.reproduce"], cwd=REPO_ROOT, capture_output=True, text=True)
     assert bare.returncode == 2 and "--plan" in bare.stderr
 
 
-def test_reproduce_stays_torch_free():
+def test_reproduce_stays_torch_free() -> None:
     code = ("import sys, pilot.reproduce as r\n"
             "import_time = sorted(m.split('.')[0] for m in sys.modules if m.split('.')[0] in "
             "('numpy', 'scipy', 'torch', 'transformers', 'laya', 'ray'))\n"
@@ -93,7 +99,7 @@ def test_reproduce_stays_torch_free():
 # ---- synthetic trees (tmp copies; the committed tree is never touched) ----
 
 @pytest.fixture
-def tree(tmp_path):
+def tree(tmp_path: Path) -> str:
     """A copy of the committed record (protocol.json, Makefile, data/splits.json, results/) without the local split
     and audit files."""
     import shutil
@@ -104,7 +110,8 @@ def tree(tmp_path):
     return str(tmp_path)
 
 
-def refusal(root):
+def refusal(root: str) -> str:
+    """The one-line SystemExit message of plan(root)."""
     with pytest.raises(SystemExit) as e:
         rp.plan(root)
     msg = str(e.value.code)
@@ -112,12 +119,13 @@ def refusal(root):
     return msg
 
 
-def first_final_seed():
+def first_final_seed() -> str:
+    """The dump run id of the frozen protocol's first Laya final seed."""
     proto, _ = pilot.protocol.require_frozen()
     return pilot.protocol.final_seeds(proto, "laya")[0]["dump_run_id"]
 
 
-def test_state_todo_tail_is_accepted(tree):
+def test_state_todo_tail_is_accepted(tree: str) -> None:
     import json
     import shutil
     with open(os.path.join(tree, "results", "fewshot", "runs.json"), encoding="utf-8") as f:
@@ -127,12 +135,12 @@ def test_state_todo_tail_is_accepted(tree):
     for rid in ids:
         shutil.rmtree(os.path.join(tree, "results", "dumps", rid))
     st = states(rp.plan(tree))
-    tail = D01[13:18]
+    tail = ORDER[13:18]
     assert [n for n in tail if st[n] != "todo"] == [], st
-    assert [n for n in D01[1:13] if st[n] != "done"] == [], st
+    assert [n for n in ORDER[1:13] if st[n] != "done"] == [], st
 
 
-def test_state_all_todo_without_results(tree):
+def test_state_all_todo_without_results(tree: str) -> None:
     import shutil
     shutil.rmtree(os.path.join(tree, "results"))
     st = states(rp.plan(tree))
@@ -140,7 +148,7 @@ def test_state_all_todo_without_results(tree):
     assert st["report"] == "run" and st["data"] == "todo"
 
 
-def test_state_refuses_a_partly_done_step(tree):
+def test_state_refuses_a_partly_done_step(tree: str) -> None:
     rid = first_final_seed()
     for ext in ("npz", "json"):
         os.remove(os.path.join(tree, "results", "dumps", rid, "test." + ext))
@@ -149,7 +157,7 @@ def test_state_refuses_a_partly_done_step(tree):
     assert "results/dumps/%s/test" % rid in msg and "git checkout" in msg, msg
 
 
-def test_state_refuses_a_tampered_dump(tree):
+def test_state_refuses_a_tampered_dump(tree: str) -> None:
     from pilot import dumps
     rid = rp.makefile_vars(REPO_ROOT)["LAYA_SELECTION"].split()[0]
     npz = os.path.join(tree, "results", "dumps", rid, "val.npz")
@@ -166,7 +174,7 @@ def test_state_refuses_a_tampered_dump(tree):
     assert msg.endswith("`git checkout -- results/dumps/%s/val.npz results/dumps/%s/val.json`" % (rid, rid)), msg
 
 
-def test_state_refuses_a_tampered_pinned_record(tree):
+def test_state_refuses_a_tampered_pinned_record(tree: str) -> None:
     from pilot.data import sha256_file
     path = os.path.join(tree, "results", "postfit", "laya.json")
     with open(path, "ab") as f:
@@ -178,7 +186,7 @@ def test_state_refuses_a_tampered_pinned_record(tree):
     assert msg.endswith("`git checkout -- results/postfit/laya.json`"), msg
 
 
-def test_state_refuses_an_orphan_gated_npz(tree):
+def test_state_refuses_an_orphan_gated_npz(tree: str) -> None:
     rid = first_final_seed()
     os.remove(os.path.join(tree, "results", "dumps", rid, "test.json"))
     msg = refusal(tree)
@@ -188,7 +196,7 @@ def test_state_refuses_an_orphan_gated_npz(tree):
     assert msg.endswith("`git checkout -- results/dumps/%s/test.npz results/dumps/%s/test.json`" % (rid, rid)), msg
 
 
-def test_state_refuses_a_step_done_after_a_todo_step(tree):
+def test_state_refuses_a_step_done_after_a_todo_step(tree: str) -> None:
     import shutil
     shutil.rmtree(os.path.join(tree, "results", "confidence"))
     msg = refusal(tree)
@@ -196,7 +204,7 @@ def test_state_refuses_a_step_done_after_a_todo_step(tree):
     assert "results/confidence/" in msg and "git checkout --" in msg, msg
 
 
-def test_data_step_is_local(tree):
+def test_data_step_is_local(tree: str) -> None:
     st, want = states(rp.plan(tree)), states(rp.plan(REPO_ROOT))
     assert st["data"] == "todo"                    # no data/splits/: todo, exempt from the order rule
     assert {n: s for n, s in st.items() if n != "data"} == {n: s for n, s in want.items() if n != "data"}
@@ -208,14 +216,14 @@ def test_data_step_is_local(tree):
     assert msg.endswith("regenerate with `make data`") and msg.count("make data") == 1, msg
 
 
-# ---- eval-only (plan 10-04, D-05, D-06): rebuild every report from the committed dumps, no training, no scoring ----
+# ---- eval-only: rebuild every report from the committed dumps, no training, no scoring ----
 
 BANNED_SCRIPTS = ("score.py", "ray_train.py", "berturk_train.py", "compute_checkpoint.py", "mps_spike.py")
 BANNED_TARGETS = ("baselines", "final-scoring", "fewshot-scoring")
 START_RE = re.compile(r"<!-- (\S+):start -->")
 
 
-def recipe(target):
+def recipe(target: str) -> list[str]:
     """The recipe lines of one Makefile target."""
     with open(os.path.join(REPO_ROOT, "Makefile"), encoding="utf-8") as f:
         lines = f.read().split("\n")
@@ -228,7 +236,7 @@ def recipe(target):
     return out
 
 
-def test_eval_only_runs_no_model():
+def test_eval_only_runs_no_model() -> None:
     cmds = list(rp.REBUILD) + [cmd for _, cmd in rp.README_BLOCKS]
     assert len(rp.REBUILD) == 9 and len(rp.README_BLOCKS) == 11
     for cmd in cmds:
@@ -250,7 +258,7 @@ def test_eval_only_runs_no_model():
     assert rp.CHECKED == ("results/", "README.md", "protocol.json", "Makefile", "reproduce.py", "pilot/reproduce.py")
 
 
-def test_readme_blocks_cover_every_marker():
+def test_readme_blocks_cover_every_marker() -> None:
     with open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8") as f:
         names = START_RE.findall(f.read())
     assert len(names) == len(set(names)) == 11
@@ -258,7 +266,7 @@ def test_readme_blocks_cover_every_marker():
     assert len(rp.README_BLOCKS) == len({n for n, _ in rp.README_BLOCKS})
 
 
-def test_readme_rewriter_reproduces_the_readme():
+def test_readme_rewriter_reproduces_the_readme() -> None:
     with open(os.path.join(REPO_ROOT, "README.md"), "rb") as f:
         raw = f.read()
     renders = rp.render_blocks(REPO_ROOT)
@@ -267,8 +275,8 @@ def test_readme_rewriter_reproduces_the_readme():
     assert rp.rewrite_blocks(raw.decode("utf-8"), renders).encode("utf-8") == raw
 
 
-def test_makefile_reproduce_and_report_targets():
-    """make reproduce is the one target (MODE ?= full); make report is its eval-only form, recursing into it (D-05)."""
+def test_makefile_reproduce_and_report_targets() -> None:
+    """make reproduce is the one target (MODE ?= full); make report is its eval-only form, recursing into it."""
     assert recipe("reproduce") == ["$(PYTHON) reproduce.py --mode $(MODE) "
                                    "$(if $(VERIFY_CHECKPOINTS),--verify-checkpoints,)"]
     assert recipe("report") == ['$(MAKE) reproduce MODE=eval-only PYTHON="$(PYTHON)"']
@@ -291,7 +299,7 @@ def test_makefile_reproduce_and_report_targets():
     assert out.returncode == 0 and out.stdout.split("\n")[0].rstrip() == "py reproduce.py --mode full", out.stdout
 
 
-def _data_done(monkeypatch):
+def _data_done(monkeypatch: pytest.MonkeyPatch) -> None:
     """The data step's evidence stubbed to one verified item, so a test of the committed record needs no local
     split files."""
     step = rp.STEPS[rp.STEP_NAMES.index("data")]
@@ -299,42 +307,43 @@ def _data_done(monkeypatch):
         rp._item("data/splits/val.jsonl", True, True, "")])
 
 
-def test_full_mode_on_the_committed_tree_runs_only_the_report(monkeypatch):
+def test_full_mode_on_the_committed_tree_runs_only_the_report(monkeypatch: pytest.MonkeyPatch) -> None:
     _data_done(monkeypatch)
     calls, reports, lines = [], [], []
 
-    def run(cmd, root):
+    def run(cmd: Sequence[str], root: str) -> int:
         calls.append(cmd)
         return 0
 
-    def capture(cmd, root):
+    def capture(cmd: Sequence[str], root: str) -> str:
         calls.append(cmd)
         return "x"
 
-    def report(root, run, blocks, precheck=True, out=print):
+    def report(root: str, run: rp.Runner, blocks: rp.Blocks | None, precheck: bool = True, out: rp.Out = print) -> None:
         reports.append((root, precheck))
     rp.run_full(REPO_ROOT, run=run, capture=capture, blocks=None, report=report, out=lines.append)
     assert calls == [] and reports == [(REPO_ROOT, True)], (calls, reports)
-    assert lines == ["skip %s (done)" % n for n in D01[:18]], lines
+    assert lines == ["skip %s (done)" % n for n in ORDER[:18]], lines
     assert rp.DISCLOSURE not in lines and not [l for l in lines if l.startswith("run: ")]
 
 
 # ---- eval-only fail paths (tmp git repos and synthetic trees; the committed tree is never touched) ----
 
-def _git_env(monkeypatch):
+def _git_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """No global or system git config (commit.gpgsign, core.hooksPath, excludes) reaches a temp repo."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
 
 
-def git_in(root, *args):
+def git_in(root: str | Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    """git ARGS in root with a fixed identity, no signing and no hooks; check=True."""
     return subprocess.run(("git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c",
                            "commit.gpgsign=false", "-c", "core.hooksPath=%s" % os.devnull) + args, cwd=root,
                           check=True, capture_output=True)
 
 
 @pytest.fixture
-def repo(tmp_path, monkeypatch):
+def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     """A tmp git repo with one committed results/x.json, README.md and protocol.json."""
     _git_env(monkeypatch)
     root = tmp_path / "repo"
@@ -348,11 +357,11 @@ def repo(tmp_path, monkeypatch):
     return str(root)
 
 
-def fake_run(write=None):
+def fake_run(write: dict[str, bytes] | None = None) -> tuple[rp.Runner, list[Sequence[str]]]:
     """A run() that records each command and, on the first one, writes `write` ({rel: bytes}) under root."""
     calls = []
 
-    def run(cmd, root):
+    def run(cmd: Sequence[str], root: str) -> int:
         if write and not calls:
             for rel, data in write.items():
                 with open(os.path.join(root, rel), "wb") as f:
@@ -362,11 +371,12 @@ def fake_run(write=None):
     return run, calls
 
 
-def no_blocks(root):
+def no_blocks(root: str) -> list[tuple[str, str]]:
+    """A render_blocks stand-in that renders no README block."""
     return []
 
 
-def test_readme_rewriter_refuses_bad_markers():
+def test_readme_rewriter_refuses_bad_markers() -> None:
     good = "a\n<!-- x:start -->\nold\n<!-- x:end -->\nb\n"
     assert rp.rewrite_blocks(good, [("x", "new\n")]) == "a\n<!-- x:start -->\nnew\n<!-- x:end -->\nb\n"
     assert rp.rewrite_blocks(good, [("x", "old\n")]) == good           # every body already its render: unchanged
@@ -381,7 +391,7 @@ def test_readme_rewriter_refuses_bad_markers():
         assert "git checkout -- README.md" in msg and "\n" not in msg, (case, msg)
 
 
-def test_tree_changes_names_each_changed_path(repo, tmp_path):
+def test_tree_changes_names_each_changed_path(repo: str, tmp_path: Path) -> None:
     assert rp.tree_changes(repo) == []
     with open(os.path.join(repo, "results", "x.json"), "ab") as f:
         f.write(b" ")
@@ -405,7 +415,7 @@ def test_tree_changes_names_each_changed_path(repo, tmp_path):
     assert rp.snapshot(str(plain)) != snap and rp._snapshot_diff(snap, rp.snapshot(str(plain))) == ["results/x.json"]
 
 
-def test_eval_only_refuses_a_dirty_tree_before_any_command(repo):
+def test_eval_only_refuses_a_dirty_tree_before_any_command(repo: str) -> None:
     with open(os.path.join(repo, "README.md"), "ab") as f:
         f.write(b"edited\n")
     run, calls = fake_run()
@@ -418,7 +428,8 @@ def test_eval_only_refuses_a_dirty_tree_before_any_command(repo):
     assert "\n" not in msg
 
 
-def _rebuild_case(root):
+def _rebuild_case(root: str) -> None:
+    """report_step over root: green when the rebuild writes the committed bytes, red naming the file otherwise."""
     with open(os.path.join(root, "results", "x.json"), "rb") as f:
         committed = f.read()
     run, calls = fake_run({"results/x.json": committed})                    # identical bytes: green
@@ -438,7 +449,7 @@ def _rebuild_case(root):
     assert calls == list(rp.REBUILD)
 
 
-def test_eval_only_fails_naming_a_rebuilt_file_that_differs(repo):
+def test_eval_only_fails_naming_a_rebuilt_file_that_differs(repo: str) -> None:
     _rebuild_case(repo)
     run, calls = fake_run()                             # the differing file is left: the next run is refused up front
     with pytest.raises(SystemExit):
@@ -446,8 +457,9 @@ def test_eval_only_fails_naming_a_rebuilt_file_that_differs(repo):
     assert calls == []
 
 
-def test_eval_only_without_git_is_refused_before_overwriting_anything(repo, tree, tmp_path, monkeypatch):
-    """WR-05: without git there is no committed copy to compare the rebuilt files with or restore them from, so the
+def test_eval_only_without_git_is_refused_before_overwriting_anything(repo: str, tree: str, tmp_path: Path,
+                                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without git there is no committed copy to compare the rebuilt files with or restore them from, so the
     report step (eval-only, and full mode up front) is refused before any command, and every file keeps its bytes;
     the refusal names no git restore command."""
     import shutil
@@ -472,8 +484,8 @@ def test_eval_only_without_git_is_refused_before_overwriting_anything(repo, tree
     assert r.events == [] and rp.snapshot(tree) == before
 
 
-def test_eval_only_refuses_an_edited_makefile_or_runner(repo):
-    """WR-04: the Makefile decides every make target eval-only runs and the run ids it reads, and the runner decides
+def test_eval_only_refuses_an_edited_makefile_or_runner(repo: str) -> None:
+    """The Makefile decides every make target eval-only runs and the run ids it reads, and the runner decides
     the rest; an uncommitted edit to either is refused before any command."""
     for rel in ("Makefile", "reproduce.py", "pilot/reproduce.py"):
         p = os.path.join(repo, rel)
@@ -497,15 +509,15 @@ def test_eval_only_refuses_an_edited_makefile_or_runner(repo):
     assert calls == list(rp.REBUILD)
 
 
-def test_report_step_after_steps_compares_with_git_head(repo):
-    """WR-02: with the precheck off (full mode after steps ran), a committed file already dirty fails even when the
+def test_report_step_after_steps_compares_with_git_head(repo: str) -> None:
+    """With the precheck off (full mode after steps ran), a committed file already dirty fails even when the
     rebuild leaves it alone, and the last line never claims a clean git status; a deleted committed file the rebuild
     restores to HEAD's bytes passes; an untracked output must keep its bytes, and a file the rebuild creates fails."""
     x = os.path.join(repo, "results", "x.json")
     with open(x, "rb") as f:
         committed = f.read()
 
-    def step(write):
+    def step(write: dict[str, bytes] | None) -> str:
         run, calls = fake_run(write)
         lines = []
         rp.report_step(repo, run=run, blocks=no_blocks, precheck=False, out=lines.append)
@@ -532,7 +544,7 @@ def test_report_step_after_steps_compares_with_git_head(repo):
     assert msg.startswith("eval-only rebuilt 1 file(s) that differ from the committed ones: results/made.json;"), msg
 
 
-def test_eval_only_names_the_step_of_a_missing_artifact(tree):
+def test_eval_only_names_the_step_of_a_missing_artifact(tree: str) -> None:
     import json
     import shutil
     os.rename(os.path.join(tree, "results", "postfit", "laya.json"), os.path.join(tree, "laya.json.saved"))
@@ -558,7 +570,7 @@ def test_eval_only_names_the_step_of_a_missing_artifact(tree):
     assert calls == []                                  # the data step (todo in this tree) never ran either
 
 
-def _need_data():
+def _need_data() -> None:
     import glob
     if not glob.glob(os.path.join(REPO_ROOT, "data", "splits", "*.jsonl")):
         pytest.fail("data/splits/ is empty; run `make data` first")
@@ -566,7 +578,7 @@ def _need_data():
 
 @pytest.mark.data
 @pytest.mark.parametrize("how", ["eval-only", "make reproduce"])
-def test_eval_only_end_to_end(tmp_path, monkeypatch, how):
+def test_eval_only_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
     """A fresh copy of the working tree (every tracked file, plus the local data/splits/ and data/audit/), committed
     in a new repo: reproduce.py --mode eval-only, and `make reproduce` (full mode: every step from data to
     fewshot-reports skipped as done, no command of a todo step), exit 0, run all 9 rebuild commands and leave the copy
@@ -598,7 +610,7 @@ def test_eval_only_end_to_end(tmp_path, monkeypatch, how):
     if how == "eval-only":
         assert skips == []
     else:
-        assert skips == ["skip %s (done)" % n for n in D01[:18]], skips
+        assert skips == ["skip %s (done)" % n for n in ORDER[:18]], skips
         assert not [l for l in lines if l.startswith("run: ")] and rp.DISCLOSURE not in lines
     assert [l for l in lines if l.startswith("eval-only: ")] == ["eval-only: " + " ".join(c) for c in rp.REBUILD]
     assert "README blocks: 11 rendered, README.md unchanged" in lines
@@ -608,12 +620,12 @@ def test_eval_only_end_to_end(tmp_path, monkeypatch, how):
     assert st.stdout == ""
 
 
-# ---- --verify-checkpoints (D-06): the on-disk final seeds re-hashed against their manifests, reported, not gated ----
+# ---- --verify-checkpoints: the on-disk final seeds re-hashed against their manifests, reported, not gated ----
 
 ABSENT = "not needed: eval-only rebuilds from the committed dumps"
 
 
-def laya_ckpt(d, salt):
+def laya_ckpt(d: str, salt: bytes) -> None:
     """A synthetic Laya-like checkpoint dir: weights, config, tokenizer/ and encoder/ files."""
     files = {"model.safetensors": b"w" + salt, "rl_agent_config.json": b'{"t": 1}\n',
              "tokenizer/tokenizer_config.json": b'{"tokenizer_class": "PreTrainedTokenizerFast"}\n',
@@ -624,7 +636,7 @@ def laya_ckpt(d, salt):
             f.write(data)
 
 
-def berturk_ckpt(d, salt):
+def berturk_ckpt(d: str, salt: bytes) -> None:
     """A synthetic BERTurk checkpoint dir: every pilot.berturk.CHECKPOINT_FILES entry."""
     from pilot import berturk
     os.makedirs(d)
@@ -633,7 +645,7 @@ def berturk_ckpt(d, salt):
             f.write(name.encode("utf-8") + salt)
 
 
-def final_manifest(path, kind, ckpt_root, make):
+def final_manifest(path: str, kind: str, ckpt_root: str, make: Callable[[str, bytes], None]) -> list[dict[str, Any]]:
     """A postfit-final/1 manifest of three seeds whose identity and dump run id are computed from their dirs."""
     import json
     from pilot import berturk, dumps, weights
@@ -655,7 +667,8 @@ def final_manifest(path, kind, ckpt_root, make):
     return seeds
 
 
-def make_final_seeds(tmp_path):
+def make_final_seeds(tmp_path: Path) -> tuple[str, dict[str, str]]:
+    """(the checkpoint root, {kind: final manifest path}) of three synthetic final seeds per system under tmp_path."""
     ckpts = str(tmp_path / "ckpts")
     os.makedirs(ckpts)
     manifests = {}
@@ -665,7 +678,7 @@ def make_final_seeds(tmp_path):
     return ckpts, manifests
 
 
-def test_verify_checkpoints_reports_match_differs_absent(tmp_path):
+def test_verify_checkpoints_reports_match_differs_absent(tmp_path: Path) -> None:
     import shutil
     ckpts, manifests = make_final_seeds(tmp_path)
     rows = rp.verify_checkpoints(REPO_ROOT, ckpts, manifests=manifests)
@@ -690,12 +703,12 @@ def test_verify_checkpoints_reports_match_differs_absent(tmp_path):
     assert got[("berturk", 0)]["status"] == "differs" and got[("berturk", 0)]["detail"], got[("berturk", 0)]
 
 
-def test_verify_checkpoints_writes_nothing(tmp_path, monkeypatch):
+def test_verify_checkpoints_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import json
     ckpts, manifests = make_final_seeds(tmp_path)
     before = (rp.snapshot(str(tmp_path)), rp.snapshot(REPO_ROOT), sorted(os.listdir(str(tmp_path))))
 
-    def tree_files(root):
+    def tree_files(root: str) -> list[str]:
         return sorted(os.path.relpath(os.path.join(d, n), root) for d, _, fs in os.walk(root) for n in fs)
     files = tree_files(str(tmp_path))
     rp.verify_checkpoints(REPO_ROOT, ckpts, manifests=manifests)
@@ -731,14 +744,14 @@ def test_verify_checkpoints_writes_nothing(tmp_path, monkeypatch):
     assert bad.returncode == 2 and "--checkpoint-root" in bad.stderr and "--verify-checkpoints" in bad.stderr
 
 
-# ---- the command layer (plan 10-05, D-01, D-04): every step's commands, the dry run, the --force guard ----
+# ---- the command layer: every step's commands, the dry run, the --force guard ----
 
 TRAINERS = ("ray_train.py", "berturk_train.py")
 SELECTION_STEPS = ("laya-selection", "berturk-selection")
 
 
 @pytest.fixture
-def bare(tmp_path):
+def bare(tmp_path: Path) -> str:
     """A tree with only protocol.json, the Makefile and data/splits.json: every record absent (the from-scratch form,
     with the deferred final-seed commands and the primary few-shot mode)."""
     import shutil
@@ -748,11 +761,12 @@ def bare(tmp_path):
     return str(tmp_path)
 
 
-def header(name):
-    return "== %2d %s (" % (D01.index(name) + 1, name)
+def header(name: str) -> str:
+    """The start of a dry run's step header line: "== N name ("."""
+    return "== %2d %s (" % (ORDER.index(name) + 1, name)
 
 
-def test_every_step_has_commands(bare):
+def test_every_step_has_commands(bare: str) -> None:
     for root in (REPO_ROOT, bare):
         for name in rp.STEP_NAMES:
             cmds = rp.commands(name, root)
@@ -761,7 +775,7 @@ def test_every_step_has_commands(bare):
                 assert rp.display(c).startswith(("python ", "make ")), c
     text = rp.dry_run(REPO_ROOT, all_steps=True)
     heads = [l for l in text.splitlines() if l.startswith("== ")]
-    assert heads == ["== %2d %s (%s)" % (i, n, "run" if n == "report" else "done") for i, n in enumerate(D01, 1)]
+    assert heads == ["== %2d %s (%s)" % (i, n, "run" if n == "report" else "done") for i, n in enumerate(ORDER, 1)]
     assert rp.commands("report") == list(rp.REBUILD)
     assert "README: rewrite the 11 generated blocks of README_BLOCKS" in text
     sel = ("python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --device mps --workers 1 "
@@ -774,11 +788,12 @@ def test_every_step_has_commands(bare):
     assert rp.RUN_ID in " ".join(" ".join(c) for c in rp.commands("laya-selection", bare))
 
 
-def every_command(roots):
+def every_command(roots: Iterable[str]) -> list[tuple[str, str, rp.Cmd]]:
+    """[(root, step name, command)] of every step's commands under each root."""
     return [(root, name, c) for root in roots for name in rp.STEP_NAMES for c in rp.commands(name, root)]
 
 
-def test_no_command_passes_force_or_rescores(bare):
+def test_no_command_passes_force_or_rescores(bare: str) -> None:
     from pilot.data import SPLITS
     gated_targets = {("make", t): t for t in rp.GATED}
     seen = set()
@@ -807,8 +822,8 @@ def test_no_command_passes_force_or_rescores(bare):
     assert {s["name"] for s in SPLITS} >= {"val", "test", "hotels_probe"}
 
 
-def test_dry_run_runs_nothing(monkeypatch, tree):
-    def boom(*a, **k):
+def test_dry_run_runs_nothing(monkeypatch: pytest.MonkeyPatch, tree: str) -> None:
+    def boom(*a: Any, **k: Any) -> None:
         raise AssertionError("the dry run ran %r" % (a,))
     monkeypatch.setattr(subprocess, "run", boom)
     monkeypatch.setattr(subprocess, "Popen", boom)
@@ -832,7 +847,7 @@ def test_dry_run_runs_nothing(monkeypatch, tree):
     assert bad.returncode == 2 and "--all" in bad.stderr and "--dry-run" in bad.stderr
 
 
-def test_dry_run_prints_the_disclosure_before_the_first_model_step(tree):
+def test_dry_run_prints_the_disclosure_before_the_first_model_step(tree: str) -> None:
     import json
     import shutil
     assert not re.search(r"[0-9]", rp.DISCLOSURE)
@@ -848,28 +863,29 @@ def test_dry_run_prints_the_disclosure_before_the_first_model_step(tree):
     assert text.index(header("data")) < text.index(rp.DISCLOSURE)
     with open(os.path.join(tree, "results", "fewshot", "runs.json"), encoding="utf-8") as f:
         ids = {e["dump_run_id"] for e in json.load(f)["entries"]}
-    shutil.rmtree(os.path.join(tree, "results", "fewshot"))           # the 10-03 todo-tail tree
+    shutil.rmtree(os.path.join(tree, "results", "fewshot"))           # the few-shot todo-tail tree
     for rid in ids:
         shutil.rmtree(os.path.join(tree, "results", "dumps", rid))
     text = rp.dry_run(tree)
     heads = [l for l in text.splitlines() if l.startswith("== ")]
-    assert heads == ["==  1 data (todo)"] + [header(n) + "todo)" for n in D01[13:18]] + ["== 19 report (run)"]
+    assert heads == ["==  1 data (todo)"] + [header(n) + "todo)" for n in ORDER[13:18]] + ["== 19 report (run)"]
     assert text.count(rp.DISCLOSURE) == 1
     projection = rp.display(("fewshot.py", "--projection", "--out", "results/fewshot/projection.json"))
     assert text.index(header("fewshot-projection")) < text.index(projection) < text.index(rp.DISCLOSURE) \
         < text.index(header("fewshot-bases"))
-    assert "# the mode is primary until results/fewshot/projection.json records the D-08 decision" in text
+    assert "# the mode is primary until results/fewshot/projection.json records the few-shot compute decision" in text
 
 
-# ---- the command bindings (plan 10-05): each command is the record, recipe or protocol field it reproduces ----
+# ---- the command bindings: each command is the record, recipe or protocol field it reproduces ----
 
-def committed(rel):
+def committed(rel: str) -> Any:
+    """The parsed JSON of the committed file rel."""
     import json
     with open(os.path.join(REPO_ROOT, rel), encoding="utf-8") as f:
         return json.load(f)
 
 
-def flags(cmd):
+def flags(cmd: Sequence[str]) -> dict[str, str | bool]:
     """{--flag: value or True} of an argv tuple (a flag followed by another flag, or last, is a switch)."""
     out, c = {}, list(cmd)
     for i, a in enumerate(c):
@@ -879,7 +895,7 @@ def flags(cmd):
     return out
 
 
-def expand(line, v):
+def expand(line: str, v: dict[str, str]) -> list[str]:
     """A Makefile recipe line as an argv list: $(NAME) expanded from v, "$(PYTHON) " and " > /dev/null" dropped."""
     import shlex
     line = line.replace(" > /dev/null", "")
@@ -888,7 +904,7 @@ def expand(line, v):
     return shlex.split(line)
 
 
-def test_baselines_commands_are_the_makefile_lines_without_force():
+def test_baselines_commands_are_the_makefile_lines_without_force() -> None:
     import shlex
     lines = recipe("baselines")
     assert len(lines) == 7 and all(" --force" in l for l in lines[:6]) and lines[6].startswith("$(MAKE) baseline-reports")
@@ -901,7 +917,7 @@ def test_baselines_commands_are_the_makefile_lines_without_force():
     assert cmds[6:] == [("make", "baseline-reports")]
 
 
-def test_selection_commands_match_the_chosen_canonical():
+def test_selection_commands_match_the_chosen_canonical() -> None:
     keys = {"laya": {"--device": "device", "--workers": "workers", "--micro-batch": "micro_batch",
                      "--grad-accum": "grad_accum", "--max-len": "max_len", "--epochs": "epochs", "--neg": "neg",
                      "--seed": "seed", "--encoder-lr": "encoder_lr", "--head-lr": "head_lr"},
@@ -929,7 +945,7 @@ def test_selection_commands_match_the_chosen_canonical():
         assert all(flags(x)["--model"] == kind and x[1] == "data/splits/val.jsonl" for x in cmds if x[0] == "score.py")
 
 
-def test_final_seed_commands_are_the_records(bare):
+def test_final_seed_commands_are_the_records(bare: str) -> None:
     from pilot import berturk, postfit
     for kind, prefix, storage in (("laya", "ckpt-final", "ray_results"), ("berturk", "ckpt-berturk-final",
                                                                           "berturk_runs")):
@@ -951,7 +967,7 @@ def test_final_seed_commands_are_the_records(bare):
         assert printed[1] == cmds[-1] and printed[0][:3] == ("postfit.py", "--print-final-commands", rel)
 
 
-def test_final_reports_commands_match_the_makefile():
+def test_final_reports_commands_match_the_makefile() -> None:
     proto, _ = pilot.protocol.require_frozen()
     v = rp.makefile_vars(REPO_ROOT)
     lines = recipe("final-reports")
@@ -968,7 +984,7 @@ def test_final_reports_commands_match_the_makefile():
     assert rp.commands("final-reports") == scratch
 
 
-def test_latency_commands_write_the_pinned_reports():
+def test_latency_commands_write_the_pinned_reports() -> None:
     proto, _ = pilot.protocol.require_frozen()
     cmds = rp.commands("latency")
     runs = [c for c in cmds if "--system" in c]
@@ -979,7 +995,7 @@ def test_latency_commands_write_the_pinned_reports():
     assert outs == ["results/latency/%s-%s.json" % (flags(c)["--system"], flags(c)["--device"]) for c in runs]
 
 
-def test_fewshot_commands_match_the_runs_manifest():
+def test_fewshot_commands_match_the_runs_manifest() -> None:
     runs = committed("results/fewshot/runs.json")
     entries = runs["entries"]
     assert len(entries) == 18 and runs["mode"] == "primary"
@@ -1013,7 +1029,7 @@ def test_fewshot_commands_match_the_runs_manifest():
 @pytest.mark.data
 @pytest.mark.weights
 @pytest.mark.mps
-def test_print_run_id_reproduces_the_recorded_run_ids(tmp_path):
+def test_print_run_id_reproduces_the_recorded_run_ids(tmp_path: Path) -> None:
     """The 14 training commands that can print one (the 2 selections, the 6 final seeds, the 6 few-shot bases), with
     --storage and --out moved under tmp_path and --print-run-id appended, print the train run ids the committed
     records hold (the run id keeps paths out of the identity; nothing starts Ray or trains)."""
@@ -1050,20 +1066,20 @@ def test_print_run_id_reproduces_the_recorded_run_ids(tmp_path):
     assert not os.listdir(tmp_path) or all(not os.listdir(tmp_path / d) for d in os.listdir(tmp_path))
 
 
-# ---- full mode from scratch (plan 10-06, D-01 to D-04): synthetic registries and fake runners; nothing trains ----
+# ---- full mode from scratch: synthetic registries and fake runners; nothing trains ----
 
-def _builders(cmds):
+def _builders(cmds: dict[str, list[Any]]) -> dict[str, rp.Builder]:
     """BUILDERS of a synthetic registry: {name: [command tuple or (tuple, note)]} -> step builders."""
-    def build(lines):
+    def build(lines: list[Any]) -> rp.Builder:
         return lambda root, proto, pin: [x if isinstance(x[0], tuple) or x[0] is None else (x, None) for x in lines]
     return {n: build(lines) for n, lines in cmds.items()}
 
 
 @pytest.fixture
-def registry(tmp_path, monkeypatch):
-    """A tmp git repo (protocol.json and the Makefile committed; git HEAD holds no output, the from-scratch form of
-    D-04, so a todo step is never a deleted committed record) under a synthetic registry: a (model), b (model-free), g
-    (gated, trained by a: GATE_PRODUCERS {"g": ("a",)}) and report, each step's evidence results/<name>.txt checked
+def registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Registry:
+    """A tmp git repo (protocol.json and the Makefile committed; git HEAD holds no output, the from-scratch form the
+    retraining disclosure names, so a todo step is never a deleted committed record) under a synthetic registry: a
+    (model), b (model-free), g (gated, trained by a: GATE_PRODUCERS {"g": ("a",)}) and report, each step's evidence results/<name>.txt checked
     against its recorded bytes (the registry's protocol pin). Returns (root, the recorded bytes, set_commands)."""
     import shutil
     _git_env(monkeypatch)
@@ -1076,14 +1092,14 @@ def registry(tmp_path, monkeypatch):
     git_in(root, "add", "-A")
     git_in(root, "commit", "-q", "-m", "init")
 
-    def pinned(n):
-        def check(path):
+    def pinned(n: str) -> Callable[[str], None]:
+        def check(path: str) -> None:
             with open(path, "rb") as f:
                 if f.read() != committed[n]:
                     raise SystemExit("results/%s.txt is not the recorded bytes" % n)
         return check
 
-    def ev(n):
+    def ev(n: str) -> rp.Evidence:
         return lambda r, proto, pin, manifest: [rp._file(r, "results/%s.txt" % n, proto, pinned(n))]
     steps = [{"name": "a", "model": True, "gated": False, "evidence": ev("a"), "fix": "restore a"},
              {"name": "b", "model": False, "gated": False, "evidence": ev("b"), "fix": "restore b"},
@@ -1092,7 +1108,7 @@ def registry(tmp_path, monkeypatch):
     monkeypatch.setattr(rp, "STEPS", steps)
     monkeypatch.setattr(rp, "GATE_PRODUCERS", {"g": ("a",)})
 
-    def set_commands(**over):
+    def set_commands(**over: list[Any]) -> None:
         cmds = {"a": [("a.py",)], "b": [("b.py",)], "g": [("g.py",)], "report": list(rp.REBUILD)}
         cmds.update(over)
         monkeypatch.setattr(rp, "BUILDERS", _builders(cmds))
@@ -1104,10 +1120,11 @@ class Recorder:
     """A fake run, capture, report and out over one event list: run(cmd) writes results/<name>.txt for <name>.py
     (the committed bytes, or other bytes for a name in `bad`) and returns rc.get(name, 0)."""
 
-    def __init__(self, committed, rc=None, bad=(), rid="run-xyz"):
+    def __init__(self, committed: dict[str, bytes], rc: dict[str, int] | None = None, bad: Iterable[str] = (),
+                 rid: str = "run-xyz") -> None:
         self.committed, self.rc, self.bad, self.rid, self.events = committed, rc or {}, set(bad), rid, []
 
-    def run(self, cmd, root):
+    def run(self, cmd: Sequence[str], root: str) -> int:
         self.events.append(("run", cmd))
         name = cmd[0][:-3]
         if name in self.committed and not self.rc.get(name):
@@ -1115,29 +1132,31 @@ class Recorder:
                 f.write(b"other bytes\n" if name in self.bad else self.committed[name])
         return self.rc.get(name, 0)
 
-    def capture(self, cmd, root):
+    def capture(self, cmd: Sequence[str], root: str) -> str:
         self.events.append(("capture", cmd))
         return self.rid
 
-    def report(self, root, run, blocks, precheck=True, out=print):
+    def report(self, root: str, run: rp.Runner, blocks: rp.Blocks | None, precheck: bool = True,
+               out: rp.Out = print) -> None:
         self.events.append(("report", precheck))
 
-    def out(self, line):
+    def out(self, line: str) -> None:
         self.events.append(("out", line))
 
-    def full(self, root):
+    def full(self, root: str) -> None:
         return rp.run_full(root, run=self.run, capture=self.capture, blocks=None, report=self.report, out=self.out)
 
-    def of(self, kind):
+    def of(self, kind: str) -> list[Any]:
         return [e[1] for e in self.events if e[0] == kind]
 
 
-def _delete(root, *names):
+def _delete(root: str, *names: str) -> None:
     for n in names:
         os.remove(os.path.join(root, "results", "%s.txt" % n))
 
 
-def _stop(fn):
+def _stop(fn: Callable[[], object]) -> str:
+    """The one-line SystemExit message fn() raises."""
     with pytest.raises(SystemExit) as e:
         fn()
     msg = str(e.value.code)
@@ -1145,7 +1164,7 @@ def _stop(fn):
     return msg
 
 
-def test_full_mode_runs_todo_steps_in_order_after_the_disclosure(registry):
+def test_full_mode_runs_todo_steps_in_order_after_the_disclosure(registry: Registry) -> None:
     root, committed, _ = registry
     r = Recorder(committed)
     r.full(root)
@@ -1160,11 +1179,11 @@ def test_full_mode_runs_todo_steps_in_order_after_the_disclosure(registry):
     assert rp.tree_changes(root) == ["results/a.txt", "results/b.txt", "results/g.txt"]   # untracked outputs
 
 
-def test_full_mode_stops_at_a_failing_command(registry):
+def test_full_mode_stops_at_a_failing_command(registry: Registry) -> None:
     root, committed, set_commands = registry
     r = Recorder(committed, rc={"b": 1})
     msg = _stop(lambda: r.full(root))
-    assert msg.startswith("step b: `python b.py` exited 1; a protocol gate refusal printed above is final (D-04)"), msg
+    assert msg.startswith("step b: `python b.py` exited 1; a protocol gate refusal printed above is final: a "), msg
     assert "rerun `make reproduce`" in msg
     assert r.of("run") == [("a.py",), ("b.py",)] and r.of("report") == []          # g never ran, no report
     _delete(root, "a")                                    # a deferred command (its record absent) is never run
@@ -1175,28 +1194,28 @@ def test_full_mode_stops_at_a_failing_command(registry):
     assert r.of("run") == [] and r.of("out").count(rp.DISCLOSURE) == 1
 
 
-def test_full_mode_stops_at_the_first_divergence(registry):
+def test_full_mode_stops_at_the_first_divergence(registry: Registry) -> None:
     root, committed, _ = registry
     r = Recorder(committed, bad={"a"})
     msg = _stop(lambda: r.full(root))
     assert msg.startswith("step a ran, but results/a.txt is not the recorded bytes; "), msg
-    assert "(D-04)" in msg and "git checkout -- results/" in msg and "protocol gate" in msg
+    assert rp.RETRAIN_STOP in msg and "git checkout -- results/" in msg and "protocol gate" in msg
     assert r.of("run") == [("a.py",)] and r.of("report") == []                     # b and g never ran
     os.remove(os.path.join(root, "results", "a.txt"))     # a step that leaves its evidence missing stops too
     r = Recorder(committed, rc={"a": 0})
     r.committed = {}
     msg = _stop(lambda: r.full(root))
-    assert msg.startswith("step a ran, but results/a.txt is missing; ") and "(D-04)" in msg, msg
+    assert msg.startswith("step a ran, but results/a.txt is missing; ") and rp.RETRAIN_STOP in msg, msg
     assert r.of("run") == [("a.py",)]
 
 
-def write(root, committed, *names):
+def write(root: str, committed: dict[str, bytes], *names: str) -> None:
     for n in names:
         with open(os.path.join(root, "results", "%s.txt" % n), "wb") as f:
             f.write(committed[n])
 
 
-def test_gated_step_never_reruns_without_its_training(registry):
+def test_gated_step_never_reruns_without_its_training(registry: Registry) -> None:
     root, committed, _ = registry
     write(root, committed, "a", "b")                      # a and b done (their outputs present), g todo
     r = Recorder(committed)
@@ -1206,8 +1225,8 @@ def test_gated_step_never_reruns_without_its_training(registry):
     assert r.events == []                                 # refused before any command, any output and the report
 
 
-def test_full_mode_never_redoes_a_record_git_head_holds(registry):
-    """WR-03 (D-03, fail closed): a todo step whose evidence git HEAD holds (deleted from the working tree) is refused
+def test_full_mode_never_redoes_a_record_git_head_holds(registry: Registry) -> None:
+    """Fail closed: a todo step whose evidence git HEAD holds (deleted from the working tree) is refused
     before any command, pointing at `git checkout -- PATH`; for a gated step the refusal says its dumps are scored
     exactly once, even though the steps that train its checkpoints would run first."""
     root, committed, _ = registry
@@ -1218,7 +1237,7 @@ def test_full_mode_never_redoes_a_record_git_head_holds(registry):
     r = Recorder(committed)
     msg = _stop(lambda: r.full(root))
     assert msg.startswith("step a is todo, but git HEAD holds 1 of its committed artifacts, missing from the working "
-                          "tree (first results/a.txt): a deleted committed record is never work to redo (D-03)"), msg
+                          "tree (first results/a.txt): a deleted committed record is never work to redo, "), msg
     assert msg.endswith("restore them with `git checkout -- results/a.txt`"), msg
     assert "exactly-once" not in msg and r.events == []
     write(root, committed, "a", "b")                      # only the gated step's record deleted
@@ -1228,8 +1247,8 @@ def test_full_mode_never_redoes_a_record_git_head_holds(registry):
     assert r.events == []
 
 
-def test_full_mode_refuses_a_dirty_committed_file_before_any_command(registry):
-    """WR-02: a committed file under the checked paths that already differs from git HEAD (and is no todo step's
+def test_full_mode_refuses_a_dirty_committed_file_before_any_command(registry: Registry) -> None:
+    """A committed file under the checked paths that already differs from git HEAD (and is no todo step's
     evidence) is refused before any command, naming it."""
     root, committed, _ = registry
     (open(os.path.join(root, "results", "z.txt"), "wb")).close()
@@ -1244,7 +1263,7 @@ def test_full_mode_refuses_a_dirty_committed_file_before_any_command(registry):
     assert r.events == []
 
 
-def test_full_mode_resolves_the_run_id_before_the_exports(registry):
+def test_full_mode_resolves_the_run_id_before_the_exports(registry: Registry) -> None:
     root, committed, set_commands = registry
     set_commands(a=[("a.py", "--print-run-id"), ("a.py",), ("score.py", "x/%s/epoch-001" % rp.RUN_ID),
                     ("postfit.py", "--prune", "x/%s/epoch-001" % rp.RUN_ID)])
@@ -1262,7 +1281,8 @@ def test_full_mode_resolves_the_run_id_before_the_exports(registry):
         assert r.of("run") == []
 
 
-def test_full_mode_refuses_before_any_command_on_an_out_of_order_tree(tree, monkeypatch):
+def test_full_mode_refuses_before_any_command_on_an_out_of_order_tree(tree: str,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
     import json
     import shutil
     _data_done(monkeypatch)
@@ -1283,7 +1303,7 @@ def test_full_mode_refuses_before_any_command_on_an_out_of_order_tree(tree, monk
     shutil.rmtree(os.path.join(tree, "results", "final"))
     shutil.rmtree(os.path.join(tree, "results", "fewshot"))
     st = states(rp.plan(tree))
-    assert [n for n in D01[1:11] if st[n] != "done"] == [] and [n for n in D01[11:18] if st[n] != "todo"] == [], st
+    assert [n for n in ORDER[1:11] if st[n] != "done"] == [] and [n for n in ORDER[11:18] if st[n] != "todo"] == [], st
     r = Recorder({})
     msg = _stop(lambda: r.full(tree))
     assert msg.startswith("final-scoring has no committed gated dumps while the steps that train its checkpoints are "
@@ -1295,10 +1315,10 @@ def test_full_mode_refuses_before_any_command_on_an_out_of_order_tree(tree, monk
     assert r.events == []
 
 
-# ---- full mode over the REAL registry (10-REVIEW CR-01): STEPS, their evidence and after_check on a scratch tree
+# ---- full mode over the REAL registry: STEPS, their evidence and after_check on a scratch tree
 # whose git HEAD lacks a todo tail; stub runners write the committed bytes each command's outputs hold ----
 
-def fewshot_tail():
+def fewshot_tail() -> list[str]:
     """The repo-relative paths of the few-shot tail: results/fewshot/ and the 18 few-shot dump dirs."""
     import json
     with open(os.path.join(REPO_ROOT, "results", "fewshot", "runs.json"), encoding="utf-8") as f:
@@ -1308,14 +1328,14 @@ def fewshot_tail():
 
 
 @pytest.fixture
-def scratch(tmp_path, monkeypatch):
+def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., str]:
     """make(tail): a tmp git repo holding protocol.json, the Makefile, data/splits.json and results/ without the tail
     paths (files or dirs), committed, so git HEAD does not track the tail; the data step stubbed done."""
     import shutil
     _git_env(monkeypatch)
     _data_done(monkeypatch)
 
-    def make(tail, name="scratch"):
+    def make(tail: Iterable[str], name: str = "scratch") -> str:
         root = tmp_path / name
         for rel in ("protocol.json", "Makefile", "data/splits.json"):
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -1338,11 +1358,12 @@ class Committed:
     --drop-storage and --prune write nothing under results/. override(cmd, rel) -> bytes or None replaces a file's
     bytes; skip holds commands that write nothing."""
 
-    def __init__(self, override=None, skip=()):
+    def __init__(self, override: Callable[[rp.Cmd, str], bytes | None] | None = None,
+                 skip: Iterable[rp.Cmd] = ()) -> None:
         self.override, self.skip, self.calls = override or (lambda cmd, rel: None), set(skip), []
 
     @staticmethod
-    def outputs(cmd):
+    def outputs(cmd: Sequence[str]) -> list[str]:
         import glob
         cmd = tuple(cmd)
         if cmd == ("make", "fewshot-scoring"):
@@ -1358,7 +1379,7 @@ class Committed:
             return [rel] + ([svg] if rel.endswith(".json") and os.path.isfile(os.path.join(REPO_ROOT, svg)) else [])
         return []
 
-    def run(self, cmd, root):
+    def run(self, cmd: Sequence[str], root: str) -> int:
         self.calls.append(tuple(cmd))
         if tuple(cmd) in self.skip:
             return 0
@@ -1373,44 +1394,47 @@ class Committed:
         return 0
 
 
-def real_full(root, runner, lines=None):
+def real_full(root: str, runner: Committed, lines: list[str] | None = None) -> list[bool]:
+    """run_full over the real registry with runner's commands; [precheck] of each report step call."""
     reports = []
 
-    def capture(cmd, root):
+    def capture(cmd: Sequence[str], root: str) -> str:
         raise AssertionError("no step of a few-shot or final-reports tail prints a run id: %r" % (cmd,))
 
-    def report(root, run, blocks, precheck=True, out=print):
+    def report(root: str, run: rp.Runner, blocks: rp.Blocks | None, precheck: bool = True,
+               out: rp.Out = print) -> None:
         reports.append(precheck)
     rp.run_full(root, run=runner.run, capture=capture, blocks=None, report=report,
                 out=(lines.append if lines is not None else (lambda s: None)))
     return reports
 
 
-def test_full_mode_completes_the_real_fewshot_tail(scratch):
-    """CR-01: with the few-shot tail todo, every tail step runs in D-01 order and passes its after-check (the bases are
+def test_full_mode_completes_the_real_fewshot_tail(scratch: Callable[..., str]) -> None:
+    """With the few-shot tail todo, every tail step runs in the pipeline order and passes its after-check (the bases are
     verified with fewshot-continued, which writes their runs.json), then the report step runs."""
     root = scratch(fewshot_tail())
     st = states(rp.plan(root))
-    assert [n for n in D01[13:18] if st[n] != "todo"] == [], st
+    assert [n for n in ORDER[13:18] if st[n] != "todo"] == [], st
     runner, lines = Committed(), []
     assert real_full(root, runner, lines) == [False]
-    assert [l for l in lines if l.startswith("skip ")] == ["skip %s (done)" % n for n in D01[:13]]
+    assert [l for l in lines if l.startswith("skip ")] == ["skip %s (done)" % n for n in ORDER[:13]]
     assert lines.count(rp.DISCLOSURE) == 1
     ran = [c for c in runner.calls]
-    assert ran == [c for n in D01[13:18] for c in rp.commands(n, root)], ran
+    assert ran == [c for n in ORDER[13:18] for c in rp.commands(n, root)], ran
     assert states(rp.plan(root)) == states(rp.plan(REPO_ROOT))
     assert rp.tree_changes(root) == sorted(rel for t in fewshot_tail() for rel in _files_under(t))
 
 
-def _files_under(rel):
+def _files_under(rel: str) -> list[str]:
+    """The repo-relative paths of every file under REPO_ROOT/rel."""
     out = []
     for d, _, fs in os.walk(os.path.join(REPO_ROOT, rel)):
         out += [os.path.relpath(os.path.join(d, n), REPO_ROOT) for n in fs]
     return out
 
 
-def test_full_mode_names_the_step_whose_output_diverges(scratch):
-    """CR-01: a runs manifest the continued runs never wrote stops the run at fewshot-continued (its writer), never
+def test_full_mode_names_the_step_whose_output_diverges(scratch: Callable[..., str]) -> None:
+    """A runs manifest the continued runs never wrote stops the run at fewshot-continued (its writer), never
     at fewshot-bases; a few-shot dump that differs stops it at fewshot-scoring."""
     root = scratch(fewshot_tail())
     manifest = [c for c in rp.commands("fewshot-continued", REPO_ROOT) if c[:2] == ("fewshot.py", "--runs-manifest")]
@@ -1418,12 +1442,12 @@ def test_full_mode_names_the_step_whose_output_diverges(scratch):
     runner = Committed(skip=manifest)
     msg = _stop(lambda: real_full(root, runner))
     assert msg.startswith("step fewshot-continued ran, but results/fewshot/runs.json is missing; "), msg
-    assert "(D-04)" in msg
+    assert rp.RETRAIN_STOP in msg
     assert runner.calls[-1] == manifest[0]                        # every bases and continued command ran first
     root = scratch(fewshot_tail(), "scratch2")
     dump = fewshot_tail()[1] + "/test.npz"
 
-    def flip(cmd, rel):
+    def flip(cmd: rp.Cmd, rel: str) -> bytes | None:
         if rel != dump:
             return None
         with open(os.path.join(REPO_ROOT, rel), "rb") as f:
@@ -1433,16 +1457,16 @@ def test_full_mode_names_the_step_whose_output_diverges(scratch):
     runner = Committed(override=flip)
     msg = _stop(lambda: real_full(root, runner))
     assert msg.startswith("step fewshot-scoring ran, but "), msg
-    assert "(D-04)" in msg and runner.calls[-1][:2] == ("fewshot.py", "--prune")
+    assert rp.RETRAIN_STOP in msg and runner.calls[-1][:2] == ("fewshot.py", "--prune")
 
 
-def test_full_mode_completes_a_from_scratch_final_reports_tail(scratch):
-    """WR-01: with results/final/ and the few-shot tail todo, final-reports writes the verdict without --fewshot (its
+def test_full_mode_completes_a_from_scratch_final_reports_tail(scratch: Callable[..., str]) -> None:
+    """With results/final/ and the few-shot tail todo, final-reports writes the verdict without --fewshot (its
     from-scratch form, here bytes that differ from the committed verdict) and passes its after-check, because the
     committed verdict and the first-time memo are fewshot-reports' outputs; that step writes and verifies both."""
     root = scratch(["results/final"] + fewshot_tail())
     st = states(rp.plan(root))
-    assert [n for n in D01[12:18] if st[n] != "todo"] == [], st
+    assert [n for n in ORDER[12:18] if st[n] != "todo"] == [], st
     pending = ("report.py", "--verdict", "--out", rp.VERDICT)
     assert pending in rp.commands("final-reports", root)
     assert rp.commands("fewshot-reports", root) == [
@@ -1450,15 +1474,15 @@ def test_full_mode_completes_a_from_scratch_final_reports_tail(scratch):
         ("make", "memo")]
     runner = Committed(override=lambda cmd, rel: b'{"few-shot path": "PENDING"}\n' if cmd == pending else None)
     assert real_full(root, runner) == [False]
-    assert runner.calls == [c for n in D01[12:18] for c in rp.commands(n, root)]
+    assert runner.calls == [c for n in ORDER[12:18] for c in rp.commands(n, root)]
     for rel in (rp.VERDICT, rp.MEMO):
         with open(os.path.join(root, rel), "rb") as f, open(os.path.join(REPO_ROOT, rel), "rb") as g:
             assert f.read() == g.read(), rel
     assert states(rp.plan(root)) == states(rp.plan(REPO_ROOT))
 
 
-def test_full_mode_names_fewshot_reports_for_a_memo_that_differs(scratch):
-    """WR-01: the memo is fewshot-reports' output; a memo that differs from git HEAD's stops the run there."""
+def test_full_mode_names_fewshot_reports_for_a_memo_that_differs(scratch: Callable[..., str]) -> None:
+    """The memo is fewshot-reports' output; a memo that differs from git HEAD's stops the run there."""
     root = scratch(fewshot_tail())
     runner = Committed(override=lambda cmd, rel: b"another memo\n" if rel == rp.MEMO else None)
     msg = _stop(lambda: real_full(root, runner))
@@ -1467,8 +1491,8 @@ def test_full_mode_names_fewshot_reports_for_a_memo_that_differs(scratch):
     assert runner.calls[-1] == ("make", "memo")
 
 
-def test_full_mode_refuses_a_deleted_committed_tail(scratch):
-    """WR-03: on a tree whose git HEAD holds the whole record, deleting the few-shot tail from the working tree does not
+def test_full_mode_refuses_a_deleted_committed_tail(scratch: Callable[..., str]) -> None:
+    """On a tree whose git HEAD holds the whole record, deleting the few-shot tail from the working tree does not
     make it work to redo (no projection is re-recorded, no base retrained): full mode refuses before any command at
     the first todo step, naming its path and `git checkout --`; with the gated final-scoring dumps and every later
     record deleted, the refusal names final-scoring and its exactly-once dumps."""
@@ -1477,7 +1501,7 @@ def test_full_mode_refuses_a_deleted_committed_tail(scratch):
     for rel in fewshot_tail():
         shutil.rmtree(os.path.join(root, rel))
     st = states(rp.plan(root))
-    assert [n for n in D01[13:18] if st[n] != "todo"] == [], st
+    assert [n for n in ORDER[13:18] if st[n] != "todo"] == [], st
     runner = Committed()
     msg = _stop(lambda: real_full(root, runner))
     assert msg.startswith("step fewshot-projection is todo, but git HEAD holds 1 of its committed artifacts, missing "
@@ -1497,10 +1521,9 @@ def test_full_mode_refuses_a_deleted_committed_tail(scratch):
     assert runner.calls == []
 
 
-def test_memo_names_the_one_command_rebuild():
-
+def test_memo_names_the_one_command_rebuild() -> None:
     """The memo's rebuild bullet names `make report` (every report, the README blocks and the memo from the committed
-    dumps) and `make reproduce` (the whole pipeline, skipping every finished step), digit-free (plan 10-06)."""
+    dumps) and `make reproduce` (the whole pipeline, skipping every finished step), digit-free."""
     from pilot import memo
     text = memo.MEMO_REBUILD
     assert text.startswith("- Rebuild: ") and "\n" not in text
@@ -1513,19 +1536,19 @@ def test_memo_names_the_one_command_rebuild():
     assert text in lines and len([l for l in lines if l]) <= memo.MEMO_MAX_LINES
 
 
-# ---- 10-07: the README Files table, Run block and reproduction rules name every Phase 10 file and command ----
+# ---- the README Files table, Run block and reproduction rules name every reproduction and memo file and command ----
 
-PHASE10_FILES = {
+REPRODUCTION_FILES = {
     "reproduce.py": ("--mode full", "--mode eval-only", "--dry-run", "--all", "--verify-checkpoints",
                      "--checkpoint-root", "make reproduce", "make report"),
     "pilot/reproduce.py": ("STEP_NAMES", "committed, hash-verified", "plan", "eval_only", "run_full", "dry_run",
                            "verify_checkpoints"),
     "pilot/memo.py": ("render_recommendation", "render_memo", "CAVEATS"),
-    "report.py": ("Phase 10: `--recommendation`", "`--memo` writes the decision memo"),
-    "results/": ("Phase 10: `final/memo.md`", "decision memo"),
+    "report.py": ("`--recommendation`", "`--memo` writes the decision memo"),
+    "results/": ("`final/memo.md`", "decision memo"),
 }
-PHASE10_RUN = (
-    "# Phase 10: the recommendation, the decision memo and one-command reproduction",
+REPRODUCTION_RUN = (
+    "the decision memo and one-command reproduction",
     "make reproduce              #",
     "make reproduce MODE=eval-only",
     "make report                 #",
@@ -1537,47 +1560,48 @@ PHASE10_RUN = (
     "python report.py --memo results/final/verdict.json --out results/final/memo.md",
     "python report.py --recommendation results/final/verdict.json",
 )
-PHASE9_LAST = "python report.py --verdict --fewshot results/fewshot/fewshot.json --out results/final/verdict.json"
+FEWSHOT_VERDICT_LINE = ("python report.py --verdict --fewshot results/fewshot/fewshot.json --out "
+                        "results/final/verdict.json")
 REPRODUCTION_RULES = ("committed, hash-verified", "skips every finished step", "exactly once",
                       "recomputes from the committed dumps", "fails on any rebuilt file that differs",
                       "reported, not gated", "first divergence", "never weakens the gate")
 RULES_START = "`make reproduce` decides each step"
 
 
-def _readme():
+def _readme() -> str:
     with open(os.path.join(REPO_ROOT, "README.md"), encoding="utf-8") as f:
         return f.read()
 
 
-def test_readme_names_the_phase10_files_and_commands():
-    """D-11: the README Files table has a row for each Phase 10 file, naming its key flags or functions, and extends
-    the report.py and results/ rows; the Run block holds the Phase 10 commands after the Phase 9 verdict line, in
-    order; the Makefile has the targets the block names."""
+def test_readme_names_the_reproduction_files_and_commands() -> None:
+    """The README Files table has a row for each reproduction and memo file, naming its key flags or functions, and
+    extends the report.py and results/ rows; the Run block holds the reproduction and memo commands after the
+    few-shot verdict line, in order; the Makefile has the targets the block names."""
     from test_fewshot_results import files_rows, run_block
     text = _readme()
     rows = files_rows(text)
-    for path, wants in PHASE10_FILES.items():
+    for path, wants in REPRODUCTION_FILES.items():
         assert path in rows, "the README Files table has no row for %s" % path
         missing = [w for w in wants if w not in rows[path]]
         assert not missing, "the README Files row of %s does not name %s" % (path, ", ".join(missing))
     run = run_block(text)
-    assert run.count(PHASE9_LAST) == 1, "the Run block must hold the Phase 9 verdict line once"
-    at = run.index(PHASE9_LAST)
-    for cmd in PHASE10_RUN:
+    assert run.count(FEWSHOT_VERDICT_LINE) == 1, "the Run block must hold the few-shot verdict line once"
+    at = run.index(FEWSHOT_VERDICT_LINE)
+    for cmd in REPRODUCTION_RUN:
         i = run.find(cmd, at + 1)
-        assert i > at, "the README Run block does not hold %r after the previous Phase 10 command" % cmd
+        assert i > at, "the README Run block does not hold %r after the previous reproduction command" % cmd
         at = i
     for target in ("reproduce:", "report:", "memo:"):
         assert re.search(r"^%s$" % re.escape(target), makefile_text(), re.M), "the Makefile has no %s target" % target
 
 
-def makefile_text():
+def makefile_text() -> str:
     with open(os.path.join(REPO_ROOT, "Makefile"), encoding="utf-8") as f:
         return f.read()
 
 
-def test_readme_states_the_reproduction_rules():
-    """D-04, D-05, D-06: the Run section, outside its fenced code, states the reproduction rules in words, in one
+def test_readme_states_the_reproduction_rules() -> None:
+    """The Run section, outside its fenced code, states the reproduction rules in words, in one
     number-free paragraph."""
     from test_fewshot_results import readme_part
     from test_final_results import PROSE_NUMBER_RE

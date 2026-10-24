@@ -1,7 +1,7 @@
-"""One-command reproduction (ENV-03, Phase 10): the CLI over pilot/reproduce.py, as postfit.py is over pilot/postfit.py.
+"""One-command reproduction: the CLI over pilot/reproduce.py, as postfit.py is over pilot/postfit.py.
 
 --mode eval-only (= `make report`) rebuilds the evaluation and every report from the committed dumps, without training
-or scoring (D-05, D-06). It prints the interpreter and the step plan of the working tree, then verifies first: the
+or scoring. It prints the interpreter and the step plan of the working tree, then verifies first: the
 frozen protocol (require_frozen), every split and manifest hash and every committed record and dump through the step
 registry (pilot.reproduce.plan). A missing dump or record is refused before any command, naming its path and the step
 that makes it; `make data` runs only when the local split files are absent. Then it rebuilds, through the make
@@ -13,27 +13,27 @@ one. A tree whose checked paths (those, plus the Makefile, reproduce.py and pilo
 runs) already differ is refused before any rebuild command, so a difference is always the rebuild's, and so is a tree
 that is not the top of a git work tree: without git there is no committed copy to compare with or restore from.
 
-The gated splits are scored exactly once (protocol.json), so eval-only never rescores a checkpoint: criterion 2's
-re-scoring is met by the committed dumps. --verify-checkpoints (`make report VERIFY_CHECKPOINTS=1`) adds a check that
-is reported, not gated: each final seed listed in results/postfit/<kind>-final.json is re-hashed under
+The gated splits are scored exactly once (protocol.json), so eval-only never rescores a checkpoint: re-scoring is
+replaced by recomputing every report from the committed dumps. --verify-checkpoints (`make report VERIFY_CHECKPOINTS=1`)
+adds a check that is reported, not gated: each final seed listed in results/postfit/<kind>-final.json is re-hashed under
 --checkpoint-root (default the repo root) with the identity functions score.py uses and reported as match, differs or
 absent. It loads no model, writes nothing and never changes the exit status (no committed val dump of a final seed
 exists to re-score against: the final seeds are scored once, on test and HOTELS).
 
 --dry-run prints the interpreter, the step plan of the working tree and each todo step's exact commands (--all: every
-step's, in D-01 order), built from the committed records, protocol.json and the Makefile (pilot.reproduce.commands),
-with the D-04 disclosure before the first model step listed (pilot.reproduce.DISCLOSURE). It runs nothing and exits 0.
+step's, in the pipeline order), built from the committed records, protocol.json and the Makefile
+(pilot.reproduce.commands), with the retraining disclosure before the first model step listed
+(pilot.reproduce.DISCLOSURE). It runs nothing and exits 0.
 No printed command passes --force or runs `make baselines`.
 
---mode full (the default; = `make reproduce`) runs the whole pipeline in D-01 order (pilot.reproduce.run_full): data,
-val selection, final training, evaluation, few-shot, report. It skips every step its committed, hash-verified
-artifacts prove done, so on a finished tree only the report step (the eval-only rebuild above) runs. A todo step's
-commands run in order after the D-04 disclosure; the run stops at the first failing command (a protocol gate refusal
-is final) or at the first output that differs from the committed record or a protocol pin, and a gated scoring step
-runs only after the training steps that make its checkpoints ran in the same invocation. A todo step whose committed
-artifacts git HEAD holds (deleted from the working tree) is refused before any command: a committed record is
-restored with `git checkout -- PATH`, never redone, so a from-scratch run needs a repository whose HEAD does not hold
-the results.
+--mode full (the default; = `make reproduce`) runs the whole pipeline in order (pilot.reproduce.run_full): data, val
+selection, final training, evaluation, few-shot, report. It skips every step its committed, hash-verified artifacts
+prove done, so on a finished tree only the report step (the eval-only rebuild above) runs. A todo step's commands run in
+order after the retraining disclosure; the run stops at the first failing command (a protocol gate refusal is final) or
+at the first output that differs from the committed record or a protocol pin, and a gated scoring step runs only after
+the training steps that make its checkpoints ran in the same invocation. A todo step whose committed artifacts git HEAD
+holds (deleted from the working tree) is refused before any command: a committed record is restored with
+`git checkout -- PATH`, never redone, so a from-scratch run needs a repository whose HEAD does not hold the results.
 
 usage:
     python reproduce.py                                # = make reproduce PYTHON=.venv/bin/python (--mode full)
@@ -49,7 +49,9 @@ from pilot import reproduce
 from pilot.data import REPO_ROOT
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int | None:
+    """Parse argv, print the interpreter, then the dry run (exit 0) or the plan followed by full mode or eval-only;
+    returns 0 after a dry run, else None."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--mode", choices=reproduce.MODES, default="full",
                     help="full (default): every todo step in order, then the report; eval-only: rebuild every "
@@ -59,7 +61,7 @@ def main(argv=None):
     ap.add_argument("--checkpoint-root", metavar="DIR", default=None,
                     help="where the final seed dirs live (default: the repo root); only with --verify-checkpoints")
     ap.add_argument("--dry-run", action="store_true",
-                    help="print the plan and the todo steps' commands, with the D-04 disclosure; run nothing")
+                    help="print the plan and the todo steps' commands, with the retraining disclosure; run nothing")
     ap.add_argument("--all", action="store_true", help="--dry-run: print every step's commands, done ones included")
     a = ap.parse_args(argv)
     if a.checkpoint_root is not None and not a.verify_checkpoints:

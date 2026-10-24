@@ -19,7 +19,7 @@ The test no-intent set holds 15 messages, so every interval is wide.
 | (d) a clear edge on calibration, abstention or few-shot learning | PASS | calibration (brier): NOT MET, delta +0.34 points, CI [+0.21, +0.48]; abstention (precision_at_80): NOT MET, delta -9.05 points, CI [-11.96, -6.08]; fewshot (new_tag_macro_ap): MET, mean delta +65.87 points |
 | alternative GO | NOT MET | micro-F1 delta -1.72 points, CI [-3.63, +0.22] |
 
-Latency is reported, not gated: it is not a decision criterion (a latency budget is DEC-01, v2).
+Latency is reported, not gated: it is not a decision criterion (a latency budget is left to a later version).
 
 ## Accuracy on test: the results table
 
@@ -29,12 +29,12 @@ Latency is reported, not gated: it is not a decision criterion (a latency budget
 | prior (train: final_train) | prior | 0.184 | 0.048 | 0.000 | 0.231 |
 | laya (multilingual) | laya-zeroshot-7b928d82 | 0.205 | 0.216 | 0.007 | 0.214 |
 | laya fine-tuned (final seeds 0, 1, 2) | mean ± std (seed 0 / 1 / 2) | 0.793 ± 0.020 (0.779 / 0.784 / 0.815) | 0.790 ± 0.013 (0.784 / 0.781 / 0.805) | 0.390 ± 0.040 (0.370 / 0.363 / 0.436) | 0.890 ± 0.003 (0.887 / 0.892 / 0.892) |
-| laya fine-tuned, seed-averaged (EVAL-07 system) | seeds 0, 1, 2 averaged | 0.826 | 0.815 | 0.460 | 0.922 |
+| laya fine-tuned, seed-averaged | seeds 0, 1, 2 averaged | 0.826 | 0.815 | 0.460 | 0.922 |
 | berturk fine-tuned (final seeds 0, 1, 2) | mean ± std (seed 0 / 1 / 2) | 0.832 ± 0.009 (0.829 / 0.826 / 0.843) | 0.759 ± 0.003 (0.758 / 0.757 / 0.762) | 0.532 ± 0.018 (0.523 / 0.521 / 0.552) | 0.927 ± 0.003 (0.927 / 0.925 / 0.930) |
-| berturk fine-tuned, seed-averaged (EVAL-07 system) | seeds 0, 1, 2 averaged | 0.844 | 0.777 | 0.562 | 0.940 |
+| berturk fine-tuned, seed-averaged | seeds 0, 1, 2 averaged | 0.844 | 0.777 | 0.562 | 0.940 |
 
 ## Few-shot new intents
-- Few-shot path (Phase 9): k = 10, mean over 3 draws, mode primary; record results/fewshot/fewshot.json sha256 `2eac0da66a2a`.
+- Few-shot path: k = 10, mean over 3 draws, mode primary; record results/fewshot/fewshot.json sha256 `2eac0da66a2a`.
 Criterion (d)'s few-shot path reads the mean over draws of Laya - BERTurk at k = 10, unrounded.
 
 ## Caveats

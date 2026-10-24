@@ -222,7 +222,7 @@ __marimo__/
 # local planning notes, never committed
 .planning/
 
-# Phase 1 data outputs: only the manifest is committed (D-02)
+# data outputs of `make data`: only the manifest data/splits.json is committed
 /data/*
 !/data/splits.json
 

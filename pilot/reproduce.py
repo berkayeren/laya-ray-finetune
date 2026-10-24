@@ -1,11 +1,11 @@
-"""The step registry of the one-command reproduction (ENV-03, Phase 10): every pipeline step, its committed evidence,
-its done/todo state and the printed plan.
+"""The step registry of the one-command reproduction: every pipeline step, its committed evidence, its done/todo
+state and the printed plan, plus the eval-only rebuild, the command layer and full mode built on it.
 
-D-01: the steps run in one fixed order, STEP_NAMES: data, baselines, laya-selection, laya-postfit, laya-final,
-berturk-selection, berturk-postfit, berturk-reference, berturk-final, confidence, latency, final-scoring,
+Order: the steps run in one fixed pipeline order, STEP_NAMES: data, baselines, laya-selection, laya-postfit,
+laya-final, berturk-selection, berturk-postfit, berturk-reference, berturk-final, confidence, latency, final-scoring,
 final-reports, fewshot-projection, fewshot-bases, fewshot-continued, fewshot-scoring, fewshot-reports, report.
 
-D-02: a step is done only by committed, hash-verified artifacts read with the existing readers: the split and audit
+Done: a step is done only by committed, hash-verified artifacts read with the existing readers: the split and audit
 verifiers of pilot.data, pilot.dumps.load_dump (with the gate keys of a gated dump), the protocol.json input pins
 (the sha256 of a file's exact bytes == protocol["inputs"][path]), pilot.postfit.read_record,
 pilot.latency.read_final_manifest and load_reports, pilot.verdict.check_record, pilot.fewshot.read_mode and read_runs,
@@ -14,58 +14,58 @@ storage (ray_results/), BERTurk run storage (berturk_runs/) or a run dir is neve
 every step through scoring is done and only the report step runs. Each protocol.json input is the evidence of
 exactly one step.
 
-D-03: a partial, tampered or out-of-order tree fails closed, in one line, before anything runs, and is never half-run
-or recomputed: a step with none of its artifacts is todo, with all of them verified done, with some missing refused
-naming the missing paths and the fix; a present artifact that does not verify is refused with its reader's own
-refusal (or the protocol pin mismatch naming both sha256 values) and the `git checkout -- PATH` restore fix; a dump
-whose npz or sidecar alone exists (an orphan) is refused naming both paths; and once a step is todo, a later step
-with any committed artifact is refused naming both steps. Full mode also refuses, before any command, a todo step
-any of whose evidence files git HEAD holds (head_holds): a deleted record is never treated as work to redo, whether
-or not a later step is done, and a gated scoring step (final-scoring, fewshot-scoring) is never rescored around its
-committed dumps; the fix is `git checkout -- PATH`. A from-scratch run therefore needs a repository whose HEAD does
-not hold the outputs it makes (D-04). The data step is local (data/splits/ and data/audit/ are gitignored, written by
-`make data`) and exempt from the order rule; the report step always runs.
+Fail closed: a partial, tampered or out-of-order tree is refused, in one line, before anything runs, and is never
+half-run or recomputed: a step with none of its artifacts is todo, with all of them verified done, with some missing
+refused naming the missing paths and the fix; a present artifact that does not verify is refused with its reader's
+own refusal (or the protocol pin mismatch naming both sha256 values) and the `git checkout -- PATH` restore fix; a
+dump whose npz or sidecar alone exists (an orphan) is refused naming both paths; and once a step is todo, a later
+step with any committed artifact is refused naming both steps. Full mode also refuses, before any command, a todo
+step any of whose evidence files git HEAD holds (head_holds): a deleted record is never treated as work to redo,
+whether or not a later step is done, and a gated scoring step (final-scoring, fewshot-scoring) is never rescored
+around its committed dumps; the fix is `git checkout -- PATH`. A from-scratch run therefore needs a repository whose
+HEAD does not hold the outputs it makes (see DISCLOSURE). The data step is local (data/splits/ and data/audit/ are
+gitignored, written by `make data`) and exempt from the order rule; the report step always runs.
 
 Torch-free: the stdlib, pilot.protocol and pilot.data at import time; numpy, scipy and the record readers are imported
 inside the evidence functions, so computing the plan of a tree never imports torch, transformers, laya or Ray.
 
-Eval-only (D-05, D-06; `make report`, reproduce.py --mode eval-only): eval_only verifies first (plan(): the frozen
-protocol, every split and manifest hash, every committed record and dump through the step registry), refuses before
-any command a missing record or dump, naming its path and the step that makes it (eval-only never runs a todo step
-but the local data step, `make data`, run only when the local split files are absent), then report_step rebuilds
-every report from the committed dumps (REBUILD: fixed argv tuples, no score.py, training script, `latency.py
---system`, --force or scoring target), rewrites the README's generated blocks from their renders (README_BLOCKS,
-rewrite_blocks) and proves the tree unchanged: `git status --porcelain` over CHECKED (results/, README.md,
-protocol.json, and the Makefile and runner sources that decide what runs) must be empty before (else the
-run is refused, so a difference is always the rebuild's) and after (else the run fails naming every differing path);
-a root that is not the top of a git work tree is refused before any command (NO_GIT), because without git there is
-no committed copy to compare the rebuilt files with or to restore them from. In full mode after steps ran, the
-report step compares a file git HEAD tracks with HEAD's bytes (an already dirty file fails) and a file HEAD does not
-track (an output of those steps) with its bytes before the rebuild; "git status clean" is printed only when it is. Every command is an argv list run
-without a shell by the interpreter running this module (make targets get PYTHON=sys.executable).
+Eval-only (`make report`, reproduce.py --mode eval-only; it never trains or scores, and the final-seed re-hash is
+reported, not gated): eval_only verifies first (plan(): the frozen protocol, every split and manifest hash, every
+committed record and dump through the step registry), refuses before any command a missing record or dump, naming
+its path and the step that makes it (eval-only never runs a todo step but the local data step, `make data`, run only
+when the local split files are absent), then report_step rebuilds every report from the committed dumps (REBUILD:
+fixed argv tuples, no score.py, training script, `latency.py --system`, --force or scoring target), rewrites the
+README's generated blocks from their renders (README_BLOCKS, rewrite_blocks) and proves the tree unchanged:
+`git status --porcelain` over CHECKED (results/, README.md, protocol.json, and the Makefile and runner sources that
+decide what runs) must be empty before (else the run is refused, so a difference is always the rebuild's) and after
+(else the run fails naming every differing path); a root that is not the top of a git work tree is refused before
+any command (NO_GIT), because without git there is no committed copy to compare the rebuilt files with or to restore
+them from. In full mode after steps ran, the report step compares a file git HEAD tracks with HEAD's bytes (an
+already dirty file fails) and a file HEAD does not track (an output of those steps) with its bytes before the
+rebuild; "git status clean" is printed only when it is. Every command is an argv list run without a shell by the
+interpreter running this module (make targets get PYTHON=sys.executable).
 verify_checkpoints (--verify-checkpoints) re-hashes the on-disk final seeds with score.py's identity functions against
 their final manifests: reported, not gated (it loads no model, writes nothing and never refuses).
 
-The command layer (D-01, D-04; reproduce.py --dry-run [--all]): commands(name, root) gives every step's argv tuples,
-built from the committed records, protocol.json and the Makefile, never retyped: the selection runs and the few-shot
-runs from protocol.json's fewshot block (rules.base_runs, the frozen epochs, the draws, pilot.fewshot.slots and
-base_seed_of under the recorded mode), the final seeds from pilot.postfit.final_command and
-pilot.berturk.final_command of the hash-verified postfit records, the baselines as the Makefile's score.py lines
-without --force, final-reports as final_report_commands (the Makefile recipe; the from-scratch form without the
-verdict's --fewshot, since fewshot.json comes later in D-01), and fewshot-reports as `make fewshot-reports`, then the
-verdict with --fewshot and `make memo` (fewshot_report_commands), so the committed verdict and the memo are that
-step's outputs. No command passes --force or runs `make baselines`, and
-the gated scoring targets appear only in their own steps. dry_run prints the plan, then each todo step's commands (every
-step's with --all), with DISCLOSURE once before the first model step listed; it runs nothing. A from-scratch run is
-disclosed, not run here: MPS retraining is not bit-identical, so it stops at the first output that differs from the
-committed record or a protocol pin, and the gate is never weakened.
+The command layer (reproduce.py --dry-run [--all]): commands(name, root) gives every step's argv tuples, built from
+the committed records, protocol.json and the Makefile, never retyped: the selection runs and the few-shot runs from
+protocol.json's fewshot block (rules.base_runs, the frozen epochs, the draws, pilot.fewshot.slots and base_seed_of
+under the recorded mode), the final seeds from pilot.postfit.final_command and pilot.berturk.final_command of the
+hash-verified postfit records, the baselines as the Makefile's score.py lines without --force, final-reports as
+final_report_commands (the Makefile recipe; the from-scratch form without the verdict's --fewshot, since fewshot.json
+comes later in the pipeline order), and fewshot-reports as `make fewshot-reports`, then the verdict with --fewshot and
+`make memo` (fewshot_report_commands), so the committed verdict and the memo are that step's outputs. No command
+passes --force or runs `make baselines`, and the gated scoring targets appear only in their own steps. dry_run prints
+the plan, then each todo step's commands (every step's with --all), with DISCLOSURE, the retraining disclosure, once
+before the first model step listed; it runs nothing. A from-scratch run is disclosed, not run here: MPS retraining is
+not bit-identical, so it stops at the first output that differs from the committed record or a protocol pin, and the
+gate is never weakened.
 
-Full mode (D-01 to D-04; `make reproduce`, reproduce.py --mode full, the default): run_full takes plan() (so a
-partial, tampered or out-of-order tree is refused before any command), skips every done step ("skip NAME (done)"),
-runs each todo step's commands in D-01 order, evaluated just before the step runs (so a record an earlier step wrote
-feeds the next step's commands), and ends with report_step, the eval-only rebuild with its pre and post tree checks.
-A committed path under CHECKED that already differs from git HEAD (other than a todo step's evidence) is refused
-before any command.
+Full mode (`make reproduce`, reproduce.py --mode full, the default): run_full takes plan() (so a partial, tampered or
+out-of-order tree is refused before any command), skips every done step ("skip NAME (done)"), runs each todo step's
+commands in the pipeline order, evaluated just before the step runs (so a record an earlier step wrote feeds the next
+step's commands), and ends with report_step, the eval-only rebuild with its pre and post tree checks. A committed path
+under CHECKED that already differs from git HEAD (other than a todo step's evidence) is refused before any command.
 DISCLOSURE prints once before the first model step; a selection run id is resolved with the step's --print-run-id
 command (capture_command) and substituted for RUN_ID; the first non-zero exit stops the run in one line naming the
 step and the command (a protocol gate refusal from score.py is final). After every step it ran, after_check re-reads
@@ -73,10 +73,10 @@ the outputs that step itself writes (after_items): its evidence, except an item 
 writes (LATER_OUTPUT: the bases' slots are recorded in the runs.json that fewshot-continued writes, so they are
 verified with fewshot-continued), plus the deferred items of earlier steps whose file it writes. An artifact that is
 missing, fails its reader, differs from its protocol.json pin or differs from the bytes git HEAD holds for it
-(committed_bytes) stops the run with the D-04 reason, naming the step that wrote it. A gated scoring step
-(GATE_PRODUCERS) runs only when the steps that train its checkpoints ran in the same invocation, and never when git
-HEAD holds its dumps (the D-03 refusal above); otherwise it is refused before any command, because the gated dumps
-are the exactly-once audit record. No command passes --force.
+(committed_bytes) stops the run with the retraining reason (RETRAIN_STOP), naming the step that wrote it. A gated
+scoring step (GATE_PRODUCERS) runs only when the steps that train its checkpoints ran in the same invocation, and
+never when git HEAD holds its dumps (the refusal above); otherwise it is refused before any command, because the
+gated dumps are the exactly-once audit record. No command passes --force.
 On a finished tree every step through fewshot-reports is done, so only the report regenerates.
 
 usage:
@@ -92,6 +92,7 @@ import re
 import shlex
 import subprocess
 import sys
+from typing import Any, Callable, Iterable, Sequence
 
 from pilot import protocol
 from pilot.data import (AUDIT_FILES, REPO_ROOT, SPLITS, sha256_bytes, sha256_file, verify_audit_file,
@@ -113,12 +114,26 @@ FEWSHOT_RECORD = "results/fewshot/fewshot.json"
 CONFIDENCE_SCHEMA = "confidence/1"
 MAKEFILE_VAR_RE = re.compile(r"^([A-Z_][A-Z0-9_]*) [:?]= (.*)$")     # `NAME := value` and the `NAME ?= default`
 
+# annotation aliases: an evidence item or registry step is a plain dict, a command a tuple of argv strings
+Item = dict[str, Any]                # one evidence item (_item)
+Step = dict[str, Any]                # one registry step (_step)
+Row = tuple[Step, str, list[Item]]   # one plan row: (step, state, items)
+Evidence = Callable[[str, dict[str, Any], str, str], list[Item]]     # (root, proto, pin, manifest) -> [item]
+Cmd = tuple[str, ...]                # a make target or a Python CLI, never a shell string (command_argv)
+Line = tuple[Cmd | None, str | None]                                  # (command or None, note or None)
+Builder = Callable[[str, dict[str, Any], str], list[Line]]           # (root, proto, pin) -> [line]
+Slot = tuple[str, str, int, int | None, int | None]                  # a few-shot (kind, stage, seed, draw, k)
+Runner = Callable[[Sequence[str], str], int]                          # (command, root) -> exit code
+Blocks = Callable[[str], list[tuple[str, str]]]                       # root -> [(README block name, render)]
+Out = Callable[[str], object]                                         # a print-like sink
 
-def _one_line(msg):
+
+def _one_line(msg: object) -> str:
+    """msg as one line: every run of whitespace, newlines included, collapsed to one space."""
     return " ".join(str(msg).split())
 
 
-def makefile_vars(root):
+def makefile_vars(root: str) -> dict[str, str]:
     """{NAME: value} of the `NAME := value` and `NAME ?= value` lines of root/Makefile (a ?= line gives the Makefile's
     own default); SystemExit when it is missing."""
     path = os.path.join(root, "Makefile")
@@ -133,13 +148,14 @@ def makefile_vars(root):
     return out
 
 
-def _item(rel, present, ok, reason, files=None, label=None):
+def _item(rel: str, present: bool, ok: bool, reason: str, files: list[str] | None = None,
+          label: str | None = None) -> Item:
     """One evidence item: its display path, the committed files a restore names, present, verified, why not."""
     return {"path": rel, "files": list(files or [rel]), "present": present, "ok": ok, "reason": reason,
             "label": label or rel}
 
 
-def _check(fn, *args):
+def _check(fn: Callable[..., object], *args: Any) -> str | None:
     """None when fn(*args) returns, else its SystemExit message on one line."""
     try:
         fn(*args)
@@ -148,7 +164,7 @@ def _check(fn, *args):
     return None
 
 
-def _file(root, rel, proto, check=None):
+def _file(root: str, rel: str, proto: dict[str, Any], check: Callable[[str], object] | None = None) -> Item:
     """The item of one committed file: present by os.path.lexists; a protocol.json input must hash to its pin, then
     check(path) must return."""
     p = os.path.join(root, rel)
@@ -166,7 +182,8 @@ def _file(root, rel, proto, check=None):
     return _item(rel, True, reason is None, reason or "")
 
 
-def _dump(root, run_id, split, manifest, proto, keys=None):
+def _dump(root: str, run_id: str, split: str, manifest: str, proto: dict[str, Any],
+          keys: dict[str, Any] | None = None) -> Item:
     """The item of one dump results/dumps/<run_id>/<split>.{npz,json}: present when either file exists; verified when
     a pinned sidecar hashes to its protocol.json pin, load_dump passes and every `keys` item equals the sidecar's."""
     from pilot import dumps
@@ -174,7 +191,7 @@ def _dump(root, run_id, split, manifest, proto, keys=None):
     npz, js = rel + ".npz", rel + ".json"
     have = [os.path.lexists(os.path.join(root, r)) for r in (npz, js)]
 
-    def item(present, ok, reason):
+    def item(present: bool, ok: bool, reason: str) -> Item:
         return _item(rel, present, ok, reason, files=[npz, js])
     if not any(have):
         return item(False, False, "")
@@ -196,9 +213,9 @@ def _dump(root, run_id, split, manifest, proto, keys=None):
     return item(True, True, "")
 
 
-def _json_schema(schema):
+def _json_schema(schema: str | None) -> Callable[[str], None]:
     """A check: the file is a JSON object, of `schema` when given."""
-    def check(path):
+    def check(path: str) -> None:
         with open(path, "rb") as f:
             raw = f.read()
         try:
@@ -213,7 +230,7 @@ def _json_schema(schema):
 
 # ---- the evidence of each step (root, proto, pin, manifest) -> [item] ----
 
-def ev_data(root, proto, pin, manifest):
+def ev_data(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
     """The committed manifest (pinned; an anchor: verified, never counted as the step's local output) and the 5 split
     files and 3 audit files `make data` writes, each against the manifest."""
     anchor = _file(root, "data/splits.json", proto)
@@ -227,31 +244,36 @@ def ev_data(root, proto, pin, manifest):
     return items
 
 
-def ev_baselines(root, proto, pin, manifest):
+def ev_baselines(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
+    """The six baseline dumps (majority, prior and zero-shot Laya on val and test) and their three test reports."""
     items = [_dump(root, rid, split, manifest, proto) for rid in ("majority", "prior", protocol.ZEROSHOT)
              for split in ("val", "test")]
     return items + [_file(root, "results/reports/%s.json" % rid, proto, _json_schema(None))
                     for rid in ("majority", "prior", protocol.ZEROSHOT)]
 
 
-def _selection(var):
-    def ev(root, proto, pin, manifest):
+def _selection(var: str) -> Evidence:
+    """The evidence of a selection step: the val dump of every run id the Makefile variable var lists."""
+    def ev(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
         return [_dump(root, rid, "val", manifest, proto) for rid in makefile_vars(root)[var].split()]
     return ev
 
 
-def _postfit(kind):
-    def check(path):
+def _postfit(kind: str) -> Evidence:
+    """The evidence of a postfit step: results/postfit/<kind>.json, read with pilot.postfit.read_record."""
+    def check(path: str) -> None:
         from pilot import postfit
         postfit.read_record(path)
 
-    def ev(root, proto, pin, manifest):
+    def ev(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
         return [_file(root, "results/postfit/%s.json" % kind, proto, check)]
     return ev
 
 
-def _final(kind):
-    def check(path, proto):
+def _final(kind: str) -> Evidence:
+    """The evidence of a final-seed step: results/postfit/<kind>-final.json, whose dump run ids must be the frozen
+    protocol's final seeds of kind."""
+    def check(path: str, proto: dict[str, Any]) -> None:
         from pilot import latency
         m, _ = latency.read_final_manifest(path, kind)
         ids = [s.get("dump_run_id") for s in m["seeds"]]
@@ -259,16 +281,19 @@ def _final(kind):
         if ids != want:
             raise SystemExit("%s lists the final dump run ids %s, the frozen protocol's are %s" % (path, ids, want))
 
-    def ev(root, proto, pin, manifest):
+    def ev(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
         return [_file(root, "results/postfit/%s-final.json" % kind, proto, lambda p: check(p, proto))]
     return ev
 
 
-def ev_berturk_reference(root, proto, pin, manifest):
+def ev_berturk_reference(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
+    """The BERTurk reference check record (schema berturk-reference/1)."""
     return [_file(root, "results/postfit/berturk-reference.json", proto, _json_schema("berturk-reference/1"))]
 
 
-def ev_confidence(root, proto, pin, manifest):
+def ev_confidence(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
+    """The three val confidence records and their reliability SVGs (the chosen Laya and BERTurk selection candidates
+    and zero-shot Laya, run ids from the Makefile)."""
     v = makefile_vars(root)
     items = []
     for rid in (v["LAYA_CHOSEN"], v["BERTURK_CHOSEN"], v["LAYA_ZS"]):
@@ -277,7 +302,9 @@ def ev_confidence(root, proto, pin, manifest):
     return items
 
 
-def ev_latency(root, proto, pin, manifest):
+def ev_latency(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
+    """The four latency reports (each system on mps and cpu), plus the directory as one item read with
+    pilot.latency.load_reports."""
     from pilot import latency
     items = [_file(root, "results/latency/%s-%s.json" % (kind, dev), proto)
              for kind in protocol.KINDS for dev in ("mps", "cpu")]
@@ -288,17 +315,20 @@ def ev_latency(root, proto, pin, manifest):
     return items
 
 
-def _final_seeds(proto):
+def _final_seeds(proto: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """[(kind, final seed entry)] of the frozen protocol, Laya's seeds first."""
     return [(kind, s) for kind in protocol.KINDS for s in protocol.final_seeds(proto, kind)]
 
 
-def ev_final_scoring(root, proto, pin, manifest):
+def ev_final_scoring(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
+    """The gated test and HOTELS dumps of every final seed (each carrying protocol_sha256 == pin) and the ungated
+    zero-shot HOTELS reference."""
     items = [_dump(root, s["dump_run_id"], split, manifest, proto, {"protocol_sha256": pin})
              for _, s in _final_seeds(proto) for split in ("test", "hotels_probe")]
     return items + [_dump(root, protocol.ZEROSHOT, "hotels_probe", manifest, proto)]
 
 
-def confidence_names(proto):
+def confidence_names(proto: dict[str, Any]) -> list[tuple[str, bool]]:
     """[(record name, with an SVG)] of the 15 committed results/final/confidence records: every final seed on test
     (with its reliability SVG) and hotels_probe, zero-shot Laya on both, the prior on test."""
     out = [("%s-%s" % (s["dump_run_id"], split), split == "test") for _, s in _final_seeds(proto)
@@ -307,8 +337,10 @@ def confidence_names(proto):
                   ("prior-test", True)]
 
 
-def ev_final_reports(root, proto, pin, manifest):
-    def verdict(path):
+def ev_final_reports(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
+    """results/final/: the verdict (pilot.verdict.check_record against the frozen protocol), the per-seed test
+    reports and the confidence records with their SVGs."""
+    def verdict(path: str) -> None:
         from pilot import verdict as pv
         with open(path, encoding="utf-8") as f:
             try:
@@ -326,15 +358,16 @@ def ev_final_reports(root, proto, pin, manifest):
     return items
 
 
-def ev_fewshot_projection(root, proto, pin, manifest):
+def ev_fewshot_projection(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
+    """The few-shot compute decision record results/fewshot/projection.json, read with pilot.fewshot.read_mode."""
     from pilot import fewshot
     return [_file(root, "results/fewshot/projection.json", proto, lambda p: fewshot.read_mode(pin, p))]
 
 
-def read_runs(root, proto, pin):
+def read_runs(root: str, proto: dict[str, Any], pin: str) -> tuple[dict[str, Any] | None, str | None]:
     """(runs manifest, sha256) of root's results/fewshot/runs.json through pilot.fewshot.read_runs, bound to root's
-    own D-08 decision record (pilot.fewshot.DECISION_PATH is read at call time, so it points at root's for the call),
-    or (None, None) when the file does not exist."""
+    own few-shot compute decision record (pilot.fewshot.DECISION_PATH is read at call time, so it points at root's
+    for the call), or (None, None) when the file does not exist."""
     from pilot import fewshot
     saved = fewshot.DECISION_PATH
     fewshot.DECISION_PATH = os.path.join(root, "results", "fewshot", "projection.json")
@@ -344,18 +377,20 @@ def read_runs(root, proto, pin):
         fewshot.DECISION_PATH = saved
 
 
-def _runs_item(root, proto, pin):
+def _runs_item(root: str, proto: dict[str, Any], pin: str) -> tuple[Item, dict[str, Any] | None, str | None]:
     """(the runs.json item, runs manifest or None, its sha256 or None)."""
     out = {}
 
-    def check(path):
+    def check(path: str) -> None:
         out["runs"], out["sha"] = read_runs(root, proto, pin)
     item = _file(root, RUNS, proto, check)
     return item, out.get("runs") if item["ok"] else None, out.get("sha") if item["ok"] else None
 
 
-def _fewshot_stage(stage):
-    def ev(root, proto, pin, manifest):
+def _fewshot_stage(stage: str) -> Evidence:
+    """The evidence of a few-shot training step: runs.json plus one item per slot of stage (base or continued) under
+    the recorded mode, present when the runs manifest lists it."""
+    def ev(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
         from pilot import fewshot
         item, runs, _ = _runs_item(root, proto, pin)
         if runs is None:
@@ -367,7 +402,9 @@ def _fewshot_stage(stage):
     return ev
 
 
-def ev_fewshot_scoring(root, proto, pin, manifest):
+def ev_fewshot_scoring(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
+    """Every dump runs.json lists: each masked base's ungated val dump and every gated test dump (protocol_sha256 ==
+    pin, fewshot_runs_sha256 == the runs manifest's); none before runs.json verifies."""
     _, runs, sha = _runs_item(root, proto, pin)
     if runs is None:
         return []
@@ -380,8 +417,10 @@ def ev_fewshot_scoring(root, proto, pin, manifest):
     return items
 
 
-def ev_fewshot_reports(root, proto, pin, manifest):
-    def check(path):
+def ev_fewshot_reports(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
+    """The few-shot results record results/fewshot/fewshot.json, whose sha256 must be the one the committed verdict
+    binds when the verdict exists."""
+    def check(path: str) -> None:
         from pilot import fewshot_report
         _, sha = fewshot_report.read_record(path)
         vp = os.path.join(root, VERDICT)
@@ -394,11 +433,12 @@ def ev_fewshot_reports(root, proto, pin, manifest):
     return [_file(root, "results/fewshot/fewshot.json", proto, check)]
 
 
-def ev_report(root, proto, pin, manifest):
+def ev_report(root: str, proto: dict[str, Any], pin: str, manifest: str) -> list[Item]:
+    """The report step has no evidence: it always runs."""
     return []
 
 
-def _step(name, evidence, fix, outputs=()):
+def _step(name: str, evidence: Evidence, fix: str, outputs: tuple[str, ...] = ()) -> Step:
     """One registry step; outputs are the committed files it writes that are no step's plan evidence (the memo):
     after_check requires them present and equal to the bytes git HEAD holds for them."""
     return {"name": name, "model": name in MODEL_STEPS, "gated": name in GATED, "evidence": evidence, "fix": fix,
@@ -427,7 +467,7 @@ STEPS = [
           "gated split is scored once and never rescored"),
     _step("final-reports", ev_final_reports, "restore the committed records with `git checkout -- results/final/`"),
     _step("fewshot-projection", ev_fewshot_projection, "restore it with `git checkout -- "
-          "results/fewshot/projection.json`; the D-08 decision is recorded once"),
+          "results/fewshot/projection.json`; the few-shot compute decision is recorded once"),
     _step("fewshot-bases", _fewshot_stage("base"), "restore it with `git checkout -- results/fewshot/runs.json`"),
     _step("fewshot-continued", _fewshot_stage("continued"), "restore it with `git checkout -- "
           "results/fewshot/runs.json`"),
@@ -439,13 +479,14 @@ STEPS = [
 ]
 
 
-def _restore(step, item):
+def _restore(step: Step, item: Item) -> str:
+    """The fix for one item that does not verify: `make data` for a local data file, else `git checkout -- FILES`."""
     if step["name"] in LOCAL and not item.get("anchor"):
         return "regenerate it with `make data`"
     return "restore the committed file with `git checkout -- %s`" % " ".join(item["files"])
 
 
-def state(step, items):
+def state(step: Step, items: list[Item]) -> str:
     """"run" (report), "todo" (no artifact present), "done" (every artifact present and verified); SystemExit for a
     present artifact that does not verify (its own refusal plus the restore fix) or a partly present step."""
     name = step["name"]
@@ -467,7 +508,7 @@ def state(step, items):
     return "done"
 
 
-def plan(root=REPO_ROOT):
+def plan(root: str = REPO_ROOT) -> list[Row]:
     """[(step, state, items)] of the tree at `root`, in STEP_NAMES order, after require_frozen of root's protocol.json;
     SystemExit (one line) on the first partial, tampered or out-of-order step."""
     proto, pin = protocol.require_frozen(os.path.join(root, "protocol.json"))
@@ -490,7 +531,7 @@ def plan(root=REPO_ROOT):
     return rows
 
 
-def render_plan(rows, pin):
+def render_plan(rows: list[Row], pin: str) -> str:
     """The printed plan: a header with the protocol sha256 prefix, then one line per step."""
     out = ["reproduce plan of the working tree (protocol.json sha256 %s...)" % pin[:12]]
     for i, (step, st, items) in enumerate(rows, 1):
@@ -504,10 +545,10 @@ def render_plan(rows, pin):
     return "\n".join(out) + "\n"
 
 
-# ---- eval-only (D-05, D-06): rebuild every report from the committed dumps, no training, no scoring ----
+# ---- eval-only: rebuild every report from the committed dumps, no training, no scoring ----
 
 # the audit record a rebuild must leave byte for byte, plus what decides the commands eval-only runs: the Makefile
-# (every REBUILD make target's recipe, and the run ids makefile_vars reads) and the runner itself (10-REVIEW WR-04),
+# (every REBUILD make target's recipe, and the run ids makefile_vars reads) and the runner itself,
 # so an uncommitted edit to any of them is refused before any command
 CHECKED = ("results/", "README.md", "protocol.json", "Makefile", "reproduce.py", "pilot/reproduce.py")
 REBUILD = (
@@ -540,11 +581,12 @@ MODES = ("full", "eval-only")
 README = "README.md"
 
 
-def _show(cmd):
+def _show(cmd: Sequence[str]) -> str:
+    """One command tuple as space-joined text, for messages."""
     return " ".join(cmd)
 
 
-def command_argv(cmd):
+def command_argv(cmd: Sequence[str]) -> list[str]:
     """The argv list of one command tuple: a make target with PYTHON pinned to this interpreter, or a Python CLI (a
     script or -m module) run by this interpreter; SystemExit for anything else (never a shell string)."""
     cmd = tuple(cmd)
@@ -558,13 +600,14 @@ def command_argv(cmd):
                      % _show(cmd))
 
 
-def run_command(cmd, root):
+def run_command(cmd: Sequence[str], root: str) -> int:
     """Run one command tuple in root, without a shell; its exit code."""
     sys.stdout.flush()
     return subprocess.run(command_argv(cmd), cwd=root).returncode
 
 
-def _git(root, *args):
+def _git(root: str, *args: str) -> subprocess.CompletedProcess[bytes] | None:
+    """git ARGS run in root with captured output, or None when git cannot be run."""
     try:
         return subprocess.run(("git",) + args, cwd=root, capture_output=True)
     except OSError:
@@ -578,14 +621,14 @@ NO_GIT = ("%s compares every rebuilt file with the bytes git HEAD holds, but %s 
           "`git commit` first)")
 
 
-def tree_changes(root):
+def tree_changes(root: str) -> list[str] | None:
     """The sorted repo-relative paths `git status --porcelain --untracked-files=all` reports under CHECKED in root
     (modified, deleted, added or untracked), or None when git is missing or root is not the top of a work tree."""
     st = tree_status(root)
     return None if st is None else sorted(st)
 
 
-def tree_status(root):
+def tree_status(root: str) -> dict[str, str] | None:
     """{repo-relative path: its two-letter porcelain status} of every path `git status --porcelain
     --untracked-files=all` reports under CHECKED in root (UNTRACKED for a file git HEAD does not track), or None when
     git is missing or root is not the top of a work tree."""
@@ -611,12 +654,12 @@ def tree_status(root):
     return out
 
 
-def _hashes(root, rels):
+def _hashes(root: str, rels: Iterable[str]) -> dict[str, str]:
     """{rel: sha256} of the regular files among the repo-relative rels in root."""
     return {rel: sha256_file(os.path.join(root, rel)) for rel in rels if os.path.isfile(os.path.join(root, rel))}
 
 
-def snapshot(root):
+def snapshot(root: str) -> dict[str, str]:
     """{repo-relative path: sha256} of every file under CHECKED in root (a content fingerprint of a tree)."""
     out = {}
     for rel in CHECKED:
@@ -632,11 +675,12 @@ def snapshot(root):
     return out
 
 
-def _snapshot_diff(before, after):
+def _snapshot_diff(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    """The sorted paths whose sha256 differs between two snapshots (added and removed paths included)."""
     return sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
 
 
-def rewrite_blocks(text, renders):
+def rewrite_blocks(text: str, renders: Iterable[tuple[str, str]]) -> str:
     """text with each <!-- name:start --> ... <!-- name:end --> body replaced by "\\n" + its render; SystemExit,
     before anything is written, unless each marker occurs exactly once and the start comes first."""
     for name, body in renders:
@@ -649,7 +693,7 @@ def rewrite_blocks(text, renders):
     return text
 
 
-def render_blocks(root):
+def render_blocks(root: str) -> list[tuple[str, str]]:
     """[(name, stdout)] of every README_BLOCKS render run in root (UTF-8, bytes kept as printed); SystemExit naming
     the render and its last stderr line when one exits non-zero."""
     out = []
@@ -664,13 +708,14 @@ def render_blocks(root):
     return out
 
 
-def report_step(root=REPO_ROOT, run=run_command, blocks=render_blocks, precheck=True, out=print):
+def report_step(root: str = REPO_ROOT, run: Runner = run_command, blocks: Blocks = render_blocks,
+                precheck: bool = True, out: Out = print) -> None:
     """The report step: every REBUILD command, then the README blocks; SystemExit when the CHECKED paths already
     differ from git HEAD (precheck, before any command), when a command fails, or afterwards, naming every path, when a
     file git HEAD tracks differs from HEAD's bytes (whatever it was before the rebuild, so an already dirty file
     fails) or a file HEAD does not track (full mode, after steps ran: their untracked outputs) was created, changed or
-    removed by the rebuild (10-REVIEW WR-02). A root that is not the top of a git work tree is refused before any
-    command (NO_GIT): without git there is no committed copy to compare with or restore from (10-REVIEW WR-05)."""
+    removed by the rebuild. A root that is not the top of a git work tree is refused before any command (NO_GIT):
+    without git there is no committed copy to compare with or restore from."""
     before = tree_status(root)
     if before is None:
         raise SystemExit(NO_GIT % ("eval-only", root))
@@ -718,7 +763,7 @@ VERIFY_LINE = "verify-checkpoints (reported, not gated): "
 ABSENT_DETAIL = "not needed: eval-only rebuilds from the committed dumps"
 
 
-def _identity_diff(have, want):
+def _identity_diff(have: Any, want: Any) -> list[str]:
     """The identity keys (files_sha256 entries as files_sha256[NAME]) whose digests differ."""
     have, want = have if isinstance(have, dict) else {}, want if isinstance(want, dict) else {}
     out = []
@@ -731,8 +776,9 @@ def _identity_diff(have, want):
     return out
 
 
-def verify_checkpoints(root=REPO_ROOT, checkpoint_root=None, manifests=None):
-    """D-06, reported, not gated: [{kind, seed, checkpoint_name, status, detail}] of every final seed listed in
+def verify_checkpoints(root: str = REPO_ROOT, checkpoint_root: str | None = None,
+                       manifests: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    """Reported, not gated: [{kind, seed, checkpoint_name, status, detail}] of every final seed listed in
     root's results/postfit/<kind>-final.json (manifests={kind: path} overrides them), its dir under checkpoint_root
     (default root) re-hashed with the identity functions score.py uses (pilot.weights.identity + pilot.dumps.run_id,
     pilot.berturk.identity + dump_run_id) against the manifest's checkpoint_identity and dump_run_id: "match",
@@ -766,7 +812,8 @@ def verify_checkpoints(root=REPO_ROOT, checkpoint_root=None, manifests=None):
     return rows
 
 
-def _missing_refusal(step, items):
+def _missing_refusal(step: Step, items: list[Item]) -> str:
+    """Eval-only's refusal of a step that is not done: its first missing path and the step that makes it."""
     gone = [it for it in items if not it["present"]]
     if not gone:
         return "eval-only never trains or scores: step %s has no committed artifact; %s" % (step["name"], step["fix"])
@@ -775,14 +822,16 @@ def _missing_refusal(step, items):
             "with `git checkout -- %s`" % (it["path"], step["name"], " ".join(it["files"])))
 
 
-def _print_verify(root, checkpoint_root, out):
+def _print_verify(root: str, checkpoint_root: str | None, out: Out) -> None:
+    """One VERIFY_LINE per verify_checkpoints row."""
     for r in verify_checkpoints(root, checkpoint_root):
         out("%s%s seed %s %s: %s%s" % (VERIFY_LINE, r["kind"], r["seed"], r["checkpoint_name"], r["status"],
                                       " (%s)" % r["detail"] if r["detail"] else ""))
 
 
-def eval_only(root=REPO_ROOT, run=run_command, blocks=render_blocks, out=print, verify=False, checkpoint_root=None):
-    """Eval-only (D-05): verify the tree through plan(), refuse before any command a step other than data that is
+def eval_only(root: str = REPO_ROOT, run: Runner = run_command, blocks: Blocks = render_blocks, out: Out = print,
+              verify: bool = False, checkpoint_root: str | None = None) -> None:
+    """Eval-only: verify the tree through plan(), refuse before any command a step other than data that is
     not done (its first missing path and the step that makes it), run `make data` only when the local split files are
     absent, then (verify: the verify_checkpoints rows first, reported, not gated) report_step."""
     rows = plan(root)
@@ -803,10 +852,11 @@ def eval_only(root=REPO_ROOT, run=run_command, blocks=render_blocks, out=print, 
     report_step(root, run, blocks, precheck=True, out=out)
 
 
-# ---- the command layer (D-01, D-04): every step's commands, built from the committed records, protocol.json and the
-# Makefile, never retyped; printed by dry_run, which runs nothing ----
+# ---- the command layer: every step's commands, built from the committed records, protocol.json and the Makefile,
+# never retyped; printed by dry_run, which runs nothing ----
 
 RUN_ID = "<RUN_ID>"                  # a selection run id before its postfit record exists (--print-run-id prints it)
+# the retraining disclosure, printed once before the first model step (dry_run, run_full)
 DISCLOSURE = (
     "Full mode retrains every model from scratch. MPS retraining is not bit-identical, so the new selection exports, "
     "final seeds and few-shot checkpoints get other identities and dump run ids than the frozen record holds. The "
@@ -827,15 +877,15 @@ PROJECTION = "results/fewshot/projection.json"
 LATENCY_DEVICES = ("mps", "cpu")
 
 
-def _record(root, proto, kind):
+def _record(root: str, proto: dict[str, Any], kind: str) -> tuple[dict[str, Any] | None, str]:
     """(the committed postfit record of kind or None when absent, its repo-relative path), read with
     pilot.postfit.read_record after its protocol.json pin; SystemExit (the refusal and the restore fix) for a record
-    that is present and does not verify, so an edited record never yields a command (T-10-16)."""
+    that is present and does not verify, so an edited record never yields a command."""
     from pilot import postfit
     rel = "results/postfit/%s.json" % kind
     got = {}
 
-    def check(p):
+    def check(p: str) -> None:
         got["record"] = postfit.read_record(p)[0]
     item = _file(root, rel, proto, check)
     if not item["present"]:
@@ -848,7 +898,8 @@ def _record(root, proto, kind):
     return got["record"], rel
 
 
-def _laya_argv(b, data, base, epochs, seed, lr, head_lr, stop=None, tail=()):
+def _laya_argv(b: dict[str, Any], data: str, base: str, epochs: int, seed: int, lr: float, head_lr: float,
+               stop: int | None = None, tail: Sequence[str] = ()) -> Cmd:
     """A ray_train.py argv in the recorded flag order from a protocol recipe b (fewshot.rules.base_runs.laya)."""
     argv = [b["trainer"], "--data", data, "--base", base, "--device", b["device"], "--workers", str(b["workers"]),
             "--micro-batch", str(b["micro_batch"]), "--grad-accum", str(b["grad_accum"]), "--max-len",
@@ -859,7 +910,8 @@ def _laya_argv(b, data, base, epochs, seed, lr, head_lr, stop=None, tail=()):
     return tuple(argv) + tuple(tail)
 
 
-def _berturk_argv(b, data, base, epochs, seed, lr, head_lr, stop=None, tail=()):
+def _berturk_argv(b: dict[str, Any], data: str, base: str, epochs: int, seed: int, lr: float, head_lr: float,
+                  stop: int | None = None, tail: Sequence[str] = ()) -> Cmd:
     """A berturk_train.py argv in the recorded flag order from a protocol recipe b (fewshot.rules.base_runs.berturk);
     --batch and --max-len only where b differs from berturk_train.py's defaults (pilot.berturk.BATCH, MAX_LEN), as
     the recorded commands pass neither."""
@@ -874,7 +926,7 @@ def _berturk_argv(b, data, base, epochs, seed, lr, head_lr, stop=None, tail=()):
     return tuple(argv + ["--seed", str(seed)]) + tuple(tail)
 
 
-def selection_command(proto, kind):
+def selection_command(proto: dict[str, Any], kind: str) -> Cmd:
     """The selection run of kind: protocol fewshot.rules.base_runs.<kind> (every field but stop_after_epoch, the full
     schedule) at pilot.postfit.SELECTION_SEED on the base runs' split; Laya with --storage ray_results --out ckpt-sel,
     BERTurk with --storage berturk_runs (its exports are its output)."""
@@ -888,8 +940,10 @@ def selection_command(proto, kind):
                          tail=("--storage", STORAGE[kind]))
 
 
-def _selection_lines(kind):
-    def build(root, proto, pin):
+def _selection_lines(kind: str) -> Builder:
+    """The lines of a selection step: the run id printer, the selection run, then per epoch the val scoring of its
+    export and the export's prune; the run id is the postfit record's when it exists, else RUN_ID."""
+    def build(root: str, proto: dict[str, Any], pin: str) -> list[Line]:
         rec, rel = _record(root, proto, kind)
         train, out = selection_command(proto, kind), []
         out.append((train + ("--print-run-id",), "prints the run id (%s/<run_id>/); it starts no Ray and trains "
@@ -914,8 +968,10 @@ def _selection_lines(kind):
     return build
 
 
-def _final_lines(kind):
-    def build(root, proto, pin):
+def _final_lines(kind: str) -> Builder:
+    """The lines of a final-seed step: one training command per final seed from the postfit record (deferred, with
+    the command that prints them, while the record is absent), then the final manifest."""
+    def build(root: str, proto: dict[str, Any], pin: str) -> list[Line]:
         from pilot import berturk, postfit
         rec, rel = _record(root, proto, kind)
         storage, prefix, out = STORAGE[kind], FINAL_PREFIX[kind], []
@@ -938,20 +994,20 @@ def _final_lines(kind):
     return build
 
 
-def latency_commands():
+def latency_commands() -> list[Cmd]:
     """The four latency runs (each final seed of a system on a device, the pinned report paths) and the render."""
     runs = [("latency.py", "--system", kind, "--device", dev, "--out", "results/latency/%s-%s.json" % (kind, dev))
             for kind in protocol.KINDS for dev in LATENCY_DEVICES]
     return runs + [("latency.py", "--render", "results/latency", "--out", "results/latency/latency.md")]
 
 
-def final_report_commands(proto, fewshot=None):
+def final_report_commands(proto: dict[str, Any], fewshot: str | None = None) -> list[Cmd]:
     """The Makefile final-reports recipe as argv tuples, from the protocol's final seeds, their postfit paths, ZEROSHOT
     and the prior (report.py creates the --out dirs): the 6 per-seed test reports, the verdict (with --fewshot fewshot
     when given) and the 15 confidence records."""
     seeds = _final_seeds(proto)
 
-    def postfit_path(kind):
+    def postfit_path(kind: str) -> str:
         return proto["systems"][kind]["postfit"]["path"]
     out = [("report.py", "results/dumps/%s" % s["dump_run_id"], "--split", "test", "--postfit", postfit_path(kind),
             "--out", "results/final/reports/%s-test.json" % s["dump_run_id"]) for kind, s in seeds]
@@ -965,22 +1021,22 @@ def final_report_commands(proto, fewshot=None):
                    "results/final/confidence/prior-test.json")]
 
 
-def fewshot_report_commands():
-    """The fewshot-reports step (10-REVIEW WR-01): the few-shot record (`make fewshot-reports`), then the verdict that
+def fewshot_report_commands() -> list[Cmd]:
+    """The fewshot-reports step: the few-shot record (`make fewshot-reports`), then the verdict that
     binds it (the Makefile final-reports line with --fewshot) and the memo (`make memo`), the committed forms of
     results/final/verdict.json and results/final/memo.md, which need the few-shot record."""
     return [("make", "fewshot-reports"), ("report.py", "--verdict", "--fewshot", FEWSHOT_RECORD, "--out", VERDICT),
             ("make", "memo")]
 
 
-def fewshot_checkpoint(slot):
+def fewshot_checkpoint(slot: Slot) -> str:
     """The checkpoint dir name of a few-shot slot (kind, stage, seed, draw, k), as runs.json lists it."""
     kind, stage, seed, draw, k = slot
     return ("ckpt-fewshot-%s-base-s%d" % (kind, seed) if stage == "base"
             else "ckpt-fewshot-%s-d%d-k%d" % (kind, draw, k))
 
 
-def fewshot_command(proto, slot, mode):
+def fewshot_command(proto: dict[str, Any], slot: Slot, mode: str) -> Cmd:
     """The training argv of one few-shot slot from protocol.json's fewshot block: a masked base at
     rules.base_runs.<kind> (--fewshot-base), or a continued run of the frozen epochs at rules.continued_training's LRs
     from the base pilot.fewshot.base_seed_of(block, draw, mode), seed = the draw's seed."""
@@ -1000,20 +1056,23 @@ def fewshot_command(proto, slot, mode):
                 tail=("--fewshot-draw", str(draw), "--fewshot-k", str(k)) + tail)
 
 
-def _fewshot_slots(root, proto, pin):
-    """(every slot of pilot.fewshot.slots in slot order, the mode, a note or None): the mode from root's D-08 record
+def _fewshot_slots(root: str, proto: dict[str, Any], pin: str) -> tuple[list[Slot], str, str | None]:
+    """(every slot of pilot.fewshot.slots in slot order, the mode, a note or None): the mode from root's few-shot
+    compute decision record
     (pilot.fewshot.read_mode) when it exists, else primary with a note."""
     from pilot import fewshot
     path = os.path.join(root, PROJECTION)
     if os.path.lexists(path):
         mode, note = fewshot.read_mode(pin, path), None
     else:
-        mode, note = "primary", "the mode is primary until %s records the D-08 decision" % PROJECTION
+        mode, note = "primary", "the mode is primary until %s records the few-shot compute decision" % PROJECTION
     return fewshot.slots(proto["fewshot"], mode), mode, note
 
 
-def _fewshot_stage_lines(stage):
-    def build(root, proto, pin):
+def _fewshot_stage_lines(stage: str) -> Builder:
+    """The lines of a few-shot training step: per slot of stage its training command, `fewshot.py --inspect` and,
+    for Laya, `--drop-storage`; the continued stage ends with the runs manifest."""
+    def build(root: str, proto: dict[str, Any], pin: str) -> list[Line]:
         slots, mode, note = _fewshot_slots(root, proto, pin)
         out = [(None, note)] if note else []
         for slot in slots:
@@ -1031,14 +1090,15 @@ def _fewshot_stage_lines(stage):
     return build
 
 
-def _fewshot_scoring_lines(root, proto, pin):
+def _fewshot_scoring_lines(root: str, proto: dict[str, Any], pin: str) -> list[Line]:
+    """`make fewshot-scoring`, then `fewshot.py --prune` of every few-shot checkpoint."""
     slots, _, note = _fewshot_slots(root, proto, pin)
     return ([(None, note)] if note else []) + [(("make", "fewshot-scoring"), None),
                                                 (("fewshot.py", "--prune") + tuple(fewshot_checkpoint(s)
                                                                                    for s in slots), None)]
 
 
-def _baselines_lines(root, proto, pin):
+def _baselines_lines(root: str, proto: dict[str, Any], pin: str) -> list[Line]:
     """The Makefile baselines recipe without --force (every baseline dump is absent when the step is todo, so none is
     overwritten): the six score.py lines, zero-shot Laya at the Makefile's SCORE_WORKERS and SCORE_CPUS, then
     baseline-reports. `make baselines` itself passes --force and is never run."""
@@ -1049,14 +1109,16 @@ def _baselines_lines(root, proto, pin):
     return [(c, None) for c in cmds] + [(("make", "baseline-reports"), None)]
 
 
-def _make(target):
-    def build(root, proto, pin):
+def _make(target: str) -> Builder:
+    """A step that is one make target."""
+    def build(root: str, proto: dict[str, Any], pin: str) -> list[Line]:
         return [(("make", target), None)]
     return build
 
 
-def _fixed(*cmds):
-    def build(root, proto, pin):
+def _fixed(*cmds: Cmd) -> Builder:
+    """A step of fixed command tuples."""
+    def build(root: str, proto: dict[str, Any], pin: str) -> list[Line]:
         return [(c, None) for c in cmds]
     return build
 
@@ -1084,7 +1146,7 @@ BUILDERS = {
 }
 
 
-def step_lines(name, root=REPO_ROOT):
+def step_lines(name: str, root: str = REPO_ROOT) -> list[Line]:
     """[(command tuple or None, note or None)] of one step, in run order, from root's frozen protocol.json, Makefile
     and committed records; SystemExit for an unknown step or a record that does not verify."""
     if name not in BUILDERS:
@@ -1093,12 +1155,12 @@ def step_lines(name, root=REPO_ROOT):
     return BUILDERS[name](root, proto, pin)
 
 
-def commands(name, root=REPO_ROOT):
+def commands(name: str, root: str = REPO_ROOT) -> list[Cmd]:
     """The command tuples of one step (no interpreter: command_argv adds it), in run order."""
     return [c for c, _ in step_lines(name, root) if c is not None]
 
 
-def display(cmd):
+def display(cmd: Sequence[str]) -> str:
     """One command as a reader types it: "make TARGET" or "python SCRIPT ARGS" (shlex-quoted); SystemExit for
     anything command_argv would not run."""
     cmd = tuple(cmd)
@@ -1108,8 +1170,8 @@ def display(cmd):
     return "python " + shlex.join(cmd)
 
 
-def dry_run(root=REPO_ROOT, all_steps=False):
-    """The text of a dry run (D-01, D-04): the plan of root, then each todo or always-run step (every step with
+def dry_run(root: str = REPO_ROOT, all_steps: bool = False) -> str:
+    """The text of a dry run: the plan of root, then each todo or always-run step (every step with
     all_steps) as a "== N name (state)" header and its displayed commands, with the DISCLOSURE once before the first
     model step listed. It runs nothing."""
     rows = plan(root)
@@ -1135,12 +1197,12 @@ def dry_run(root=REPO_ROOT, all_steps=False):
     return "\n".join(out) + "\n"
 
 
-# ---- full mode (D-01 to D-04; `make reproduce`, reproduce.py --mode full): the todo steps in order, then the report ----
+# ---- full mode (`make reproduce`, reproduce.py --mode full): the todo steps in order, then the report ----
 
 GATE_PRODUCERS = {"final-scoring": ("laya-final", "berturk-final"), "fewshot-scoring": ("fewshot-continued",)}
-D04_STOP = ("a from-scratch run stops at the first output that differs from the committed record or a protocol.json "
-            "pin (D-04): the protocol gate admits only the frozen record's checkpoints; `git checkout -- results/` "
-            "restores the audit record")
+RETRAIN_STOP = ("a from-scratch run stops at the first output that differs from the committed record or a "
+                "protocol.json pin (MPS retraining is not bit-identical): the protocol gate admits only the frozen "
+                "record's checkpoints; `git checkout -- results/` restores the audit record")
 DEFERRED_RE = re.compile(r"once (\S+) exists")
 # a committed file that is one step's evidence but a later step's output: the after-check of the step that writes it
 # verifies it (fewshot-bases' slots are recorded in the runs manifest that fewshot-continued writes; final-reports
@@ -1148,7 +1210,7 @@ DEFERRED_RE = re.compile(r"once (\S+) exists")
 LATER_OUTPUT = {RUNS: "fewshot-continued", VERDICT: "fewshot-reports"}
 
 
-def capture_command(cmd, root):
+def capture_command(cmd: Sequence[str], root: str) -> str:
     """The last non-empty stdout line of one command tuple run in root without a shell (a --print-run-id command);
     its stderr passes through. SystemExit naming the command when it exits non-zero."""
     sys.stdout.flush()
@@ -1159,7 +1221,7 @@ def capture_command(cmd, root):
     return lines[-1] if lines else ""
 
 
-def committed_bytes(root, rel):
+def committed_bytes(root: str, rel: str) -> bytes | None:
     """The bytes git HEAD holds for the repo-relative file rel in root, or None when git is missing, root is not the
     top of a work tree, there is no HEAD or HEAD does not track rel as a file."""
     top = _git(root, "rev-parse", "--show-toplevel")
@@ -1171,7 +1233,7 @@ def committed_bytes(root, rel):
     return r.stdout if r is not None and r.returncode == 0 else None
 
 
-def head_holds(root, rel):
+def head_holds(root: str, rel: str) -> bool:
     """True when git HEAD tracks the repo-relative file rel in root (root the top of a work tree), without reading
     the blob; False without git, outside a work tree's top, without a HEAD or for a path HEAD does not hold as a file."""
     top = _git(root, "rev-parse", "--show-toplevel")
@@ -1183,16 +1245,17 @@ def head_holds(root, rel):
     return r is not None and r.returncode == 0 and r.stdout.strip() == b"blob"
 
 
-def _held_refusal(step, held):
+def _held_refusal(step: Step, held: list[str]) -> str:
+    """Full mode's refusal of a todo step whose committed artifacts git HEAD holds (deleted from the working tree)."""
     gated = (" the gated dumps are the exactly-once audit record and are never rescored;" if step.get("gated")
              else "")
     return ("step %s is todo, but git HEAD holds %d of its committed artifacts, missing from the working tree (first "
-            "%s): a deleted committed record is never work to redo (D-03), and full mode reruns no step whose "
+            "%s): a deleted committed record is never work to redo, and full mode reruns no step whose "
             "output HEAD holds;%s restore them with `git checkout -- %s`"
             % (step["name"], len(held), held[0], gated, " ".join(held)))
 
 
-def _writer(name, item, order):
+def _writer(name: str, item: Item, order: list[str]) -> str | None:
     """The later step (a name in order, after name) that writes a file of item, or None: the item is the evidence of
     step name, but its committed bytes are that later step's output (LATER_OUTPUT)."""
     for f in item["files"]:
@@ -1202,7 +1265,7 @@ def _writer(name, item, order):
     return None
 
 
-def after_items(step, root, proto, pin):
+def after_items(step: Step, root: str, proto: dict[str, Any], pin: str) -> list[tuple[str, Item]]:
     """[(step name, item)] that after_check verifies once step ran: the step's own evidence items, except those whose
     committed file a later step writes (LATER_OUTPUT: fewshot-bases' slots live in the runs.json that
     fewshot-continued writes; the verdict, whose committed form fewshot-reports writes), plus the deferred items of
@@ -1220,21 +1283,21 @@ def after_items(step, root, proto, pin):
     return out + [(name, _file(root, rel, proto)) for rel in step.get("outputs", ())]
 
 
-def after_check(step, root, proto, pin):
+def after_check(step: Step, root: str, proto: dict[str, Any], pin: str) -> None:
     """After a step ran: the items of after_items (its own outputs, never a file a later step writes), every item
     present and verified (the readers and the protocol.json pins of the evidence functions), and every file of each
     item (a dump's npz and sidecar) equal to the bytes git HEAD holds for it when HEAD tracks it; SystemExit (one
-    line, the D-04 reason) at the first failure. A step whose every evidence item is a later step's output (the
+    line, the RETRAIN_STOP reason) at the first failure. A step whose every evidence item is a later step's output (the
     masked bases, recorded by fewshot-continued's runs manifest) is verified with that step."""
     name = step["name"]
     manifest = os.path.join(root, "data", "splits.json")
     if not step["evidence"](root, proto, pin, manifest):
-        raise SystemExit("step %s ran, but it left no evidence to verify; %s" % (name, D04_STOP))
+        raise SystemExit("step %s ran, but it left no evidence to verify; %s" % (name, RETRAIN_STOP))
     for _, it in after_items(step, root, proto, pin):
         if not it["present"]:
-            raise SystemExit("step %s ran, but %s is missing; %s" % (name, it["label"], D04_STOP))
+            raise SystemExit("step %s ran, but %s is missing; %s" % (name, it["label"], RETRAIN_STOP))
         if not it["ok"]:
-            raise SystemExit("step %s ran, but %s; %s" % (name, it["reason"], D04_STOP))
+            raise SystemExit("step %s ran, but %s; %s" % (name, it["reason"], RETRAIN_STOP))
         for rel in it["files"]:
             want = committed_bytes(root, rel)
             if want is None:
@@ -1243,31 +1306,36 @@ def after_check(step, root, proto, pin):
                 have = f.read()
             if have != want:
                 raise SystemExit("step %s ran, but %s differs from the bytes git HEAD holds for it; %s"
-                                 % (name, rel, D04_STOP))
+                                 % (name, rel, RETRAIN_STOP))
 
 
-def _gate_refusal(name):
+def _gate_refusal(name: str) -> str:
+    """Full mode's refusal of a todo gated step whose training steps are done (it would rescore around them)."""
     return ("%s has no committed gated dumps while the steps that train its checkpoints are done: the gated dumps are "
             "the exactly-once audit record and are never rescored; restore them with `git checkout -- results/dumps/`"
             % name)
 
 
-def _substitute(cmd, rid):
+def _substitute(cmd: Cmd, rid: str) -> Cmd:
+    """cmd with every RUN_ID placeholder replaced by the resolved run id rid."""
     return tuple(a.replace(RUN_ID, rid) for a in cmd)
 
 
-def run_full(root=REPO_ROOT, run=run_command, capture=capture_command, blocks=render_blocks, report=report_step,
-             out=print, verify=False, checkpoint_root=None):
-    """Full mode (D-01 to D-04): plan(root) (the 10-03 refusals), then every todo step in STEP_NAMES order, each
+def run_full(root: str = REPO_ROOT, run: Runner = run_command,
+             capture: Callable[[Sequence[str], str], str] = capture_command, blocks: Blocks = render_blocks,
+             report: Callable[..., None] = report_step, out: Out = print, verify: bool = False,
+             checkpoint_root: str | None = None) -> None:
+    """Full mode: plan(root) (its fail-closed refusals), then every todo step in STEP_NAMES order, each
     step's commands evaluated just before it runs, then the report step. A done step is skipped; a todo step any of
-    whose evidence files git HEAD holds is refused before any command (D-03: a deleted committed record, restored with
+    whose evidence files git HEAD holds is refused before any command (a deleted committed record, restored with
     `git checkout -- PATH`, never rerun); a todo gated step runs only after the steps that train its checkpoints
-    (GATE_PRODUCERS) ran in this invocation, else it is refused before any command; DISCLOSURE prints once before the first model step; a selection run id (RUN_ID) is resolved
+    (GATE_PRODUCERS) ran in this invocation, else it is refused before any command; DISCLOSURE prints once before the
+    first model step; a selection run id (RUN_ID) is resolved
     with the step's --print-run-id command; the first non-zero exit stops the run naming the step and the command;
     after_check stops it at the first output that differs from the committed record or a protocol pin."""
     rows = plan(root)
     proto, pin = protocol.require_frozen(os.path.join(root, "protocol.json"))
-    # D-03, fail closed (10-REVIEW WR-03): a todo step whose evidence git HEAD holds is a deleted committed record,
+    # fail closed: a todo step whose evidence git HEAD holds is a deleted committed record,
     # never work to redo; a gated step's dumps are scored once, so its rerun never depends on retraining differing
     for step, st, items in rows:
         if st != "todo" or step["name"] in LOCAL + ALWAYS:
@@ -1280,7 +1348,7 @@ def run_full(root=REPO_ROOT, run=run_command, capture=capture_command, blocks=re
         if st == "todo" and not all(p in todo for p in GATE_PRODUCERS.get(step["name"], ())):
             raise SystemExit(_gate_refusal(step["name"]))
     # every output is compared with git HEAD, so a committed path that already differs from it (other than the
-    # evidence of a todo step) is refused before any command (10-REVIEW WR-02), and so is a root without git (WR-05)
+    # evidence of a todo step) is refused before any command, and so is a root without git
     status = tree_status(root)
     if status is None:
         raise SystemExit(NO_GIT % ("full mode", root))
@@ -1309,7 +1377,7 @@ def run_full(root=REPO_ROOT, run=run_command, capture=capture_command, blocks=re
             if note and note.startswith("deferred"):
                 m = DEFERRED_RE.search(note)
                 raise SystemExit("%s needs %s, which the earlier step did not produce; %s"
-                                 % (name, m.group(1) if m else "a committed record", D04_STOP))
+                                 % (name, m.group(1) if m else "a committed record", RETRAIN_STOP))
         cmds = [c for c, _ in lines if c is not None]
         if any(RUN_ID in a for c in cmds for a in c):
             if not cmds or cmds[0][-1:] != ("--print-run-id",):
@@ -1325,7 +1393,7 @@ def run_full(root=REPO_ROOT, run=run_command, capture=capture_command, blocks=re
             out("run: " + display(cmd))
             rc = run(cmd, root)
             if rc != 0:
-                raise SystemExit("step %s: `%s` exited %d; a protocol gate refusal printed above is final (D-04): a "
+                raise SystemExit("step %s: `%s` exited %d; a protocol gate refusal printed above is final: a "
                                  "from-scratch run stops there; otherwise fix the cause and rerun `make reproduce`, "
                                  "which skips every finished step" % (name, display(cmd), rc))
         after_check(step, root, proto, pin)
@@ -1333,7 +1401,8 @@ def run_full(root=REPO_ROOT, run=run_command, capture=capture_command, blocks=re
     report(root, run, blocks, precheck=not [n for n in ran if n not in LOCAL], out=out)
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> str:
+    """`python -m pilot.reproduce --plan`: print the step plan of the working tree and return its text."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--plan", action="store_true", help="print the step plan of the working tree")
     a = ap.parse_args(argv)

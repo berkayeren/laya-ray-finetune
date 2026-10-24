@@ -1,4 +1,4 @@
-# Direct exact pins for the pilot (source: .planning/research/STACK.md).
+# Direct exact pins for the pilot.
 # The project is never pip-installed (no [build-system]); tests use pythonpath.
 # Regenerate the hash lock with `make lock` and commit both files together.
 [project]
@@ -23,6 +23,6 @@ markers = [
   "unit: offline, fast, no weights or data downloads",
   "data: needs the pinned Multi3NLU++ download (network on first run)",
   "weights: fetches/verifies pinned HF weights (~1.1 GB on first run)",
-  "ray: starts a local Ray instance (Phase 3+)",
+  "ray: starts a local Ray instance",
   "mps: needs Apple MPS",
 ]

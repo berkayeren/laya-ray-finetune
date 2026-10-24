@@ -8,9 +8,9 @@
 #                    (needs `make data` and the pinned weights; about 5 minutes on the M4). It passes --force,
 #                    because score.py refuses to overwrite an existing dump in results/dumps (the committed record)
 #   make baseline-reports  rebuild the reports and print the results table from the committed dumps (no model)
-#   make laya-postfit      rebuild the Phase 5 Laya postfit record from the committed selection dumps (no model)
-#   make berturk-postfit   rebuild the Phase 6 BERTurk postfit record from the committed 30-epoch selection dumps (no model)
-#   make confidence-reports  rebuild the Phase 7 val confidence records from the committed dumps and postfit records (no model)
+#   make laya-postfit      rebuild the Laya postfit record from the committed selection dumps (no model)
+#   make berturk-postfit   rebuild the BERTurk postfit record from the committed 30-epoch selection dumps (no model)
+#   make confidence-reports  rebuild the val confidence records from the committed dumps and postfit records (no model)
 #   make final-scoring  score the six final seeds once on test and HOTELS behind the protocol gate (model, about 35 min on the M4; never rerun: the gate refuses an existing dump)
 #   make final-reports  rebuild results/final/ (per-seed reports, verdict with the few-shot record, confidence records) from the committed dumps (no model)
 #   make fewshot-scoring  score every few-shot checkpoint of results/fewshot/runs.json once (bases on val and test, continued models on test) behind the protocol gate (model, about 30 min on the M4; never rerun: the gate refuses an existing dump)
