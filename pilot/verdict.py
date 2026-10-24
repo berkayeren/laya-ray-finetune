@@ -1,54 +1,59 @@
-"""The mechanical GO block of REP-03 under the decision rule frozen in protocol.json (REP-01): per-criterion statuses
-and the overall verdict, computed from numbers and thresholds passed in, never from a judgement.
+"""The mechanical GO block under the decision rule frozen in protocol.json: per-criterion statuses and the overall
+verdict, computed from numbers and thresholds passed in, never from a judgement.
 
 Thresholds always come from the caller's criteria dict: in production the frozen protocol's `criteria` block;
-DEFAULT_CRITERIA are the REP-01 defaults that 08-05 writes into protocol.json (and a test there keeps the two equal).
-No criterion function holds a threshold literal. Every comparison uses the operator its key names (`_min` and
-`_at_least` >=, `_above` >, `_below` <) on the unrounded float64 values; nothing is rounded. Units are fractions in
-[0, 1]; the rule texts render points = fraction x 100. Deltas are Laya - BERTurk.
+DEFAULT_CRITERIA are the defaults build_protocol copied into protocol.json (a test keeps the two equal). No criterion
+function holds a threshold literal. Every comparison uses the operator its key names (`_min` and `_at_least` >=,
+`_above` >, `_below` <) on the unrounded float64 values; nothing is rounded. Units are fractions in [0, 1]; the rule
+texts render points = fraction x 100. Deltas are Laya - BERTurk.
 
-Decisions taken as 08-RESEARCH recommended, under the user's standing delegation (2026-10-21):
+Choices frozen with the protocol under the user's standing delegation (2026-10-21; the ids are protocol.json's
+assumptions):
 - A1: (d)'s calibration path is Brier (strictly proper, additive over messages, so its paired percentile bootstrap is
   well posed); classwise ECE is reported only, its percentile bootstrap being biased (DEFAULT_CRITERIA d reported_only).
 - A2: (a) is three-way: PASS when the micro-F1 delta CI lower bound >= micro_ci_lower_min and the macro-F1 delta point
   >= macro_point_min; FAIL when the micro-F1 CI upper bound < micro_fail_ci_upper_below or the macro-F1 point <
   macro_point_min; INCONCLUSIVE otherwise. The macro-F1 CI is carried, labelled macro_ci_label, never gated.
 - A3: overall follows VERDICT_RULES in order. INCONCLUSIVE counts as NO-GO (INCONCLUSIVE_MEANS) and is never mapped to
-  GO. With (a) PASS and (d) PENDING (the few-shot path waits for Phase 9) decide computes the verdict with the few-shot
-  path MET and NOT MET; it is PROVISIONAL (PROVISIONAL_TEXT, both outcomes named) only when the two differ.
+  GO. With (a) PASS and (d) PENDING (the few-shot path not yet run) decide computes the verdict with the few-shot path
+  MET and NOT MET; it is PROVISIONAL (PROVISIONAL_TEXT, both outcomes named) only when the two differ.
 - A4: the alternative GO is a micro-F1 delta strictly above delta_above with a CI lower bound strictly above
   ci_lower_above, and still needs (b) PASS ((b) FAIL is rule 1, before it).
 - A6: the collapse rule of (b) (DEFAULT_COLLAPSE) applies to each model's selection run (its postfit record's chosen
   candidate: val floor and loss) and to each final seed (loss and a test floor; the val floor is not applied to final
   seeds, whose final_train holds the val folds). The floors compare exact Fractions 2TP / (2TP + FP + FN)
   (micro_fraction, parse_fraction), never floats, and only strictly below the floor is collapsed; a loss list with a
-  NaN or infinite value, or whose last epoch is strictly above its first, is collapsed. The test floor is a
-  Claude-recommended addition to the REP-01 default (08-RESEARCH Open Question 1), frozen before any fine-tuned test
-  number. (b) is PASS only with no collapsed row and exactly seeds_per_model distinct seeds per model; (c) is always
-  REPORTED (not gated).
+  NaN or infinite value, or whose last epoch is strictly above its first, is collapsed. The test floor is a marked
+  addition to the default rule, frozen before any fine-tuned test number. (b) is PASS only with no collapsed row and
+  exactly seeds_per_model distinct seeds per model; (c) is always REPORTED (not gated).
 Inputs are validated before any comparison: a missing or non-finite delta, a missing, non-finite or misordered CI and
 an unknown status raise SystemExit naming the input, so an empty result is refused, never scored.
 
-The verdict record (08-09): build_verdict(protocol, sha, inputs) turns report.verdict_from's protocol-bound inputs into
+The verdict record: build_verdict(protocol, sha, inputs) turns report.verdict_from's protocol-bound inputs into
 verdict/1 (VERDICT_KEYS): the per-seed rows, settings and summary of each fine-tuned system (mean_std: the mean and the
-sample std, ddof 1, A16, exact for equal values), the reference rows, the seed-averaged deltas (headline gates, raw is
-reported, A18), the collapse rows (A6: selection laya, selection berturk, then each model's final seeds), the latency
-rows, the few-shot path, every criterion from the protocol's criteria block and the overall verdict by decide. It
-refuses a protocol whose verdict rules are not this module's, holds no timestamp and rounds nothing.
-The few-shot path (09-08, D-13): without a few-shot result the fewshot block is {status PENDING, phase 9} (the Phase 8
-verdict, byte for byte); with inputs["fewshot"] (report.fewshot_input: the few-shot results record's primary numbers,
-recomputed from the dumps) criterion_d reads its {mean_delta, draws} at the frozen mean_delta_at_least (_fewshot,
-unchanged), so the path is MET or NOT MET, (d) PASS or FAIL and decide names no few-shot branch; the fewshot block is
-then FEWSHOT_KEYS: the path's status, phase 9, k (criteria (d)'s fewshot k), mean_delta, draws, the record {path,
-sha256}, the mode (primary or fallback) and the frozen compute-fallback disclosure under the fallback (None under
-primary). check_record accepts either form and recomputes (d) from the block's own numbers, so an edited few-shot status,
-mean, draw, k, phase or key is refused; render_go adds the few-shot line (and the disclosure line) for the record's form
+sample std, ddof 1, exact for equal values), the reference rows, the seed-averaged deltas (headline gates, raw is
+reported), the collapse rows (selection laya, selection berturk, then each model's final seeds), the latency rows, the
+few-shot path, every criterion from the protocol's criteria block and the overall verdict by decide. It refuses a
+protocol whose verdict rules are not this module's, holds no timestamp and rounds nothing.
+The few-shot path: without a few-shot result the fewshot block is {status PENDING, phase 9} (the verdict as first
+computed, before the few-shot experiment; `phase` is a record key, 9 the number the record carries for that
+experiment); with inputs["fewshot"] (report.fewshot_input: the few-shot results record's primary numbers, recomputed
+from the dumps) criterion_d reads its {mean_delta, draws} at the frozen mean_delta_at_least (_fewshot, unchanged), so
+the path is MET or NOT MET, (d) PASS or FAIL and decide names no few-shot branch; the fewshot block is then
+FEWSHOT_KEYS: the path's status, phase 9, k (criteria (d)'s fewshot k), mean_delta, draws, the record {path, sha256},
+the mode (primary or fallback) and the frozen compute-fallback disclosure under the fallback (None under primary).
+check_record accepts either form and recomputes (d) from the block's own numbers, so an edited few-shot status, mean,
+draw, k, phase or key is refused; render_go adds the few-shot line (and the disclosure line) for the record's form
 only, so the PENDING render is unchanged.
-render_final_table(v) is REP-02's one results table (references in REFERENCE_ORDER, each fine-tuned model as
-mean ± sample std with its per-seed values in seed order, then its seed-averaged EVAL-07 system, and the settings)
-and render_go(v) REP-03's GO block (every criterion's status and numbers, the verdict and the frozen rule lines that
-fired, INCONCLUSIVE_MEANS whenever INCONCLUSIVE appears); both read only the record and the frozen texts, refuse
-another schema or a dropped seed, and round for display only.
+render_final_table(v) is the one results table (references in REFERENCE_ORDER, each fine-tuned model as mean ± sample
+std with its per-seed values in seed order, then its seed-averaged system, and the settings) and render_go(v) the GO
+block (every criterion's status and numbers, the verdict and the frozen rule lines that fired, INCONCLUSIVE_MEANS
+whenever INCONCLUSIVE appears); both read only the record and the frozen texts, refuse another schema or a dropped
+seed, and round for display only.
+
+Every text constant copied into protocol.json or the verdict record (the statuses, VERDICT_RULES, INCONCLUSIVE_MEANS,
+PROVISIONAL_TEXT, UNITS, DEFAULT_CRITERIA, DEFAULT_COLLAPSE) is kept byte for byte as frozen, including the planning
+labels some of them quote; _check_rules refuses a protocol whose texts differ from them.
 
 numpy and stdlib only: no torch, scipy, Ray, laya or sklearn (report.py imports this module).
 
@@ -72,6 +77,7 @@ import numbers
 import re
 import statistics
 from fractions import Fraction
+from typing import Any, NoReturn, Sequence
 
 import numpy as np
 
@@ -87,7 +93,7 @@ A_STATUSES = (PASS, FAIL, INCONCLUSIVE)
 B_STATUSES = (PASS, FAIL)
 D_STATUSES = (PASS, FAIL, PENDING)
 ALT_STATUSES = (MET, NOT_MET)
-# A3: the overall verdict, first matching line wins; decide records the 1-based index of the line that fired
+# the overall verdict (A3), first matching line wins; decide records the 1-based index of the line that fired
 VERDICT_RULES = (
     "(b) FAIL -> NO-GO",
     "alternative GO MET -> GO",
@@ -157,7 +163,8 @@ DEFAULT_CRITERIA = {
 }
 
 
-# A6: rule texts only; 08-05 adds the data-derived prior fractions (val and test) when it builds protocol.json
+# the collapse rule (A6), rule texts only; build_protocol added the data-derived prior fractions (val and test) to
+# protocol.json's collapse block
 DEFAULT_COLLAPSE = {
     "rule": "a run is collapsed when any component applied to it is collapsed; (b) needs no collapsed run",
     "applies_to": [
@@ -193,20 +200,20 @@ DEFAULT_COLLAPSE = {
 FRACTION_RE = re.compile(r"^(0|[1-9][0-9]*)/([1-9][0-9]*)$")
 
 
-def _status(value, allowed, what):
+def _status(value: Any, allowed: Sequence[str], what: str) -> str:
     if not isinstance(value, str) or value not in allowed:
         raise SystemExit("unknown %s status %r; expected one of: %s" % (what, value, ", ".join(allowed)))
     return value
 
 
-def _finite(x, what):
+def _finite(x: Any, what: str) -> float:
     """x as a float64 value, refused unless it is a finite real number (never None, a bool or a string)."""
     if isinstance(x, bool) or not isinstance(x, numbers.Real) or not math.isfinite(x):
         raise SystemExit("%s must be a finite number, got %r; it is refused, never scored" % (what, x))
     return float(x)
 
 
-def _delta_ci(s, what):
+def _delta_ci(s: Any, what: str) -> tuple[float, float, float]:
     """(delta, ci lower, ci upper) of a {"delta", "ci": [lower, upper]} dict, every value finite and lower <= upper."""
     if not isinstance(s, dict) or "delta" not in s or "ci" not in s:
         raise SystemExit("%s needs a {\"delta\", \"ci\"} result, got %r; it is refused, never scored" % (what, s))
@@ -220,13 +227,13 @@ def _delta_ci(s, what):
     return d, lo, hi
 
 
-def _threshold(rule, key, what):
+def _threshold(rule: Any, key: str, what: str) -> float:
     if not isinstance(rule, dict) or key not in rule:
         raise SystemExit("%s rule has no %r threshold; pass the frozen protocol's criteria block" % (what, key))
     return _finite(rule[key], "%s threshold %s" % (what, key))
 
 
-def _path_rule(rule, name):
+def _path_rule(rule: Any, name: str) -> dict[str, Any]:
     paths = [p for p in rule.get("paths", ()) if isinstance(p, dict) and p.get("path") == name] \
         if isinstance(rule, dict) else []
     if len(paths) != 1:
@@ -234,7 +241,7 @@ def _path_rule(rule, name):
     return paths[0]
 
 
-def criterion_a(micro, macro, rule):
+def criterion_a(micro: dict[str, Any], macro: dict[str, Any], rule: dict[str, Any]) -> dict[str, Any]:
     """(a) non-inferiority, three-way (A2): {"status", "micro", "macro", "macro_ci_label", "rule"}."""
     lo_min = _threshold(rule, "micro_ci_lower_min", "(a)")
     fail_below = _threshold(rule, "micro_fail_ci_upper_below", "(a)")
@@ -254,7 +261,7 @@ def criterion_a(micro, macro, rule):
             "macro_ci_label": rule.get("macro_ci_label"), "rule": rule.get("rule")}
 
 
-def alternative_go(micro, rule):
+def alternative_go(micro: dict[str, Any], rule: dict[str, Any]) -> dict[str, Any]:
     """The alternative GO path (A4): {"status": MET or NOT_MET, "micro", "requires", "rule"}."""
     above = _threshold(rule, "delta_above", "alternative GO")
     lo_above = _threshold(rule, "ci_lower_above", "alternative GO")
@@ -264,7 +271,7 @@ def alternative_go(micro, rule):
             "rule": rule.get("rule")}
 
 
-def _fewshot(fewshot, p):
+def _fewshot(fewshot: dict[str, Any] | None, p: dict[str, Any]) -> dict[str, Any]:
     at_least = _threshold(p, "mean_delta_at_least", "(d) fewshot")
     if fewshot is None:
         return {"path": "fewshot", "metric": p.get("metric"), "status": PENDING, "mean_delta": None, "draws": None}
@@ -282,7 +289,8 @@ def _fewshot(fewshot, p):
     return {"path": "fewshot", "metric": p.get("metric"), "status": status, "mean_delta": mean, "draws": draws}
 
 
-def criterion_d(calibration, abstention, fewshot, rule):
+def criterion_d(calibration: dict[str, Any], abstention: dict[str, Any], fewshot: dict[str, Any] | None,
+                rule: dict[str, Any]) -> dict[str, Any]:
     """(d) any one path (A1): calibration and abstention are {"delta", "ci"} results, fewshot is None (pending) or
     {"mean_delta", "draws"}. Returns {"status", "paths": [calibration, abstention, fewshot], "reported_only",
     "rule"}."""
@@ -309,7 +317,7 @@ def criterion_d(calibration, abstention, fewshot, rule):
     return {"status": status, "paths": paths, "reported_only": rule.get("reported_only"), "rule": rule.get("rule")}
 
 
-def _fire(a, b, d, alt):
+def _fire(a: str, b: str, d: str, alt: str) -> tuple[str | None, int | None]:
     """(verdict, 1-based VERDICT_RULES index), or (None, None) for (a) PASS with (d) PENDING."""
     _status(a, A_STATUSES, "(a)")
     _status(b, B_STATUSES, "(b)")
@@ -330,13 +338,13 @@ def _fire(a, b, d, alt):
     return None, None
 
 
-def overall(a, b, d, alt):
+def overall(a: str, b: str, d: str, alt: str) -> str | None:
     """The overall verdict by VERDICT_RULES (A3): GO, NO_GO, INCONCLUSIVE, or None when it depends on the pending
     few-shot path ((a) PASS with (d) PENDING)."""
     return _fire(a, b, d, alt)[0]
 
 
-def decide(a, b, d, alt):
+def decide(a: str, b: str, d: str, alt: str) -> dict[str, Any]:
     """The GO block's verdict: {"verdict", "provisional", "if_fewshot_met", "if_fewshot_not_met", "rule", "means",
     "statuses"}. With (d) PENDING both branches are computed ((d) PASS: the few-shot path MET; (d) FAIL: NOT MET, the
     other two paths being NOT MET whenever (d) is PENDING); the verdict is PROVISIONAL_TEXT naming both when they
@@ -357,20 +365,20 @@ def decide(a, b, d, alt):
             "statuses": {"a": a, "b": b, "d": d, "alternative_go": alt}}
 
 
-def _count(x, what):
+def _count(x: Any, what: str) -> int:
     if isinstance(x, bool) or not isinstance(x, numbers.Integral) or x < 0:
         raise SystemExit("%s must be a non-negative integer count, got %r" % (what, x))
     return int(x)
 
 
-def micro_fraction(tp, fp, fn):
+def micro_fraction(tp: int, fp: int, fn: int) -> Fraction:
     """Micro-F1 as the exact Fraction 2TP / (2TP + FP + FN) (0 for 0 / 0), the postfit objective's form."""
     tp, fp, fn = _count(tp, "tp"), _count(fp, "fp"), _count(fn, "fn")
     den = 2 * tp + fp + fn
     return Fraction(2 * tp, den) if den else Fraction(0)
 
 
-def parse_fraction(text):
+def parse_fraction(text: str) -> Fraction:
     """The Fraction of an "a/b" text (non-negative integers, b > 0, no sign, space or leading zero); anything else is
     refused, so a float never stands in for a floor."""
     m = FRACTION_RE.fullmatch(text) if isinstance(text, str) else None
@@ -379,7 +387,7 @@ def parse_fraction(text):
     return Fraction(int(m.group(1)), int(m.group(2)))
 
 
-def _fraction(x, what):
+def _fraction(x: Fraction | str, what: str) -> Fraction:
     if isinstance(x, Fraction):
         return x
     if isinstance(x, str):
@@ -387,26 +395,26 @@ def _fraction(x, what):
     raise SystemExit("%s must be an exact Fraction or \"a/b\" text, never %r (floors compare exactly)" % (what, x))
 
 
-def _text(f):
+def _text(f: Fraction) -> str:
     return "%d/%d" % (f.numerator, f.denominator)
 
 
-def _floor(component, value, floor):
+def _floor(component: str, value: Fraction | str, floor: Fraction | str) -> dict[str, Any]:
     value, floor = _fraction(value, component + " value"), _fraction(floor, component + " floor")
     return {"component": component, "value": _text(value), "floor": _text(floor), "collapsed": value < floor}
 
 
-def collapse_val(value, floor):
+def collapse_val(value: Fraction | str, floor: Fraction | str) -> dict[str, Any]:
     """The val floor of a selection run: collapsed when value < floor, both exact Fractions (equal is not)."""
     return _floor("val_floor", value, floor)
 
 
-def collapse_test_floor(value, floor):
+def collapse_test_floor(value: Fraction | str, floor: Fraction | str) -> dict[str, Any]:
     """The test floor of a final seed (the marked addition): collapsed when value < floor, exactly as the val floor."""
     return _floor("test_floor", value, floor)
 
 
-def collapse_loss(losses):
+def collapse_loss(losses: list[float]) -> dict[str, Any]:
     """The loss component: collapsed when any epoch loss is NaN or infinite, or the last is strictly above the first.
     first and last are None when not finite, so the row stays strict JSON."""
     if not isinstance(losses, list) or not losses:
@@ -423,7 +431,7 @@ def collapse_loss(losses):
             "collapsed": non_finite or last > first}
 
 
-def criterion_b(rows, seeds, rule):
+def criterion_b(rows: list[dict[str, Any]], seeds: dict[str, list[int]], rule: dict[str, Any]) -> dict[str, Any]:
     """(b): PASS when no collapse row is collapsed and every model has exactly seeds_per_model distinct seeds.
     rows are collapse_* results (a caller may add labels such as "run"); seeds maps a model to its scored seeds."""
     n = rule.get("seeds_per_model") if isinstance(rule, dict) else None
@@ -449,7 +457,7 @@ def criterion_b(rows, seeds, rule):
             "seed_check": check, "rule": rule.get("rule")}
 
 
-def criterion_c(rows, rule):
+def criterion_c(rows: list[dict[str, Any]], rule: dict[str, Any]) -> dict[str, Any]:
     """(c) latency: always REPORTED (not gated), whatever the numbers; rows are carried as given."""
     if not isinstance(rows, list) or not rows:
         raise SystemExit("(c) needs a non-empty list of latency rows, got %r; it is refused, never shown" % (rows,))
@@ -461,8 +469,9 @@ def criterion_c(rows, rule):
 BOOT_KEYS = ("B", "seed", "level", "coverage")
 
 
-def system_deltas(Y, PA, thA, PB, thB, boot):
-    """The paired Laya - BERTurk deltas of one bootstrap draw (EVAL-07): paired_bootstrap's four metrics (micro-F1,
+def system_deltas(Y: np.ndarray, PA: np.ndarray, thA: float | np.ndarray, PB: np.ndarray, thB: float | np.ndarray,
+                  boot: dict[str, Any]) -> dict[str, Any]:
+    """The paired Laya - BERTurk deltas of one bootstrap draw: paired_bootstrap's four metrics (micro-F1,
     macro-F1, exact match, top-1) then paired_bootstrap_extra's brier, classwise_ece and precision_at_<coverage>,
     both drawn with boot's (B, seed, level) on the same n, so every metric shares one index draw. Each metric is
     {a, b, delta, ci, width, n_undefined}. `boot` is the protocol's bootstrap block (B, seed, level, coverage); a
@@ -480,7 +489,7 @@ def system_deltas(Y, PA, thA, PB, thB, boot):
             "coverage": extra["coverage"], "metrics": dict(base["metrics"], **extra["metrics"])}
 
 
-# ---- the verdict record (08-09, REP-02 and REP-03) ----
+# ---- the verdict record ----
 
 VERDICT_SCHEMA = "verdict/1"
 KINDS = ("laya", "berturk")                                 # A - B: every delta is Laya - BERTurk
@@ -490,8 +499,8 @@ VERDICT_KEYS = ("schema", "protocol", "split", "systems", "references", "seed_av
 PRIOR_KEYS = ("prior_val_fraction", "prior_test_fraction", "prior_theta_global")
 # the seed-averaged deltas: system_deltas plus which system is A and B and each one's T and θ
 SEEDED_KEYS = ("metrics", "B", "seed", "level", "method", "a", "b", "temperature", "theta")
-FEWSHOT_PHASE = 9                                           # the phase that runs the few-shot path of (d)
-# the fewshot block of a verdict built with the few-shot record (09-08, D-13); without it the block is PENDING_FEWSHOT
+FEWSHOT_PHASE = 9                                           # the record's `phase` value of the few-shot experiment
+# the fewshot block of a verdict built with the few-shot record; without it the block is _pending_fewshot()
 FEWSHOT_KEYS = ("status", "phase", "k", "mean_delta", "draws", "record", "mode", "disclosure")
 FEWSHOT_INPUT_KEYS = ("mean_delta", "draws", "k", "record", "mode", "disclosure")
 FEWSHOT_MODES = ("primary", "fallback")                     # pilot.fewshot.MODES (a test keeps the two equal)
@@ -499,8 +508,8 @@ FEWSHOT_FIX = "rebuild it with report.py --verdict --fewshot results/fewshot/few
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def mean_std(values):
-    """(mean, sample standard deviation with ddof 1) of per-seed values as floats (A16), computed exactly (the
+def mean_std(values: Sequence[float]) -> tuple[float, float]:
+    """(mean, sample standard deviation with ddof 1) of per-seed values as floats, computed exactly (the
     statistics module sums exact rationals), so equal values give their own value and a std of exactly 0.0. Fewer
     than two values, or a value that is not a finite number, is refused."""
     if not isinstance(values, (list, tuple)) or len(values) < 2:
@@ -509,7 +518,7 @@ def mean_std(values):
     return float(statistics.mean(xs)), float(statistics.stdev(xs))
 
 
-def _check_rules(protocol):
+def _check_rules(protocol: dict[str, Any]) -> None:
     """SystemExit unless the protocol's verdict block holds exactly the rules, INCONCLUSIVE meaning and provisional
     text this module implements: decide runs this code, so it must be the code of the frozen rules."""
     v = protocol.get("verdict") if isinstance(protocol, dict) else None
@@ -520,13 +529,15 @@ def _check_rules(protocol):
                          "the code of the frozen rules only" % ", ".join(k for k in want if got[k] != want[k]))
 
 
-def _run_row(run, kind, seed, train_run_id, dump_run_id, components):
+def _run_row(run: str, kind: str, seed: int, train_run_id: str, dump_run_id: str,
+             components: list[dict[str, Any]]) -> dict[str, Any]:
     return {"run": run, "kind": kind, "seed": seed, "train_run_id": train_run_id, "dump_run_id": dump_run_id,
             "components": components, "collapsed": any(c["collapsed"] for c in components)}
 
 
-def _collapse_rows(protocol, inputs, systems):
-    """A6, one row per run in the order selection laya, selection berturk, final laya s0.., final berturk s0..:
+def _collapse_rows(protocol: dict[str, Any], inputs: dict[str, Any],
+                   systems: dict[str, Any]) -> dict[str, Any]:
+    """The collapse rows, one per run in the order selection laya, selection berturk, final laya s0.., final berturk s0..:
     each selection run (its record's chosen candidate) by the val floor and the loss, each final seed by the loss and
     the test floor, against the protocol's frozen prior fractions."""
     col = protocol["collapse"]
@@ -552,7 +563,7 @@ def _collapse_rows(protocol, inputs, systems):
             "rows": rows}
 
 
-def _systems(inputs):
+def _systems(inputs: dict[str, Any]) -> dict[str, Any]:
     """Each fine-tuned system as given plus its summary: per TABLE_METRICS metric the mean and sample std over its
     seeds and the per-seed values in seed order; the per-seed rows must be exactly the protocol's listed seeds."""
     out = {}
@@ -573,22 +584,22 @@ def _systems(inputs):
     return out
 
 
-def _pending_fewshot():
+def _pending_fewshot() -> dict[str, Any]:
     return {"status": PENDING, "phase": FEWSHOT_PHASE}
 
 
-def _fewshot_k(protocol):
+def _fewshot_k(protocol: dict[str, Any]) -> Any:
     return _path_rule(protocol["criteria"]["d"], "fewshot").get("k")
 
 
-def _fewshot_draws(protocol):
+def _fewshot_draws(protocol: dict[str, Any]) -> int | None:
     """The number of frozen few-shot draws (the protocol's few-shot block), or None when it lists none."""
     block = protocol.get("fewshot") if isinstance(protocol, dict) else None
     draws = block.get("draws") if isinstance(block, dict) else None
     return len(draws) if isinstance(draws, list) and draws else None
 
 
-def _fallback_disclosure(protocol):
+def _fallback_disclosure(protocol: dict[str, Any]) -> str | None:
     """The frozen compute-fallback disclosure of the protocol's few-shot block (None when it names none)."""
     block = protocol.get("fewshot") if isinstance(protocol, dict) else None
     rules = block.get("rules") if isinstance(block, dict) else None
@@ -597,13 +608,13 @@ def _fallback_disclosure(protocol):
     return text if isinstance(text, str) and text else None
 
 
-def _check_fewshot(block, protocol, what):
+def _check_fewshot(block: Any, protocol: dict[str, Any], what: str) -> dict[str, Any]:
     """SystemExit (one line naming `what` and the fix) unless `block` is the few-shot record's form of the fewshot block
     but for its status: exactly FEWSHOT_KEYS, phase FEWSHOT_PHASE, k criteria (d)'s fewshot k, one draw delta per
     frozen draw of the protocol's few-shot block (a draw is never dropped), mode one of FEWSHOT_MODES, disclosure None
     under primary and the protocol's compute-fallback disclosure under fallback, record {path, sha256} with a 64-hex
     sha256. The values of mean_delta and draws are checked by criterion_d."""
-    def bad(text):
+    def bad(text: str) -> NoReturn:
         raise SystemExit("%s: %s; %s" % (what, text, FEWSHOT_FIX))
     if not isinstance(block, dict) or set(block) != set(FEWSHOT_KEYS):
         bad("keys %s, expected exactly %s (or the PENDING form {status, phase})"
@@ -632,29 +643,30 @@ def _check_fewshot(block, protocol, what):
     return block
 
 
-def _fewshot_result(block):
+def _fewshot_result(block: dict[str, Any] | None) -> dict[str, Any] | None:
     """criterion_d's few-shot input of a fewshot block: None (PENDING) or {"mean_delta", "draws"}."""
     return None if block is None else {"mean_delta": block["mean_delta"], "draws": block["draws"]}
 
 
-def _metric(deltas, name):
+def _metric(deltas: Any, name: str) -> dict[str, Any]:
     m = (deltas.get("metrics") or {}).get(name) if isinstance(deltas, dict) else None
     if not isinstance(m, dict):
         raise SystemExit("the headline deltas have no %r metric; the verdict needs every gated statistic" % name)
     return m
 
 
-def build_verdict(protocol, sha, inputs):
-    """The verdict/1 record (REP-03) from the frozen protocol and verdict_from's inputs: per system the per-seed rows,
-    settings and summary (mean and sample std, A16), the seed-averaged deltas (headline gates, raw is reported, A18),
-    the collapse rows (A6), the latency and reference rows, and the criteria from the protocol's criteria block: (a)
-    on the headline micro-F1 and macro-F1 deltas, (b) on the collapse rows and the scored seeds, (c) on the latency
-    rows, (d) on the headline Brier and precision-at-coverage deltas with the few-shot path PENDING until Phase 9, the
-    alternative GO on the headline micro-F1 delta, and the overall verdict by decide (A3). No timestamp and no
-    rounding: the same inputs give the same bytes. The protocol's verdict rules must be this module's.
-    inputs["fewshot"] (09-08), when present, is {FEWSHOT_INPUT_KEYS} from the few-shot record (report.fewshot_input):
-    (d)'s few-shot path reads its mean_delta and draws, and the fewshot block is FEWSHOT_KEYS with the path's status;
-    absent (or None) the path is PENDING and the block {status PENDING, phase 9}, exactly as in Phase 8."""
+def build_verdict(protocol: dict[str, Any], sha: str, inputs: dict[str, Any]) -> dict[str, Any]:
+    """The verdict/1 record from the frozen protocol and verdict_from's inputs: per system the per-seed rows, settings
+    and summary (mean and sample std), the seed-averaged deltas (headline gates, raw is reported), the collapse rows,
+    the latency and reference rows, and the criteria from the protocol's criteria block: (a) on the headline micro-F1
+    and macro-F1 deltas, (b) on the collapse rows and the scored seeds, (c) on the latency rows, (d) on the headline
+    Brier and precision-at-coverage deltas and the few-shot path, the alternative GO on the headline micro-F1 delta,
+    and the overall verdict by decide. No timestamp and no rounding: the same inputs give the same bytes. The
+    protocol's verdict rules must be this module's.
+    inputs["fewshot"], when present, is {FEWSHOT_INPUT_KEYS} from the few-shot record (report.fewshot_input): (d)'s
+    few-shot path reads its mean_delta and draws, and the fewshot block is FEWSHOT_KEYS with the path's status; absent
+    (or None) the path is PENDING and the block {status PENDING, phase 9}, the verdict as computed before the few-shot
+    experiment."""
     _check_rules(protocol)
     crit = protocol["criteria"]
     systems = _systems(inputs)
@@ -702,10 +714,10 @@ def build_verdict(protocol, sha, inputs):
         raise SystemExit("the verdict holds a value that is not strict JSON (%s); it is refused" % e)
 
 
-# ---- the renders: REP-02's final table and REP-03's GO block (markdown; 08-12 writes them into the README) ----
+# ---- the renders: the final results table and the GO block (markdown; the README holds both, test-enforced) ----
 
-REFERENCE_ORDER = ("majority", "prior", "laya")             # REP-02's fixed order: majority, label prior, zero-shot Laya
-FINAL_HEADING = "### Results on test (Phase 8)"
+REFERENCE_ORDER = ("majority", "prior", "laya")             # the fixed order: majority, label prior, zero-shot Laya
+FINAL_HEADING = "### Results on test"
 GO_HEADING = "### GO block (mechanical)"
 TABLE_HEADER = ("system", "run", "micro-F1", "macro-F1", "exact match", "top-1")
 SETTINGS_HEADER = ("system", "T", "θ shipped global (per-tag)", "θ raw global (per-tag)", "epoch / schedule",
@@ -714,15 +726,15 @@ DESCRIPTIVE = ("classwise_ece", "exact_match", "top1_hit")  # GO block's closing
 SIDE = {"laya": "a", "berturk": "b"}                        # the seed-averaged deltas are Laya (a) - BERTurk (b)
 
 
-def _verdict_record(v):
+def _verdict_record(v: Any) -> dict[str, Any]:
     if not isinstance(v, dict) or v.get("schema") != VERDICT_SCHEMA:
         raise SystemExit("not a %s record (schema %r); write it with report.py --verdict --out PATH"
                          % (VERDICT_SCHEMA, v.get("schema") if isinstance(v, dict) else type(v).__name__))
     return v
 
 
-def check_record(v, protocol, sha):
-    """SystemExit unless the verdict/1 record `v` is the frozen protocol's (08-REVIEW WR-03): its protocol block is
+def check_record(v: Any, protocol: dict[str, Any], sha: str) -> dict[str, Any]:
+    """SystemExit unless the verdict/1 record `v` is the frozen protocol's: its protocol block is
     {path protocol.json, sha256 `sha`} (the pin), the protocol's verdict rules are this module's (_check_rules), and
     every gated number it renders recomputes from the record's own numbers and the frozen criteria block, exactly as
     build_verdict computed them: each collapse component from its value and the protocol's floor (the loss component
@@ -730,7 +742,7 @@ def check_record(v, protocol, sha):
     counts, the scored seeds the protocol's; then every criterion ((a), (b), (c), (d), the alternative GO) from the
     headline seed-averaged deltas, the collapse rows and the latency rows, and the verdict by decide. A hand-edited
     status, verdict, criterion number or protocol sha256 is refused, never rendered. The headline numbers themselves
-    are bound to the dumps only by the byte rebuild (report.py --verdict). The fewshot block (09-08) is either the
+    are bound to the dumps only by the byte rebuild (report.py --verdict). The fewshot block is either the
     PENDING form {status PENDING, phase 9} ((d)'s few-shot path PENDING) or the few-shot record's form (_check_fewshot:
     exactly FEWSHOT_KEYS, phase 9, criteria (d)'s fewshot k, a mode, the disclosure of that mode, a record {path,
     sha256}), whose mean_delta and draws (d) is recomputed from and whose status must be the recomputed path's; the
@@ -814,33 +826,33 @@ def check_record(v, protocol, sha):
     return v
 
 
-def _md(header, rows):
+def _md(header: Sequence[str], rows: list[Sequence[str]]) -> list[str]:
     return ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"] + \
         ["| " + " | ".join(r) + " |" for r in rows]
 
 
-def _f(x, fmt="%.3f"):
+def _f(x: float | None, fmt: str = "%.3f") -> str:
     return "n/a" if x is None else fmt % x
 
 
-def _points(x):
+def _points(x: float | None) -> str:
     return "n/a" if x is None else "%+.2f points" % (x * 100)
 
 
-def _ci(ci):
+def _ci(ci: Sequence[float] | None) -> str:
     return "n/a" if ci is None else "[%+.2f, %+.2f]" % (ci[0] * 100, ci[1] * 100)
 
 
-def _seed_text(seeds):
+def _seed_text(seeds: list[int]) -> str:
     return ", ".join("%d" % s for s in seeds)
 
 
-def _references(v):
+def _references(v: dict[str, Any]) -> list[dict[str, Any]]:
     """The verdict's reference rows in REFERENCE_ORDER (by system kind, then name); none, an unknown kind or a row
-    without a table metric is refused (REP-02 empty edge)."""
+    without a table metric is refused."""
     refs = v.get("references") or []
     if not refs:
-        raise SystemExit("the verdict holds no reference row; REP-02's table needs the protocol's reference reports "
+        raise SystemExit("the verdict holds no reference row; the results table needs the protocol's reference reports "
                          "(rebuild it with report.py --verdict)")
     for r in refs:
         if r.get("kind") not in REFERENCE_ORDER or any(m not in r for m in TABLE_METRICS):
@@ -849,13 +861,13 @@ def _references(v):
     return sorted(refs, key=lambda r: (REFERENCE_ORDER.index(r["kind"]), str(r.get("name"))))
 
 
-def _ref_label(r):
+def _ref_label(r: dict[str, Any]) -> str:
     if r.get("checkpoint"):
         return "%s (%s)" % (r["kind"], r["checkpoint"])
     return "%s (train: %s)" % (r["kind"], r.get("baseline_split"))
 
 
-def _fine_tuned(v, kind):
+def _fine_tuned(v: dict[str, Any], kind: str) -> tuple[dict[str, Any], list[int]]:
     """(system, seeds) of a fine-tuned system, refused unless its per-seed rows are exactly its listed seeds (at least
     two; a seed is never dropped) and its summary is mean_std of those rows (else the record was edited)."""
     s = (v.get("systems") or {}).get(kind) or {}
@@ -872,11 +884,11 @@ def _fine_tuned(v, kind):
     return s, seeds
 
 
-def render_final_table(v):
-    """REP-02's one results table (markdown, level-3 heading) of a verdict/1 record: the reference rows in
+def render_final_table(v: dict[str, Any]) -> str:
+    """The one results table (markdown, level-3 heading) of a verdict/1 record: the reference rows in
     REFERENCE_ORDER (majority, prior, zero-shot Laya), then per fine-tuned model (Laya, BERTurk) a row of mean ± sample
-    std (ddof 1, A16) with the per-seed values in seed order and a row of its seed-averaged EVAL-07 system (the one
-    the GO block compares), at the val-selected θ and headline T; then the settings table (T, θ shipped and raw with
+    std (ddof 1) with the per-seed values in seed order and a row of its seed-averaged system (the one the GO block
+    compares), at the val-selected θ and headline T; then the settings table (T, θ shipped and raw with
     the per-tag count, epoch and schedule, encoder and head LR, seeds, train run ids, the selection run) and the bound
     records. Values are rounded for display only (3 decimals); identical input gives identical text."""
     v = _verdict_record(v)
@@ -896,7 +908,7 @@ def render_final_table(v):
                     + tuple("%.3f ± %.3f (%s)" % (s["summary"][m]["mean"], s["summary"][m]["std"],
                                                   " / ".join(_f(x) for x in s["summary"][m]["values"]))
                             for m in TABLE_METRICS))
-        rows.append(("%s fine-tuned, seed-averaged (EVAL-07 system)" % kind, "seeds %s averaged" % _seed_text(seeds))
+        rows.append(("%s fine-tuned, seed-averaged" % kind, "seeds %s averaged" % _seed_text(seeds))
                     + tuple(_f(h["metrics"][m][SIDE[kind]]) for m in TABLE_METRICS))
         th = st["theta"]
         settings.append(("%s fine-tuned" % kind, "%.4f" % st["temperature"],
@@ -923,7 +935,7 @@ def render_final_table(v):
     return "\n".join(out) + "\n"
 
 
-def _criterion_row(key, c, v):
+def _criterion_row(key: str, c: dict[str, Any], v: dict[str, Any]) -> tuple[str, str, str]:
     """(label, status, numbers) of one GO block row; every number and label read from the verdict record."""
     label = "(%s) %s" % (key, c["name"]) if len(key) == 1 else c["name"]
     if key == "a":
@@ -943,7 +955,8 @@ def _criterion_row(key, c, v):
         parts = []
         for p in c["paths"]:
             if p["status"] == PENDING:
-                parts.append("%s (%s): %s (Phase %s)" % (p["path"], p["metric"], p["status"], v["fewshot"]["phase"]))
+                parts.append("%s (%s): %s (until the few-shot experiment runs)" % (p["path"], p["metric"],
+                                                                                   p["status"]))
             elif "delta" in p:
                 parts.append("%s (%s): %s, delta %s, CI %s" % (p["path"], p["metric"], p["status"], _points(p["delta"]),
                                                                _ci(p["ci"])))
@@ -956,8 +969,8 @@ def _criterion_row(key, c, v):
     return label, c["status"], nums
 
 
-def render_go(v):
-    """REP-03's GO block (markdown, level-3 heading) of a verdict/1 record: the protocol sha256 (first 12 hex
+def render_go(v: dict[str, Any]) -> str:
+    """The GO block (markdown, level-3 heading) of a verdict/1 record: the protocol sha256 (first 12 hex
     characters), the split and the bootstrap of the seed-averaged deltas, one row per criterion ((a), (b), (c), (d))
     and the alternative GO with its status and numbers (points, 95% CI), the statuses line ((c) REPORTED (not
     gated)), the verdict and the frozen rule line(s) that fired, INCONCLUSIVE_MEANS whenever INCONCLUSIVE appears, and
@@ -977,9 +990,8 @@ def render_go(v):
            "- Units: %s." % UNITS]
     few = v["fewshot"]
     if few != _pending_fewshot():                           # the few-shot record's form only: PENDING renders as before
-        out.append("- Few-shot path (Phase %d): k = %d, mean over %d draws, mode %s; record %s sha256 `%s`." % (
-            few["phase"], few["k"], len(few["draws"]), few["mode"], few["record"]["path"],
-            few["record"]["sha256"][:12]))
+        out.append("- Few-shot path: k = %d, mean over %d draws, mode %s; record %s sha256 `%s`." % (
+            few["k"], len(few["draws"]), few["mode"], few["record"]["path"], few["record"]["sha256"][:12]))
         if few["disclosure"]:
             out.append("- Few-shot compute fallback: %s." % few["disclosure"].rstrip("."))
     out.append("")

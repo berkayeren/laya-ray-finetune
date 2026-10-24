@@ -1,24 +1,24 @@
-"""The synthetic frozen protocol every Phase 9 test installs (a helper module, no test functions).
+"""The synthetic frozen protocol every few-shot test installs (a helper module, no test functions).
 
 synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, ...) runs pilot.data.prepare on the synthetic Multi3NLU++
-snapshot (conftest), draws the few-shot support sets on its verified selection_train with pilot.fewshot.draw (tags
-card, k 1 and 2, draw seed 0, 1 negative per positive, replay 2 by default), writes a REQUIRED_KEYS-complete protocol/1
-file whose fewshot block carries the settings, the source, the draws (base seed and digest included) and the rules (a
-deep copy of pilot.fewshot.RULES, base_runs and continued_training replaced by `rules` when given), writes a minimal
-D-08 decision record (schema fewshot-projection/1, this protocol's sha256, decision.mode and trigger fields that agree
-with it), and pins both by monkeypatch: pilot.protocol.PROTOCOL_PATH and PROTOCOL_SHA256, pilot.data.DEFAULT_MANIFEST
-and pilot.fewshot.DECISION_PATH. It returns a namespace (manifest, out_dir, protocol_path, pin, decision_path, block,
-rows, protocol).
+snapshot (conftest), draws the few-shot support sets on its verified selection_train with pilot.fewshot.draw (tags card,
+k 1 and 2, draw seed 0, 1 negative per positive, replay 2 by default), writes a REQUIRED_KEYS-complete protocol/1 file
+whose fewshot block carries the settings, the source, the draws (base seed and digest included) and the rules (a deep
+copy of pilot.fewshot.RULES, base_runs and continued_training replaced by `rules` when given), writes a minimal compute
+decision record (schema fewshot-projection/1, this protocol's sha256, decision.mode and trigger fields that agree with
+it), and pins both by monkeypatch: pilot.protocol.PROTOCOL_PATH and PROTOCOL_SHA256, pilot.data.DEFAULT_MANIFEST and
+pilot.fewshot.DECISION_PATH. It returns a namespace (manifest, out_dir, protocol_path, pin, decision_path, block, rows,
+protocol).
 
 `splits` (optional) replaces the protocol's splits block, e.g. {"val": {"n_messages": 5}, "test": {"n_messages": 7}}
-for fewshot.py --projection (09-04); by default the block is pilot.protocol.splits_block of the synthetic manifest
+for fewshot.py --projection; by default the block is pilot.protocol.splits_block of the synthetic manifest
 (pilot.data.DEFAULT_MANIFEST is pinned to it first), so score.py's protocol gate can name the synthetic test split.
 
 postfit_systems(tmp_path, canonicals) writes one minimal postfit record per system kind ({"chosen": {"canonical":
 ...}}) and returns the protocol "systems" block that binds each by absolute path and sha256, with an empty final_seeds
 list (pilot.protocol.final_seed_allowed reads it).
 
-Planted few-shot checkpoints (09-05; no training): bench(tmp_path, synthetic_raw, monkeypatch, ...) installs the
+Planted few-shot checkpoints (no training): bench(tmp_path, synthetic_raw, monkeypatch, ...) installs the
 synthetic protocol with PLANT_RULES (base seed 0 only, tiny recipes), postfit records binding the chosen canonical
 configs of both kinds (chosen_laya, chosen_berturk over the synthetic selection_train sha256) and a scoring block on
 cpu with workers 0. plant_laya(path, canonical, record) is tests/tiny_laya.tiny_checkpoint plus rl_agent_config.json
@@ -27,7 +27,7 @@ tests/tiny_berturk.tiny_base files plus berturk_train.json. plant_fewshot_set(ns
 kind under root: the masked base of each allowed base seed and one continued run per frozen (draw, k), each with a
 valid masking proof, and returns {name: dir} (names laya-base-s0, laya-d0-k1, berturk-d0-k2, ...).
 
-Planted results inputs (09-06; no checkpoint, no model): plant_runs(ns, path) writes a complete runs manifest
+Planted results inputs (no checkpoint, no model): plant_runs(ns, path) writes a complete runs manifest
 (fewshot-runs/1) for the synthetic protocol `ns` straight from its slots, with made-up run ids, a valid masking proof
 and a distinct wall clock per entry, and returns its path (pilot.fewshot.read_runs accepts it). plant_fewshot_dumps(ns,
 runs, runs_sha256, dump_root, seed) writes, for every entry of that manifest, its dumps through pilot.dumps.write_dump
@@ -36,30 +36,36 @@ gated test dump (protocol_sha256 the pin, fewshot_runs_sha256 the manifest's), e
 kind, identity, dump run id, seed and training run id. The logits are seeded float32 normals unless `logits(entry,
 split, Y, rng)` returns them. `extra` of synthetic_protocol sets top-level protocol keys (e.g. the bootstrap block).
 
-fewshot_block(manifest, ...) is the few-shot block synthetic_protocol writes, on its own (09-08: the verdict's synthetic
+fewshot_block(manifest, ...) is the few-shot block synthetic_protocol writes, on its own (the verdict's synthetic
 protocol in tests/test_final_report.py carries one over its own snapshot).
 """
 import copy
 import json
 import os
 import types
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any
+
+import pytest
 
 import pilot.data
-from conftest import prepared
+from conftest import SyntheticRaw, prepared
 from pilot import fewshot as fs
 from pilot import protocol as pr
 
 DECISION_SCHEMA = "fewshot-projection/1"     # pilot.fewshot.DECISION_SCHEMA; tests/test_fewshot_binding.py checks it
 
 
-def _rows(manifest):
+def _rows(manifest: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """(selection_train manifest entry, parsed rows) of the synthetic snapshot at `manifest`."""
     with open(manifest, encoding="utf-8") as f:
         entry = json.load(f)["splits"]["selection_train"]
     with open(os.path.join(os.path.dirname(manifest), entry["path"]), "rb") as f:
         return entry, pilot.data.parse_jsonl(f.read())
 
 
-def postfit_systems(tmp_path, canonicals):
+def postfit_systems(tmp_path: Path, canonicals: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """{kind: {"kind", "postfit": {"path": absolute path, "sha256"}}} over records written under tmp_path/postfit."""
     out = {}
     os.makedirs(str(tmp_path / "postfit"), exist_ok=True)
@@ -83,14 +89,14 @@ PLANT_CONTINUED = {"epochs": 1, "encoder_lr": 2e-05, "head_lr": 0.0001, "rule": 
 PLANT_SCORING = {"splits": ["test", "hotels_probe"], "device": "cpu", "workers": 0}
 
 
-def plant_rules(seeds=(0,)):
+def plant_rules(seeds: Sequence[int] = (0,)) -> dict[str, Any]:
     """The synthetic frozen rules of the planted sets: base seeds `seeds`, tiny recipes, one continued epoch."""
     base_runs = json.loads(json.dumps(fs.RULES["base_runs"]))
     base_runs.update(seeds=list(seeds), laya=dict(PLANT_LAYA), berturk=dict(PLANT_BERTURK))
     return {"base_runs": base_runs, "continued_training": dict(PLANT_CONTINUED)}
 
 
-def chosen_laya(data_sha256):
+def chosen_laya(data_sha256: str) -> dict[str, Any]:
     """A chosen Laya selection run's canonical config (pilot.runs IDENTITY, the PLANT_LAYA recipe, seed 0)."""
     from pilot import runs
     r = PLANT_LAYA
@@ -105,7 +111,7 @@ def chosen_laya(data_sha256):
         "postfit_sha256": None, "mask_tags": None, "fewshot": None})
 
 
-def chosen_berturk(data_sha256):
+def chosen_berturk(data_sha256: str) -> dict[str, Any]:
     """A chosen BERTurk selection run's canonical config (pilot.berturk IDENTITY, the PLANT_BERTURK recipe, seed 0)."""
     from pilot import berturk
     r = PLANT_BERTURK
@@ -119,7 +125,8 @@ def chosen_berturk(data_sha256):
         "postfit_sha256": None, "fewshot": None})
 
 
-def bench(tmp_path, synthetic_raw, monkeypatch, mode="primary", seeds=(0,), scoring=None):
+def bench(tmp_path: Path, synthetic_raw: SyntheticRaw, monkeypatch: pytest.MonkeyPatch, mode: str = "primary",
+          seeds: Sequence[int] = (0,), scoring: dict[str, Any] | None = None) -> types.SimpleNamespace:
     """synthetic_protocol with PLANT_RULES, both kinds' chosen canonicals bound and the scoring block (cpu, 0)."""
     _, pre_manifest = prepared(tmp_path, synthetic_raw, name="pre")
     data_sha = _rows(pre_manifest)[0]["sha256"]              # prepare() is deterministic: the source's sha256
@@ -128,7 +135,8 @@ def bench(tmp_path, synthetic_raw, monkeypatch, mode="primary", seeds=(0,), scor
                               scoring=dict(PLANT_SCORING if scoring is None else scoring), mode=mode)
 
 
-def _epoch_rows(kind, n):
+def _epoch_rows(kind: str, n: int) -> list[dict[str, Any]]:
+    """n made-up epoch rows of a finished run record of `kind` (pilot.runs or pilot.berturk EPOCH_FIELDS)."""
     from pilot import berturk, runs
     rows = []
     for e in range(1, n + 1):
@@ -139,7 +147,7 @@ def _epoch_rows(kind, n):
     return rows
 
 
-def plant_laya(path, canonical, record, seed=0):
+def plant_laya(path: str, canonical: dict[str, Any], record: dict[str, Any], seed: int = 0) -> str:
     """A tiny Laya checkpoint holding a finished ray_train.py run: rl_agent_config.json training.ray_train {run_id,
     canonical, record (run_id and canonical filled in)}, training.epoch the run's last epoch, and final.json."""
     from pilot import runs
@@ -160,7 +168,7 @@ def plant_laya(path, canonical, record, seed=0):
     return ckpt
 
 
-def plant_berturk(path, canonical, record, seed=0):
+def plant_berturk(path: str, canonical: dict[str, Any], record: dict[str, Any], seed: int = 0) -> str:
     """The tiny BERTurk base files plus a finished run's berturk_train.json (schema berturk-train/1)."""
     from pilot import berturk
     from tiny_berturk import tiny_base
@@ -174,14 +182,17 @@ def plant_berturk(path, canonical, record, seed=0):
     return ckpt
 
 
-def _base_canonical(ns, kind):
+def _base_canonical(ns: types.SimpleNamespace, kind: str) -> dict[str, Any]:
+    """The canonical config of a masked base of `kind` bound to the synthetic protocol (seed left to the caller)."""
     canon = dict(fs.chosen_canonical(ns.protocol, kind), mask_tags=sorted(ns.block["tags"]),
                  fewshot=fs.binding(ns.pin, "base"))
     canon["stop_after_epoch"] = ns.block["rules"]["base_runs"][kind]["stop_after_epoch"]
     return canon
 
 
-def _continued_canonical(ns, kind, base_dir, base_canon, base_rid, draw, k):
+def _continued_canonical(ns: types.SimpleNamespace, kind: str, base_dir: str, base_canon: dict[str, Any], base_rid: str,
+                         draw: int, k: int) -> dict[str, Any]:
+    """The canonical config of a continued run of (draw, k) from the planted base at `base_dir`."""
     from pilot import berturk, dumps
     from pilot.weights import identity
     ident = berturk.identity(base_dir) if kind == "berturk" else identity(base_dir)
@@ -196,7 +207,8 @@ def _continued_canonical(ns, kind, base_dir, base_canon, base_rid, draw, k):
     return canon
 
 
-def plant_fewshot_set(ns, root, kinds=("laya", "berturk")):
+def plant_fewshot_set(ns: types.SimpleNamespace, root: str,
+                      kinds: Sequence[str] = ("laya", "berturk")) -> dict[str, str]:
     """One consistent planted set per kind under `root` for the synthetic protocol `ns` (see the module docstring);
     returns {name: checkpoint dir}."""
     from pilot import berturk, runs
@@ -245,22 +257,26 @@ def plant_fewshot_set(ns, root, kinds=("laya", "berturk")):
     return out
 
 
-def decision_record(pin, mode="primary", projection_fired=None, ladder_failure=False):
-    """A minimal D-08 decision record (schema fewshot-projection/1) whose trigger fields agree with `mode` unless
+def decision_record(pin: str, mode: str = "primary", projection_fired: bool | None = None,
+                    ladder_failure: bool = False) -> dict[str, Any]:
+    """A minimal compute decision record (schema fewshot-projection/1) whose trigger fields agree with `mode` unless
     projection_fired is given."""
     fired = (mode == "fallback") if projection_fired is None else projection_fired
     return {"schema": DECISION_SCHEMA, "protocol_sha256": pin, "decision": {"mode": mode},
             "trigger": {"projection_fired": fired, "ladder_failure": ladder_failure}}
 
 
-def write_decision(path, record):
+def write_decision(path: str, record: dict[str, Any]) -> str:
+    """Write the decision record as JSON to `path` (creating its dir); returns `path`."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(record, f, ensure_ascii=False, indent=2)
     return path
 
 
-def fewshot_block(manifest, tags=("card",), k_values=(1, 2), draw_seeds=(0,), neg_per_pos=1, replay=2, rules=None):
+def fewshot_block(manifest: str, tags: Sequence[str] = ("card",), k_values: Sequence[int] = (1, 2),
+                  draw_seeds: Sequence[int] = (0,), neg_per_pos: int = 1, replay: int = 2,
+                  rules: dict[str, Any] | None = None) -> dict[str, Any]:
     """The protocol's few-shot block over the synthetic snapshot's selection_train at `manifest`: the draws (base seed
     and digest included) and a deep copy of pilot.fewshot.RULES with the top-level keys of `rules` replaced."""
     entry, rows = _rows(manifest)
@@ -278,9 +294,15 @@ def fewshot_block(manifest, tags=("card",), k_values=(1, 2), draw_seeds=(0,), ne
             "draws": draws, "rules": json.loads(json.dumps(block_rules))}
 
 
-def synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, tags=("card",), k_values=(1, 2), draw_seeds=(0,),
-                       neg_per_pos=1, replay=2, rules=None, systems=None, scoring=None, mode="primary", splits=None,
-                       extra=None):
+def synthetic_protocol(tmp_path: Path, synthetic_raw: SyntheticRaw, monkeypatch: pytest.MonkeyPatch,
+                       tags: Sequence[str] = ("card",), k_values: Sequence[int] = (1, 2),
+                       draw_seeds: Sequence[int] = (0,), neg_per_pos: int = 1, replay: int = 2,
+                       rules: dict[str, Any] | None = None, systems: dict[str, Any] | None = None,
+                       scoring: dict[str, Any] | None = None, mode: str = "primary",
+                       splits: dict[str, Any] | None = None,
+                       extra: dict[str, Any] | None = None) -> types.SimpleNamespace:
+    """The synthetic frozen protocol, written and pinned with its decision record (see the module docstring); returns
+    the namespace (manifest, out_dir, protocol_path, pin, decision_path, block, rows, protocol)."""
     out_dir, manifest = prepared(tmp_path, synthetic_raw)
     monkeypatch.setattr(pilot.data, "DEFAULT_MANIFEST", manifest)   # first: splits_block reads the committed one
     _, rows = _rows(manifest)
@@ -305,7 +327,7 @@ def synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, tags=("card",), k_v
                                  protocol=json.loads(json.dumps(protocol)))
 
 
-def plant_runs(ns, path):
+def plant_runs(ns: types.SimpleNamespace, path: str) -> str:
     """A complete runs manifest (pilot.fewshot RUNS_SCHEMA) of the synthetic protocol `ns` under its recorded mode,
     built from pilot.fewshot.slots without any checkpoint, written to `path` (key-sorted JSON); returns `path`."""
     from pilot.data import repo_relpath, sha256_bytes
@@ -346,7 +368,7 @@ def plant_runs(ns, path):
     return path
 
 
-def split_gold(manifest, split):
+def split_gold(manifest: str, split: str) -> tuple[dict[str, Any], list[str], Any]:
     """(manifest entry, uids in file order, bool [n, 48] gold) of a verified split of the synthetic snapshot."""
     from pilot import dumps
     with open(manifest, encoding="utf-8") as f:
@@ -356,7 +378,8 @@ def split_gold(manifest, split):
     return entry, uids, dumps.read_gold(entry, manifest, uids)
 
 
-def plant_fewshot_dumps(ns, runs, runs_sha256, dump_root, seed=0, logits=None):
+def plant_fewshot_dumps(ns: types.SimpleNamespace, runs: dict[str, Any], runs_sha256: str, dump_root: str,
+                        seed: int = 0, logits: Callable[..., Any] | None = None) -> dict[tuple[str, str], str]:
     """Every dump the few-shot record reads, for the entries of `runs` (see the module docstring); returns {(dump run
     id, split): dump dir}."""
     import zlib

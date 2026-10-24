@@ -1,4 +1,4 @@
-"""The BERTurk few-shot tracer (FEW-01, FEW-02; 09-03): a label-masked base, then a continued run from its own
+"""The BERTurk few-shot tracer: a label-masked base, then a continued run from its own
 fine-tuned head, end to end through berturk_train.py and the HF Trainer on CPU, under a synthetic frozen protocol.
 
 tests/fewshot_synthetic.synthetic_protocol installs a protocol whose fewshot block holds the tag card, k 1 and 2, one
@@ -19,10 +19,13 @@ In `make test` (unit: no Ray, no weights, no data download; seconds).
 """
 import json
 import os
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 
 import pytest
 
-from conftest import prepared
+from conftest import SyntheticRaw, prepared
 from fewshot_synthetic import postfit_systems, synthetic_protocol
 from pilot import berturk
 from pilot import fewshot as fs
@@ -42,43 +45,45 @@ COMMON = ["--device", "cpu", "--batch", "4", "--max-len", "32", "--lr", "2e-05",
 GROUPS = [("encoder", True, 2e-05), ("encoder", False, 2e-05), ("head", True, 0.0001), ("head", False, 0.0001)]
 
 
-def rules():
+def rules() -> dict[str, Any]:
     base_runs = json.loads(json.dumps(fs.RULES["base_runs"]))
     base_runs.update(seeds=[0], berturk=dict(BERTURK_RULE))
     return {"base_runs": base_runs, "continued_training": dict(CONTINUED)}
 
 
 @pytest.fixture
-def keep_threads():
+def keep_threads() -> Iterator[None]:
     import torch
     n = torch.get_num_threads()
     yield
     torch.set_num_threads(n)
 
 
-def train(argv):
+def train(argv: list[Any]) -> Any:
     import berturk_train
     return berturk_train.main([str(x) for x in argv])
 
 
-def print_run_id(argv, capsys):
+def print_run_id(argv: list[Any], capsys: pytest.CaptureFixture[str]) -> str:
     capsys.readouterr()
     assert train(argv + ["--print-run-id"]) is None
     return capsys.readouterr().out.strip().splitlines()[-1]
 
 
-def read(ckpt):
+def read(ckpt: str | Path) -> tuple[str, dict[str, Any]]:
     with open(os.path.join(str(ckpt), berturk.RECORD), encoding="utf-8") as f:
         raw = f.read()
     return raw, json.loads(raw)
 
 
-def groups(rec):
+def groups(rec: dict[str, Any]) -> list[tuple[str, bool, float]]:
     return [(g["group"], g["decay"], g["lr"]) for g in rec["record"]["optimizer_groups"]]
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_berturk_masked_base_then_continued_run(tmp_path, synthetic_raw, monkeypatch, capsys, keep_threads):
+def test_berturk_masked_base_then_continued_run(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+                                                keep_threads: None) -> None:
     import torch
     import transformers
     from safetensors.torch import load_file
@@ -98,7 +103,7 @@ def test_berturk_masked_base_then_continued_run(tmp_path, synthetic_raw, monkeyp
     tags = ns.block["tags"]
     assert tags == ["card"]
 
-    # ---- FEW-01: the label-masked base ----
+    # ---- the label-masked base ----
     storage, base_out = tmp_path / "runs-base", tmp_path / "ckpt-base"
     base_argv = ["--data", sel, "--manifest", ns.manifest, "--base", tiny, "--out", base_out, "--storage", storage,
                  "--epochs", "2", "--stop-after-epoch", "1", "--fewshot-base"] + COMMON
@@ -116,11 +121,11 @@ def test_berturk_masked_base_then_continued_run(tmp_path, synthetic_raw, monkeyp
     assert groups(rec) == GROUPS                                     # the fresh head at the head LR
     assert "bank_" not in raw                                        # counts and digests only, never a uid
 
-    # ---- FEW-02: the continued run from that base's own head, on support plus replay ----
+    # ---- the continued run from that base's own head, on support plus replay ----
     seen = {}
     load = transformers.BertForSequenceClassification.from_pretrained
 
-    def spy(*args, **kwargs):                                       # the head as loaded, before any training step
+    def spy(*args: Any, **kwargs: Any) -> tuple[Any, Any]:  # the head as loaded, before any training step
         model, info = load(*args, **kwargs)
         seen.update(info=info, weight=model.classifier.weight.detach().clone(),
                     bias=model.classifier.bias.detach().clone())

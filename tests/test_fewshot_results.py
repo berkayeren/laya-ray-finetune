@@ -1,16 +1,13 @@
-"""The committed Phase 9 few-shot records (FEW-02 and later): bindings, byte rebuilds and the rules they apply.
+"""The committed few-shot records: bindings, byte rebuilds and the rules they apply.
 
-This file grows through Phase 9: 09-04 adds the D-08 compute projection and decision record, 09-11 the runs manifest
-and the once-only scoring, 09-12 the few-shot result record and the README block.
-
-09-04 (D-08, ROADMAP Phase 9 criterion 1):
+The compute projection and decision record:
 - results/fewshot/projection.json (fewshot-projection/1) is tracked, bound to the frozen protocol's sha256 and to the
   sha256 of results/compute/compute_checkpoint.json, mode primary with projection_fired false and no ladder failure,
   a total between 8.0 and 8.6 h whose lines sum to it, and pilot.fewshot.read_mode reads primary from it; it holds no
   uid string and no local path.
 - the projection and the decision recompute from the committed compute rates and the record's own counts
-  (pilot.compute.fewshot_projection, fewshot_decision), offline; the Laya lines use calib_s None (LAYA-05) and the
-  notes say so.
+  (pilot.compute.fewshot_projection, fewshot_decision), offline; the Laya lines use calib_s None (training no longer
+  calibrates) and the notes say so.
 - the frozen trigger at its boundary: a projection of exactly 36,000 s (10 h) does not fire it ("exceeds 10 h"), one
   microsecond more does, and the fallback carries the frozen disclosure; a recorded ladder failure gives the fallback
   too (base seed 0 only); read_mode accepts every such record.
@@ -20,9 +17,9 @@ and the once-only scoring, 09-12 the few-shot result record and the README block
   failure, everything else unchanged.
 - data-marked: `fewshot.py --projection` rebuilds the record byte for byte from the committed data.
 
-09-11 (D-04, D-05, D-09, D-11, FEW-01, FEW-02):
+The runs manifest and the once-only scoring:
 - results/fewshot/runs.json (fewshot-runs/1) is tracked and pilot.fewshot.read_runs accepts it under the frozen pin and
-  the recorded D-08 mode; per kind it lists one masked base per allowed base seed and one continued run per frozen
+  the recorded compute mode; per kind it lists one masked base per allowed base seed and one continued run per frozen
   (draw, k) (pilot.fewshot.slots), every base proof reads 0 for each held-out tag (Laya held_out_items, BERTurk
   unmasked_held_out_labels), every continued proof counts exactly its frozen support rows per tag and the frozen
   replay size (BERTurk replay_unmasked_held_out_labels 0); its bytes hold no bank_ or hotel_ uid and no local path.
@@ -35,37 +32,37 @@ and the once-only scoring, 09-12 the few-shot result record and the README block
   (pilot.dumps.load_dump), is full with the protocol split's message count, was scored on mps, fp32, autocast off,
   in-process, from the entry's checkpoint (base name), with the entry's seed and training run id; every test sidecar
   carries protocol_sha256 == PROTOCOL_SHA256 and fewshot_runs_sha256 == the sha256 of the committed runs.json, a
-  base's val sidecar neither (its ungated θ source, D-05).
-- git order (D-09, T-09-35): runs.json has exactly one commit M, M descends from the protocol.json commit, and every
-  tracked few-shot test dump file was added in a commit C != M with M an ancestor of C, and each masked base's val
-  dump file exactly once (09-REVIEW WR-02) (skipped in a shallow clone).
+  base's val sidecar neither (its ungated θ source).
+- git order: runs.json has exactly one commit M, M descends from the protocol.json commit, and every tracked few-shot
+  test dump file was added in a commit C != M with M an ancestor of C, and each masked base's val dump file exactly
+  once (skipped in a shallow clone).
 
-09-12 (D-12, ROADMAP Phase 9 criteria 1, 3, 4):
+The few-shot results record and the README section:
 - results/fewshot/fewshot.json (fewshot-results/1) is tracked and bound: protocol_sha256 the pin, the runs manifest
-  and the D-08 decision record by path and sha256, its mode the decision record's (the disclosure present iff
+  and the compute decision record by path and sha256, its mode the decision record's (the disclosure present iff
   fallback), every runs.json entry's dumps by the dump_sha256 of their sidecars; its primary block is at criteria
   (d)'s fewshot k, each per-draw delta is laya - berturk, mean_delta == float(np.mean(draws)) in float64; by_k holds
   k = 0 and every frozen k, the bootstrap block the protocol's B, seed and level, forgetting = old-tag F1 minus the
   base's; its bytes hold no bank_ or hotel_ uid and no local path, written as pilot.fewshot_report.record_bytes.
-- README.md's Phase 9 section follows the Phase 8 section and holds exactly one block between <!-- fewshot:start -->
-  and <!-- fewshot:end -->, equal to `python fewshot.py --render results/fewshot/fewshot.json`; its prose (heading to
-  the first marker) states what was masked and how it was proven, the identical support sets, epoch parity, the
-  once-only scoring behind the allow-list, how to read the primary metric and forgetting, the record's compute mode
-  and how the GO block uses the record, and holds no metric value (test_final_results.PROSE_NUMBER_RE).
+- README.md's few-shot section (FEWSHOT_HEADING) follows the frozen-protocol section and holds exactly one block
+  between <!-- fewshot:start --> and <!-- fewshot:end -->, equal to `python fewshot.py --render
+  results/fewshot/fewshot.json`; its prose (heading to the first marker) states what was masked and how it was proven,
+  the identical support sets, epoch parity, the once-only scoring behind the allow-list, how to read the primary
+  metric and forgetting, the record's compute mode and how the GO block uses the record, and holds no metric value
+  (test_final_results.PROSE_NUMBER_RE).
 - data-marked: pilot.fewshot_report.build_record rebuilds the committed record byte for byte from the dumps.
 
-09-13 (the Phase 9 docs):
-- README.md's Files table has a row for every Phase 9 file (pilot/fewshot.py with its row builders, binding, runs
+The README docs of the few-shot experiment:
+- README.md's Files table has a row for every few-shot file (pilot/fewshot.py with its row builders, binding, runs
   manifest and admission, pilot/fewshot_report.py, fewshot.py with every mode, the few-shot flags of ray_train.py and
   berturk_train.py, score.py's few-shot allow-list, report.py --verdict --fewshot, results/fewshot/ and the few-shot
-  dumps), its Run block every Phase 9 command (each fewshot.py mode, both trainers' base and continued commands,
-  make fewshot-scoring marked as run once, make fewshot-reports, the --render and --verdict --fewshot lines), and the
-  phrase "Phase 9 adds" appears nowhere.
-- the Phase 9 prose states the caveats a reader needs: BERTurk's new-tag micro-F1 is zero on every continued run
+  dumps), and its Run block every few-shot command (each fewshot.py mode, both trainers' base and continued commands,
+  make fewshot-scoring marked as run once, make fewshot-reports, the --render and --verdict --fewshot lines).
+- the few-shot prose states the caveats a reader needs: BERTurk's new-tag micro-F1 is zero on every continued run
   because its new-tag scores stay below its base's val θ (checked against the committed record), AP is the primary
   metric because it needs no θ, and step parity is deferred.
-- 09-REVIEW CR-01: the prose names the cause (the masked BERTurk base's untrained held-out rows near one half on val
-  push its 48-column θ up; Laya's θ is the same under both rules) and the record's post hoc variant (θ on each base's
+- the prose names the cause of that zero (the masked BERTurk base's untrained held-out rows near one half on val push
+  its 48-column θ up; Laya's θ is the same under both rules) and the record's post hoc variant (θ on each base's
   trained columns only, labelled post hoc, not frozen, descriptive and not a decision input), each claim checked
   against the committed record and dumps; the frozen reading's numbers stay the record's.
 Offline except the `data` tests.
@@ -74,10 +71,14 @@ import json
 import os
 import re
 import subprocess
+import types
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 import fewshot as runner
+from conftest import SyntheticRaw
 from fewshot_synthetic import decision_record, synthetic_protocol, write_decision
 from pilot import compute
 from pilot import dumps
@@ -93,26 +94,26 @@ LINE_IDS = ["fewshot_laya_bases", "fewshot_berturk_bases", "fewshot_laya_continu
             "fewshot_scoring"]
 
 
-def committed():
+def committed() -> tuple[bytes, dict[str, Any]]:
     with open(PROJECTION, "rb") as f:
         raw = f.read()
     return raw, json.loads(raw.decode("utf-8"))
 
 
-def frozen():
+def frozen() -> tuple[dict[str, Any], str]:
     return pr.require_frozen()
 
 
-def measured():
+def measured() -> dict[str, Any]:
     with open(COMPUTE, encoding="utf-8") as f:
         return json.load(f)["measured"]
 
 
-def n_scored(proto):
+def n_scored(proto: dict[str, Any]) -> dict[str, int]:
     return {s: proto["splits"][s]["n_messages"] for s in ("val", "test")}
 
 
-def test_projection_record_is_committed_and_bound():
+def test_projection_record_is_committed_and_bound() -> None:
     out = subprocess.run(["git", "ls-files", "--error-unmatch", "results/fewshot/projection.json"], cwd=REPO_ROOT,
                          capture_output=True, text=True)
     assert out.returncode == 0, "results/fewshot/projection.json is not tracked: %s" % out.stderr
@@ -138,7 +139,7 @@ def test_projection_record_is_committed_and_bound():
                                           + "\n").encode("utf-8")
 
 
-def test_projection_recomputes_from_the_committed_rates_and_counts():
+def test_projection_recomputes_from_the_committed_rates_and_counts() -> None:
     proto, _ = frozen()
     _, rec = committed()
     block = proto["fewshot"]
@@ -148,11 +149,11 @@ def test_projection_recomputes_from_the_committed_rates_and_counts():
     assert {"trigger": rec["trigger"], "decision": rec["decision"]} == json.loads(json.dumps(d))
 
 
-def test_projection_lines_use_the_measured_terms_without_calibration():
+def test_projection_lines_use_the_measured_terms_without_calibration() -> None:
     proto, _ = frozen()
     _, rec = committed()
     m = measured()
-    assert m["laya"]["calib_s"] is not None                   # the Phase 4 probe calibrated; Phase 9 runs do not
+    assert m["laya"]["calib_s"] is not None                   # the compute probe calibrated; few-shot runs do not
     p = compute.fewshot_projection(m, rec["counts"], proto["fewshot"], n_scored(proto))
     lines = {line["id"]: line for line in p["lines"]}
     for line in p["lines"]:
@@ -179,7 +180,7 @@ def test_projection_lines_use_the_measured_terms_without_calibration():
     assert {key: (q["runs"], q["units_per_epoch"]) for key, q in sc.items()} == {
         ("laya", "val"): (3, 208), ("laya", "test"): (9, 413), ("berturk", "val"): (3, 208),
         ("berturk", "test"): (9, 413)}
-    assert any("LAYA-05" in n and "calib" in n for n in rec["notes"])
+    assert any("removed training-time calibration" in n and "calib_s None" in n for n in rec["notes"])
     # the fallback: one base per model, the continued runs and their scoring unchanged
     one = 2 * compute.laya_run_s(14580, 3, laya_terms) + 2 * 29 * 46 * m["berturk"]["s_per_step"] + \
         2 * (208 + 413) * (m["scoring"]["s_per_msg"] + m["berturk"]["s_per_msg_infer"])
@@ -187,7 +188,7 @@ def test_projection_lines_use_the_measured_terms_without_calibration():
 
 
 @pytest.mark.data
-def test_projection_rebuilds(tmp_path):
+def test_projection_rebuilds(tmp_path: Path) -> None:
     raw, _ = committed()
     out = str(tmp_path / "projection.json")
     runner.main(["--projection", "--out", out])
@@ -195,16 +196,16 @@ def test_projection_rebuilds(tmp_path):
         assert f.read() == raw
 
 
-# ---- the trigger at its boundary, the fallback disclosure and the ladder-failure branch (09-04 Task 2) ----
+# ---- the trigger at its boundary, the fallback disclosure and the ladder-failure branch ----
 
 SPLITS = {"val": {"n_messages": 5}, "test": {"n_messages": 7}}
 
 
-def record_of(pin, decision):
+def record_of(pin: str, decision: dict[str, Any]) -> dict[str, Any]:
     return dict({"schema": fs.DECISION_SCHEMA, "protocol_sha256": pin}, **decision)
 
 
-def test_projection_trigger_boundary(tmp_path):
+def test_projection_trigger_boundary(tmp_path: Path) -> None:
     proto, pin = frozen()
     block = proto["fewshot"]
     fb = block["rules"]["compute_fallback"]
@@ -224,7 +225,7 @@ def test_projection_trigger_boundary(tmp_path):
         assert fs.read_mode(pin, path) == d["decision"]["mode"]
 
 
-def test_projection_ladder_failure_gives_the_disclosed_fallback(tmp_path):
+def test_projection_ladder_failure_gives_the_disclosed_fallback(tmp_path: Path) -> None:
     proto, pin = frozen()
     block = proto["fewshot"]
     _, rec = committed()
@@ -241,23 +242,25 @@ def test_projection_ladder_failure_gives_the_disclosed_fallback(tmp_path):
             compute.fewshot_decision(rec["projection"], block, bad)
 
 
-def test_projection_fallback_total_is_one_base_per_model():
+def test_projection_fallback_total_is_one_base_per_model() -> None:
     _, rec = committed()
     p = rec["projection"]
     assert p["base_runs_per_model"] == 3 and p["fallback_base_runs_per_model"] == 1
     assert p["fallback_total_s"] < p["total_s"] and p["fallback_total_h"] == pytest.approx(p["fallback_total_s"] / 3600)
 
 
-def synthetic(tmp_path, synthetic_raw, monkeypatch):
+def synthetic(tmp_path: Path, synthetic_raw: SyntheticRaw, monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
     return synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, splits=SPLITS)
 
 
-def read_bytes(path):
+def read_bytes(path: str) -> bytes:
     with open(path, "rb") as f:
         return f.read()
 
 
-def test_projection_cli_writes_the_record_once(tmp_path, synthetic_raw, monkeypatch, capsys):
+def test_projection_cli_writes_the_record_once(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                               monkeypatch: pytest.MonkeyPatch,
+                                               capsys: pytest.CaptureFixture[str]) -> None:
     ns = synthetic(tmp_path, synthetic_raw, monkeypatch)
     out = str(tmp_path / "rec" / "projection.json")
     capsys.readouterr()
@@ -273,7 +276,9 @@ def test_projection_cli_writes_the_record_once(tmp_path, synthetic_raw, monkeypa
     assert "\n" not in str(e.value) and read_bytes(out) == before
 
 
-def test_projection_cli_ladder_failure_rewrites_a_primary_record(tmp_path, synthetic_raw, monkeypatch, capsys):
+def test_projection_cli_ladder_failure_rewrites_a_primary_record(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                                 monkeypatch: pytest.MonkeyPatch,
+                                                                 capsys: pytest.CaptureFixture[str]) -> None:
     ns = synthetic(tmp_path, synthetic_raw, monkeypatch)
     out = str(tmp_path / "rec" / "projection.json")
     rec = runner.main(["--projection", "--out", out])
@@ -299,7 +304,8 @@ def test_projection_cli_ladder_failure_rewrites_a_primary_record(tmp_path, synth
     ("no_projection", "no projection"),
     ("empty_text", "non-empty text"),
 ])
-def test_projection_cli_ladder_failure_refuses(tmp_path, synthetic_raw, monkeypatch, case, match):
+def test_projection_cli_ladder_failure_refuses(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                               monkeypatch: pytest.MonkeyPatch, case: str, match: str) -> None:
     ns = synthetic(tmp_path, synthetic_raw, monkeypatch)
     out = str(tmp_path / "rec" / "projection.json")
     text = "laya base seed 0: failed after encoder_frozen"
@@ -324,24 +330,25 @@ def test_projection_cli_ladder_failure_refuses(tmp_path, synthetic_raw, monkeypa
     (["--counts", "--out", "x.json"], "belong to --projection"),
     (["--support-sets", "--ladder-failure", "x"], "belong to --projection"),
 ])
-def test_projection_cli_refuses_misplaced_flags(argv, match, capsys):
+def test_projection_cli_refuses_misplaced_flags(argv: list[str], match: str,
+                                                capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         runner.main(argv)
     assert match in capsys.readouterr().err
 
 
-# ---- 09-11: the runs manifest and the once-only scoring target (D-04, D-05, D-09, D-11) ----
+# ---- the runs manifest and the once-only scoring target ----
 
 RUNS = os.path.join(REPO_ROOT, "results", "fewshot", "runs.json")
 
 
-def git(*args):
+def git(*args: str) -> str:
     """stdout of a git command in the repo, captured before any parsing."""
     out = subprocess.run(["git", *args], cwd=REPO_ROOT, check=True, capture_output=True, text=True, encoding="utf-8")
     return out.stdout
 
 
-def committed_runs():
+def committed_runs() -> tuple[dict[str, Any], str, bytes]:
     """(runs manifest, its sha256, its bytes) read through pilot.fewshot.read_runs under the frozen pin."""
     proto, pin = frozen()
     runs, sha = fs.read_runs(proto, pin, RUNS)
@@ -349,7 +356,7 @@ def committed_runs():
     return runs, sha, read_bytes(RUNS)
 
 
-def test_runs_manifest_is_committed_and_valid():
+def test_runs_manifest_is_committed_and_valid() -> None:
     out = git("ls-files", "--", "results/fewshot/runs.json")
     assert out.strip() == "results/fewshot/runs.json", "results/fewshot/runs.json is not tracked"
     proto, pin = frozen()
@@ -400,19 +407,19 @@ def test_runs_manifest_is_committed_and_valid():
                                           + "\n").encode("utf-8")
 
 
-def makefile():
+def makefile() -> str:
     with open(os.path.join(REPO_ROOT, "Makefile"), encoding="utf-8") as f:
         return f.read()
 
 
-def fewshot_scoring_recipe(text):
+def fewshot_scoring_recipe(text: str) -> list[str]:
     """The recipe lines (tab stripped) of the fewshot-scoring target."""
     m = re.search(r"^fewshot-scoring:\n((?:\t.*\n)+)", text, re.M)
     assert m, "Makefile has no fewshot-scoring target"
     return [line[1:] for line in m.group(1).splitlines()]
 
 
-def expected_fewshot_lines(runs):
+def expected_fewshot_lines(runs: dict[str, Any]) -> list[str]:
     """Per entry in runs.json order: a base's val line then its test line, a continued run's test line."""
     out = []
     for e in runs["entries"]:
@@ -422,7 +429,7 @@ def expected_fewshot_lines(runs):
     return out
 
 
-def test_makefile_fewshot_scoring_matches_runs():
+def test_makefile_fewshot_scoring_matches_runs() -> None:
     proto, _ = frozen()
     assert proto["scoring"]["device"] == "mps" and proto["scoring"]["workers"] == 0
     runs, _, _ = committed_runs()
@@ -449,11 +456,11 @@ FEWSHOT_FILES = {"base": ("test.json", "test.npz", "val.json", "val.npz"), "cont
 GATE_KEYS = ("protocol_sha256", "fewshot_runs_sha256")
 
 
-def tracked(*pathspec):
+def tracked(*pathspec: str) -> list[str]:
     return [f for f in git("ls-files", "-z", "--", *pathspec).split("\0") if f]
 
 
-def test_fewshot_scored_exactly_once():
+def test_fewshot_scored_exactly_once() -> None:
     proto, pin = frozen()
     runs, runs_sha, _ = committed_runs()
     assert runs_sha == sha256_bytes(read_bytes(RUNS))
@@ -484,14 +491,14 @@ def test_fewshot_scored_exactly_once():
     assert not any("hotels" in f for rid in listed for f in tracked("results/dumps/%s/" % rid))
 
 
-def require_full_history():
+def require_full_history() -> None:
     """Skip in a shallow clone: its grafted HEAD commit reports every file as added there, and merge-base has no
-    history to walk, so the git-order checks need the full history (08-REVIEW WR-05)."""
+    history to walk, so the git-order checks need the full history."""
     if git("rev-parse", "--is-shallow-repository").strip() == "true":
         pytest.skip("needs the full git history (git fetch --unshallow)")
 
 
-def test_fewshot_dumps_descend_from_the_runs_manifest():
+def test_fewshot_dumps_descend_from_the_runs_manifest() -> None:
     require_full_history()
     out = git("log", "--format=%H", "--", "results/fewshot/runs.json")
     manifest = out.split()
@@ -515,7 +522,7 @@ def test_fewshot_dumps_descend_from_the_runs_manifest():
                            capture_output=True)
         assert r.returncode == 0, "%s was added in %s, which does not descend from the runs manifest %s" % (
             path, added[0], manifest[0])
-    # 09-REVIEW WR-02: each masked base's ungated val dump (its θ source) was added exactly once, never re-added
+    # each masked base's ungated val dump (its θ source) was added exactly once, never re-added
     vals = ["results/dumps/%s/val.%s" % (e["dump_run_id"], ext) for e in runs["entries"] if e["stage"] == "base"
             for ext in ("npz", "json")]
     assert set(vals) <= have, sorted(set(vals) - have)
@@ -524,16 +531,16 @@ def test_fewshot_dumps_descend_from_the_runs_manifest():
         assert len(added) == 1, (path, added)
 
 
-# ---- 09-12: the few-shot results record and the README Phase 9 section (D-12, ROADMAP criteria 1, 3, 4) ----
+# ---- the few-shot results record and the README few-shot section ----
 
 RECORD = os.path.join(REPO_ROOT, "results", "fewshot", "fewshot.json")
 DECISION = os.path.join(REPO_ROOT, "results", "fewshot", "projection.json")
 README = os.path.join(REPO_ROOT, "README.md")
-PHASE9_HEADING = "## Few-shot new-intent experiment (Phase 9)"
+FEWSHOT_HEADING = "## Few-shot new-intent experiment"
 FEWSHOT_START, FEWSHOT_END = "<!-- fewshot:start -->", "<!-- fewshot:end -->"
 FINAL_CONF_END = "<!-- final-confidence:end -->"
 RENDER_LINE = "Regenerate with `python fewshot.py --render results/fewshot/fewshot.json`."
-PHASE9_PROSE = ("protocol.json", "unchanged", "no number of its own", "masked", "deleted", "before negative sampling",
+FEWSHOT_PROSE = ("protocol.json", "unchanged", "no number of its own", "masked", "deleted", "before negative sampling",
                 "masked label", "Every message was kept", "runs manifest", "identical frozen support sets", "replay",
                 "k = 5 and k = 10", "epoch parity, not step parity", "allow-list", "scored once", "protocol gate",
                 "refuses a rerun", "make fewshot-reports", "average precision at k = 10", "mean over the draws",
@@ -543,7 +550,7 @@ FALLBACK_PROSE = {"primary": "The compute fallback was not used: the decision re
                   "fallback": "The compute fallback was used: the decision record reads mode fallback"}
 
 
-def committed_record():
+def committed_record() -> tuple[dict[str, Any], str, bytes]:
     """(record, its sha256, its bytes) of the tracked results/fewshot/fewshot.json."""
     assert git("ls-files", "--", "results/fewshot/fewshot.json").strip() == "results/fewshot/fewshot.json", \
         "results/fewshot/fewshot.json is not tracked"
@@ -551,7 +558,7 @@ def committed_record():
     return json.loads(raw.decode("utf-8")), sha256_bytes(raw), raw
 
 
-def test_fewshot_record_binds_the_protocol_and_runs():
+def test_fewshot_record_binds_the_protocol_and_runs() -> None:
     import numpy as np
     from pilot import fewshot_report as fr
     proto, pin = frozen()
@@ -602,30 +609,30 @@ def test_fewshot_record_binds_the_protocol_and_runs():
     assert raw == fr.record_bytes(rec)
 
 
-def load_json(path):
+def load_json(path: str) -> Any:
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
-def readme_text():
+def readme_text() -> str:
     with open(README, encoding="utf-8") as f:
         return f.read()
 
 
-def phase9_section(text):
-    assert text.count(PHASE9_HEADING) == 1, "README.md has no single Phase 9 section"
-    i = text.index(PHASE9_HEADING)
-    j = text.find("\n## ", i + len(PHASE9_HEADING))
+def fewshot_section(text: str) -> tuple[int, int]:
+    assert text.count(FEWSHOT_HEADING) == 1, "README.md has no single few-shot section"
+    i = text.index(FEWSHOT_HEADING)
+    j = text.find("\n## ", i + len(FEWSHOT_HEADING))
     return i, (len(text) if j < 0 else j)
 
 
-def test_readme_fewshot_block_matches_render(capsys):
+def test_readme_fewshot_block_matches_render(capsys: pytest.CaptureFixture[str]) -> None:
     text = readme_text()
     assert text.count(FEWSHOT_START) == 1 and text.count(FEWSHOT_END) == 1, "README.md must hold one fewshot block"
     i, j = text.index(FEWSHOT_START), text.index(FEWSHOT_END)
-    lo, hi = phase9_section(text)
-    assert text.index(FINAL_CONF_END) < lo < i < j < hi, "the fewshot block must sit in the Phase 9 section, after " \
-        "the Phase 8 section"
+    lo, hi = fewshot_section(text)
+    assert text.index(FINAL_CONF_END) < lo < i < j < hi, "the fewshot block must sit in the few-shot section, after " \
+        "the frozen-protocol section"
     assert text.index(RENDER_LINE) < i and text.index(RENDER_LINE) > lo
     capsys.readouterr()
     rendered = runner.main(["--render", RECORD])
@@ -635,45 +642,45 @@ def test_readme_fewshot_block_matches_render(capsys):
         "regenerate it")
 
 
-def phase9_prose(text=None):
-    """The README's Phase 9 prose: from the section heading to the first generated block's marker after it."""
+def fewshot_prose(text: str | None = None) -> str:
+    """The README's few-shot prose: from the section heading to the first generated block's marker after it."""
     text = readme_text() if text is None else text
-    lo, hi = phase9_section(text)
+    lo, hi = fewshot_section(text)
     j = text.find("<!--", lo)
-    assert lo < j < hi, "the Phase 9 section holds no generated block"
+    assert lo < j < hi, "the few-shot section holds no generated block"
     return " ".join(text[lo:j].split())
 
 
-def test_readme_phase9_prose():
+def test_readme_fewshot_prose() -> None:
     """The prose states what was masked and how it was proven, the identical support sets and replay, the epoch
     parity, the once-only scoring behind the committed allow-list, how to read the primary metric and forgetting, the
     record's compute mode and how the GO block uses the record, and holds no metric value of its own."""
     from test_final_results import PROSE_NUMBER_RE
-    prose = phase9_prose()
-    for want in PHASE9_PROSE:
-        assert want in prose, "the README Phase 9 prose must state %r before its generated block" % want
+    prose = fewshot_prose()
+    for want in FEWSHOT_PROSE:
+        assert want in prose, "the README few-shot prose must state %r before its generated block" % want
     rec, _, _ = committed_record()
     mode = rec["decision"]["mode"]
-    assert FALLBACK_PROSE[mode] in prose, "the Phase 9 prose must say %r (the record's mode)" % FALLBACK_PROSE[mode]
+    assert FALLBACK_PROSE[mode] in prose, "the few-shot prose must say %r (the record's mode)" % FALLBACK_PROSE[mode]
     other = [m for m in FALLBACK_PROSE if m != mode]
     assert all(FALLBACK_PROSE[m] not in prose for m in other)
     if mode == "fallback":
         assert rec["decision"]["disclosure"] in prose
     hits = [m.group(0) for m in PROSE_NUMBER_RE.finditer(prose)]
-    assert hits == [], "the README Phase 9 prose holds metric values %r; numbers belong in a generated block" % hits
+    assert hits == [], "the README few-shot prose holds metric values %r; numbers belong in a generated block" % hits
 
 
 @pytest.mark.data
-def test_fewshot_record_rebuilds():
+def test_fewshot_record_rebuilds() -> None:
     from pilot import fewshot_report as fr
     proto, pin = frozen()
     _, _, raw = committed_record()
     assert fr.record_bytes(fr.build_record(proto, pin)) == raw, "results/fewshot/fewshot.json does not rebuild"
 
 
-# ---- 09-13: the README Files table and Run block name every Phase 9 file and command ----
+# ---- the README Files table and Run block name every few-shot file and command ----
 
-PHASE9_FILES = {
+README_FILES = {
     "pilot/fewshot.py": ("masked_rows", "laya_rows", "berturk_rows", "binding", "check_base", "check_continued",
                          "read_mode", "check_runs", "read_runs", "admitted"),
     "pilot/fewshot_report.py": ("fewshot-results/1", "new-tag macro-AP", "forgetting", "bootstrap"),
@@ -686,7 +693,7 @@ PHASE9_FILES = {
     "pilot/compute.py": ("fewshot_projection", "fewshot_decision"),
     "results/": ("fewshot/", "projection.json", "runs.json", "fewshot.json", "few-shot dumps"),
 }
-PHASE9_RUN = (
+README_RUN = (
     "python fewshot.py --support-sets",
     "python fewshot.py --counts",
     "python fewshot.py --projection --out results/fewshot/projection.json",
@@ -697,7 +704,7 @@ PHASE9_RUN = (
     "python fewshot.py --drop-storage",
     "python fewshot.py --inspect",
     "python fewshot.py --runs-manifest CKPT... --out results/fewshot/runs.json",
-    "make fewshot-scoring        # ran once in Phase 9; never rerun: the gate refuses an existing dump",
+    "make fewshot-scoring        # ran once; never rerun: the gate refuses an existing dump",
     "python fewshot.py --prune",
     "make fewshot-reports",
     "python fewshot.py --render results/fewshot/fewshot.json",
@@ -705,7 +712,7 @@ PHASE9_RUN = (
 )
 
 
-def readme_part(text, heading, end):
+def readme_part(text: str, heading: str, end: str) -> str:
     """The README text from `heading` to the next `end` heading after it (exactly one of each)."""
     assert text.count(heading) == 1, "README.md must hold one %r" % heading
     i = text.index(heading)
@@ -713,7 +720,7 @@ def readme_part(text, heading, end):
     return text[i:j]
 
 
-def files_rows(text):
+def files_rows(text: str) -> dict[str, str]:
     """{file: description} of the README Files table (a row is | `file` | description |)."""
     rows = {}
     for line in readme_part(text, "\n## Files\n", "\n## Run\n").splitlines():
@@ -724,33 +731,32 @@ def files_rows(text):
     return rows
 
 
-def run_block(text):
+def run_block(text: str) -> str:
     """The README Run block's fenced code."""
     part = readme_part(text, "\n## Run\n", "\n## Scoring path\n")
     i = part.index("```bash\n")
     return part[i:part.index("\n```", i + 8)]
 
 
-def test_readme_names_the_phase9_files_and_commands():
+def test_readme_names_the_fewshot_files_and_commands() -> None:
     text = readme_text()
-    assert "Phase 9 adds" not in text, "the README still says \"Phase 9 adds\": Phase 9 ran; state it in the past tense"
     rows = files_rows(text)
-    for path, wants in PHASE9_FILES.items():
+    for path, wants in README_FILES.items():
         assert path in rows, "the README Files table has no row for %s" % path
         missing = [w for w in wants if w not in rows[path]]
         assert not missing, "the README Files row of %s does not name %s" % (path, ", ".join(missing))
     run = run_block(text)
-    missing = [c for c in PHASE9_RUN if c not in run]
+    missing = [c for c in README_RUN if c not in run]
     assert not missing, "the README Run block does not hold %r" % missing
     i, j = run.index("python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --device mps"), \
         run.index("python berturk_train.py --data data/splits/selection_train.jsonl --base berturk --device mps")
     assert run.index("python fewshot.py --projection") < i < j < run.index("make fewshot-scoring") \
-        < run.index("make fewshot-reports"), "the Run block's Phase 9 commands must be in the order they ran"
+        < run.index("make fewshot-reports"), "the Run block's few-shot commands must be in the order they ran"
     for target in ("fewshot-scoring:", "fewshot-reports:"):
         assert re.search(r"^%s$" % re.escape(target), makefile(), re.M), "the Makefile has no %s target" % target
 
 
-PHASE9_CAVEATS = ("new-tag micro-F1", "zero on every continued run", "below its masked base's val θ",
+FEWSHOT_CAVEATS = ("new-tag micro-F1", "zero on every continued run", "below its masked base's val θ",
                   "Average precision needs no θ", "primary metric", "Step parity", "deferred", "fp16-rounded",
                   "The cause is that θ", "held-out classifier rows were never trained", "score near one half on val",
                   "choosing the global θ over all 48 columns pushes it up",
@@ -759,11 +765,12 @@ PHASE9_CAVEATS = ("new-tag micro-F1", "zero on every continued run", "below its 
                   "trained columns only")
 
 
-def test_readme_phase9_prose_states_the_caveats():
-    """The caveats Phase 10 carries are in the Phase 9 prose, and the BERTurk new-tag F1 statement is the record's."""
-    prose = phase9_prose()
-    for want in PHASE9_CAVEATS:
-        assert want in prose, "the README Phase 9 prose must state %r" % want
+def test_readme_fewshot_prose_states_the_caveats() -> None:
+    """The caveats the recommendation carries are in the few-shot prose, and the BERTurk new-tag F1 statement is the
+    record's."""
+    prose = fewshot_prose()
+    for want in FEWSHOT_CAVEATS:
+        assert want in prose, "the README few-shot prose must state %r" % want
     rec, _, _ = committed_record()
     cont = {k: v for k, v in rec["f1"]["berturk"]["continued"].items()}
     assert cont and all(v["new"] == 0.0 for v in cont.values()), \
@@ -783,8 +790,8 @@ def test_readme_phase9_prose_states_the_caveats():
         assert p.max() < theta["global"], "BERTurk %s scores a held-out tag at or above its base's val θ" % key
 
 
-def test_committed_post_hoc_theta_variant_matches_the_prose():
-    """09-REVIEW CR-01: the committed record keeps the frozen reading (theta, f1) and adds theta_trained beside it,
+def test_committed_post_hoc_theta_variant_matches_the_prose() -> None:
+    """The committed record keeps the frozen reading (theta, f1) and adds theta_trained beside it,
     labelled post hoc, not frozen, descriptive and not a decision input. The prose's claims are the record's: Laya's θ
     (global and per tag) is the same under both rules on every base, so its post hoc F1 rows are its frozen ones;
     every BERTurk base's θ on its trained columns is below its 48-column θ; and the masked BERTurk bases' held-out

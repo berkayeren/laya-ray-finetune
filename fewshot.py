@@ -1,13 +1,13 @@
-"""The few-shot runner of the frozen protocol (REP-01; ROADMAP Phase 8 criterion 3, Phase 9 criterion 1).
+"""The few-shot runner of the frozen protocol: draw checks, counts, the compute decision, the allow-list of few-shot
+checkpoints, guarded deletion and the few-shot results record.
 
-protocol.json's "fewshot" block (pilot.fewshot.protocol_block, frozen by plan 08-10) is the whole few-shot protocol:
-the held-out tags, k values, draw seeds, negatives per positive, replay size, the source split and the three frozen
-support-set draws with their uid lists and digests. Phase 9 trains and scores on those frozen lists only, unchanged.
-
-Phase 8 ships one mode, --support-sets, the runner's entry point (08-RESEARCH Open Question 3). Phase 9 adds the base,
-incremental and scoring modes to this entry point; every mode calls pilot.protocol.require_frozen() before anything
-else and records the protocol_sha256 it ran under, so the runner refuses a missing, unpinned or changed protocol.json
-before it reads a split or loads a model (ROADMAP Phase 8 criterion 1).
+protocol.json's "fewshot" block (pilot.fewshot.protocol_block, frozen with the protocol) is the whole few-shot
+protocol: the held-out tags, k values, draw seeds, negatives per positive, replay size, the source split and the three
+frozen support-set draws with their uid lists and digests. The few-shot experiment trains and scores on those frozen
+lists only, unchanged. The training itself runs through the --fewshot-* modes of ray_train.py and berturk_train.py and
+the scoring through score.py; this runner checks, counts, lists, prunes and reports. Every mode calls
+pilot.protocol.require_frozen() before anything else and records the protocol_sha256 it ran under, so the runner
+refuses a missing, unpinned or changed protocol.json before it reads a split or loads a model.
 
 --support-sets, in this order:
 1. pilot.protocol.require_frozen(): protocol.json exists, PROTOCOL_SHA256 is set, its bytes hash to the pin and parse
@@ -19,12 +19,12 @@ before it reads a split or loads a model (ROADMAP Phase 8 criterion 1).
 4. prints, as JSON, the protocol sha256, the source, and per draw its number, seed, base seed, digest, support sizes
    per k, replay size and realised positives; never a uid list or message text.
 
---counts (09-01), in this order: require_frozen() first; the verified source rows (read_source); pilot.fewshot.
-check_source (the frozen source and every frozen draw re-checked over those bytes, D-02); then counts(block, rows),
-printed as JSON: the masked-base and per-(draw, k) row, item and optimizer-step counts of both trainers, computed from
-the frozen uid lists only (the D-08 projection consumes them). Counts only, never a uid list or message text.
+--counts, in this order: require_frozen() first; the verified source rows (read_source); pilot.fewshot.check_source
+(the frozen source and every frozen draw re-checked over those bytes); then counts(block, rows), printed as JSON: the
+masked-base and per-(draw, k) row, item and optimizer-step counts of both trainers, computed from the frozen uid lists
+only (the compute projection consumes them). Counts only, never a uid list or message text.
 
---projection --out PATH (09-04, D-08), in this order: require_frozen() first; a fresh run refuses an existing PATH
+--projection --out PATH, in this order: require_frozen() first; a fresh run refuses an existing PATH
 (the decision is recorded once); the verified source and its counts as --counts; results/compute/
 compute_checkpoint.json read once (its sha256 binds the record); pilot.compute.fewshot_projection on the committed
 rates, the counts and the protocol's val and test sizes; pilot.compute.fewshot_decision applies the frozen
@@ -32,10 +32,10 @@ compute_fallback trigger exactly (fallback when the projection exceeds pilot.few
 (schema fewshot-projection/1: protocol_sha256, compute, counts, projection, trigger, decision, notes; no timestamp) is
 written atomically as key-sorted JSON (indent 2, one trailing newline) and printed. With --ladder-failure TEXT it
 rewrites an existing primary record of this protocol into the fallback record naming the failure (the second frozen
-trigger, a primary base run that still fails after the LAYA-03 ladder); it refuses a missing PATH, a fallback record
+trigger, a primary base run that still fails after the fallback ladder); it refuses a missing PATH, a fallback record
 and a record of another protocol. Both trainers read the mode through pilot.fewshot.read_mode.
 
---inspect CKPT... (09-05, D-01, D-04): require_frozen() first, the mode from the D-08 decision record; then each
+--inspect CKPT...: require_frozen() first, the mode from the compute decision record; then each
 checkpoint on its own (entry_of): its kind from its files (rl_agent_config.json with training.ray_train: Laya;
 berturk_train.json: BERTurk), its identity and dump run id exactly as score.py computes them (pilot.weights.identity and
 pilot.dumps.run_id; pilot.berturk.identity and dump_run_id), its record read from the bytes that identity hashed, a run
@@ -46,7 +46,7 @@ base canonical and run id its record carries), and its masking proof (pilot.fews
 prints one runs-manifest entry per checkpoint (pilot.fewshot.ENTRY_KEYS: ids, digests, counts, wall clock by
 WALL_RULE and losses; never a uid list or message text).
 
---runs-manifest CKPT... --out PATH (09-05, D-04, D-07, D-09): require_frozen() first; an existing PATH is refused (the
+--runs-manifest CKPT... --out PATH: require_frozen() first; an existing PATH is refused (the
 allow-list is written once); every checkpoint through entry_of; every continued entry's base among the inputs (the
 same train run id), its canonical base digests (base_model_sha256, base_config_sha256, base_files_sha256) that base
 checkpoint's identity and its record's base canonical that base's own; a missing slot (pilot.fewshot.slots) is refused
@@ -55,67 +55,70 @@ record's path and sha256, the sorted tags, WALL_RULE, the entries sorted by (kin
 atomically as key-sorted JSON with one trailing newline. score.py's protocol gate admits exactly its dump run ids, on
 test only, once (pilot.fewshot.admitted).
 
---prune CKPT... (09-05, D-14): require_frozen() first; results/fewshot/runs.json must exist and pass
-pilot.fewshot.read_runs; every path is checked before anything is deleted. A symlink (or a path in a symlinked dir),
-a dir that is not a checkpoint, and a checkpoint whose hashed dump run id the manifest does not list for its kind
-(under its listed checkpoint_name) are refused, so a Phase 8 final seed or any other dir is never deleted. A listed
-continued checkpoint goes once its full test dump under results/dumps verifies (pilot.dumps.load_dump) with its own
-identity, protocol_sha256 the pin and fewshot_runs_sha256 the manifest's; a listed base once its ungated full val dump
-(its θ source) and its gated test dump verify the same way and the gated test dump of every listed continued run from
-it exists. Then each checkpoint's realpath is deleted (shutil.rmtree of that one dir) and its name and dump run id
-printed.
+--prune CKPT...: require_frozen() first; results/fewshot/runs.json must exist and pass pilot.fewshot.read_runs; every
+path is checked before anything is deleted. A symlink (or a path in a symlinked dir), a dir that is not a checkpoint,
+and a checkpoint whose hashed dump run id the manifest does not list for its kind (under its listed checkpoint_name)
+are refused, so a final seed of the protocol or any other dir is never deleted. A listed continued checkpoint goes once
+its full test dump under results/dumps verifies (pilot.dumps.load_dump) with its own identity, protocol_sha256 the pin
+and fewshot_runs_sha256 the manifest's; a listed base once its ungated full val dump (its θ source) and its gated test
+dump verify the same way and the gated test dump of every listed continued run from it exists. Then each checkpoint's
+realpath is deleted (shutil.rmtree of that one dir) and its name and dump run id printed.
 
---drop-storage CKPT --storage DIR (09-05, D-14): require_frozen() first; CKPT must be a finished ray_train.py few-shot
+--drop-storage CKPT --storage DIR: require_frozen() first; CKPT must be a finished ray_train.py few-shot
 checkpoint of this protocol (not a symlink; pilot.runs.read_record; a run id that is its canonical's; final.json of
 that run; a canonical few-shot binding of this pin); then DIR/<run id>, the run's Ray storage, is deleted, and nothing
 else. A missing or symlinked DIR/<run id>, or one that holds CKPT itself, is refused. The runs manifest is not needed:
 storage is freed after each training run, before the allow-list is written.
 
---report --out PATH (09-06, D-10, D-12): require_frozen() first; pilot.fewshot.read_runs must find and accept
+--report --out PATH: require_frozen() first; pilot.fewshot.read_runs must find and accept
 results/fewshot/runs.json; pilot.fewshot_report.build_record computes the few-shot results record (schema
 fewshot-results/1) from the dumps the manifest lists only (numpy, no model), writes it to PATH atomically (a rebuild
 overwrites it: make fewshot-reports) and prints its primary block.
 
---render PATH (09-06, D-10): require_frozen() first; pilot.fewshot_report.read_record; a record built under another
-protocol sha256 is refused; prints pilot.fewshot_report.render_markdown, the README Phase 9 block (no torch, no dump).
+--render PATH: require_frozen() first; pilot.fewshot_report.read_record; a record built under another protocol sha256
+is refused; prints pilot.fewshot_report.render_markdown, the README few-shot results block (no torch, no dump).
 
 usage:
-    python fewshot.py --support-sets                     # refused until protocol.json is frozen (plan 08-10)
+    python fewshot.py --support-sets                     # refused unless protocol.json is frozen and pinned
     python fewshot.py --support-sets --manifest OTHER_DIR/splits.json
-    python fewshot.py --counts                           # rows, items and steps of every Phase 9 training run
-    python fewshot.py --projection --out results/fewshot/projection.json          # the D-08 record, written once
+    python fewshot.py --counts                           # rows, items and steps of every few-shot training run
+    python fewshot.py --projection --out results/fewshot/projection.json          # the decision record, written once
     python fewshot.py --projection --ladder-failure TEXT --out results/fewshot/projection.json   # primary -> fallback
     python fewshot.py --inspect ckpt-fewshot-base-s0 ckpt-fewshot-d0-k10   # one allow-list entry per checkpoint
     python fewshot.py --runs-manifest ckpt-fewshot-* ckpt-berturk-fewshot-* --out results/fewshot/runs.json   # once
     python fewshot.py --prune ckpt-fewshot-d0-k10          # after its verified gated test dump exists
     python fewshot.py --drop-storage ckpt-fewshot-d0-k10 --storage ray_results   # that run's Ray storage only
     python fewshot.py --report --out results/fewshot/fewshot.json   # the results record (make fewshot-reports)
-    python fewshot.py --render results/fewshot/fewshot.json         # the README Phase 9 block
+    python fewshot.py --render results/fewshot/fewshot.json         # the README few-shot results block
 """
 import argparse
 import json
 import math
 import os
 import shutil
+from typing import Any
 
 import pilot.data
 from pilot import berturk, compute, dumps, fewshot, fewshot_report, protocol, runs, spike
 from pilot.data import REPO_ROOT, parse_jsonl, repo_relpath, sha256_bytes, verify_split_file, write_atomic
 
 SOURCE_SPLIT = fewshot.SOURCE_SPLIT
-# the committed Phase 4 compute record whose measured rates the D-08 projection uses (bound by its sha256)
+# the committed compute checkpoint record whose measured rates the few-shot projection uses (bound by its sha256)
 COMPUTE_PATH = os.path.join(REPO_ROOT, "results", "compute", "compute_checkpoint.json")
+# a finished run as _laya_run and _berturk_run read it: (identity, dump run id, run id, canonical, record, wall clock,
+# per-epoch losses)
+RunInfo = tuple[dict[str, Any], str, str, dict[str, Any], dict[str, Any], float, list[Any]]
 
 
-def read_source(block, manifest_path):
+def read_source(block: dict[str, Any], manifest_path: str) -> list[dict[str, Any]]:
     """The verified rows of the block's source split: the manifest's selection_train bytes, read once, verified and
     bound to the block's source sha256 and uids_sha256; SystemExit naming the source otherwise."""
     return read_source_entry(block, manifest_path)[1]
 
 
-def read_source_entry(block, manifest_path):
+def read_source_entry(block: dict[str, Any], manifest_path: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """(manifest entry, verified rows) of the block's source split, as read_source; a missing manifest is refused in
-    one line (08-REVIEW IN-07)."""
+    one line, never a traceback."""
     src = block.get("source") or {}
     if src.get("split") != SOURCE_SPLIT:
         raise SystemExit("the frozen few-shot source is %r, not %s; the protocol draws from %s only"
@@ -142,7 +145,7 @@ def read_source_entry(block, manifest_path):
     return entry, parse_jsonl(raw)
 
 
-def frozen_protocol():
+def frozen_protocol() -> tuple[dict[str, Any], dict[str, Any], str]:
     """(protocol, fewshot block, pin) of require_frozen(), the first call of every mode: nothing is read without it."""
     proto, pin = protocol.require_frozen()
     block = proto["fewshot"]
@@ -152,13 +155,13 @@ def frozen_protocol():
     return proto, block, pin
 
 
-def frozen_block():
+def frozen_block() -> tuple[dict[str, Any], str]:
     """(fewshot block, pin) of require_frozen(), the first call of every mode: nothing is read without it."""
     _, block, pin = frozen_protocol()
     return block, pin
 
 
-def support_sets(manifest_path):
+def support_sets(manifest_path: str) -> dict[str, Any]:
     """--support-sets: the frozen draws, re-checked against the verified source, as a printable summary."""
     block, pin = frozen_block()                                 # first: nothing is read without the frozen protocol
     rows = read_source(block, manifest_path)
@@ -171,8 +174,8 @@ def support_sets(manifest_path):
     return out
 
 
-def counts(block, rows):
-    """The rows, items and optimizer steps of every Phase 9 training run, from the frozen uid lists over `rows` (the
+def counts(block: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """The rows, items and optimizer steps of every few-shot training run, from the frozen uid lists over `rows` (the
     verified source): the masked base (every message, the held-out keys deleted before neg sampling; Laya items by
     pilot.runs.neg_items, steps by pilot.spike.optimizer_steps at the frozen micro-batch and grad-accum; BERTurk
     steps ceil(n / batch)) and per (draw, k), in draw then k order, the support and replay rows, the Laya items of
@@ -200,7 +203,7 @@ def counts(block, rows):
     return out
 
 
-def counts_mode(manifest_path):
+def counts_mode(manifest_path: str) -> dict[str, Any]:
     """--counts: require_frozen first, the verified source, check_source, then counts(), printed as JSON."""
     block, pin = frozen_block()                                 # first: nothing is read without the frozen protocol
     entry, rows = read_source_entry(block, manifest_path)
@@ -211,18 +214,18 @@ def counts_mode(manifest_path):
     return out
 
 
-def record_bytes(record):
+def record_bytes(record: dict[str, Any]) -> bytes:
     """The decision record's bytes: key-sorted JSON, indent 2, UTF-8, one trailing newline (no timestamp, so a rebuild
     is byte-identical)."""
     return (json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def read_compute(path=COMPUTE_PATH):
+def read_compute(path: str = COMPUTE_PATH) -> tuple[dict[str, Any], dict[str, str]]:
     """(measured block, {"path", "sha256"}) of the committed compute record, from one read of its bytes; SystemExit on
     a missing file or another schema."""
     if not os.path.isfile(path):
-        raise SystemExit("%s not found; the D-08 projection uses the committed Phase 4 rates (`git checkout -- "
-                         "results/compute/`)" % path)
+        raise SystemExit("%s not found; the few-shot projection uses the committed compute checkpoint rates (`git "
+                         "checkout -- results/compute/`)" % path)
     with open(path, "rb") as f:
         raw = f.read()
     report = json.loads(raw.decode("utf-8"))
@@ -232,7 +235,7 @@ def read_compute(path=COMPUTE_PATH):
     return report["measured"], {"path": repo_relpath(path), "sha256": sha256_bytes(raw)}
 
 
-def scored_sizes(proto):
+def scored_sizes(proto: dict[str, Any]) -> dict[str, int]:
     """{"val": n, "test": n} of the frozen protocol's splits (the messages every base and continued model is scored
     on); SystemExit when the protocol does not record them."""
     splits = proto.get("splits") or {}
@@ -246,14 +249,15 @@ def scored_sizes(proto):
     return out
 
 
-def write_record(out, record):
+def write_record(out: str, record: dict[str, Any]) -> None:
+    """Write record_bytes(record) to `out` atomically, creating its directory."""
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     write_atomic(out, record_bytes(record))
 
 
-def projection_mode(manifest_path, out, ladder_failure=None):
-    """--projection: the D-08 record, written once (see the module docstring); with `ladder_failure` the rewrite of an
-    existing primary record of this protocol into the fallback record."""
+def projection_mode(manifest_path: str, out: str, ladder_failure: str | None = None) -> dict[str, Any]:
+    """--projection: the compute decision record, written once (see the module docstring); with `ladder_failure` the
+    rewrite of an existing primary record of this protocol into the fallback record. Returns the record."""
     proto, block, pin = frozen_protocol()                       # first: nothing is read without the frozen protocol
     if ladder_failure is not None:
         if not os.path.isfile(out):
@@ -272,8 +276,8 @@ def projection_mode(manifest_path, out, ladder_failure=None):
         record.update(compute.fewshot_decision(record["projection"], block, ladder_failure))
     else:
         if os.path.lexists(out):
-            raise SystemExit("%s exists; the D-08 decision is recorded once, before any base run (a primary base run "
-                             "that still fails after the LAYA-03 ladder turns it into the fallback: pass "
+            raise SystemExit("%s exists; the compute decision is recorded once, before any base run (a primary base "
+                             "run that still fails after the fallback ladder turns it into the fallback: pass "
                              "--ladder-failure TEXT)" % out)
         entry, rows = read_source_entry(block, manifest_path)
         fewshot.check_source(block, entry, rows)
@@ -294,9 +298,9 @@ def projection_mode(manifest_path, out, ladder_failure=None):
     return record
 
 
-# ---- 09-05: the allow-list of few-shot checkpoints (D-01, D-04, D-09) ----
+# ---- the allow-list of few-shot checkpoints ----
 
-def _read_bound(path, sha, what):
+def _read_bound(path: str, sha: str, what: str) -> bytes:
     """The bytes of `path`, refused unless they hash to `sha` (the digest the checkpoint identity recorded)."""
     with open(path, "rb") as f:
         raw = f.read()
@@ -305,7 +309,7 @@ def _read_bound(path, sha, what):
     return raw
 
 
-def checkpoint_kind(ckpt):
+def checkpoint_kind(ckpt: str) -> str:
     """'laya' or 'berturk' from the files of a checkpoint dir; SystemExit for a missing dir, both or neither."""
     if not os.path.isdir(ckpt):
         raise SystemExit("%s is not a checkpoint dir; pass a ray_train.py or berturk_train.py few-shot checkpoint"
@@ -318,7 +322,7 @@ def checkpoint_kind(ckpt):
     return "laya" if laya else "berturk"
 
 
-def _laya_run(ckpt):
+def _laya_run(ckpt: str) -> RunInfo:
     """(identity, dump run id, run id, canonical, record, wall clock, losses) of a finished ray_train.py checkpoint,
     read from the config bytes its identity hashed; SystemExit on a missing run record, a run id that is not its
     canonical's, or an unfinished run (no final.json of this run, or not one epoch row per trained epoch)."""
@@ -358,7 +362,7 @@ def _laya_run(ckpt):
     return ident, rid, run, canon, rec, float(sum(terms)), [row.get("loss") for row in rows]
 
 
-def _berturk_run(ckpt):
+def _berturk_run(ckpt: str) -> RunInfo:
     """(identity, dump run id, run id, canonical, record, wall clock, losses) of a finished berturk_train.py
     checkpoint, from the berturk_train.json bytes its identity hashed (pilot.berturk.read_record); SystemExit on a
     missing file, a run id that is not its canonical's, or an unfinished run."""
@@ -382,15 +386,15 @@ def _berturk_run(ckpt):
     return ident, rid, run, canon, rec, float(sum(terms)), [row.get("loss") for row in rows]
 
 
-def proof_tags_match(got, tags):
+def proof_tags_match(got: Any, tags: list[str]) -> bool:
     """True when a record's proof names exactly the frozen held-out tags, each once, in any order. The order carries
     no meaning: the per-tag counts are a dict, a base and a BERTurk proof list the tags sorted and a Laya continued
-    proof lists them in protocol order (ray_train.py takes them from the frozen block, 09-10)."""
+    proof lists them in protocol order (ray_train.py takes them from the frozen block)."""
     return (isinstance(got, list) and all(isinstance(t, str) for t in got) and len(set(got)) == len(got)
             and sorted(got) == sorted(tags))
 
 
-def entry_of(ckpt, proto, pin, mode):
+def entry_of(ckpt: str, proto: dict[str, Any], pin: str, mode: str) -> tuple[dict[str, Any], dict[str, Any]]:
     """(runs-manifest entry, {"identity", "canonical", "base"}) of one few-shot checkpoint, re-validated on its own
     (see the module docstring); SystemExit naming the checkpoint and what fails."""
     block = fewshot._block(proto)
@@ -399,7 +403,7 @@ def entry_of(ckpt, proto, pin, mode):
     name = os.path.basename(os.path.normpath(os.path.abspath(ckpt)))
     bind = canon.get("fewshot")
     if not isinstance(bind, dict) or bind.get("stage") not in fewshot.STAGES:
-        raise SystemExit("%s (run %s) is not a Phase 9 run: its canonical config carries no few-shot binding; only "
+        raise SystemExit("%s (run %s) is not a few-shot run: its canonical config carries no few-shot binding; only "
                          "a --fewshot-base or --fewshot-draw checkpoint is listed" % (name, run))
     stage, proof = bind["stage"], rec.get("fewshot")
     if not isinstance(proof, dict) or proof.get("stage") != stage or proof.get("protocol_sha256") != pin:
@@ -450,7 +454,7 @@ def entry_of(ckpt, proto, pin, mode):
     return entry, {"identity": ident, "canonical": canon, "base": base}
 
 
-def inspect_mode(ckpts):
+def inspect_mode(ckpts: list[str]) -> list[dict[str, Any]]:
     """--inspect: require_frozen first, the recorded mode, then entry_of per checkpoint, printed as JSON."""
     proto, _, pin = frozen_protocol()                           # first: nothing is read without the frozen protocol
     mode = fewshot.read_mode(pin)
@@ -459,14 +463,14 @@ def inspect_mode(ckpts):
     return out
 
 
-def _base_digests(kind, ident):
+def _base_digests(kind: str, ident: dict[str, Any]) -> dict[str, str]:
     """{base_model_sha256, base_config_sha256, base_files_sha256} a continued run's canonical config carries for a
     base checkpoint of this identity (as ray_train.py and berturk_train.py compute them)."""
     return {"base_model_sha256": ident["model_sha256"], "base_config_sha256": ident["config_sha256"],
             "base_files_sha256": dumps.files_digest(ident["files_sha256"])}
 
 
-def runs_manifest_mode(ckpts, out):
+def runs_manifest_mode(ckpts: list[str], out: str) -> dict[str, Any]:
     """--runs-manifest: the allow-list, written once (see the module docstring)."""
     proto, block, pin = frozen_protocol()                       # first: nothing is read without the frozen protocol
     mode = fewshot.read_mode(pin)
@@ -507,9 +511,9 @@ def runs_manifest_mode(ckpts, out):
     return record
 
 
-# ---- 09-05: guarded deletion (D-14) ----
+# ---- guarded deletion ----
 
-def _hashed(kind, ckpt):
+def _hashed(kind: str, ckpt: str) -> tuple[dict[str, Any], str]:
     """(identity, dump run id) of a checkpoint dir from hashes alone, as score.py computes them."""
     if kind == "laya":
         from pilot.weights import identity
@@ -520,7 +524,8 @@ def _hashed(kind, ckpt):
     return ident, berturk.dump_run_id(ident)
 
 
-def dump_problem(rid, split, manifest, pin, runs_sha, gated, kind, ident=None):
+def dump_problem(rid: str, split: str, manifest: str, pin: str, runs_sha: str, gated: bool, kind: str,
+                 ident: dict[str, Any] | None = None) -> str | None:
     """None when results/dumps/<rid>/<split> (pilot.dumps.DUMP_ROOT, read at call time) is a verified full dump of
     system `kind` (and of identity `ident` when given), scored through the protocol gate under this runs manifest
     (gated: protocol_sha256 the pin, fewshot_runs_sha256 `runs_sha`) or ungated (neither key); else what is wrong."""
@@ -538,12 +543,11 @@ def dump_problem(rid, split, manifest, pin, runs_sha, gated, kind, ident=None):
         return ("the test dump %s/%s was not scored through the protocol gate under this runs manifest "
                 "(protocol_sha256 %s, fewshot_runs_sha256 %s)" % (rid, split, keys[0], keys[1]))
     if not gated and ("protocol_sha256" in side or "fewshot_runs_sha256" in side):
-        return "the %s dump %s/%s is gated, not the base's own ungated val dump (its θ source, D-05)" % (split, rid,
-                                                                                                       split)
+        return "the %s dump %s/%s is gated, not the base's own ungated val dump (its θ source)" % (split, rid, split)
     return None
 
 
-def prune_mode(paths, manifest):
+def prune_mode(paths: list[str], manifest: str) -> list[str]:
     """--prune: delete listed few-shot checkpoints whose verified dumps exist (see the module docstring); returns the
     dump run ids of the deleted checkpoints, in argument order."""
     proto, _, pin = frozen_protocol()                           # first: nothing is read without the frozen protocol
@@ -563,7 +567,7 @@ def prune_mode(paths, manifest):
         name = os.path.basename(real)
         if e is None:
             raise SystemExit("%s (dump run id %s) is not listed in results/fewshot/runs.json; --prune deletes only a "
-                             "listed few-shot checkpoint, never a Phase 8 final seed or any other dir" % (p, rid))
+                             "listed few-shot checkpoint, never a final seed or any other dir" % (p, rid))
         if e["checkpoint_name"] != name:
             raise SystemExit("%s is listed as %s, not %s; pass the listed checkpoint dir" % (p, e["checkpoint_name"],
                                                                                        name))
@@ -588,7 +592,7 @@ def prune_mode(paths, manifest):
     return [rid for _, _, rid in todo]
 
 
-def drop_storage_mode(ckpt, storage):
+def drop_storage_mode(ckpt: str, storage: str) -> str:
     """--drop-storage: delete the Ray storage dir of one finished ray_train.py few-shot run (see the module
     docstring); returns the deleted run id."""
     _, _, pin = frozen_protocol()                               # first: nothing is read without the frozen protocol
@@ -613,7 +617,7 @@ def drop_storage_mode(ckpt, storage):
                          "resumes from, so it is kept" % (ckpt, run))
     bind = canon.get("fewshot")
     if not isinstance(bind, dict) or bind.get("protocol_sha256") != pin:
-        raise SystemExit("%s (run %s) is not a few-shot run of the frozen protocol %s; --drop-storage frees Phase 9 "
+        raise SystemExit("%s (run %s) is not a few-shot run of the frozen protocol %s; --drop-storage frees few-shot "
                          "storage only" % (ckpt, run, pin))
     target = os.path.join(os.path.abspath(storage), run)
     if not os.path.lexists(target):
@@ -630,9 +634,9 @@ def drop_storage_mode(ckpt, storage):
     return run
 
 
-# ---- 09-06: the results record (D-10, D-12) ----
+# ---- the results record ----
 
-def report_mode(out):
+def report_mode(out: str) -> dict[str, Any]:
     """--report: require_frozen first, then pilot.fewshot_report.build_record of the committed runs manifest and the
     dumps it lists, written to `out` atomically (a rebuild); prints the primary block."""
     proto, _, pin = frozen_protocol()                           # first: nothing is read without the frozen protocol
@@ -642,9 +646,9 @@ def report_mode(out):
     return record
 
 
-def render_mode(path):
-    """--render: require_frozen first, then the README Phase 9 block of the results record at `path`, refused unless
-    the record was built under the frozen protocol."""
+def render_mode(path: str) -> str:
+    """--render: require_frozen first, then the README few-shot results block of the results record at `path`, refused
+    unless the record was built under the frozen protocol. Returns the text."""
     _, _, pin = frozen_protocol()                               # first: nothing is read without the frozen protocol
     record, _ = fewshot_report.read_record(path)
     if record.get("protocol_sha256") != pin:
@@ -660,15 +664,17 @@ FLAG_MODES = {"out": ("projection", "runs_manifest", "report"), "ladder_failure"
               "storage": ("drop_storage",), "manifest": ("support_sets", "counts", "projection", "prune")}
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> Any:
+    """The CLI; returns the chosen mode's result (printed as well)."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--support-sets", action="store_true",
                       help="re-check the frozen support-set draws against the verified source and print their digests")
     mode.add_argument("--counts", action="store_true",
-                      help="print the rows, items and optimizer steps of every Phase 9 training run")
+                      help="print the rows, items and optimizer steps of every few-shot training run")
     mode.add_argument("--projection", action="store_true",
-                      help="compute the D-08 projection and compute-fallback decision and write it to --out (once)")
+                      help="compute the few-shot projection and compute-fallback decision and write it to --out "
+                           "(once)")
     mode.add_argument("--inspect", nargs="+", metavar="CKPT",
                       help="re-validate few-shot checkpoints and print one runs-manifest entry each")
     mode.add_argument("--runs-manifest", nargs="+", metavar="CKPT",
@@ -680,13 +686,13 @@ def main(argv=None):
     mode.add_argument("--report", action="store_true",
                       help="build the few-shot results record from the listed dumps and write it to --out")
     mode.add_argument("--render", metavar="PATH",
-                      help="print the README Phase 9 block of a few-shot results record")
+                      help="print the README few-shot results block of a few-shot results record")
     ap.add_argument("--out", default=None, help="--projection: the decision record (results/fewshot/projection.json); "
                                                 "--runs-manifest: the allow-list (results/fewshot/runs.json); "
                                                 "--report: the results record (results/fewshot/fewshot.json)")
     ap.add_argument("--ladder-failure", default=None, metavar="TEXT",
                     help="--projection: turn the recorded primary decision at --out into the fallback, naming the "
-                         "primary base run that still failed after the LAYA-03 ladder")
+                         "primary base run that still failed after the fallback ladder")
     ap.add_argument("--storage", default=None, help="--drop-storage: the Ray storage dir the run trained under")
     ap.add_argument("--manifest", default=None, help="the splits manifest (default data/splits.json)")
     a = ap.parse_args(argv)

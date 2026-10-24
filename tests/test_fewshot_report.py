@@ -1,4 +1,4 @@
-"""The few-shot results record (09-06, FEW-02, D-12): pilot.fewshot_report and fewshot.py --report / --render.
+"""The few-shot results record: pilot.fewshot_report and fewshot.py --report / --render.
 
 Every test runs on the synthetic frozen protocol (tests/fewshot_synthetic.synthetic_protocol: tag card, k 1 and 2, two
 draws, primary metric k = 2, a bootstrap block with B 200), a runs manifest planted straight from its slots (plant_runs)
@@ -13,20 +13,25 @@ runs on test gated). No checkpoint and no model.
   and without a runs manifest
 - build_record refuses a test dump of another pin or runs manifest, a val dump carrying protocol_sha256, a missing
   dump, a sidecar of another training run or seed, and test dumps that score different uid orders
-- build_record refuses a masked base's val dump of another source than its test dump (SAME_SOURCE_KEYS, 09-REVIEW
-  WR-02), and SAME_SOURCE_KEYS is report.SAME_SOURCE_KEYS without the checkpoint path
-- theta_trained (09-REVIEW CR-01): labelled post hoc, not frozen, descriptive and not a decision input; each base's
+- build_record refuses a masked base's val dump of another source than its test dump (SAME_SOURCE_KEYS), and
+  SAME_SOURCE_KEYS is report.SAME_SOURCE_KEYS without the checkpoint path
+- theta_trained: labelled post hoc, not frozen, descriptive and not a decision input; each base's
   θ on its trained columns only (an independent grid reading), F1 and forgetting at it; replacing its rule changes no
   other record key; on hand-made arrays, held-out rows near P = 0.5 push the 48-column θ up and not this one
 """
 import copy
 import json
 import os
+import types
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 
 import fewshot as fewshot_cli
+from conftest import SyntheticRaw
 from fewshot_synthetic import plant_fewshot_dumps, plant_rules, plant_runs, split_gold, synthetic_protocol
 from intents import INTENTS
 from pilot import dumps, metrics, verdict
@@ -40,13 +45,15 @@ BOOT = {"B": 200, "seed": 0, "level": 0.95, "coverage": 80, "unit": "message", "
 PRIMARY_K = 2
 
 
-def report_rules(seeds=(0, 1)):
+def report_rules(seeds: Sequence[int] = (0, 1)) -> dict[str, Any]:
     rules = plant_rules(seeds)
     rules["primary_metric"] = {"k": PRIMARY_K, "rule": "the synthetic primary metric at k = %d" % PRIMARY_K}
     return rules
 
 
-def install(tmp_path, synthetic_raw, monkeypatch, mode="primary", logits=None, seed=0):
+def install(tmp_path: Path, synthetic_raw: SyntheticRaw, monkeypatch: pytest.MonkeyPatch, mode: str = "primary",
+            logits: Callable[..., Any] | None = None,
+            seed: int = 0) -> tuple[types.SimpleNamespace, dict[str, Any], str, str]:
     """The synthetic protocol, a planted runs manifest at fs.RUNS_PATH and every dump it lists under dumps.DUMP_ROOT;
     returns (ns, runs, runs sha256, dump root)."""
     seeds = (0, 1) if mode == "primary" else (0,)
@@ -62,11 +69,13 @@ def install(tmp_path, synthetic_raw, monkeypatch, mode="primary", logits=None, s
 
 
 @pytest.fixture
-def planted(tmp_path, synthetic_raw, monkeypatch):
+def planted(tmp_path: Path, synthetic_raw: SyntheticRaw,
+            monkeypatch: pytest.MonkeyPatch) -> tuple[types.SimpleNamespace, dict[str, Any], str, str]:
     return install(tmp_path, synthetic_raw, monkeypatch)
 
 
-def _entry(runs, kind, stage, draw=None, k=None, seed=None):
+def _entry(runs: dict[str, Any], kind: str, stage: str, draw: int | None = None, k: int | None = None,
+           seed: int | None = None) -> dict[str, Any]:
     for e in runs["entries"]:
         if (e["kind"], e["stage"]) == (kind, stage) and (stage == "base" and e["seed"] == seed
                                                          or stage == "continued" and (e["draw"], e["k"]) == (draw, k)):
@@ -74,22 +83,23 @@ def _entry(runs, kind, stage, draw=None, k=None, seed=None):
     raise AssertionError("no %s %s entry" % (kind, stage))
 
 
-def _test_ap(ns, root, e):
+def _test_ap(ns: types.SimpleNamespace, root: str, e: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
     logits, uids, _, entry = dumps.load_dump(os.path.join(root, e["dump_run_id"]), "test", ns.manifest)
     Y = dumps.read_gold(entry, ns.manifest, uids)
     return Y, metrics.probabilities(logits, 1.0)
 
 
-def _report(tmp_path, *extra):
+def _report(tmp_path: Path, *extra: str) -> tuple[str, dict[str, Any]]:
     out = str(tmp_path / "out" / "fewshot.json")
     fewshot_cli.main(["--report", "--out", out] + list(extra))
     with open(out, encoding="utf-8") as f:
         return out, json.load(f)
 
 
-# ---- the primary metric and criterion (d) (Task 1, tracer) ----
+# ---- the primary metric and criterion (d) ----
 
-def test_record_primary_matches_criterion_d(planted, tmp_path):
+def test_record_primary_matches_criterion_d(planted: tuple[types.SimpleNamespace, dict[str, Any], str, str],
+                                            tmp_path: Path) -> None:
     """fewshot.py --report writes the record; its primary block is the k = 2 per-draw Laya - BERTurk macro-AP and its
     mean, which pilot.verdict.criterion_d accepts as is; the few-shot path is MET exactly when mean_delta >= 0.05."""
     ns, runs, sha, root = planted
@@ -109,16 +119,18 @@ def test_record_primary_matches_criterion_d(planted, tmp_path):
     assert res["status"] == (verdict.PASS if p["mean_delta"] >= 0.05 else verdict.FAIL)
 
 
-def _separating(good):
+def _separating(good: str) -> Callable[..., np.ndarray]:
     """A logits callback: `good` kind ranks every positive above every negative, the other kind inverts the ranking."""
-    def make(e, split, Y, rng):
+    def make(e: dict[str, Any], split: str, Y: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         sign = 1.0 if e["kind"] == good else -1.0
         return np.where(Y, 4.0, -4.0) * sign + rng.normal(0.0, 0.1, size=Y.shape)
     return make
 
 
 @pytest.mark.parametrize("good, status", [("laya", "MET"), ("berturk", "NOT_MET")])
-def test_criterion_d_fewshot_path_follows_the_mean_delta(tmp_path, synthetic_raw, monkeypatch, good, status):
+def test_criterion_d_fewshot_path_follows_the_mean_delta(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                         monkeypatch: pytest.MonkeyPatch, good: str,
+                                                         status: str) -> None:
     """A Laya that ranks the new tag perfectly against a BERTurk that inverts it is MET; the reverse is NOT_MET."""
     from pilot import fewshot_report as fr
     ns, runs, sha, root = install(tmp_path, synthetic_raw, monkeypatch, logits=_separating(good))
@@ -130,7 +142,8 @@ def test_criterion_d_fewshot_path_follows_the_mean_delta(tmp_path, synthetic_raw
     assert (p["mean_delta"] > 0) == (good == "laya")
 
 
-def test_primary_equals_new_tag_ap_and_the_sklearn_oracle(planted):
+def test_primary_equals_new_tag_ap_and_the_sklearn_oracle(
+        planted: tuple[types.SimpleNamespace, dict[str, Any], str, str]) -> None:
     """Per draw, each model's macro-AP is new_tag_ap of its continued run's test dump at T = 1, and the per-tag AP is
     sklearn's average_precision_score (a test-only oracle)."""
     from sklearn.metrics import average_precision_score
@@ -151,7 +164,8 @@ def test_primary_equals_new_tag_ap_and_the_sklearn_oracle(planted):
     assert direct == rec["primary"]
 
 
-def test_report_cli_writes_the_record_build_record_returns(planted, tmp_path):
+def test_report_cli_writes_the_record_build_record_returns(
+        planted: tuple[types.SimpleNamespace, dict[str, Any], str, str], tmp_path: Path) -> None:
     ns, runs, sha, root = planted
     from pilot import fewshot_report as fr
     out, rec = _report(tmp_path)
@@ -165,7 +179,9 @@ def test_report_cli_writes_the_record_build_record_returns(planted, tmp_path):
     _report(tmp_path)                                          # a rebuild overwrites the same path
 
 
-def test_report_refuses_without_the_frozen_protocol_before_any_dump(planted, tmp_path, monkeypatch):
+def test_report_refuses_without_the_frozen_protocol_before_any_dump(
+        planted: tuple[types.SimpleNamespace, dict[str, Any], str, str], tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch) -> None:
     ns, runs, sha, root = planted
     read = []
     monkeypatch.setattr(dumps, "load_dump", lambda *a, **k: read.append(a))
@@ -176,14 +192,15 @@ def test_report_refuses_without_the_frozen_protocol_before_any_dump(planted, tmp
     assert not os.path.exists(str(tmp_path / "out" / "fewshot.json"))
 
 
-def test_report_refuses_without_a_runs_manifest(planted, tmp_path, monkeypatch):
+def test_report_refuses_without_a_runs_manifest(planted: tuple[types.SimpleNamespace, dict[str, Any], str, str],
+                                                tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(fs, "RUNS_PATH", str(tmp_path / "absent" / "runs.json"))
     with pytest.raises(SystemExit) as e:
         _report(tmp_path)
     assert "runs manifest" in str(e.value.code) and "--runs-manifest" in str(e.value.code)
 
 
-def _rewrite_sidecar(run_dir, split, **changes):
+def _rewrite_sidecar(run_dir: str, split: str, **changes: Any) -> None:
     path = os.path.join(run_dir, split + ".json")
     with open(path, encoding="utf-8") as f:
         side = json.load(f)
@@ -204,7 +221,8 @@ def _rewrite_sidecar(run_dir, split, **changes):
     ("test", {"seed": 7}, "seed"),
     ("test", {"training": {"run_id": "laya-train-other"}}, "training run"),
 ])
-def test_build_record_refuses_an_unbound_dump(planted, split, changes, needle):
+def test_build_record_refuses_an_unbound_dump(planted: tuple[types.SimpleNamespace, dict[str, Any], str, str],
+                                              split: str, changes: Any, needle: str) -> None:
     from pilot import fewshot_report as fr
     ns, runs, sha, root = planted
     e = _entry(runs, "laya", "base", seed=0)
@@ -214,7 +232,7 @@ def test_build_record_refuses_an_unbound_dump(planted, split, changes, needle):
     assert needle in str(x.value.code) and e["dump_run_id"] in str(x.value.code)
 
 
-def _changed_val_side(side, path, value):
+def _changed_val_side(side: dict[str, Any], path: tuple[str, ...], value: Any) -> dict[str, Any]:
     side = json.loads(json.dumps(side))
     d = side
     for k in path[:-1]:
@@ -230,8 +248,9 @@ def _changed_val_side(side, path, value):
     (("system", "checkpoint_identity"), {"local": True, "model_sha256": "e" * 64}),
     (("temperature", "shipped"), 2.0),
 ], ids=["device", "dtype", "amp", "identity", "temperature"])
-def test_build_record_refuses_a_base_val_dump_of_another_source(planted, path, value):
-    """09-REVIEW WR-02: a masked base's val dump (its ungated θ source) of another source than its gated test dump
+def test_build_record_refuses_a_base_val_dump_of_another_source(
+        planted: tuple[types.SimpleNamespace, dict[str, Any], str, str], path: tuple[str, ...], value: Any) -> None:
+    """A masked base's val dump (its ungated θ source) of another source than its gated test dump
     (another scorer device, dtype or autocast, another checkpoint identity or shipped T) is refused, naming the key."""
     from pilot import fewshot_report as fr
     ns, runs, sha, root = planted
@@ -246,7 +265,7 @@ def test_build_record_refuses_a_base_val_dump_of_another_source(planted, path, v
     assert "differ in %s" % ".".join(path) in text and e["dump_run_id"] in text and "θ source" in text
 
 
-def test_same_source_keys_are_reports_but_the_path():
+def test_same_source_keys_are_reports_but_the_path() -> None:
     """fewshot_report.SAME_SOURCE_KEYS is report.SAME_SOURCE_KEYS without report.PATH_KEY (a local identity binds the
     checkpoint's files, so a moved checkpoint is the same source)."""
     import report
@@ -254,7 +273,7 @@ def test_same_source_keys_are_reports_but_the_path():
     assert fr.SAME_SOURCE_KEYS == tuple(k for k in report.SAME_SOURCE_KEYS if k != report.PATH_KEY)
 
 
-def test_build_record_refuses_a_missing_dump(planted):
+def test_build_record_refuses_a_missing_dump(planted: tuple[types.SimpleNamespace, dict[str, Any], str, str]) -> None:
     from pilot import fewshot_report as fr
     ns, runs, sha, root = planted
     e = _entry(runs, "berturk", "continued", 1, 1)
@@ -264,7 +283,8 @@ def test_build_record_refuses_a_missing_dump(planted):
     assert "test.npz not found" in str(x.value.code)
 
 
-def test_build_record_refuses_unpaired_uid_orders(planted):
+def test_build_record_refuses_unpaired_uid_orders(
+        planted: tuple[types.SimpleNamespace, dict[str, Any], str, str]) -> None:
     """A test dump scoring the split in another row order (a subset dump of every uid, permuted) is refused: every
     model and draw must score one uid order (the bootstrap pairs messages)."""
     from pilot import fewshot_report as fr
@@ -282,24 +302,27 @@ def test_build_record_refuses_unpaired_uid_orders(planted):
     assert "uid order" in str(x.value.code)
 
 
-def test_split_gold_helper_reads_the_synthetic_test(planted):
+def test_split_gold_helper_reads_the_synthetic_test(
+        planted: tuple[types.SimpleNamespace, dict[str, Any], str, str]) -> None:
     ns, runs, sha, root = planted
     entry, uids, Y = split_gold(ns.manifest, "test")
     assert entry["role"] == "test" and len(uids) == Y.shape[0] and Y[:, TAGS.index("card")].sum() >= 1
 
 
-# ---- the secondary metrics, the bootstrap, the render and the Makefile target (Task 2) ----
+# ---- the secondary metrics, the bootstrap, the render and the Makefile target ----
 
-def _f1(per_tag, tags):
+def _f1(per_tag: dict[str, dict[str, Any]], tags: Sequence[str]) -> float:
     tp = sum(per_tag[t]["tp"] for t in tags)
     fp = sum(per_tag[t]["fp"] for t in tags)
     fn = sum(per_tag[t]["fn"] for t in tags)
     return 2 * tp / (2 * tp + fp + fn) if 2 * tp + fp + fn else 0.0
 
 
-def test_forgetting_is_continued_old_minus_base_old(planted):
-    """θ per masked base is select_theta of its own val dump at T = 1 (all 48 columns); new- and old-tag micro-F1 of the
-    base and of every continued run at that θ; forgetting = continued old - base old for base_seed_of(draw, mode)."""
+def test_forgetting_is_continued_old_minus_base_old(
+        planted: tuple[types.SimpleNamespace, dict[str, Any], str, str]) -> None:
+    """θ per masked base is select_theta of its own val dump at T = 1 (all 48 columns); new- and old-tag micro-F1 of
+    the base and of every continued run at that θ; forgetting = continued old - base old for base_seed_of(draw,
+    mode)."""
     from pilot import fewshot_report as fr
     ns, runs, sha, root = planted
     rec = fr.build_record(ns.protocol, ns.pin)
@@ -331,7 +354,7 @@ def test_forgetting_is_continued_old_minus_base_old(planted):
                 assert c["forgetting"] == c["old"] - rec["f1"][kind]["base"]["s%d" % b]["old"]
 
 
-def _trained_global(Y, P, held):
+def _trained_global(Y: np.ndarray, P: np.ndarray, held: Sequence[str]) -> float:
     """An independent reading of THETA_TRAINED_RULE's global θ: val micro-F1 over the trained columns only, per grid
     point, then pilot.metrics.pick (the shared tie rule)."""
     cols = [j for j, t in enumerate(TAGS) if t not in set(held)]
@@ -344,8 +367,9 @@ def _trained_global(Y, P, held):
     return metrics.pick(np.asarray(f1, dtype=np.float64))
 
 
-def test_trained_theta_variant_is_post_hoc_beside_the_frozen_reading(planted):
-    """09-REVIEW CR-01: theta_trained is labelled post hoc, not frozen, descriptive and not a decision input, carries
+def test_trained_theta_variant_is_post_hoc_beside_the_frozen_reading(
+        planted: tuple[types.SimpleNamespace, dict[str, Any], str, str]) -> None:
+    """theta_trained is labelled post hoc, not frozen, descriptive and not a decision input, carries
     the rule and the cause, and holds each masked base's θ chosen on its trained columns only (the held-out columns
     excluded) with the new- and old-tag micro-F1 and forgetting at that θ."""
     from pilot import fewshot_report as fr
@@ -355,7 +379,8 @@ def test_trained_theta_variant_is_post_hoc_beside_the_frozen_reading(planted):
     assert sorted(t) == ["cause", "f1", "label", "rule", "theta"]
     assert t["label"] == fr.POST_HOC_LABEL == "post hoc, not frozen, descriptive; not a decision input"
     assert t["rule"] == fr.THETA_TRAINED_RULE and t["cause"] == fr.THETA_CAUSE
-    assert "trained columns" in t["rule"] and "CR-01" in t["rule"] and "criterion (d) read neither" in t["rule"]
+    assert "trained columns" in t["rule"] and "after the results were seen" in t["rule"]
+    assert "criterion (d) read neither" in t["rule"]
     held = list(ns.block["tags"])
     old = [x for x in TAGS if x not in held]
     for kind in ("laya", "berturk"):
@@ -383,14 +408,15 @@ def test_trained_theta_variant_is_post_hoc_beside_the_frozen_reading(planted):
                 assert c["forgetting"] == c["old"] - t["f1"][kind]["base"]["s%d" % b]["old"]
 
 
-def test_trained_theta_variant_changes_nothing_else(planted, monkeypatch):
+def test_trained_theta_variant_changes_nothing_else(planted: tuple[types.SimpleNamespace, dict[str, Any], str, str],
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
     """The post hoc variant is an addition: with trained_theta replaced by any other rule, every other record key
     (primary, by_k, bootstrap, the frozen theta and f1, ...) is byte-identical, so criterion (d) cannot read it."""
     from pilot import fewshot_report as fr
     ns, runs, sha, root = planted
     rec = fr.build_record(ns.protocol, ns.pin)
 
-    def everything_at_005(Y, P, held):
+    def everything_at_005(Y: np.ndarray, P: np.ndarray, held: Sequence[str]) -> dict[str, Any]:
         return dict(metrics.select_theta(Y, P), **{"global": 0.05, "per_tag": {}})
 
     monkeypatch.setattr(fr, "trained_theta", everything_at_005)
@@ -401,10 +427,11 @@ def test_trained_theta_variant_changes_nothing_else(planted, monkeypatch):
     assert rec["primary"] == fr.primary(ns.protocol, ns.pin, runs, sha)
 
 
-def test_trained_theta_excludes_untrained_rows_near_one_half():
-    """The CR-01 mechanism on hand-made val arrays: trained columns whose positives score 0.3 or 0.9 (so they separate
-    fully only at a low θ) and held-out columns stuck near P = 0.5 (an untrained BERTurk row). Over all 48 columns the val rule moves the global θ above 0.5 to
-    avoid the held-out false positives; over the trained columns it stays low, and a held-out tag gets no θ."""
+def test_trained_theta_excludes_untrained_rows_near_one_half() -> None:
+    """The mechanism THETA_CAUSE names, on hand-made val arrays: trained columns whose positives score 0.3 or 0.9 (so
+    they separate fully only at a low θ) and held-out columns stuck near P = 0.5 (an untrained BERTurk row). Over all
+    48 columns the val rule moves the global θ above 0.5 to avoid the held-out false positives; over the trained
+    columns it stays low, and a held-out tag gets no θ."""
     from pilot import fewshot_report as fr
     rng = np.random.default_rng(0)
     n = 400
@@ -421,7 +448,7 @@ def test_trained_theta_excludes_untrained_rows_near_one_half():
     assert np.array_equal(Y, Y0) and np.array_equal(P, P0), "trained_theta modified its input arrays"
 
 
-def test_subset_micro_f1_is_zero_without_counts():
+def test_subset_micro_f1_is_zero_without_counts() -> None:
     from pilot import fewshot_report as fr
     zero = {t: {"tp": 0, "fp": 0, "fn": 0} for t in TAGS}
     assert fr.subset_micro_f1(zero, ["card"]) == 0.0
@@ -429,7 +456,7 @@ def test_subset_micro_f1_is_zero_without_counts():
     assert fr.subset_micro_f1(one, ["card", "loan"]) == 2 / 3
 
 
-def test_by_k_holds_k0_and_every_frozen_k(planted):
+def test_by_k_holds_k0_and_every_frozen_k(planted: tuple[types.SimpleNamespace, dict[str, Any], str, str]) -> None:
     from pilot import fewshot_report as fr
     ns, runs, sha, root = planted
     rec = fr.build_record(ns.protocol, ns.pin)
@@ -442,14 +469,15 @@ def test_by_k_holds_k0_and_every_frozen_k(planted):
         assert d["berturk"] == rec["ap"]["berturk"]["base"][key]["macro"]
 
 
-def _same_by_slot(e, split, Y, rng):
+def _same_by_slot(e: dict[str, Any], split: str, Y: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     """Laya and BERTurk get identical logits for the same slot (the rng seed comes from the slot, not the kind)."""
     import zlib
     r = np.random.default_rng(zlib.crc32(("%s/%s" % (e["dump_run_id"].split("-", 2)[2], split)).encode("utf-8")))
     return r.normal(0.0, 3.0, size=Y.shape)
 
 
-def test_bootstrap_ci_is_zero_when_laya_equals_berturk(tmp_path, synthetic_raw, monkeypatch):
+def test_bootstrap_ci_is_zero_when_laya_equals_berturk(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                       monkeypatch: pytest.MonkeyPatch) -> None:
     from pilot import fewshot_report as fr
     ns, runs, sha, root = install(tmp_path, synthetic_raw, monkeypatch, logits=_same_by_slot)
     rec = fr.build_record(ns.protocol, ns.pin)
@@ -461,7 +489,8 @@ def test_bootstrap_ci_is_zero_when_laya_equals_berturk(tmp_path, synthetic_raw, 
         assert b["pairing"] == fr.BOOT_PAIRING and b["n_undefined"] + 0 >= 0
 
 
-def test_bootstrap_block_uses_the_protocol_settings_and_the_observed_mean(planted):
+def test_bootstrap_block_uses_the_protocol_settings_and_the_observed_mean(
+        planted: tuple[types.SimpleNamespace, dict[str, Any], str, str]) -> None:
     from pilot import fewshot_report as fr
     ns, runs, sha, root = planted
     rec = fr.build_record(ns.protocol, ns.pin)
@@ -471,7 +500,7 @@ def test_bootstrap_block_uses_the_protocol_settings_and_the_observed_mean(plante
         assert 0 <= b["n_undefined"] < b["B"]
 
 
-def test_bootstrap_counts_undefined_replicates_and_leaves_them_out():
+def test_bootstrap_counts_undefined_replicates_and_leaves_them_out() -> None:
     """A replicate whose resampled messages hold no positive of a held-out tag is undefined (counted, left out); every
     defined replicate is the mean over draws of new_tag_ap(Laya) - new_tag_ap(BERTurk) on the resampled rows."""
     from pilot import fewshot_report as fr
@@ -493,7 +522,8 @@ def test_bootstrap_counts_undefined_replicates_and_leaves_them_out():
         metrics.new_tag_ap(np.zeros((n, len(TAGS)), dtype=bool), PA[0], ["card"])   # the full split is refused
 
 
-def test_wall_clock_and_positives_come_from_the_manifest_and_the_protocol(planted):
+def test_wall_clock_and_positives_come_from_the_manifest_and_the_protocol(
+        planted: tuple[types.SimpleNamespace, dict[str, Any], str, str]) -> None:
     from pilot import fewshot_report as fr
     ns, runs, sha, root = planted
     rec = fr.build_record(ns.protocol, ns.pin)
@@ -507,7 +537,8 @@ def test_wall_clock_and_positives_come_from_the_manifest_and_the_protocol(plante
     assert [d["digest"] for d in rec["draws"]] == [d["digest"] for d in ns.block["draws"]]
 
 
-def test_record_is_byte_identical_rebuilt_and_in_any_manifest_order(planted):
+def test_record_is_byte_identical_rebuilt_and_in_any_manifest_order(
+        planted: tuple[types.SimpleNamespace, dict[str, Any], str, str]) -> None:
     from pilot import fewshot_report as fr
     ns, runs, sha, root = planted
     one = fr.record_bytes(fr.build_record(ns.protocol, ns.pin))
@@ -516,7 +547,8 @@ def test_record_is_byte_identical_rebuilt_and_in_any_manifest_order(planted):
     assert fr.record_bytes(fr.record_of(ns.protocol, ns.pin, rev, sha, fs.RUNS_PATH)) == one
 
 
-def test_record_holds_no_uid_text_or_local_path(planted, tmp_path):
+def test_record_holds_no_uid_text_or_local_path(planted: tuple[types.SimpleNamespace, dict[str, Any], str, str],
+                                                tmp_path: Path) -> None:
     from pilot import fewshot_report as fr
     ns, runs, sha, root = planted
     text = fr.record_bytes(fr.build_record(ns.protocol, ns.pin)).decode("utf-8")
@@ -525,7 +557,8 @@ def test_record_holds_no_uid_text_or_local_path(planted, tmp_path):
     assert "timestamp" not in text
 
 
-def test_fallback_record_discloses_and_continues_every_draw_from_seed_0(tmp_path, synthetic_raw, monkeypatch):
+def test_fallback_record_discloses_and_continues_every_draw_from_seed_0(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                                        monkeypatch: pytest.MonkeyPatch) -> None:
     from pilot import fewshot_report as fr
     ns, runs, sha, root = install(tmp_path, synthetic_raw, monkeypatch, mode="fallback")
     rec = fr.build_record(ns.protocol, ns.pin)
@@ -537,13 +570,14 @@ def test_fallback_record_discloses_and_continues_every_draw_from_seed_0(tmp_path
     assert disclosure in fr.render_markdown(rec)
 
 
-def test_render_markdown_is_deterministic_and_complete(planted):
+def test_render_markdown_is_deterministic_and_complete(
+        planted: tuple[types.SimpleNamespace, dict[str, Any], str, str]) -> None:
     from pilot import fewshot_report as fr
     ns, runs, sha, root = planted
     rec = fr.build_record(ns.protocol, ns.pin)
     md = fr.render_markdown(rec)
     assert md == fr.render_markdown(json.loads(fr.record_bytes(rec).decode("utf-8")))
-    assert md.startswith("### Few-shot new-intent results (Phase 9)\n")
+    assert md.startswith("### Few-shot new-intent results\n")
     assert rec["protocol_sha256"][:12] in md and rec["runs"]["sha256"][:12] in md
     assert "%+.2f points" % (rec["primary"]["mean_delta"] * 100) in md
     for d in rec["primary"]["per_draw"]:
@@ -563,7 +597,9 @@ def test_render_markdown_is_deterministic_and_complete(planted):
     assert "bank_" not in md
 
 
-def test_render_cli_prints_the_block_and_refuses_another_protocol(planted, tmp_path, capsys):
+def test_render_cli_prints_the_block_and_refuses_another_protocol(
+        planted: tuple[types.SimpleNamespace, dict[str, Any], str, str], tmp_path: Path,
+        capsys: pytest.CaptureFixture[str]) -> None:
     from pilot import fewshot_report as fr
     ns, runs, sha, root = planted
     out, rec = _report(tmp_path)
@@ -577,7 +613,7 @@ def test_render_cli_prints_the_block_and_refuses_another_protocol(planted, tmp_p
     assert "protocol" in str(e.value.code) and ns.pin in str(e.value.code)
 
 
-def test_import_is_numpy_only():
+def test_import_is_numpy_only() -> None:
     import subprocess
     import sys
     code = ("import sys, pilot.fewshot_report; bad = [m for m in ('torch', 'scipy', 'sklearn', 'laya', 'ray') "
@@ -585,7 +621,7 @@ def test_import_is_numpy_only():
     subprocess.run([sys.executable, "-c", code], check=True, cwd=os.path.dirname(os.path.dirname(__file__)))
 
 
-def test_makefile_fewshot_reports_recipe_is_the_report_line():
+def test_makefile_fewshot_reports_recipe_is_the_report_line() -> None:
     import re
     with open(os.path.join(os.path.dirname(os.path.dirname(__file__)), "Makefile"), encoding="utf-8") as f:
         text = f.read()

@@ -1,5 +1,5 @@
-"""Contracts of pilot/fewshot.py (REP-01, ROADMAP Phase 8 criterion 3): the few-shot protocol frozen before any
-fine-tuned test number exists. Nothing is trained here; Phase 9 executes the protocol unchanged.
+"""Contracts of pilot/fewshot.py: the few-shot protocol frozen before any fine-tuned test number existed. Nothing is
+trained here; the few-shot experiment executes the protocol unchanged.
 
 - draw: deterministic per seed, nested (the k = 5 support set is the first 5 positives and first 20 negatives of each
   tag of the k = 10 draw), sized by the settings, the replay set disjoint from the k = 10 support set, every list sorted
@@ -9,7 +9,7 @@ fine-tuned test number exists. Nothing is trained here; Phase 9 executes the pro
   repeated uid are refused.
 - pilot.fewshot imports the stdlib only.
 - data-marked: the three draws on the verified committed selection_train.
-- fewshot.py --support-sets (08-08), under a temp protocol pinned by monkeypatch around a block drawn on the
+- fewshot.py --support-sets, under a temp protocol pinned by monkeypatch around a block drawn on the
   synthetic selection_train: prints the protocol sha256 and each draw's digest and counts (no uid list, no text);
   refuses a missing, unpinned or one-byte-changed protocol before the split is read, a block of another source and a
   draw with one uid changed; no mode flag is an argparse error.
@@ -21,11 +21,15 @@ import os
 import random
 import subprocess
 import sys
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from types import ModuleType
+from typing import Any, NoReturn
 
 import pytest
 
 import pilot.data
-from conftest import prepared
+from conftest import SyntheticRaw, prepared
 from intents import INTENTS
 from pilot import fewshot as fs
 
@@ -35,7 +39,7 @@ HEAVY = ("torch", "numpy", "scipy", "sklearn", "laya", "ray", "transformers")
 TAGS = ("savings", "loan", "overdraft", "appointment", "contactless", "direct_debit")
 
 
-def synthetic_rows(n=600, cut=None):
+def synthetic_rows(n: int = 600, cut: tuple[str, int] | None = None) -> list[dict[str, Any]]:
     """n rows with full 48-tag labels: row i carries TAGS[i % 12] when i % 12 < 6 (50 positives per tag at n = 600),
     savings and loan together every 25th row (co-occurrence) and card every 3rd; uids bank_<fold>_<index>, in a
     shuffled order (the sampler must sort). cut=(tag, m) keeps only the first m positives of tag."""
@@ -56,7 +60,8 @@ def synthetic_rows(n=600, cut=None):
     return rows
 
 
-def by_rule(rows, seed, tags=TAGS, k_values=(5, 10), neg_per_pos=4, replay=200):
+def by_rule(rows: list[dict[str, Any]], seed: int, tags: Sequence[str] = TAGS, k_values: Sequence[int] = (5, 10),
+            neg_per_pos: int = 4, replay: int = 200) -> tuple[dict[str, list[str]], list[str]]:
     """SAMPLER_RULE read independently of pilot.fewshot: uids sorted; one random.Random(seed); per tag in order, a
     sample of max(k) positives, then of neg_per_pos x max(k) negatives; the k set is the union of the first k positives
     and first neg_per_pos x k negatives of every tag; replay is a sample from the sorted uids outside the max-k set."""
@@ -74,7 +79,7 @@ def by_rule(rows, seed, tags=TAGS, k_values=(5, 10), neg_per_pos=4, replay=200):
     return support, rep
 
 
-def test_draw_is_deterministic():
+def test_draw_is_deterministic() -> None:
     rows = synthetic_rows()
     a, b = fs.draw(rows, 0), fs.draw(rows, 0)
     assert a == b and fs.draw_digest(a) == fs.draw_digest(b)
@@ -83,7 +88,7 @@ def test_draw_is_deterministic():
     assert fs.draw(list(reversed(rows)), 0) == a                  # the row order never matters: pools are sorted uids
 
 
-def test_draw_is_nested():
+def test_draw_is_nested() -> None:
     rows = synthetic_rows()
     lab = {r["uid"]: r["expected"] for r in rows}
     for seed in (0, 1, 2):
@@ -101,7 +106,7 @@ def test_draw_is_nested():
         assert (d["support"], d["replay"]) == by_rule(rows, seed)       # the exact rule, read independently
 
 
-def test_draw_realised_positives():
+def test_draw_realised_positives() -> None:
     rows = synthetic_rows()
     lab = {r["uid"]: r["expected"] for r in rows}
     d = fs.draw(rows, 0)
@@ -114,14 +119,14 @@ def test_draw_realised_positives():
     assert json.loads(json.dumps(d)) == d                                 # string k keys: the JSON round-trips
 
 
-def test_draw_other_settings():
+def test_draw_other_settings() -> None:
     rows = synthetic_rows()
     d = fs.draw(rows, 3, tags=("card",), k_values=(1, 2), neg_per_pos=1, replay=2)
     assert (d["support"], d["replay"]) == by_rule(rows, 3, ("card",), (1, 2), 1, 2)
     assert d["tags"] == ["card"] and sorted(d["support"]) == ["1", "2"] and len(d["replay"]) == 2
 
 
-def test_draw_digest_rule():
+def test_draw_digest_rule() -> None:
     d = fs.draw(synthetic_rows(), 2)
     body = {"schema": d["schema"], "seed": d["seed"], "tags": d["tags"], "support": d["support"], "replay": d["replay"]}
     want = hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -133,7 +138,7 @@ def test_draw_digest_rule():
     assert fs.draw_digest(moved) != want
 
 
-def test_draw_positive_pool_too_small_refused():
+def test_draw_positive_pool_too_small_refused() -> None:
     rows = synthetic_rows(cut=("loan", 3))
     with pytest.raises(SystemExit) as e:
         fs.draw(rows, 0)
@@ -141,7 +146,7 @@ def test_draw_positive_pool_too_small_refused():
     assert "loan" in msg and "3" in msg and "10" in msg
 
 
-def test_draw_negative_pool_too_small_refused():
+def test_draw_negative_pool_too_small_refused() -> None:
     rows = synthetic_rows(n=60)
     for r in rows:
         r["expected"]["card"] = True
@@ -152,14 +157,14 @@ def test_draw_negative_pool_too_small_refused():
     assert "card" in str(e.value) and "negative" in str(e.value) and "5" in str(e.value)
 
 
-def test_draw_replay_pool_too_small_refused():
+def test_draw_replay_pool_too_small_refused() -> None:
     rows = synthetic_rows(n=240)
     with pytest.raises(SystemExit) as e:
         fs.draw(rows, 0)
     assert "replay" in str(e.value) and "200" in str(e.value)
 
 
-def test_draw_bad_tags_and_uids_refused():
+def test_draw_bad_tags_and_uids_refused() -> None:
     rows = synthetic_rows()
     with pytest.raises(SystemExit, match="not_a_tag"):
         fs.draw(rows, 0, tags=("savings", "not_a_tag"))
@@ -169,14 +174,14 @@ def test_draw_bad_tags_and_uids_refused():
         fs.draw(rows + [dict(rows[0])], 0)
 
 
-def test_fewshot_imports_stdlib_only():
+def test_fewshot_imports_stdlib_only() -> None:
     code = "import sys, pilot.fewshot; bad = [m for m in %r if m in sys.modules]; assert not bad, bad" % (HEAVY,)
     env = {k: val for k, val in os.environ.items() if k != "PYTHONPATH"}
     r = subprocess.run([sys.executable, "-c", code], cwd=pilot.data.REPO_ROOT, env=env, capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
 
-def committed_rows(name, roles):
+def committed_rows(name: str, roles: tuple[str, ...]) -> list[dict[str, Any]]:
     path = os.path.join(os.path.dirname(pilot.data.DEFAULT_MANIFEST), "splits", name + ".jsonl")
     with open(path, "rb") as f:
         raw = f.read()
@@ -185,7 +190,7 @@ def committed_rows(name, roles):
 
 
 @pytest.mark.data
-def test_committed_selection_train_draws():
+def test_committed_selection_train_draws() -> None:
     rows = committed_rows("selection_train", ("train",))
     assert len(rows) == 1450
     uids = {r["uid"] for r in rows}
@@ -197,7 +202,7 @@ def test_committed_selection_train_draws():
         assert (a["support"], a["replay"]) == by_rule(rows, seed)
 
 
-# ---- eligibility, the protocol block and check_draws (Task 2) ----
+# ---- eligibility, the protocol block and check_draws ----
 
 TEST_POSITIVES = dict(zip(TAGS, (13, 11, 13, 13, 13, 12)))          # committed test.jsonl, labels only
 FINAL_TRAIN_POSITIVES = dict(zip(TAGS, (56, 57, 56, 52, 50, 42)))   # committed final_train.jsonl, labels only
@@ -206,7 +211,7 @@ RULE_KEYS = ("base_runs", "masking", "new_question", "support_labels", "replay",
              "phase_9_notes")
 
 
-def test_settings_match_the_approved_matrix():
+def test_settings_match_the_approved_matrix() -> None:
     from pilot import compute
     m = compute.MATRIX
     assert fs.TAGS == TAGS and len(fs.TAGS) == m["fewshot_tags"]
@@ -217,7 +222,7 @@ def test_settings_match_the_approved_matrix():
     assert len(fs.BASE_RUNS["seeds"]) == m["fewshot_base_runs"]
 
 
-def test_base_runs_are_the_chosen_recipes():
+def test_base_runs_are_the_chosen_recipes() -> None:
     """The masked base runs use each model's committed chosen recipe (postfit records) and shared LRs."""
     from pilot import berturk, postfit
     for kind in ("laya", "berturk"):
@@ -233,7 +238,7 @@ def test_base_runs_are_the_chosen_recipes():
     assert fs.BASE_RUNS["split"] == "selection_train" and list(fs.BASE_RUNS["seeds"]) == list(fs.DRAW_SEEDS)
 
 
-def test_check_eligibility_passes_the_committed_counts():
+def test_check_eligibility_passes_the_committed_counts() -> None:
     from pilot import pins
     counts = {"test": dict(TEST_POSITIVES), "final_train": dict(FINAL_TRAIN_POSITIVES)}
     got = fs.check_eligibility(TAGS, counts, pins.OOD_SCORING_TAGS)
@@ -243,7 +248,7 @@ def test_check_eligibility_passes_the_committed_counts():
 
 @pytest.mark.parametrize("split,tag,n,word", [("test", "loan", 9, "test"), ("final_train", "direct_debit", 39,
                                                                               "final_train")])
-def test_check_eligibility_refuses_a_short_count(split, tag, n, word):
+def test_check_eligibility_refuses_a_short_count(split: str, tag: str, n: int, word: str) -> None:
     from pilot import pins
     counts = {"test": dict(TEST_POSITIVES), "final_train": dict(FINAL_TRAIN_POSITIVES)}
     counts[split][tag] = n
@@ -252,7 +257,7 @@ def test_check_eligibility_refuses_a_short_count(split, tag, n, word):
     assert tag in str(e.value) and str(n) in str(e.value) and word in str(e.value)
 
 
-def test_check_eligibility_refuses_a_generic_or_uncounted_tag():
+def test_check_eligibility_refuses_a_generic_or_uncounted_tag() -> None:
     from pilot import pins
     counts = {"test": dict(TEST_POSITIVES, affirm=40), "final_train": dict(FINAL_TRAIN_POSITIVES, affirm=200)}
     with pytest.raises(SystemExit, match="affirm"):
@@ -262,7 +267,7 @@ def test_check_eligibility_refuses_a_generic_or_uncounted_tag():
         fs.check_eligibility(TAGS, counts, pins.OOD_SCORING_TAGS)
 
 
-def synthetic_block(rows, seeds=(0, 1)):
+def synthetic_block(rows: list[dict[str, Any]], seeds: Sequence[int] = (0, 1)) -> dict[str, Any]:
     """A few-shot block around the synthetic rows, built the way a consumer would: draw, then draw_digest."""
     draws = []
     for i, s in enumerate(seeds):
@@ -274,12 +279,12 @@ def synthetic_block(rows, seeds=(0, 1)):
             "source": {"split": "selection_train", "sha256": "0" * 64, "uids_sha256": uids}, "draws": draws}
 
 
-def test_check_draws_passes_its_own_rows():
+def test_check_draws_passes_its_own_rows() -> None:
     rows = synthetic_rows()
     assert fs.check_draws(synthetic_block(rows), rows) is None
 
 
-def test_check_draws_refuses_a_changed_support_list():
+def test_check_draws_refuses_a_changed_support_list() -> None:
     rows = synthetic_rows()
     b = synthetic_block(rows)
     lst = b["draws"][1]["support"]["10"]
@@ -289,7 +294,7 @@ def test_check_draws_refuses_a_changed_support_list():
         fs.check_draws(b, rows)
 
 
-def test_check_draws_refuses_a_changed_digest():
+def test_check_draws_refuses_a_changed_digest() -> None:
     rows = synthetic_rows()
     b = synthetic_block(rows)
     b["draws"][0]["digest"] = "f" * 64
@@ -297,13 +302,13 @@ def test_check_draws_refuses_a_changed_digest():
         fs.check_draws(b, rows)
 
 
-def test_check_draws_refuses_rows_of_another_split():
+def test_check_draws_refuses_rows_of_another_split() -> None:
     rows, other = synthetic_rows(), synthetic_rows(n=700)
     with pytest.raises(SystemExit, match="draw 0"):
         fs.check_draws(synthetic_block(rows), other)
 
 
-def test_check_draws_refuses_a_misnumbered_or_missing_draw():
+def test_check_draws_refuses_a_misnumbered_or_missing_draw() -> None:
     rows = synthetic_rows()
     b = synthetic_block(rows)
     b["draws"][1]["base_seed"] = 0
@@ -315,14 +320,14 @@ def test_check_draws_refuses_a_misnumbered_or_missing_draw():
         fs.check_draws(b, rows)
 
 
-def test_protocol_block_refuses_another_manifest(tmp_path, synthetic_raw):
+def test_protocol_block_refuses_another_manifest(tmp_path: Path, synthetic_raw: SyntheticRaw) -> None:
     _, manifest = prepared(tmp_path, synthetic_raw)
     with pytest.raises(SystemExit, match="committed"):
         fs.protocol_block(manifest)
 
 
 @pytest.mark.data
-def test_protocol_block_on_the_committed_data():
+def test_protocol_block_on_the_committed_data() -> None:
     b = fs.protocol_block()
     assert b == fs.protocol_block()                                     # deterministic
     assert json.loads(json.dumps(b)) == b
@@ -345,15 +350,16 @@ def test_protocol_block_on_the_committed_data():
     assert fs.check_draws(b, rows) is None
 
 
-# ---- fewshot.py --support-sets: the few-shot runner's Phase 8 entry point (08-08, Open Question 3) ----
+# ---- fewshot.py --support-sets: the few-shot runner's draw check ----
 
-def runner():
+def runner() -> ModuleType:
     """The root-level few-shot runner (fewshot.py), imported here so a missing runner fails inside the test."""
     import fewshot
     return fewshot
 
 
-def frozen_protocol(tmp_path, synthetic_raw, monkeypatch, edit=None):
+def frozen_protocol(tmp_path: Path, synthetic_raw: SyntheticRaw, monkeypatch: pytest.MonkeyPatch,
+                    edit: Callable[[dict[str, Any]], None] | None = None) -> tuple[dict[str, Any], str]:
     """A REQUIRED_KEYS-complete protocol around a few-shot block drawn on the synthetic selection_train (tags card,
     k 1 and 2, draw seed 0, 1 negative per positive, replay 2), written to tmp_path and pinned: PROTOCOL_PATH,
     PROTOCOL_SHA256 and DEFAULT_MANIFEST are monkeypatched. edit(block) changes the block before it is written.
@@ -382,7 +388,9 @@ def frozen_protocol(tmp_path, synthetic_raw, monkeypatch, edit=None):
     return block, pin
 
 
-def test_fewshot_cli_support_sets_prints_the_frozen_draws(tmp_path, synthetic_raw, monkeypatch, capsys):
+def test_fewshot_cli_support_sets_prints_the_frozen_draws(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                          monkeypatch: pytest.MonkeyPatch,
+                                                          capsys: pytest.CaptureFixture[str]) -> None:
     block, pin = frozen_protocol(tmp_path, synthetic_raw, monkeypatch)
     capsys.readouterr()                                         # drop prepare()'s progress lines
     out = runner().main(["--support-sets"])
@@ -398,7 +406,9 @@ def test_fewshot_cli_support_sets_prints_the_frozen_draws(tmp_path, synthetic_ra
 
 
 @pytest.mark.parametrize("case", ["missing", "unpinned", "changed"])
-def test_fewshot_cli_support_sets_refuses_without_the_frozen_protocol(tmp_path, synthetic_raw, monkeypatch, case):
+def test_fewshot_cli_support_sets_refuses_without_the_frozen_protocol(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                                      monkeypatch: pytest.MonkeyPatch,
+                                                                      case: str) -> None:
     from pilot import protocol as pr
     frozen_protocol(tmp_path, synthetic_raw, monkeypatch)
     if case == "missing":
@@ -412,7 +422,7 @@ def test_fewshot_cli_support_sets_refuses_without_the_frozen_protocol(tmp_path, 
             f.write(raw.replace(b"protocol/1", b"protocol/2", 1))   # one byte changed
     cli = runner()
 
-    def never(*args, **kwargs):
+    def never(*args: Any, **kwargs: Any) -> NoReturn:
         raise AssertionError("the split was read before the protocol was checked")
     monkeypatch.setattr(cli, "parse_jsonl", never)
     monkeypatch.setattr(cli, "verify_split_file", never)
@@ -420,16 +430,18 @@ def test_fewshot_cli_support_sets_refuses_without_the_frozen_protocol(tmp_path, 
         cli.main(["--support-sets"])
 
 
-def test_fewshot_cli_support_sets_refuses_another_source(tmp_path, synthetic_raw, monkeypatch):
-    def edit(block):
+def test_fewshot_cli_support_sets_refuses_another_source(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    def edit(block: dict[str, Any]) -> None:
         block["source"]["sha256"] = "0" * 64
     frozen_protocol(tmp_path, synthetic_raw, monkeypatch, edit)
     with pytest.raises(SystemExit, match="source"):
         runner().main(["--support-sets"])
 
 
-def test_fewshot_cli_support_sets_refuses_a_changed_draw(tmp_path, synthetic_raw, monkeypatch):
-    def edit(block):
+def test_fewshot_cli_support_sets_refuses_a_changed_draw(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    def edit(block: dict[str, Any]) -> None:
         lst = block["draws"][0]["support"]["2"]
         lst[0] = "bank_99_99"                                   # one uid changed
         lst.sort()
@@ -438,7 +450,7 @@ def test_fewshot_cli_support_sets_refuses_a_changed_draw(tmp_path, synthetic_raw
         runner().main(["--support-sets"])
 
 
-def test_fewshot_cli_needs_a_mode(capsys):
+def test_fewshot_cli_needs_a_mode(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as e:
         runner().main([])
     assert e.value.code == 2 and "--support-sets" in capsys.readouterr().err

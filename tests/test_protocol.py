@@ -1,4 +1,4 @@
-"""Contracts of pilot/protocol.py (REP-01, ROADMAP Phase 8 criterion 1): the frozen decision protocol as code.
+"""Contracts of pilot/protocol.py: the frozen decision protocol as code.
 
 - protocol_bytes: the identity of a protocol is the sha256 of its exact bytes (indent 2, ensure_ascii False, one
   trailing newline, UTF-8); require_frozen hashes the bytes it parses and refuses a missing file, an unset pin, a
@@ -9,12 +9,12 @@
   final_seed_allowed is true for exactly the three dump run ids of a system's final manifest.
 - pilot.protocol imports the stdlib only.
 - data-marked: build_protocol on the committed inputs (deterministic bytes, the CLI).
-- render_markdown(protocol, sha256), the README protocol block (08-06): every value read from the dict passed in,
+- render_markdown(protocol, sha256), the README protocol block: every value read from the dict passed in,
   deterministic, display rounding only (2 decimals for points, 4 for metrics); `--render PATH` previews a file with its
   own sha256, `--render` alone renders require_frozen()'s protocol and refuses while unpinned.
-- 08-10, the freeze: test_freeze_rehearsal (data) rehearses it on the committed inputs with a temp pinned protocol;
-  protocol.json is then committed once with its pin and the README block, and these tests read the frozen file (never
-  a rebuild): it hashes to PROTOCOL_SHA256, exactly one commit touches it, the README block equals render_markdown of
+- the freeze: test_freeze_rehearsal (data) rehearses it on the committed inputs with a temp pinned protocol;
+  protocol.json was committed once with its pin and the README block, and these tests read the frozen file (never a
+  rebuild): it hashes to PROTOCOL_SHA256, exactly one commit touches it, the README block equals render_markdown of
   it, its inputs are the committed files, its decision blocks equal the code that applies them, and (data) its prior
   floors, known_at_freeze and few-shot draws recompute exactly.
 Offline except the `data` tests.
@@ -24,6 +24,8 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any, NoReturn
 
 import pytest
 
@@ -46,46 +48,46 @@ KEYS = ("schema", "title", "units", "frozen", "inputs", "splits", "systems", "re
         "power_context", "assumptions", "delegation", "code")
 
 
-def small():
+def small() -> dict[str, Any]:
     """A hand-written protocol dict with every top-level key: enough for the byte identity and the reader."""
     p = {k: {} for k in KEYS}
     p.update({"schema": pr.SCHEMA, "title": "a hand-written protocol", "units": "fractions; ünits"})
     return p
 
 
-def frozen(tmp_path, p=None):
+def frozen(tmp_path: Path, p: dict[str, Any] | None = None) -> tuple[str, str]:
     p = small() if p is None else p
     path = str(tmp_path / "protocol.json")
     pr.write_protocol(p, path)
     return path, pilot.data.sha256_bytes(pr.protocol_bytes(p))
 
 
-def committed_entries():
+def committed_entries() -> dict[str, Any]:
     with open(pilot.data.DEFAULT_MANIFEST, encoding="utf-8") as f:
         return json.load(f)["splits"]
 
 
-def final_ids(path):
+def final_ids(path: str) -> list[str]:
     with open(path, encoding="utf-8") as f:
         return [s["dump_run_id"] for s in json.load(f)["seeds"]]
 
 
 @pytest.fixture(scope="module")
-def gate():
+def gate() -> dict[str, Any]:
     """The two data-free blocks the gate helpers read (no split file needed)."""
     return {"splits": pr.splits_block(pilot.data.DEFAULT_MANIFEST), "systems": pr.systems_block(pilot.data.REPO_ROOT)}
 
 
 # ---- bytes and the pinned reader ----
 
-def test_protocol_bytes_are_indent_2_utf8_with_one_newline():
+def test_protocol_bytes_are_indent_2_utf8_with_one_newline() -> None:
     p = small()
     raw = pr.protocol_bytes(p)
     assert raw == (json.dumps(p, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     assert "ünits".encode("utf-8") in raw and raw.endswith(b"}\n") and not raw.endswith(b"\n\n")
 
 
-def test_require_frozen_returns_the_parsed_bytes_and_their_sha(tmp_path):
+def test_require_frozen_returns_the_parsed_bytes_and_their_sha(tmp_path: Path) -> None:
     path, sha = frozen(tmp_path)
     p, got = pr.require_frozen(path, sha)
     assert p == small() and got == sha
@@ -93,19 +95,19 @@ def test_require_frozen_returns_the_parsed_bytes_and_their_sha(tmp_path):
         assert pilot.data.sha256_bytes(f.read()) == sha
 
 
-def test_require_frozen_refuses_a_missing_file(tmp_path):
+def test_require_frozen_refuses_a_missing_file(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="not found"):
         pr.require_frozen(str(tmp_path / "protocol.json"), "0" * 64)
 
 
-def test_require_frozen_refuses_an_unset_pin(tmp_path, monkeypatch):
+def test_require_frozen_refuses_an_unset_pin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path, _ = frozen(tmp_path)
-    monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)        # pin=None falls back to the module pin, set since 08-10
+    monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)        # pin=None falls back to the module pin, set by the freeze
     with pytest.raises(SystemExit, match="not frozen"):
         pr.require_frozen(path, None)
 
 
-def test_require_frozen_refuses_a_wrong_pin_naming_both_hashes(tmp_path):
+def test_require_frozen_refuses_a_wrong_pin_naming_both_hashes(tmp_path: Path) -> None:
     path, sha = frozen(tmp_path)
     wrong = "f" * 64
     with pytest.raises(SystemExit) as e:
@@ -113,7 +115,7 @@ def test_require_frozen_refuses_a_wrong_pin_naming_both_hashes(tmp_path):
     assert sha in str(e.value) and wrong in str(e.value)
 
 
-def test_require_frozen_refuses_a_reserialised_equal_file(tmp_path):
+def test_require_frozen_refuses_a_reserialised_equal_file(tmp_path: Path) -> None:
     path, sha = frozen(tmp_path)
     with open(path, "w", encoding="utf-8") as f:
         f.write(json.dumps(small(), ensure_ascii=False, indent=4) + "\n")
@@ -125,7 +127,7 @@ def test_require_frozen_refuses_a_reserialised_equal_file(tmp_path):
 
 @pytest.mark.parametrize("raw, what", [(b"{not json", "not valid JSON"), (b"[1, 2]\n", "not a JSON object"),
                                        (b"\xff\xfe\n", "not valid JSON")])
-def test_require_frozen_refuses_non_json_or_non_object_bytes(tmp_path, raw, what):
+def test_require_frozen_refuses_non_json_or_non_object_bytes(tmp_path: Path, raw: bytes, what: str) -> None:
     path = str(tmp_path / "protocol.json")
     with open(path, "wb") as f:
         f.write(raw)
@@ -133,14 +135,14 @@ def test_require_frozen_refuses_non_json_or_non_object_bytes(tmp_path, raw, what
         pr.require_frozen(path, pilot.data.sha256_bytes(raw))
 
 
-def test_require_frozen_refuses_another_schema(tmp_path):
+def test_require_frozen_refuses_another_schema(tmp_path: Path) -> None:
     p = dict(small(), schema="protocol/0")
     path, sha = frozen(tmp_path, p)
     with pytest.raises(SystemExit, match="protocol/0"):
         pr.require_frozen(path, sha)
 
 
-def test_require_frozen_reads_the_module_pin_at_call_time(tmp_path, monkeypatch):
+def test_require_frozen_reads_the_module_pin_at_call_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path, sha = frozen(tmp_path)
     monkeypatch.setattr(pr, "PROTOCOL_PATH", path)
     monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)
@@ -150,14 +152,15 @@ def test_require_frozen_reads_the_module_pin_at_call_time(tmp_path, monkeypatch)
     assert pr.require_frozen() == (small(), sha)
 
 
-def test_the_repo_protocol_is_pinned_at_the_repo_root():
-    # 08-10 froze protocol.json: the pin is the sha256 hex of its bytes (test_protocol_json_matches_the_pin)
+def test_the_repo_protocol_is_pinned_at_the_repo_root() -> None:
+    # the freeze commit pinned protocol.json: the pin is the sha256 hex of its bytes
+    # (test_protocol_json_matches_the_pin)
     assert isinstance(pr.PROTOCOL_SHA256, str) and len(pr.PROTOCOL_SHA256) == 64
     assert int(pr.PROTOCOL_SHA256, 16) >= 0 and pr.PROTOCOL_SHA256 == pr.PROTOCOL_SHA256.lower()
     assert pr.PROTOCOL_PATH == os.path.join(pilot.data.REPO_ROOT, "protocol.json")
 
 
-def test_write_protocol_refuses_an_existing_path_and_keeps_it(tmp_path):
+def test_write_protocol_refuses_an_existing_path_and_keeps_it(tmp_path: Path) -> None:
     path, _ = frozen(tmp_path)
     with open(path, "rb") as f:
         before = f.read()
@@ -170,7 +173,7 @@ def test_write_protocol_refuses_an_existing_path_and_keeps_it(tmp_path):
 
 # ---- the gate helpers on the committed entries ----
 
-def test_gated_split_names_the_committed_test_and_hotels_entries(gate):
+def test_gated_split_names_the_committed_test_and_hotels_entries(gate: dict[str, Any]) -> None:
     e = committed_entries()
     assert pr.gated_split(gate, e["test"]) == "test"
     assert pr.gated_split(gate, e["hotels_probe"]) == "hotels_probe"
@@ -178,7 +181,7 @@ def test_gated_split_names_the_committed_test_and_hotels_entries(gate):
         assert pr.gated_split(gate, e[name]) is None
 
 
-def test_gated_split_needs_both_hashes(gate):
+def test_gated_split_needs_both_hashes(gate: dict[str, Any]) -> None:
     e = committed_entries()
     other = dict(e["test"], uids_sha256=e["val"]["uids_sha256"])
     assert pr.gated_split(gate, other) is None
@@ -187,7 +190,7 @@ def test_gated_split_needs_both_hashes(gate):
     assert pr.gated_split(gate, {}) is None
 
 
-def test_final_seed_allowed_is_exactly_the_three_final_dump_run_ids(gate):
+def test_final_seed_allowed_is_exactly_the_three_final_dump_run_ids(gate: dict[str, Any]) -> None:
     laya, berturk = final_ids(LAYA_FINAL), final_ids(BERTURK_FINAL)
     assert len(laya) == len(set(laya)) == 3 and len(berturk) == len(set(berturk)) == 3
     for rid in laya:
@@ -202,7 +205,7 @@ def test_final_seed_allowed_is_exactly_the_three_final_dump_run_ids(gate):
     assert [s["dump_run_id"] for s in pr.final_seeds(gate, "laya")] == laya
 
 
-def test_systems_block_binds_the_final_manifests_and_records(gate):
+def test_systems_block_binds_the_final_manifests_and_records(gate: dict[str, Any]) -> None:
     for kind, chosen in (("laya", LAYA_CHOSEN), ("berturk", BERTURK_CHOSEN)):
         s = gate["systems"][kind]
         assert s["kind"] == kind and s["seeds"] == [0, 1, 2]
@@ -215,7 +218,7 @@ def test_systems_block_binds_the_final_manifests_and_records(gate):
         assert [x["seed"] for x in s["final_seeds"]] == [0, 1, 2]
 
 
-def test_systems_block_refuses_a_final_manifest_bound_to_another_record(tmp_path):
+def test_systems_block_refuses_a_final_manifest_bound_to_another_record(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     (root / "results" / "postfit").mkdir(parents=True)
     for name in ("laya.json", "laya-final.json", "berturk.json", "berturk-final.json"):
@@ -229,7 +232,7 @@ def test_systems_block_refuses_a_final_manifest_bound_to_another_record(tmp_path
         pr.systems_block(str(root))
 
 
-def test_splits_block_holds_the_committed_entries():
+def test_splits_block_holds_the_committed_entries() -> None:
     e = committed_entries()
     s = pr.splits_block(pilot.data.DEFAULT_MANIFEST)
     assert list(s) == ["test", "hotels_probe", "val", "selection_train", "final_train"]
@@ -241,7 +244,7 @@ def test_splits_block_holds_the_committed_entries():
         assert s["hotels_probe"]["ood_scoring_tags"] == json.load(f)["ood_scoring_tags"]
 
 
-def test_splits_block_refuses_another_manifest(tmp_path):
+def test_splits_block_refuses_another_manifest(tmp_path: Path) -> None:
     with open(pilot.data.DEFAULT_MANIFEST, encoding="utf-8") as f:
         m = json.load(f)
     path = tmp_path / "splits.json"
@@ -251,20 +254,20 @@ def test_splits_block_refuses_another_manifest(tmp_path):
         pr.splits_block(str(path))
 
 
-def test_protocol_module_is_stdlib_only_at_import():
+def test_protocol_module_is_stdlib_only_at_import() -> None:
     code = "import sys, pilot.protocol; print(sorted(m for m in %r if m in sys.modules))" % (HEAVY,)
     out = subprocess.run([sys.executable, "-c", code], cwd=pilot.data.REPO_ROOT, capture_output=True, text=True,
                          check=True).stdout.strip()
     assert out == "[]"
 
 
-def test_cli_check_refuses_while_unpinned(monkeypatch):
+def test_cli_check_refuses_while_unpinned(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)
     with pytest.raises(SystemExit, match="not frozen|not found"):
         pr.main(["--check"])
 
 
-def test_cli_build_needs_out():
+def test_cli_build_needs_out() -> None:
     with pytest.raises(SystemExit):
         pr.main(["--build"])
 
@@ -272,7 +275,7 @@ def test_cli_build_needs_out():
 # ---- data: the build on the committed inputs ----
 
 @pytest.mark.data
-def test_build_protocol_is_deterministic_and_round_trips(tmp_path):
+def test_build_protocol_is_deterministic_and_round_trips(tmp_path: Path) -> None:
     a, b = pr.build_protocol(code=CODE), pr.build_protocol(code=copy.deepcopy(CODE))
     assert pr.protocol_bytes(a) == pr.protocol_bytes(b)
     assert a["schema"] == pr.SCHEMA and a["code"] == CODE
@@ -288,7 +291,8 @@ def test_build_protocol_is_deterministic_and_round_trips(tmp_path):
 
 
 @pytest.mark.data
-def test_cli_build_writes_the_protocol_and_refuses_an_existing_out(tmp_path, capsys):
+def test_cli_build_writes_the_protocol_and_refuses_an_existing_out(tmp_path: Path,
+                                                                   capsys: pytest.CaptureFixture[str]) -> None:
     out = str(tmp_path / "p.json")
     pr.main(["--build", "--out", out])
     sha = capsys.readouterr().out.strip().split()[-1]
@@ -298,27 +302,27 @@ def test_cli_build_writes_the_protocol_and_refuses_an_existing_out(tmp_path, cap
         pr.main(["--build", "--out", out])
 
 
-# ---- Task 2: the decision blocks ----
+# ---- the decision blocks ----
 
-def test_required_keys_are_every_top_level_key_in_build_order():
+def test_required_keys_are_every_top_level_key_in_build_order() -> None:
     assert pr.REQUIRED_KEYS == KEYS
 
 
 @pytest.mark.parametrize("key", ["criteria", "collapse", "verdict", "fewshot", "known_at_freeze", "code"])
-def test_require_frozen_refuses_a_protocol_missing_a_required_key(tmp_path, key):
+def test_require_frozen_refuses_a_protocol_missing_a_required_key(tmp_path: Path, key: str) -> None:
     p = {k: x for k, x in small().items() if k != key}
     path, sha = frozen(tmp_path, p)
     with pytest.raises(SystemExit, match=key):
         pr.require_frozen(path, sha)
 
 
-def test_bootstrap_coverage_is_criterion_d_abstention_coverage():
+def test_bootstrap_coverage_is_criterion_d_abstention_coverage() -> None:
     from pilot import verdict
     path = [x for x in verdict.DEFAULT_CRITERIA["d"]["paths"] if x["path"] == "abstention"][0]
     assert pr.bootstrap_block()["coverage"] == path["coverage"] == 80
 
 
-def test_power_context_is_a_labelled_research_estimate():
+def test_power_context_is_a_labelled_research_estimate() -> None:
     pc = pr.POWER_CONTEXT
     assert "research estimate, normal approximation (A19)" in pc["label"]
     assert pc["n"] == 413 and pc["micro_f1_delta_se"] == 0.0098
@@ -326,20 +330,20 @@ def test_power_context_is_a_labelled_research_estimate():
     assert pc["margin_80_power"] == -0.0274
     assert pc["alternative_go_success"] == {"0.03": 0.5, "0.04": 0.85, "0.05": 0.98}
     assert pc["macro_f1_ci_half_width"] == 0.035 and pc["precision_at_80_ci_half_width"] == 0.03
-    assert "the -0.02 margin is locked (REP-01) and kept" in pc["margin"]
+    assert "the -0.02 margin is locked" in pc["margin"] and "INCONCLUSIVE" in pc["margin"]
 
 
-def test_assumptions_cover_a1_to_a19_and_the_three_open_questions():
+def test_assumptions_cover_a1_to_a19_and_the_three_open_questions() -> None:
     ids = [a["id"] for a in pr.ASSUMPTIONS]
     assert ids == ["A%d" % i for i in range(1, 20)] + ["OQ1", "OQ2", "OQ3"]
     for a in pr.ASSUMPTIONS:
         assert set(a) == {"id", "decision", "taken"} and "\n" not in a["decision"] and a["decision"]
-        assert a["taken"] == "taken as 08-RESEARCH recommended under the standing delegation"
+        assert a["taken"] == "taken as 08-RESEARCH recommended under the standing delegation"   # the frozen text
     by = {a["id"]: a["decision"] for a in pr.ASSUMPTIONS}
     assert "Brier" in by["A1"] and "520/2163" in by["A6"] and "ddof 1" in by["A16"]
 
 
-def test_delegation_quotes_are_verbatim():
+def test_delegation_quotes_are_verbatim() -> None:
     d = json.dumps(pr.DELEGATION, ensure_ascii=False)
     for quote in ("do the programatical control. i will not do manual control until all phases done.",
                   "i already told you that i will not made a manual control untill all phases are done",
@@ -351,17 +355,17 @@ def test_delegation_quotes_are_verbatim():
 
 
 @pytest.fixture(scope="module")
-def built():
+def built() -> dict[str, Any]:
     return pr.build_protocol(code=CODE)
 
 
 @pytest.mark.data
-def test_build_has_every_required_key_in_order(built):
+def test_build_has_every_required_key_in_order(built: dict[str, Any]) -> None:
     assert tuple(built) == KEYS
 
 
 @pytest.mark.data
-def test_criteria_match_verdict_defaults(built):
+def test_criteria_match_verdict_defaults(built: dict[str, Any]) -> None:
     from pilot import verdict
     assert built["criteria"] == verdict.DEFAULT_CRITERIA
     assert built["criteria"] is not verdict.DEFAULT_CRITERIA
@@ -372,7 +376,7 @@ def test_criteria_match_verdict_defaults(built):
     assert vb["statuses"]["overall"] == [verdict.GO, verdict.NO_GO, verdict.INCONCLUSIVE]
 
 
-def _definitions():
+def _definitions() -> dict[str, str]:
     from pilot import fewshot, metrics
     return {"brier": metrics.CALIBRATION_RULES["brier"], "nll": metrics.CALIBRATION_RULES["nll"],
             "classwise_ece": metrics.CALIBRATION_RULES["classwise_ece"], "bins": metrics.CALIBRATION_RULES["bins"],
@@ -385,13 +389,13 @@ def _definitions():
 
 @pytest.mark.data
 @pytest.mark.parametrize("key", sorted(_definitions()))
-def test_definitions_match_code_constants(built, key):
+def test_definitions_match_code_constants(built: dict[str, Any], key: str) -> None:
     assert set(built["definitions"]) == set(_definitions())
     assert built["definitions"][key] == _definitions()[key]
 
 
 @pytest.mark.data
-def test_collapse_holds_the_rule_and_the_prior_fractions(built):
+def test_collapse_holds_the_rule_and_the_prior_fractions(built: dict[str, Any]) -> None:
     from pilot import verdict
     c = built["collapse"]
     assert {k: x for k, x in c.items() if not k.startswith("prior_")} == verdict.DEFAULT_COLLAPSE
@@ -403,7 +407,7 @@ def test_collapse_holds_the_rule_and_the_prior_fractions(built):
 
 
 @pytest.mark.data
-def test_known_at_freeze_holds_the_in_sample_val_deltas(built):
+def test_known_at_freeze_holds_the_in_sample_val_deltas(built: dict[str, Any]) -> None:
     k = built["known_at_freeze"]
     assert (k["split"], k["in_sample"], k["n"]) == ("val", True, 208)
     assert (k["laya"], k["berturk"]) == (LAYA_CHOSEN, BERTURK_CHOSEN)
@@ -425,7 +429,7 @@ def test_known_at_freeze_holds_the_in_sample_val_deltas(built):
 
 
 @pytest.mark.data
-def test_fewshot_is_the_sampler_output_and_its_draws_check(built):
+def test_fewshot_is_the_sampler_output_and_its_draws_check(built: dict[str, Any]) -> None:
     from pilot import fewshot
     assert built["fewshot"] == fewshot.protocol_block()
     path = os.path.join(pilot.data.REPO_ROOT, built["splits"]["selection_train"]["path"])
@@ -435,18 +439,18 @@ def test_fewshot_is_the_sampler_output_and_its_draws_check(built):
 
 
 @pytest.mark.data
-def test_power_assumptions_and_delegation_are_the_constants(built):
+def test_power_assumptions_and_delegation_are_the_constants(built: dict[str, Any]) -> None:
     assert built["power_context"] == pr.POWER_CONTEXT
     assert built["assumptions"] == pr.ASSUMPTIONS
     assert built["delegation"] == pr.DELEGATION
 
 
-# ---- 08-06: render_markdown and --render ----
+# ---- render_markdown and --render ----
 
 HEADING = "### Frozen decision protocol (protocol.json)"
 
 
-def _system(kind):
+def _system(kind: str) -> dict[str, Any]:
     return {"kind": kind,
             "final_manifest": {"path": "results/postfit/%s-final.json" % kind, "sha256": "1" * 64},
             "postfit": {"path": "results/postfit/%s.json" % kind, "sha256": "2" * 64},
@@ -459,14 +463,14 @@ def _system(kind):
             "dump_run_ids": ["%s-final-s0" % kind]}
 
 
-def _deltas(T):
+def _deltas(T: float) -> dict[str, Any]:
     return {"n": 4, "B": 7, "seed": 3, "level": 0.9, "method": "percentile", "coverage": 50,
             "metrics": {"micro_f1": {"a": 0.5, "b": 0.75, "delta": -0.25, "ci": [-0.5, 0.125], "width": 0.625,
                                      "n_undefined": 0}},
             "temperature": {"laya": T, "berturk": T}, "theta": {"laya": "theta.shipped", "berturk": "theta.shipped"}}
 
 
-def tiny():
+def tiny() -> dict[str, Any]:
     """A hand-written protocol/1 dict holding every block render_markdown reads, in small form (no build, no data)."""
     p = small()
     p.update({
@@ -541,7 +545,7 @@ def tiny():
     return p
 
 
-def test_render_starts_with_the_heading_and_shows_the_sha():
+def test_render_starts_with_the_heading_and_shows_the_sha() -> None:
     md = pr.render_markdown(tiny(), "5" * 64)
     assert md.startswith(HEADING + "\n") and md.endswith("\n")
     assert "5" * 64 in md
@@ -550,12 +554,12 @@ def test_render_starts_with_the_heading_and_shows_the_sha():
         assert text in md, text
 
 
-def test_render_is_deterministic_on_a_hand_written_dict():
+def test_render_is_deterministic_on_a_hand_written_dict() -> None:
     a = pr.render_markdown(tiny(), "5" * 64)
     assert a == pr.render_markdown(tiny(), "5" * 64) == pr.render_markdown(copy.deepcopy(tiny()), "5" * 64)
 
 
-def test_render_shows_thresholds_in_points_and_the_decision_texts():
+def test_render_shows_thresholds_in_points_and_the_decision_texts() -> None:
     md = pr.render_markdown(tiny(), "5" * 64)
     for text in ("-2.00 points", "-3.00 points", "+3.00 points", "+5.00 points", "+0.00 points",
                  "not resolvable at this tiny size", "reported, not gated", "tiny classwise ECE is reported, not gated",
@@ -570,7 +574,7 @@ def test_render_shows_thresholds_in_points_and_the_decision_texts():
         assert c["rule"] in md, c["rule"]
 
 
-def test_render_reads_every_value_from_the_dict_passed_in():
+def test_render_reads_every_value_from_the_dict_passed_in() -> None:
     p = tiny()
     p["criteria"]["a"]["micro_ci_lower_min"] = -0.04
     p["collapse"]["prior_test_fraction"], p["collapse"]["prior_test_micro_f1"] = "3/11", 3 / 11
@@ -581,19 +585,20 @@ def test_render_reads_every_value_from_the_dict_passed_in():
     assert "(z) a changed rule -> GO" in md and "(b) FAIL -> NO-GO" not in md
 
 
-def test_cli_render_previews_a_path_with_its_own_sha(tmp_path, capsys):
+def test_cli_render_previews_a_path_with_its_own_sha(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     path, sha = frozen(tmp_path, tiny())
     pr.main(["--render", path])
     assert capsys.readouterr().out == pr.render_markdown(tiny(), sha)
 
 
-def test_cli_render_without_path_refuses_while_unpinned(monkeypatch):
+def test_cli_render_without_path_refuses_while_unpinned(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pr, "PROTOCOL_SHA256", None)
     with pytest.raises(SystemExit, match="not frozen|not found"):
         pr.main(["--render"])
 
 
-def test_cli_render_without_path_renders_the_pinned_protocol(tmp_path, monkeypatch, capsys):
+def test_cli_render_without_path_renders_the_pinned_protocol(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                             capsys: pytest.CaptureFixture[str]) -> None:
     path, sha = frozen(tmp_path, tiny())
     monkeypatch.setattr(pr, "PROTOCOL_PATH", path)
     monkeypatch.setattr(pr, "PROTOCOL_SHA256", sha)
@@ -603,20 +608,20 @@ def test_cli_render_without_path_renders_the_pinned_protocol(tmp_path, monkeypat
 
 @pytest.mark.parametrize("raw, what", [(b"{not json", "not valid JSON"), (b"[1]\n", "not a JSON object"),
                                        (b'{"schema": "other/1"}\n', "schema")])
-def test_cli_render_refuses_a_file_that_is_not_a_protocol(tmp_path, raw, what):
+def test_cli_render_refuses_a_file_that_is_not_a_protocol(tmp_path: Path, raw: bytes, what: str) -> None:
     path = tmp_path / "p.json"
     path.write_bytes(raw)
     with pytest.raises(SystemExit, match=what):
         pr.main(["--render", str(path)])
 
 
-def test_cli_render_refuses_out():
+def test_cli_render_refuses_out() -> None:
     with pytest.raises(SystemExit):
         pr.main(["--render", "--out", "x.json"])
 
 
 @pytest.mark.data
-def test_render_shows_the_decision_sections(built):
+def test_render_shows_the_decision_sections(built: dict[str, Any]) -> None:
     md = pr.render_markdown(built, "5" * 64)
     assert md.startswith(HEADING + "\n") and "5" * 64 in md
     for text in ("-2.00 points", "-3.00 points", "+3.00 points", "+5.00 points", "Brier", "10/41", "520/2163",
@@ -626,7 +631,7 @@ def test_render_shows_the_decision_sections(built):
 
 
 @pytest.mark.data
-def test_cli_render_of_a_built_protocol(tmp_path, capsys):
+def test_cli_render_of_a_built_protocol(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     out = str(tmp_path / "p.json")
     pr.main(["--build", "--out", out])
     capsys.readouterr()
@@ -638,15 +643,15 @@ def test_cli_render_of_a_built_protocol(tmp_path, capsys):
     assert "counts as NO-GO; collect bank data" in md
 
 
-# ---- 08-06 Task 2: the remaining sections ----
+# ---- the remaining sections ----
 
 SECTIONS = ("#### Criteria", "#### Collapse rule (b)", "#### Verdict", "#### Seed averaging, θ and bootstrap",
-            "#### Systems, splits and inputs", "#### Few-shot protocol (Phase 9 executes it unchanged)",
-            "#### Known at freeze (val, in-sample, one seed per model)", "#### Power at the test size (research estimates)",
-            "#### Definitions", "#### Assumptions and delegation")
+            "#### Systems, splits and inputs", "#### Few-shot protocol (executed unchanged by the few-shot experiment)",
+            "#### Known at freeze (val, in-sample, one seed per model)",
+            "#### Power at the test size (research estimates)", "#### Definitions", "#### Assumptions and delegation")
 
 
-def _strings(x):
+def _strings(x: Any) -> list[str]:
     """Every string value under x (dict values and list items, never dict keys)."""
     if isinstance(x, str):
         return [x]
@@ -657,7 +662,7 @@ def _strings(x):
     return []
 
 
-def frozen_texts(p):
+def frozen_texts(p: dict[str, Any]) -> list[str]:
     """Every rule, definition, note and quote text of a protocol dict that the README block must show verbatim."""
     texts = list(p["definitions"].values()) + list(p["verdict"]["rules"])
     texts += [p["verdict"]["inconclusive_means"], p["verdict"]["provisional"], p["verdict"]["units"]]
@@ -674,19 +679,19 @@ def frozen_texts(p):
     return texts
 
 
-def test_render_shows_every_section_in_order_on_a_hand_written_dict():
+def test_render_shows_every_section_in_order_on_a_hand_written_dict() -> None:
     md = pr.render_markdown(tiny(), "5" * 64)
     at = [md.index(s) for s in SECTIONS]
     assert at == sorted(at)
 
 
-def test_render_shows_every_frozen_text_of_a_hand_written_dict():
+def test_render_shows_every_frozen_text_of_a_hand_written_dict() -> None:
     md = pr.render_markdown(tiny(), "5" * 64)
     for text in frozen_texts(tiny()):
         assert text in md, text
 
 
-def test_render_shows_the_remaining_values_of_a_hand_written_dict():
+def test_render_shows_the_remaining_values_of_a_hand_written_dict() -> None:
     md = pr.render_markdown(tiny(), "5" * 64)
     for text in ("B = 7", "seed 3", "level 0.9", "coverage 50%", "loan", "card", "9876543210ab", "A1", "OQ1",
                  "tiny research estimate", "in-sample", "-0.2500", "[-0.5000, +0.1250]", "laya-chosen",
@@ -698,7 +703,7 @@ def test_render_shows_the_remaining_values_of_a_hand_written_dict():
     assert "| 0 | 0 | 0 | 2 | 3 | 2 | loan 2, card 3 | 9876543210ab |" in md
 
 
-def test_render_keeps_an_html_like_text_literal_in_a_code_span():
+def test_render_keeps_an_html_like_text_literal_in_a_code_span() -> None:
     p = tiny()
     p["scoring"]["once"] = "scored once into results/dumps/<dump_run_id>/<split>"
     md = pr.render_markdown(p, "5" * 64)
@@ -706,7 +711,7 @@ def test_render_keeps_an_html_like_text_literal_in_a_code_span():
 
 
 @pytest.mark.data
-def test_render_shows_the_remaining_sections(built):
+def test_render_shows_the_remaining_sections(built: dict[str, Any]) -> None:
     md = pr.render_markdown(built, "5" * 64)
     for s in SECTIONS:
         assert s in md, s
@@ -726,7 +731,7 @@ def test_render_shows_the_remaining_sections(built):
 
 
 @pytest.mark.data
-def test_render_shows_every_frozen_text(built):
+def test_render_shows_every_frozen_text(built: dict[str, Any]) -> None:
     md = pr.render_markdown(built, "5" * 64)
     for text in list(built["definitions"].values()) + list(built["verdict"]["rules"]):
         assert text in md, text
@@ -737,7 +742,7 @@ def test_render_shows_every_frozen_text(built):
 
 
 @pytest.mark.data
-def test_render_holds_no_local_path_or_message_text(built):
+def test_render_holds_no_local_path_or_message_text(built: dict[str, Any]) -> None:
     from test_repo_hygiene import home_dir, local_split_texts
     md = pr.render_markdown(built, "5" * 64)
     home = home_dir()
@@ -757,10 +762,10 @@ def test_render_holds_no_local_path_or_message_text(built):
     assert sorted(t for t in texts if t in pieces) == []
 
 
-# ---- 08-10: the freeze rehearsal (the committed inputs, a temp protocol pinned in-process) ----
+# ---- the freeze rehearsal (the committed inputs, a temp protocol pinned in-process) ----
 
 @pytest.mark.data
-def test_freeze_rehearsal(tmp_path, monkeypatch, capsys):
+def test_freeze_rehearsal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     """The freeze end to end without touching the repo: the protocol built from the committed inputs is written to
     tmp_path and pinned by monkeypatch; then require_frozen, score.py's gate (trigger, admission, the final-seed
     allow-list), fewshot.py --support-sets and the render all accept it exactly as they will accept the frozen one,
@@ -770,7 +775,7 @@ def test_freeze_rehearsal(tmp_path, monkeypatch, capsys):
     import fewshot as runner
     import score
 
-    def no_load(*a, **k):
+    def no_load(*a: Any, **k: Any) -> NoReturn:
         raise AssertionError("the rehearsal never loads a model")
     monkeypatch.setattr(score, "load_agent", no_load)
     monkeypatch.setattr(score, "load_bert", no_load)
@@ -782,7 +787,7 @@ def test_freeze_rehearsal(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(pr, "PROTOCOL_PATH", path)
     monkeypatch.setattr(pr, "PROTOCOL_SHA256", sha)
     import pilot.fewshot
-    monkeypatch.setattr(pilot.fewshot, "RUNS_PATH", str(tmp_path / "no-runs.json"))   # no Phase 9 allow-list here
+    monkeypatch.setattr(pilot.fewshot, "RUNS_PATH", str(tmp_path / "no-runs.json"))   # no few-shot allow-list here
 
     # (1) the pinned reader
     assert pr.require_frozen() == (p, sha)
@@ -795,7 +800,7 @@ def test_freeze_rehearsal(tmp_path, monkeypatch, capsys):
     finals = {"laya": final_ids(LAYA_FINAL), "berturk": final_ids(BERTURK_FINAL)}
     assert [len(finals[k]) for k in ("laya", "berturk")] == [3, 3]
 
-    def ns(**change):
+    def ns(**change: Any) -> argparse.Namespace:
         return argparse.Namespace(**dict({"n": None, "force": False, "out_root": None, "workers": 0}, **change))
     for split in ("test", "hotels_probe"):
         entry = entries[split]
@@ -834,25 +839,26 @@ def test_freeze_rehearsal(tmp_path, monkeypatch, capsys):
     assert sorted(os.listdir(tmp_path)) == ["laya-ckpt", "protocol.json"]
 
 
-# ---- 08-10: the frozen protocol.json (never rebuilt: these tests read the file, they never compare it to a build) ----
+# ---- the frozen protocol.json (never rebuilt: these tests read the file, they never compare it to a build) ----
 
 README = os.path.join(pilot.data.REPO_ROOT, "README.md")
-PHASE8_HEADING = "## Frozen protocol and head-to-head verdict (Phase 8)"
+SECTION_HEADING = "## Frozen protocol and head-to-head verdict"
 PROTOCOL_START, PROTOCOL_END = "<!-- protocol:start -->", "<!-- protocol:end -->"
 
 
-def git(*args):
+def git(*args: str) -> str:
     return subprocess.run(("git",) + args, cwd=pilot.data.REPO_ROOT, capture_output=True, text=True,
                           check=True).stdout
 
 
 @pytest.fixture(scope="module")
-def frozen_protocol():
+def frozen_protocol() -> tuple[dict[str, Any], str]:
     """(protocol dict, sha256) of the repo's frozen protocol.json through the pinned reader."""
     return pr.require_frozen()
 
 
-def test_protocol_json_matches_the_pin(frozen_protocol, capsys):
+def test_protocol_json_matches_the_pin(frozen_protocol: tuple[dict[str, Any], str],
+                                       capsys: pytest.CaptureFixture[str]) -> None:
     assert pilot.data.sha256_file(pr.PROTOCOL_PATH) == pr.PROTOCOL_SHA256, (
         "protocol.json does not hash to pilot.protocol.PROTOCOL_SHA256: the frozen protocol may never change "
         "(restore it with `git checkout -- protocol.json`)")
@@ -865,7 +871,7 @@ def test_protocol_json_matches_the_pin(frozen_protocol, capsys):
     assert protocol["code"]["dirty"] is False, "the protocol was frozen from a tree with tracked changes"
 
 
-def test_protocol_json_is_committed_once():
+def test_protocol_json_is_committed_once() -> None:
     """Exactly one commit touches protocol.json: the freeze commit, which also sets the pin in pilot/protocol.py and
     adds the README block. A later commit that modifies, re-serialises or deletes it fails here."""
     if not git("ls-files", "--", "protocol.json").strip():
@@ -881,23 +887,23 @@ def test_protocol_json_is_committed_once():
         "protocol.json differs from its committed bytes"
 
 
-def test_readme_protocol_block_matches_render(frozen_protocol):
+def test_readme_protocol_block_matches_render(frozen_protocol: tuple[dict[str, Any], str]) -> None:
     protocol, sha = frozen_protocol
     with open(README, encoding="utf-8") as f:
         text = f.read()
-    assert text.count(PHASE8_HEADING + "\n") == 1, "README.md must hold exactly one %r section" % PHASE8_HEADING
+    assert text.count(SECTION_HEADING + "\n") == 1, "README.md must hold exactly one %r section" % SECTION_HEADING
     assert text.count(PROTOCOL_START) == 1 and text.count(PROTOCOL_END) == 1, \
         "README.md must hold exactly one pair of the protocol markers"
-    h, i, j = text.index(PHASE8_HEADING + "\n"), text.index(PROTOCOL_START), text.index(PROTOCOL_END)
-    nxt = text.find("\n## ", h + len(PHASE8_HEADING))
-    assert h < i < j and (nxt == -1 or j < nxt), "the protocol block must sit inside the Phase 8 README section"
+    h, i, j = text.index(SECTION_HEADING + "\n"), text.index(PROTOCOL_START), text.index(PROTOCOL_END)
+    nxt = text.find("\n## ", h + len(SECTION_HEADING))
+    assert h < i < j and (nxt == -1 or j < nxt), "the protocol block must sit inside the frozen protocol README section"
     block = text[i + len(PROTOCOL_START):j]
     assert block.strip() == pr.render_markdown(protocol, sha).strip(), (
         "the README protocol block differs from pilot.protocol.render_markdown of the frozen protocol.json; "
         "regenerate it with `python -m pilot.protocol --render`")
 
 
-def test_frozen_inputs_match_committed_files(frozen_protocol):
+def test_frozen_inputs_match_committed_files(frozen_protocol: tuple[dict[str, Any], str]) -> None:
     protocol, _ = frozen_protocol
     inputs = protocol["inputs"]
     assert set(pr.INPUT_PATHS) <= set(inputs)
@@ -910,7 +916,7 @@ def test_frozen_inputs_match_committed_files(frozen_protocol):
     assert protocol["systems"] == pr.systems_block(pilot.data.REPO_ROOT)
 
 
-def test_frozen_definitions_and_criteria_match_code(frozen_protocol):
+def test_frozen_definitions_and_criteria_match_code(frozen_protocol: tuple[dict[str, Any], str]) -> None:
     """Decision code and frozen protocol stay one: the criteria, verdict rules, definitions, collapse rule texts,
     bootstrap, scoring and few-shot settings the code applies are the frozen ones."""
     from pilot import fewshot, verdict
@@ -933,7 +939,7 @@ def test_frozen_definitions_and_criteria_match_code(frozen_protocol):
 
 
 @pytest.mark.data
-def test_frozen_values_recompute(frozen_protocol):
+def test_frozen_values_recompute(frozen_protocol: tuple[dict[str, Any], str]) -> None:
     """The frozen numbers recompute exactly from the committed dumps and splits: the prior's collapse floors,
     known_at_freeze (pilot.verdict.system_deltas on the chosen candidates' val dumps), and the few-shot draws."""
     from pilot import fewshot

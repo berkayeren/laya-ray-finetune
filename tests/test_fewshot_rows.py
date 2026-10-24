@@ -1,18 +1,18 @@
-"""Contracts of the few-shot row builders (FEW-01, FEW-02; 09-01): what every masked base and continued run trains on.
+"""Contracts of the few-shot row builders: what every masked base and continued run trains on.
 
 - masked_rows deletes every held-out key from expected (never sets it to False: laya builds a negative item for a False
   value), keeps every message and leaves the input rows unchanged.
 - selection(block, draw, k) is the frozen support and replay uid sets of one (draw, k); an unknown draw, a k outside
   the frozen k_values and an overlapping support/replay pair are refused; the k = 5 set is nested in the k = 10 set.
 - laya_rows builds a continued run's rows by the frozen laya_item_rule in one random.Random(neg seed) pass in file
-  order (LAYA_ROWS_RULE, A2), checked against an independent reading of that rule written here; laya_item_count gives
+  order (LAYA_ROWS_RULE), checked against an independent reading of that rule written here; laya_item_count gives
   the same item count without an RNG; berturk_rows pairs support rows with no mask and replay rows with the held-out
   tags masked.
 - every builder refuses an empty or unknown tag list and a selected uid that is missing from the rows or repeated;
   tags and uids compare as exact strings.
 - check_source binds rows to the frozen source (sha256, uids_sha256, role train) and re-checks every frozen draw.
 - fewshot.py --counts: require_frozen first (no split read without the frozen protocol), a missing manifest refused
-  in one line (08-REVIEW IN-07), the printed JSON equal to fewshot.counts.
+  in one line, the printed JSON equal to fewshot.counts.
 - data-marked: the exact counts on the committed selection_train and protocol.json (14,580 masked-base Laya items,
   456 Laya steps and 46 BERTurk steps per epoch; 4,298/6,475, 4,268/6,414, 4,328/6,492 continued Laya items).
 Offline except the `data` tests.
@@ -21,10 +21,15 @@ import json
 import math
 import os
 import random
+from collections.abc import Sequence
+from pathlib import Path
+from types import ModuleType
+from typing import Any, NoReturn
 
 import pytest
 
 import pilot.data
+from conftest import SyntheticRaw
 from fewshot_synthetic import synthetic_protocol
 from intents import INTENTS
 from pilot import fewshot as fs
@@ -36,7 +41,7 @@ pytestmark = pytest.mark.unit
 HELD = ("savings", "loan", "overdraft", "appointment", "contactless", "direct_debit")
 
 
-def full_rows(n=40, seed=3):
+def full_rows(n: int = 40, seed: int = 3) -> list[dict[str, Any]]:
     """n rows labelling all 48 tags: row i carries 1 + i % 4 random positives (held-out tags included now and then),
     uids u<i> in a shuffled file order."""
     rng, rows = random.Random(seed), []
@@ -50,11 +55,12 @@ def full_rows(n=40, seed=3):
     return rows
 
 
-def sel_of(rows, support, replay):
+def sel_of(rows: list[dict[str, Any]], support: Sequence[int], replay: Sequence[int]) -> dict[str, frozenset[str]]:
     return {"support": frozenset(rows[i]["uid"] for i in support), "replay": frozenset(rows[i]["uid"] for i in replay)}
 
 
-def by_rule(rows, sel, tags, seed, neg):
+def by_rule(rows: list[dict[str, Any]], sel: dict[str, frozenset[str]], tags: Sequence[str], seed: int,
+            neg: int) -> list[dict[str, bool]]:
     """LAYA_ROWS_RULE read independently: one random.Random(seed); rows in file order; per selected row the old-tag
     positives, then a sample of min(neg, n) from the sorted old-tag negatives, then (support only) every held-out
     label."""
@@ -72,9 +78,9 @@ def by_rule(rows, sel, tags, seed, neg):
     return out
 
 
-# ---- masked_rows (FEW-01) ----
+# ---- masked_rows ----
 
-def test_masked_rows_deletes_the_held_out_keys_and_keeps_every_message():
+def test_masked_rows_deletes_the_held_out_keys_and_keeps_every_message() -> None:
     rows = full_rows()
     before = json.dumps(rows, sort_keys=True)
     out = fs.masked_rows(rows, HELD)
@@ -87,7 +93,7 @@ def test_masked_rows_deletes_the_held_out_keys_and_keeps_every_message():
 
 
 @pytest.mark.parametrize("tags", [(), ["Savings"], ["savings", "savings"], ["not_a_tag"]])
-def test_every_builder_refuses_an_empty_or_unknown_tag_list(tags):
+def test_every_builder_refuses_an_empty_or_unknown_tag_list(tags: Sequence[str]) -> None:
     rows = full_rows()
     sel = sel_of(rows, [0, 1], [2, 3])
     for call in (lambda: fs.masked_rows(rows, tags), lambda: fs.laya_rows(rows, sel, tags, 0, 8),
@@ -96,9 +102,9 @@ def test_every_builder_refuses_an_empty_or_unknown_tag_list(tags):
             call()
 
 
-# ---- laya_rows, laya_item_count, berturk_rows (FEW-02, A2) ----
+# ---- laya_rows, laya_item_count, berturk_rows ----
 
-def test_laya_rows_follow_the_frozen_item_rule():
+def test_laya_rows_follow_the_frozen_item_rule() -> None:
     rows = full_rows()
     sel = sel_of(rows, [0, 2, 4, 6], [1, 3, 5])
     out = fs.laya_rows(rows, sel, HELD, 0, 8)
@@ -119,14 +125,14 @@ def test_laya_rows_follow_the_frozen_item_rule():
     assert "random.Random" in fs.LAYA_ROWS_RULE and "file order" in fs.LAYA_ROWS_RULE
 
 
-def test_laya_rows_seed_changes_only_the_sampled_negatives():
+def test_laya_rows_seed_changes_only_the_sampled_negatives() -> None:
     rows = full_rows()
     sel = sel_of(rows, [0, 2], [1, 3])
     a, b = fs.laya_rows(rows, sel, HELD, 0, 8), fs.laya_rows(rows, sel, HELD, 1, 8)
     assert [r["uid"] for r in a] == [r["uid"] for r in b] and a != b
 
 
-def test_berturk_rows_mask_the_held_out_tags_on_replay_rows_only():
+def test_berturk_rows_mask_the_held_out_tags_on_replay_rows_only() -> None:
     rows = full_rows()
     sel = sel_of(rows, [0, 2], [1, 3, 5])
     out = fs.berturk_rows(rows, sel, HELD)
@@ -137,7 +143,7 @@ def test_berturk_rows_mask_the_held_out_tags_on_replay_rows_only():
 
 
 @pytest.mark.parametrize("case", ["missing", "repeated", "case"])
-def test_builders_refuse_a_selected_uid_missing_or_repeated(case):
+def test_builders_refuse_a_selected_uid_missing_or_repeated(case: str) -> None:
     rows = full_rows()
     sel = sel_of(rows, [0, 1], [2, 3])
     if case == "missing":
@@ -152,7 +158,7 @@ def test_builders_refuse_a_selected_uid_missing_or_repeated(case):
             call()
 
 
-def test_builders_refuse_an_overlapping_selection():
+def test_builders_refuse_an_overlapping_selection() -> None:
     rows = full_rows()
     sel = sel_of(rows, [0, 1], [1, 2])
     for call in (lambda: fs.laya_rows(rows, sel, HELD, 0, 8), lambda: fs.berturk_rows(rows, sel, HELD)):
@@ -162,7 +168,8 @@ def test_builders_refuse_an_overlapping_selection():
 
 # ---- selection and check_source on the synthetic frozen protocol ----
 
-def test_selection_is_the_frozen_lists_nested_by_k(tmp_path, synthetic_raw, monkeypatch):
+def test_selection_is_the_frozen_lists_nested_by_k(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
     ns = synthetic_protocol(tmp_path, synthetic_raw, monkeypatch)
     d = ns.block["draws"][0]
     s1, s2 = fs.selection(ns.block, 0, 1), fs.selection(ns.block, 0, 2)
@@ -172,13 +179,15 @@ def test_selection_is_the_frozen_lists_nested_by_k(tmp_path, synthetic_raw, monk
 
 
 @pytest.mark.parametrize("draw,k", [(1, 1), (-1, 1), (0, 3), (0, "1"), (0, True), (True, 1)])
-def test_selection_refuses_an_unknown_draw_or_k(tmp_path, synthetic_raw, monkeypatch, draw, k):
+def test_selection_refuses_an_unknown_draw_or_k(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                monkeypatch: pytest.MonkeyPatch, draw: Any, k: Any) -> None:
     ns = synthetic_protocol(tmp_path, synthetic_raw, monkeypatch)
     with pytest.raises(SystemExit, match="draw|k "):
         fs.selection(ns.block, draw, k)
 
 
-def test_selection_refuses_an_overlapping_support_and_replay(tmp_path, synthetic_raw, monkeypatch):
+def test_selection_refuses_an_overlapping_support_and_replay(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                             monkeypatch: pytest.MonkeyPatch) -> None:
     ns = synthetic_protocol(tmp_path, synthetic_raw, monkeypatch)
     block = ns.block
     block["draws"][0]["replay"] = sorted(set(block["draws"][0]["replay"]) | {block["draws"][0]["support"]["1"][0]})
@@ -186,7 +195,8 @@ def test_selection_refuses_an_overlapping_support_and_replay(tmp_path, synthetic
         fs.selection(block, 0, 1)
 
 
-def test_check_source_binds_the_frozen_source(tmp_path, synthetic_raw, monkeypatch):
+def test_check_source_binds_the_frozen_source(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                              monkeypatch: pytest.MonkeyPatch) -> None:
     ns = synthetic_protocol(tmp_path, synthetic_raw, monkeypatch)
     with open(ns.manifest, encoding="utf-8") as f:
         entry = json.load(f)["splits"]["selection_train"]
@@ -203,12 +213,13 @@ def test_check_source_binds_the_frozen_source(tmp_path, synthetic_raw, monkeypat
 
 # ---- fewshot.py --counts ----
 
-def runner():
+def runner() -> ModuleType:
     import fewshot
     return fewshot
 
 
-def test_fewshot_counts_cli(tmp_path, synthetic_raw, monkeypatch, capsys):
+def test_fewshot_counts_cli(tmp_path: Path, synthetic_raw: SyntheticRaw, monkeypatch: pytest.MonkeyPatch,
+                            capsys: pytest.CaptureFixture[str]) -> None:
     ns = synthetic_protocol(tmp_path, synthetic_raw, monkeypatch)
     capsys.readouterr()
     out = runner().main(["--counts"])
@@ -230,7 +241,8 @@ def test_fewshot_counts_cli(tmp_path, synthetic_raw, monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("case", ["missing", "unpinned", "changed"])
-def test_fewshot_counts_refuses_without_the_frozen_protocol(tmp_path, synthetic_raw, monkeypatch, case):
+def test_fewshot_counts_refuses_without_the_frozen_protocol(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                            monkeypatch: pytest.MonkeyPatch, case: str) -> None:
     synthetic_protocol(tmp_path, synthetic_raw, monkeypatch)
     if case == "missing":
         os.remove(pr.PROTOCOL_PATH)
@@ -243,7 +255,7 @@ def test_fewshot_counts_refuses_without_the_frozen_protocol(tmp_path, synthetic_
             f.write(raw.replace(b"protocol/1", b"protocol/2", 1))
     cli = runner()
 
-    def never(*args, **kwargs):
+    def never(*args: Any, **kwargs: Any) -> NoReturn:
         raise AssertionError("the split was read before the protocol was checked")
     monkeypatch.setattr(cli, "parse_jsonl", never)
     monkeypatch.setattr(cli, "verify_split_file", never)
@@ -251,7 +263,8 @@ def test_fewshot_counts_refuses_without_the_frozen_protocol(tmp_path, synthetic_
         cli.main(["--counts"])
 
 
-def test_fewshot_counts_refuses_a_missing_manifest(tmp_path, synthetic_raw, monkeypatch):
+def test_fewshot_counts_refuses_a_missing_manifest(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
     synthetic_protocol(tmp_path, synthetic_raw, monkeypatch)
     path = str(tmp_path / "nowhere" / "splits.json")
     with pytest.raises(SystemExit) as e:
@@ -260,7 +273,7 @@ def test_fewshot_counts_refuses_a_missing_manifest(tmp_path, synthetic_raw, monk
     assert path in msg and "make data" in msg and "\n" not in msg
 
 
-def test_fewshot_cli_names_both_modes(capsys):
+def test_fewshot_cli_names_both_modes(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as e:
         runner().main([])
     err = capsys.readouterr().err
@@ -273,14 +286,14 @@ COUNTS = [(0, 5, 143, 4298, 343), (0, 10, 279, 6475, 479), (1, 5, 142, 4268, 342
           (2, 5, 144, 4328, 344), (2, 10, 278, 6492, 478)]
 
 
-def committed():
+def committed() -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
     proto, pin = pr.require_frozen()
     rows = runner().read_source(proto["fewshot"], pilot.data.DEFAULT_MANIFEST)
     return proto["fewshot"], pin, rows
 
 
 @pytest.mark.data
-def test_counts_on_the_committed_selection_train():
+def test_counts_on_the_committed_selection_train() -> None:
     block, _, rows = committed()
     tags = block["tags"]
     assert tuple(tags) == HELD and len(rows) == 1450
@@ -300,7 +313,7 @@ def test_counts_on_the_committed_selection_train():
 
 
 @pytest.mark.data
-def test_fewshot_counts_cli_on_the_committed_protocol(capsys):
+def test_fewshot_counts_cli_on_the_committed_protocol(capsys: pytest.CaptureFixture[str]) -> None:
     block, pin, rows = committed()
     out = runner().main(["--counts"])
     assert json.loads(capsys.readouterr().out) == out and out["protocol_sha256"] == pin

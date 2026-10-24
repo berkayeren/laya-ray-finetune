@@ -1,11 +1,11 @@
-"""The Laya few-shot tracer (FEW-01, FEW-02; 09-02): a label-masked base, then a continued run from it, end to end
+"""The Laya few-shot tracer: a label-masked base, then a continued run from it, end to end
 through ray_train.py and Ray Train on CPU, under a synthetic frozen protocol.
 
 tests/fewshot_synthetic.synthetic_protocol installs a protocol whose fewshot block holds the tag card, k 1 and 2, one
 draw (seed 0) and tiny recipes (base: --epochs 2 --stop-after-epoch 1, neg 2, micro-batch 2, grad-accum 1, max_len 32,
 cpu, one worker; continued: 1 epoch at the base LRs). Its postfit record's chosen canonical is the canonical config of
 the same tiny command without the few-shot flags, so check_base binds the masked base to it. Each ray_train.py command
-runs in a subprocess (a DRIVER that pins the synthetic protocol, manifest and D-08 decision record, then calls
+runs in a subprocess (a DRIVER that pins the synthetic protocol, manifest and compute decision record, then calls
 ray_train.main), like a user's command:
 
 - `--fewshot-base` deletes card from every row before neg sampling, keeps every message, builds no item of the card
@@ -22,11 +22,14 @@ import json
 import os
 import subprocess
 import sys
+import types
+from pathlib import Path
+from typing import Any
 
 import pytest
 
 import pilot.data
-from conftest import prepared
+from conftest import SyntheticRaw, prepared
 from fewshot_synthetic import postfit_systems, synthetic_protocol
 from pilot import dumps, runs
 from pilot import fewshot as fs
@@ -58,7 +61,7 @@ ray_train.main(p["argv"])
 """
 
 
-def chosen_canonical(argv):
+def chosen_canonical(argv: list[str]) -> dict[str, Any]:
     """The canonical config ray_train.py gives `argv` (no few-shot flag): the synthetic chosen selection run's."""
     import ray_train
     a = ray_train.parser().parse_args(argv)
@@ -66,13 +69,13 @@ def chosen_canonical(argv):
     return runs.canonical(ray_train.identity_values(a, ray_train.resolve(a), entry, a.base, identity(a.base)))
 
 
-def rules():
+def rules() -> dict[str, Any]:
     base_runs = json.loads(json.dumps(fs.RULES["base_runs"]))
     base_runs.update(seeds=[0], laya=dict(LAYA_RULE))
     return {"base_runs": base_runs, "continued_training": dict(CONTINUED)}
 
 
-def drive(ns, argv):
+def drive(ns: types.SimpleNamespace, argv: list[Any]) -> str:
     """ray_train.main(argv) in a fresh interpreter (no PYTHONPATH) pinned to the synthetic protocol; its stdout."""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     arg = json.dumps({"protocol_path": ns.protocol_path, "pin": ns.pin, "manifest": ns.manifest,
@@ -84,14 +87,15 @@ def drive(ns, argv):
     return r.stdout
 
 
-def config(ckpt):
+def config(ckpt: str) -> tuple[str, dict[str, Any]]:
     with open(os.path.join(ckpt, "rl_agent_config.json"), encoding="utf-8") as f:
         raw = f.read()
     return raw, json.loads(raw)
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_laya_masked_base_then_continued_run(tmp_path, synthetic_raw, monkeypatch):
+def test_laya_masked_base_then_continued_run(tmp_path: Path, synthetic_raw: SyntheticRaw,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
     tiny = tiny_checkpoint(tmp_path / "tiny")
     pre_dir, pre_manifest = prepared(tmp_path, synthetic_raw, name="pre")
     chosen = chosen_canonical(["--data", os.path.join(pre_dir, "splits", "selection_train.jsonl"),
@@ -104,7 +108,7 @@ def test_laya_masked_base_then_continued_run(tmp_path, synthetic_raw, monkeypatc
     tags = ns.block["tags"]
     assert tags == ["card"]
 
-    # ---- FEW-01: the label-masked base ----
+    # ---- the label-masked base ----
     base_argv = ["--data", sel, "--manifest", ns.manifest, "--base", tiny, "--out", base_out, "--storage", storage,
                  "--epochs", "2", "--stop-after-epoch", "1", "--fewshot-base"] + COMMON
     base_rid = drive(ns, base_argv + ["--print-run-id"]).strip().splitlines()[-1]
@@ -127,7 +131,7 @@ def test_laya_masked_base_then_continued_run(tmp_path, synthetic_raw, monkeypatc
     assert sum(proof["items_per_question"].values()) == rec["n_train_items"]
     assert "bank_" not in raw and "fewshot_rows" not in cfg["training"]["ray_train"]
 
-    # ---- FEW-02: the continued run from that base on support plus replay ----
+    # ---- the continued run from that base on support plus replay ----
     base_ident = identity(str(base_out))
     cont_argv = ["--data", sel, "--manifest", ns.manifest, "--base", base_out, "--out", cont_out, "--storage", storage,
                  "--epochs", "1", "--fewshot-draw", "0", "--fewshot-k", "2"] + COMMON

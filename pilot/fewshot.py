@@ -1,14 +1,15 @@
-"""Frozen few-shot protocol (REP-01, ROADMAP Phase 8 criterion 3): settings, support-set sampler, eligibility check.
+"""Frozen few-shot protocol: settings, support-set sampler, eligibility check, row builders, command binding and the
+test admission of few-shot checkpoints.
 
-REP-01 requires the few-shot protocol (held-out tags, k values, draws, LR, epochs, metric and replay) "frozen in the
-same file before any test scoring"; this module is that protocol as code and data, and 08-05 writes protocol_block()
-into protocol.json's "fewshot" block. Nothing is trained here. Phase 9 executes the protocol unchanged and reads the
-frozen support-set uid lists from protocol.json instead of regenerating them; check_draws only proves that a
+The few-shot protocol (held-out tags, k values, draws, LR, epochs, metric and replay) was frozen in protocol.json
+before any test scoring; this module is that protocol as code and data, and build_protocol wrote protocol_block() into
+protocol.json's "fewshot" block. Nothing is trained here. The few-shot experiment executes the protocol unchanged and
+reads the frozen support-set uid lists from protocol.json instead of regenerating them; check_draws only proves that a
 regeneration still gives the frozen lists and digests.
 
-What it fixes (08-RESEARCH A7-A13, taken under the user's standing delegation of 2026-10-21):
-- TAGS: the 6 held-out tags of FEATURES TS-14, listed on 2026-10-13 before any model existed. Eligibility
-  (banking-only, enough test and final_train positives) is a check of that list, never the selector.
+What it fixes (protocol.json assumptions A7-A13, taken under the user's standing delegation of 2026-10-21):
+- TAGS: the 6 held-out tags, listed on 2026-10-13 before any model existed. Eligibility (banking-only, enough test and
+  final_train positives) is a check of that list, never the selector.
 - K_VALUES (5, 10), nested: the k = 5 support set is the first 5 positives and first 20 negatives of each tag drawn
   for k = 10. NEG_PER_POS 4 negatives per positive, from selection_train messages without the tag. Every support
   message keeps its full gold labels for all 48 tags; the support set is the union over tags.
@@ -16,42 +17,52 @@ What it fixes (08-RESEARCH A7-A13, taken under the user's standing delegation of
 - DRAW_SEEDS (0, 1, 2): draw d uses random.Random(d) over sorted uid pools (SAMPLER_RULE) and continues from the
   masked base run of seed d; each draw is bound by the sha256 of its canonical JSON (DIGEST_RULE).
 - EPOCHS 10 of continued training at the base LRs.
+Every text and setting protocol.json holds (TAGS through DIGEST_RULE, ELIGIBILITY, BASE_RUNS, RULES) and every rule
+text a committed few-shot record holds (LAYA_ROWS_RULE, WALL_RULE) is kept byte for byte as frozen, including the
+planning labels some of them quote.
 
-Stdlib only at import time, like pilot/data.py: it never imports torch, numpy, scipy, laya or Ray. QUESTIONS is
-never defined here (intents.py is its only definition).
+Stdlib only at import time, like pilot/data.py: it never imports torch, numpy, scipy, laya or Ray (score.py's gate calls
+admitted). QUESTIONS is never defined here (intents.py is its only definition).
 
 protocol_block() reads selection_train, final_train and test from verified bytes of the committed data/splits.json
 (test and final_train for gold label counts only, no model output), checks the tags' eligibility, draws the three
 support sets and returns the complete block: settings, eligibility, source, sampler, draws and the rule texts
 (RULES: base runs, masking, the new question, support labels, replay, continued training, the Laya item rule, the
-primary and secondary metrics, the compute fallback, the gate, test admission and the Phase 9 notes).
+primary and secondary metrics, the compute fallback, the gate, test admission and the implementation notes).
+
+The rows: masked_rows (a label-masked base), selection (the frozen support and replay uid sets of a (draw, k)),
+laya_rows and laya_item_count (LAYA_ROWS_RULE), berturk_rows and check_source build what each trainer trains on.
+The binding: binding (the canonical `fewshot` value), chosen_canonical, check_base and check_continued bind every
+few-shot training command to the frozen recipe by refusal, naming the first differing key; read_mode reads the compute
+decision record (DECISION_PATH) and base_seed_of is the only place a draw is paired with its base seed.
+
+Test admission: results/fewshot/runs.json (RUNS_SCHEMA fewshot-runs/1, written once by fewshot.py --runs-manifest from
+the checkpoints' own records) lists every masked base and continued run of the recorded compute mode, one entry per
+(kind, base seed) and per (kind, draw, k), each with its train and dump run ids, its masking proof (PROOF_KEYS) and its
+wall clock (WALL_RULE). check_runs validates it against the frozen block; admitted, which score.py's protocol gate
+calls, reads it at every call.
 
 usage:
     from pilot import fewshot
     d = fewshot.draw(rows, seed)              # rows: parsed, verified selection_train
     fewshot.draw_digest(d)
-    block = fewshot.protocol_block()          # the "fewshot" block of protocol.json (08-05)
+    block = fewshot.protocol_block()          # the "fewshot" block of protocol.json
     fewshot.check_draws(block, rows)          # SystemExit unless a regeneration gives the frozen lists and digests
     runs, sha = fewshot.read_runs(protocol, pin)   # results/fewshot/runs.json checked (check_runs), or (None, None)
     fewshot.admitted(protocol, pin, "laya", dump_run_id)   # (entry, runs sha256) of a listed checkpoint, else None
-
-Phase 9 test admission (09-05, D-04, D-09): results/fewshot/runs.json (RUNS_SCHEMA fewshot-runs/1, written once by
-fewshot.py --runs-manifest from the checkpoints' own records) lists every masked base and continued run of the recorded
-D-08 mode, one entry per (kind, base seed) and per (kind, draw, k), each with its train and dump run ids, its masking
-proof (PROOF_KEYS) and its wall clock (WALL_RULE). check_runs validates it against the frozen block; admitted, which
-score.py's protocol gate calls, reads it at every call.
 """
 import hashlib
 import json
 import os
 import random
+from typing import Any, Collection, Iterable
 
 from intents import INTENTS
 from pilot import pins
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, sha256_bytes,
                         verify_split_file)
 
-TAGS = ("savings", "loan", "overdraft", "appointment", "contactless", "direct_debit")   # FEATURES TS-14, A7
+TAGS = ("savings", "loan", "overdraft", "appointment", "contactless", "direct_debit")   # listed before any model
 K_VALUES = (5, 10)
 DRAW_SEEDS = (0, 1, 2)
 NEG_PER_POS = 4
@@ -65,11 +76,11 @@ SAMPLER_RULE = ("rows sorted by uid; one random.Random(seed) per draw (CPython 3
                 "k = 5 set is nested in the k = 10 set; replay = rng.sample of REPLAY from the sorted uids outside "
                 "the max-k support set; every stored list is sorted; a pool smaller than a draw needs is refused, "
                 "never shortened")
-# a check of the TS-14 list, never its selector (A7): every held-out tag must have a banking-only gold on HOTELS and
+# a check of the held-out list, never its selector: every held-out tag must have a banking-only gold on HOTELS and
 # enough positives for a stable test AP (test) and for the draws (final_train holds selection_train's folds)
 ELIGIBILITY = {"banking_only": "every held-out tag is in pilot.pins.OOD_SCORING_TAGS", "min_test_positives": 10,
                "min_final_train_positives": 40}
-# A8: the label-masked base runs, on selection_train at each model's chosen recipe (results/postfit/<kind>.json:
+# the label-masked base runs, on selection_train at each model's chosen recipe (results/postfit/<kind>.json:
 # Laya epoch 3 of 4, BERTurk epoch 29 of 30), one per draw seed; literals so the module stays stdlib only, and
 # tests/test_fewshot.py checks them against the committed records, pilot.postfit and pilot.berturk
 BASE_RUNS = {
@@ -84,12 +95,12 @@ DIGEST_RULE = ("sha256 of the compact (separators ',' and ':'), key-sorted, UTF-
                "\"tags\", \"support\": {k: sorted uids}, \"replay\": sorted uids}; k keys are strings")
 
 
-def tag_counts(rows, tags):
+def tag_counts(rows: list[dict[str, Any]], tags: Iterable[str]) -> dict[str, int]:
     """{tag: number of rows whose expected[tag] is true}, in `tags` order (gold labels only)."""
     return {t: sum(1 for r in rows if r["expected"].get(t, False)) for t in tags}
 
 
-def _check_tags(tags):
+def _check_tags(tags: Iterable[str]) -> None:
     seen = set()
     for t in tags:
         if t not in INTENTS:
@@ -99,18 +110,20 @@ def _check_tags(tags):
         seen.add(t)
 
 
-def _sample(rng, pool, n, what):
+def _sample(rng: random.Random, pool: list[str], n: int, what: str) -> list[str]:
     if len(pool) < n:
         raise SystemExit("few-shot draw needs %d %s but the pool holds %d; the protocol never shortens a draw"
                          % (n, what, len(pool)))
     return rng.sample(pool, n)
 
 
-def draw(rows, seed, tags=TAGS, k_values=K_VALUES, neg_per_pos=NEG_PER_POS, replay=REPLAY):
+def draw(rows: list[dict[str, Any]], seed: int, tags: Iterable[str] = TAGS, k_values: Iterable[int] = K_VALUES,
+         neg_per_pos: int = NEG_PER_POS, replay: int = REPLAY) -> dict[str, Any]:
     """One support-set draw by SAMPLER_RULE: {"schema", "seed", "tags", "support": {str(k): sorted uids},
     "replay": sorted uids, "positives": {str(k): {tag: support messages carrying it}}}. The realised positive count
-    can exceed k through co-occurrence and because another tag's negatives may carry the tag. SystemExit on an unknown or repeated tag, a repeated uid, or a positive,
-    negative or replay pool smaller than the draw needs (naming the tag, the need and the pool)."""
+    can exceed k through co-occurrence and because another tag's negatives may carry the tag. SystemExit on an unknown
+    or repeated tag, a repeated uid, or a positive, negative or replay pool smaller than the draw needs (naming the
+    tag, the need and the pool)."""
     tags, k_values = list(tags), sorted(k_values)
     _check_tags(tags)
     if not k_values or len(set(k_values)) != len(k_values) or any(not isinstance(k, int) or k < 1 for k in k_values):
@@ -138,7 +151,7 @@ def draw(rows, seed, tags=TAGS, k_values=K_VALUES, neg_per_pos=NEG_PER_POS, repl
             "positives": positives}
 
 
-def draw_digest(d):
+def draw_digest(d: dict[str, Any]) -> str:
     """DIGEST_RULE of a draw (its realised positive counts are derived, so not digested)."""
     body = {"schema": d["schema"], "seed": d["seed"], "tags": d["tags"], "support": d["support"],
             "replay": d["replay"]}
@@ -213,14 +226,15 @@ RULES = {
 }
 
 
-def check_eligibility(tags, counts, ood_tags, rule=ELIGIBILITY):
+def check_eligibility(tags: Iterable[str], counts: dict[str, dict[str, int]], ood_tags: Collection[str],
+                      rule: dict[str, Any] = ELIGIBILITY) -> dict[str, Any]:
     """{"rule", "counts": {"test": {tag: n}, "final_train": {tag: n}}} when every tag is banking-only (in `ood_tags`)
     and has at least the rule's test and final_train positives; SystemExit naming the tag otherwise. A check of the
     pre-results list, never a selector."""
     for t in tags:
         if t not in ood_tags:
             raise SystemExit("few-shot tag %s is not banking-only (pilot.pins.OOD_SCORING_TAGS); the held-out tags "
-                             "are the TS-14 list and eligibility only checks it" % t)
+                             "are the frozen list and eligibility only checks it" % t)
         for split, key in (("test", "min_test_positives"), ("final_train", "min_final_train_positives")):
             n = counts.get(split, {}).get(t)
             if n is None:
@@ -231,7 +245,7 @@ def check_eligibility(tags, counts, ood_tags, rule=ELIGIBILITY):
     return {"rule": dict(rule), "counts": {s: {t: counts[s][t] for t in tags} for s in ("test", "final_train")}}
 
 
-def check_draws(block, rows):
+def check_draws(block: dict[str, Any], rows: list[dict[str, Any]]) -> None:
     """None when every draw of `block` regenerates from `rows` (the verified source split, in file order) with the
     block's settings and seeds to exactly its uid lists, realised positives and digest, and the rows are the block's
     source; SystemExit naming the draw and what differs otherwise."""
@@ -254,8 +268,8 @@ def check_draws(block, rows):
         for key in ("support", "replay", "positives"):
             if e.get(key) != d[key]:
                 raise SystemExit("%s: its %s differs from a regeneration on these rows (a changed list, rows of "
-                                 "another split, or a changed sampler); Phase 9 trains on the frozen lists only"
-                                 % (name, key))
+                                 "another split, or a changed sampler); the few-shot experiment trains on the "
+                                 "frozen lists only" % (name, key))
         want = draw_digest(d)
         if e.get("digest") != want:
             raise SystemExit("%s: digest %s != %s regenerated (DIGEST_RULE)" % (name, e.get("digest"), want))
@@ -266,11 +280,11 @@ def check_draws(block, rows):
                                                          block["source"].get("uids_sha256")))
 
 
-# ---- Phase 9: the rows every few-shot run trains on (FEW-01, FEW-02; 09-01) ----
+# ---- the rows every few-shot run trains on ----
 
 SOURCE_SPLIT = "selection_train"
-# A2 (09-RESEARCH): the frozen laya_item_rule names no RNG; this is the reading Phase 9 takes, disclosed in its
-# records. A module text, never part of RULES, so protocol.json's fewshot block is unchanged.
+# the frozen laya_item_rule names no RNG; this is the reading the few-shot experiment takes, disclosed in its records
+# (projection.json, fewshot.json). A module text, never part of RULES, so protocol.json's fewshot block is unchanged.
 LAYA_ROWS_RULE = ("a continued run's Laya rows: one random.Random(neg seed) pass over the support and replay rows in "
                   "selection_train file order (neg seed = training seed = draw seed); per row the old-tag positives, "
                   "then rng.sample(sorted old-tag negatives, min(neg, n)) (pilot.spike.neg8_rows's shape), then, for "
@@ -278,7 +292,7 @@ LAYA_ROWS_RULE = ("a continued run's Laya rows: one random.Random(neg seed) pass
                   "held-out key")
 
 
-def _held(tags):
+def _held(tags: Any) -> list[str]:
     """The held-out tags as a list after _check_tags; SystemExit on an empty list (never a no-op mask)."""
     if isinstance(tags, str):
         raise SystemExit("few-shot tags must be a list of intents.py tags, got the string %r" % (tags,))
@@ -289,26 +303,26 @@ def _held(tags):
     return tags
 
 
-def masked_rows(rows, tags):
-    """New rows with every held-out tag's key deleted from expected (FEW-01): laya builds a negative item for a False
+def masked_rows(rows: list[dict[str, Any]], tags: Iterable[str]) -> list[dict[str, Any]]:
+    """New rows with every held-out tag's key deleted from expected: laya builds a negative item for a False
     value, so a key is deleted, never set to False. Every row is kept, in order; the input rows are not mutated. Apply
     before any negative sampling."""
     held = set(_held(tags))
     return [dict(r, expected={t: v for t, v in r["expected"].items() if t not in held}) for r in rows]
 
 
-def selection(block, draw, k):
-    """{"support": frozenset of uids, "replay": frozenset of uids} of the frozen draw `draw` at `k` (D-02: the frozen
-    lists, never regenerated); SystemExit on a draw index outside the block's draws, a k outside its k_values, a
+def selection(block: dict[str, Any], draw: int, k: int) -> dict[str, frozenset[str]]:
+    """{"support": frozenset of uids, "replay": frozenset of uids} of the frozen draw `draw` at `k` (the frozen lists,
+    never regenerated); SystemExit on a draw index outside the block's draws, a k outside its k_values, a
     repeated uid, or a support set that intersects the replay set."""
     draws = block.get("draws") or []
     if isinstance(draw, bool) or not isinstance(draw, int) or not 0 <= draw < len(draws):
-        raise SystemExit("few-shot draw %r is not one of the frozen draws 0..%d; Phase 9 runs the frozen protocol "
-                         "unchanged" % (draw, len(draws) - 1))
+        raise SystemExit("few-shot draw %r is not one of the frozen draws 0..%d; the few-shot experiment runs the "
+                         "frozen protocol unchanged" % (draw, len(draws) - 1))
     ks = block.get("k_values") or []
     if isinstance(k, bool) or not isinstance(k, int) or k not in ks:
-        raise SystemExit("few-shot k %r is not one of the frozen k values %s; Phase 9 runs the frozen protocol "
-                         "unchanged" % (k, ks))
+        raise SystemExit("few-shot k %r is not one of the frozen k values %s; the few-shot experiment runs the "
+                         "frozen protocol unchanged" % (k, ks))
     d = draws[draw]
     if d.get("draw") != draw:
         raise SystemExit("the frozen draw at index %d is numbered %r" % (draw, d.get("draw")))
@@ -322,14 +336,14 @@ def selection(block, draw, k):
     return {"support": support, "replay": replay}
 
 
-def _check_disjoint(sel, name):
+def _check_disjoint(sel: dict[str, frozenset[str]], name: str) -> None:
     both = sel["support"] & sel["replay"]
     if both:
         raise SystemExit("%s: %d uids are in both the support and the replay set (first %s); the replay set lies "
                          "outside the support set" % (name, len(both), sorted(both)[0]))
 
 
-def _selected(rows, sel):
+def _selected(rows: list[dict[str, Any]], sel: dict[str, frozenset[str]]) -> list[tuple[dict[str, Any], bool]]:
     """[(row, is_support)] of the selected rows in file order; SystemExit on an overlapping selection, or a selected
     uid that is missing from the rows or appears twice (never a shortened row set). uids compare as exact strings."""
     _check_disjoint(sel, "the few-shot selection")
@@ -351,13 +365,14 @@ def _selected(rows, sel):
     return out
 
 
-def _check_neg(neg):
+def _check_neg(neg: Any) -> None:
     if isinstance(neg, bool) or not isinstance(neg, int) or neg < 1:
         raise SystemExit("few-shot neg must be a positive count (the frozen neg 8), got %r" % (neg,))
 
 
-def laya_rows(rows, sel, tags, seed, neg):
-    """The rows of a continued Laya run by the frozen laya_item_rule, read as LAYA_ROWS_RULE (A2): support rows keep
+def laya_rows(rows: list[dict[str, Any]], sel: dict[str, frozenset[str]], tags: Iterable[str], seed: int,
+              neg: int) -> list[dict[str, Any]]:
+    """The rows of a continued Laya run by the frozen laya_item_rule, read as LAYA_ROWS_RULE: support rows keep
     every positive, every label of `tags` and min(neg, n) random old-tag negatives; replay rows keep no held-out key,
     their old-tag positives and min(neg, n) random old-tag negatives; one random.Random(seed) pass in file order; rows
     outside `sel` are skipped. SystemExit on a bad tag list, a selected uid missing or repeated, or a support row
@@ -380,7 +395,8 @@ def laya_rows(rows, sel, tags, seed, neg):
     return out
 
 
-def laya_item_count(rows, sel, tags, neg):
+def laya_item_count(rows: list[dict[str, Any]], sel: dict[str, frozenset[str]], tags: Iterable[str],
+                    neg: int) -> int:
     """The item count laya_rows implies, without an RNG: per support row old_pos + len(tags) + min(neg, old_labels -
     old_pos), per replay row old_pos + min(neg, old_labels - old_pos). Same refusals as laya_rows."""
     tags = _held(tags)
@@ -394,7 +410,8 @@ def laya_item_count(rows, sel, tags, neg):
     return n
 
 
-def berturk_rows(rows, sel, tags):
+def berturk_rows(rows: list[dict[str, Any]], sel: dict[str, frozenset[str]],
+                 tags: Iterable[str]) -> list[tuple[dict[str, Any], tuple[str, ...]]]:
     """[(row, mask tags)] of a continued BERTurk run in file order: a support row with no mask (its full 48 labels),
     a replay row with the sorted held-out tags masked (pilot.berturk.label_vector sets them to MASK_LABEL). Same
     refusals as laya_rows."""
@@ -402,9 +419,9 @@ def berturk_rows(rows, sel, tags):
     return [(r, () if support else mask) for r, support in _selected(rows, sel)]
 
 
-def check_source(block, entry, rows):
+def check_source(block: dict[str, Any], entry: dict[str, Any], rows: list[dict[str, Any]]) -> None:
     """None when the manifest entry `entry` is the block's frozen source (role train, sha256 and uids_sha256 equal to
-    block source's, source split selection_train) and every frozen draw regenerates from `rows` (check_draws, D-02);
+    block source's, source split selection_train) and every frozen draw regenerates from `rows` (check_draws);
     SystemExit naming what differs otherwise."""
     src = block.get("source") or {}
     if src.get("split") != SOURCE_SPLIT:
@@ -420,16 +437,17 @@ def check_source(block, entry, rows):
     check_draws(block, rows)
 
 
-# ---- Phase 9: protocol binding by refusal, never by transcription (D-01, D-03, D-06, D-07, D-08; 09-01) ----
+# ---- protocol binding by refusal, never by transcription ----
 
 STAGES = ("base", "continued")
 MODES = ("primary", "fallback")
 FALLBACK_HOURS = 10                          # the frozen compute_fallback trigger's "exceeds 10 h" (a test checks it)
 DECISION_SCHEMA = "fewshot-projection/1"
-# the D-08 decision record (09-04 writes it before any base run); read at call time, so a test can monkeypatch it
+# the compute decision record (fewshot.py --projection writes it before any base run); read at call time, so a test
+# can monkeypatch it
 DECISION_PATH = os.path.join(REPO_ROOT, "results", "fewshot", "projection.json")
 # canonical keys each trainer's base must hold at the frozen rules.base_runs.<kind> value (Laya micro_batch and
-# grad_accum through the matched LAYA-03 ladder configuration)
+# grad_accum through the matched fallback ladder configuration)
 RECIPE_KEYS = {"laya": ("epochs", "stop_after_epoch", "neg", "encoder_lr", "head_lr", "device", "workers", "max_len",
                         "micro_batch", "grad_accum"),
                "berturk": ("epochs", "stop_after_epoch", "encoder_lr", "head_lr", "batch", "max_len", "device")}
@@ -440,22 +458,22 @@ BASE_FREE = ("seed", "neg_seed", "stop_after_epoch", "mask_tags", "fewshot", "fr
 CONTINUED_FREE = ("base_model_sha256", "base_config_sha256", "base_files_sha256", "epochs", "stop_after_epoch",
                   "mask_tags", "fewshot", "seed", "neg_seed")
 _MISSING = object()
-_FIX = "Phase 9 runs the frozen protocol unchanged: pass the frozen value"
+_FIX = "the few-shot experiment runs the frozen protocol unchanged: pass the frozen value"
 
 
-def _json(v):
+def _json(v: Any) -> str:
     return json.dumps(v, sort_keys=True, ensure_ascii=False)
 
 
-def _shown(v):
+def _shown(v: Any) -> str:
     return "<absent>" if v is _MISSING else repr(v)
 
 
-def _same(have, want):
+def _same(have: Any, want: Any) -> bool:
     return have is not _MISSING and want is not _MISSING and _json(have) == _json(want)
 
 
-def _block(protocol):
+def _block(protocol: Any) -> dict[str, Any]:
     block = protocol.get("fewshot") if isinstance(protocol, dict) else None
     if not isinstance(block, dict) or not isinstance(block.get("rules"), dict):
         raise SystemExit("the protocol holds no few-shot block with rules; restore protocol.json with `git checkout -- "
@@ -463,12 +481,13 @@ def _block(protocol):
     return block
 
 
-def _int(v):
+def _int(v: Any) -> bool:
     return isinstance(v, int) and not isinstance(v, bool)
 
 
-def binding(pin, stage, draw=None, k=None, digest=None, base_run_id=None):
-    """The `fewshot` value of a Phase 9 run's canonical config: {"protocol_sha256", "stage": "base"} for a masked
+def binding(pin: str, stage: str, draw: int | None = None, k: int | None = None, digest: str | None = None,
+            base_run_id: str | None = None) -> dict[str, Any]:
+    """The `fewshot` value of a few-shot run's canonical config: {"protocol_sha256", "stage": "base"} for a masked
     base, plus draw, k, digest and base_run_id for a continued run; SystemExit on a stage outside STAGES, a missing
     continued field, or a draw field on a base."""
     if stage not in STAGES:
@@ -485,16 +504,16 @@ def binding(pin, stage, draw=None, k=None, digest=None, base_run_id=None):
     return dict({"protocol_sha256": pin, "stage": "continued"}, **extra)
 
 
-def ladder_configs(rule):
-    """{LAYA-03 rung label: (freeze_embeddings, freeze_encoder, micro_batch, grad_accum)} relative to the frozen
-    rules.base_runs.laya `rule` (A5): none, embeddings_frozen, embeddings_frozen+smaller_batch (half the micro-batch,
+def ladder_configs(rule: dict[str, Any]) -> dict[str, tuple[bool, bool, int, int]]:
+    """{fallback ladder rung label: (freeze_embeddings, freeze_encoder, micro_batch, grad_accum)} relative to the
+    frozen rules.base_runs.laya `rule`: none, embeddings_frozen, embeddings_frozen+smaller_batch (half the micro-batch,
     twice the accumulation: the same effective batch) and encoder_frozen; the labels are pilot.runs.RUNG_NEXT's."""
     mb, ga = rule["micro_batch"], rule["grad_accum"]
     return {"none": (False, False, mb, ga), "embeddings_frozen": (True, False, mb, ga),
             "embeddings_frozen+smaller_batch": (True, False, mb // 2, ga * 2), "encoder_frozen": (False, True, mb, ga)}
 
 
-def chosen_canonical(protocol, kind, root=REPO_ROOT):
+def chosen_canonical(protocol: Any, kind: str, root: str = REPO_ROOT) -> dict[str, Any]:
     """The chosen selection run's canonical config of `kind`, read from the postfit record the protocol pins
     (systems.<kind>.postfit path, relative to `root` unless absolute, and sha256); SystemExit on a missing system,
     a missing file or bytes that do not hash to the pin."""
@@ -519,13 +538,13 @@ def chosen_canonical(protocol, kind, root=REPO_ROOT):
     return canon
 
 
-def _check_mode(mode):
+def _check_mode(mode: Any) -> None:
     if mode not in MODES:
-        raise SystemExit("few-shot mode %r is not one of %s (the D-08 decision record names it)"
+        raise SystemExit("few-shot mode %r is not one of %s (the compute decision record names it)"
                          % (mode, ", ".join(MODES)))
 
 
-def allowed_base_seeds(block, mode):
+def allowed_base_seeds(block: dict[str, Any], mode: str) -> list[int]:
     """The base seeds a masked base may train under `mode`: rules.base_runs.seeds (primary) or the compute
     fallback's seed alone (fallback)."""
     _check_mode(mode)
@@ -535,9 +554,9 @@ def allowed_base_seeds(block, mode):
     return [rules["compute_fallback"]["seed"]]
 
 
-def base_seed_of(block, draw, mode):
+def base_seed_of(block: dict[str, Any], draw: int, mode: str) -> int:
     """The base seed draw `draw` continues from: its own frozen base_seed under primary, the compute fallback's seed
-    under fallback (D-07, D-08). The only place the draw-to-base pairing is decided."""
+    under fallback. The only place the draw-to-base pairing is decided."""
     _check_mode(mode)
     draws = block.get("draws") or []
     if not _int(draw) or not 0 <= draw < len(draws):
@@ -547,14 +566,15 @@ def base_seed_of(block, draw, mode):
     return block["rules"]["compute_fallback"]["seed"]
 
 
-def read_mode(pin, path=None):
-    """'primary' or 'fallback' from the D-08 decision record (DECISION_PATH, read at call time, or `path`); SystemExit
-    on a missing or invalid record, another schema, a record of another protocol sha256, a mode outside MODES, or a
-    mode that disagrees with its trigger fields (fallback exactly when projection_fired or ladder_failure)."""
+def read_mode(pin: str, path: str | None = None) -> str:
+    """'primary' or 'fallback' from the compute decision record (DECISION_PATH, read at call time, or `path`);
+    SystemExit on a missing or invalid record, another schema, a record of another protocol sha256, a mode outside
+    MODES, or a mode that disagrees with its trigger fields (fallback exactly when projection_fired or
+    ladder_failure)."""
     path = DECISION_PATH if path is None else path
     if not os.path.isfile(path):
         raise SystemExit("%s not found; run `python fewshot.py --projection --out results/fewshot/projection.json` "
-                         "first: D-08 records the projection before any base run" % path)
+                         "first: the projection is recorded before any base run" % path)
     try:
         with open(path, encoding="utf-8") as f:
             rec = json.load(f)
@@ -579,7 +599,7 @@ def read_mode(pin, path=None):
     return mode
 
 
-def _differ(canon, want, free, what):
+def _differ(canon: dict[str, Any], want: dict[str, Any], free: Iterable[str], what: str) -> None:
     """SystemExit naming the first key in sorted order (outside `free`) whose JSON value differs, a key missing on
     one side shown as <absent>."""
     for key in sorted((set(canon) | set(want)) - set(free)):
@@ -588,14 +608,15 @@ def _differ(canon, want, free, what):
             raise SystemExit("%s is %s here but %s in %s; %s" % (key, _shown(have), _shown(ref), what, _FIX))
 
 
-def _equal(key, have, want, what):
+def _equal(key: str, have: Any, want: Any, what: str) -> None:
     if not _same(have, want):
         raise SystemExit("%s is %s here but %s in %s; %s" % (key, _shown(have), _shown(want), what, _FIX))
 
 
-def check_base(protocol, pin, kind, canon, chosen, mode):
-    """The LAYA-03 rung label ("none" for BERTurk) of a masked base command whose canonical config `canon` binds to
-    the frozen protocol; SystemExit naming the first difference otherwise (D-01, D-03, A5). The split and data_sha256
+def check_base(protocol: dict[str, Any], pin: str, kind: str, canon: dict[str, Any], chosen: dict[str, Any],
+               mode: str) -> str:
+    """The fallback ladder rung label ("none" for BERTurk) of a masked base command whose canonical config `canon`
+    binds to the frozen protocol; SystemExit naming the first difference otherwise. The split and data_sha256
     are the frozen source's; the seed one of allowed_base_seeds(mode), Laya's neg_seed the seed; mask_tags the sorted
     held-out tags; fewshot binding(pin, "base"); every RECIPE_KEYS value the frozen rules.base_runs.<kind> (Laya's
     freeze flags, micro-batch and grad-accum exactly one ladder configuration); every other key outside BASE_FREE
@@ -624,7 +645,7 @@ def check_base(protocol, pin, kind, canon, chosen, mode):
         ladder = ladder_configs(rule)
         match = [label for label, cfg in ladder.items() if _same(have, list(cfg))]
         if not match:
-            raise SystemExit("freeze_embeddings, freeze_encoder, micro_batch, grad_accum are %s here, not one LAYA-03 "
+            raise SystemExit("freeze_embeddings, freeze_encoder, micro_batch, grad_accum are %s here, not one fallback "
                              "ladder configuration (%s); a base walks the ladder by its flags only"
                              % (", ".join(_shown(v) for v in have),
                                 "; ".join("%s %s" % (label, list(cfg)) for label, cfg in ladder.items())))
@@ -636,9 +657,10 @@ def check_base(protocol, pin, kind, canon, chosen, mode):
     return rung
 
 
-def check_continued(protocol, pin, kind, canon, base_canon, base_run_id, draw, k, mode):
+def check_continued(protocol: dict[str, Any], pin: str, kind: str, canon: dict[str, Any], base_canon: dict[str, Any],
+                    base_run_id: str, draw: int, k: int, mode: str) -> None:
     """None when a continued command's canonical config `canon` binds to the frozen protocol and to its masked base
-    `base_canon` (run id `base_run_id`); SystemExit naming the first difference otherwise (D-01, D-06, D-07). The
+    `base_canon` (run id `base_run_id`); SystemExit naming the first difference otherwise. The
     (draw, k) is a frozen selection; seed (and Laya's neg_seed) the draw seed; fewshot the continued binding of this
     draw's digest and base; epochs and LRs the frozen continued_training's; no stop_after_epoch, mask_tags or
     postfit_sha256; the base a masked base of this protocol (its own binding, base_seed_of(block, draw, mode), the
@@ -679,7 +701,8 @@ def check_continued(protocol, pin, kind, canon, base_canon, base_run_id, draw, k
     _differ(canon, base_canon, CONTINUED_FREE, "its base %s" % base_run_id)
 
 
-def _read_split(manifest_path, m, name, roles):
+def _read_split(manifest_path: str, m: dict[str, Any], name: str,
+                roles: tuple[str, ...]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     entry = m["splits"][name]
     path = os.path.join(os.path.dirname(os.path.realpath(manifest_path)), entry["path"])
     if not os.path.isfile(path):
@@ -690,10 +713,10 @@ def _read_split(manifest_path, m, name, roles):
     return entry, parse_jsonl(raw)
 
 
-def protocol_block(manifest_path=DEFAULT_MANIFEST):
-    """The complete few-shot block 08-05 freezes into protocol.json, from verified bytes of the committed manifest:
-    settings, eligibility (gold label counts of test and final_train), source, sampler, the three draws with their
-    uid lists, realised positives and digests, and RULES. SystemExit on another manifest, a missing or tampered
+def protocol_block(manifest_path: str = DEFAULT_MANIFEST) -> dict[str, Any]:
+    """The complete few-shot block build_protocol froze into protocol.json, from verified bytes of the committed
+    manifest: settings, eligibility (gold label counts of test and final_train), source, sampler, the three draws with
+    their uid lists, realised positives and digests, and RULES. SystemExit on another manifest, a missing or tampered
     split, an ineligible tag or a short pool."""
     if not manifest_is_committed(manifest_path):
         raise SystemExit("%s is not the committed data/splits.json; the few-shot protocol is frozen from the "
@@ -721,21 +744,23 @@ def protocol_block(manifest_path=DEFAULT_MANIFEST):
     return block
 
 
-# ---- Phase 9: test admission through a committed runs manifest (D-04, D-09; 09-05) ----
+# ---- test admission through a committed runs manifest ----
 
 RUNS_SCHEMA = "fewshot-runs/1"
 # the committed allow-list of few-shot checkpoints (fewshot.py --runs-manifest writes it once, before any few-shot test
 # dump); read at call time, so a test can monkeypatch it
 RUNS_PATH = os.path.join(REPO_ROOT, "results", "fewshot", "runs.json")
 KINDS = ("laya", "berturk")
+# a runs-manifest slot: (kind, stage, seed, draw, k), a base's draw and k None
+Slot = tuple[str, str, int, int | None, int | None]
 RUNS_KEYS = ("schema", "protocol_sha256", "mode", "decision", "tags", "wall_rule", "entries")
 ENTRY_KEYS = ("kind", "stage", "seed", "draw", "k", "digest", "base_seed", "base_run_id", "train_run_id",
               "dump_run_id", "checkpoint_name", "rung", "fallback", "weaker", "proof", "wall_clock_s", "loss_by_epoch")
-# A7 (09-RESEARCH): the incremental wall clock of a run, copied from its own run record
+# the incremental wall clock of a run, copied from its own run record (the text, "(A7)" included, is runs.json's)
 WALL_RULE = ("incremental wall clock of a run, from its own run record (A7): Laya: the sum over its epochs of train_s "
              "and save_s, plus load_s and final_save_s; BERTurk: the sum over its epochs of train_s, plus load_s; "
              "reported, not gated")
-# the masking proof (D-04) each entry copies from its run record, per (kind, stage); the first key holds the per-tag
+# the masking proof each entry copies from its run record, per (kind, stage); the first key holds the per-tag
 # counts: 0 for a base (no held-out item or unmasked label reached it), the support rows for a continued run (one
 # item or label per support row, so the replay rows contributed none)
 PROOF_KEYS = {("laya", "base"): ("held_out_items",),
@@ -746,18 +771,18 @@ PROOF_KEYS = {("laya", "base"): ("held_out_items",),
 _RUNS_FIX = "rebuild it with `python fewshot.py --runs-manifest` from the checkpoints' own records"
 
 
-def entry_key(e):
+def entry_key(e: dict[str, Any]) -> tuple[str, str, int, int, int]:
     """The sort key of a runs-manifest entry: (kind, stage, seed, draw, k), a base's draw and k as -1."""
     return (e["kind"], e["stage"], e["seed"], -1 if e["draw"] is None else e["draw"], -1 if e["k"] is None else e["k"])
 
 
-def slot_name(slot):
+def slot_name(slot: Slot) -> str:
     """A slot (kind, stage, seed, draw, k) as text: 'laya base seed 0' or 'berturk draw 1 k 10'."""
     kind, stage, seed, draw, k = slot
     return "%s base seed %s" % (kind, seed) if stage == "base" else "%s draw %s k %s" % (kind, draw, k)
 
 
-def slots(block, mode):
+def slots(block: dict[str, Any], mode: str) -> list[Slot]:
     """Every (kind, stage, seed, draw, k) a complete runs manifest lists under `mode`, sorted as entry_key: per kind
     the masked base of each allowed_base_seeds seed and one continued run per frozen (draw, k)."""
     out = []
@@ -767,12 +792,12 @@ def slots(block, mode):
     return sorted(out, key=lambda s: entry_key(dict(zip(("kind", "stage", "seed", "draw", "k"), s))))
 
 
-def _count(v):
+def _count(v: Any) -> bool:
     return _int(v) and v >= 0
 
 
-def proof_problems(kind, stage, proof, tags):
-    """[what is wrong] of an entry's masking proof (D-04), empty when it proves the masking: exactly the PROOF_KEYS of
+def proof_problems(kind: str, stage: str, proof: Any, tags: Iterable[str]) -> list[str]:
+    """[what is wrong] of an entry's masking proof, empty when it proves the masking: exactly the PROOF_KEYS of
     (kind, stage); per-tag counts over exactly the held-out tags; a base's counts all 0; a continued run's counts each
     equal to its support_rows (> 0), its replay_rows a count, and BERTurk's replay_unmasked_held_out_labels 0."""
     want = PROOF_KEYS.get((kind, stage))
@@ -803,12 +828,12 @@ def proof_problems(kind, stage, proof, tags):
     return out
 
 
-def _number(v):
+def _number(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and v not in (float("inf"),
                                                                                            float("-inf"))
 
 
-def check_entry(e, block, mode, where="entry"):
+def check_entry(e: Any, block: dict[str, Any], mode: str, where: str = "entry") -> None:
     """None when one runs-manifest entry is well formed for the frozen block under `mode` (the entry alone: exact
     ENTRY_KEYS, kind and stage, the run ids and checkpoint name, the proof, the wall clock and losses, a base's seed
     one of allowed_base_seeds and no draw fields, a continued run's frozen (draw, k), draw seed, digest,
@@ -840,8 +865,9 @@ def check_entry(e, block, mode, where="entry"):
     if kind == "laya":
         if not isinstance(e["rung"], str) or not isinstance(e["fallback"], bool) or \
                 not isinstance(e["weaker"], bool):
-            raise SystemExit("%s: a Laya entry records its LAYA-03 rung (text), fallback and weaker (booleans), got "
-                             "%r, %r, %r; %s" % (where, e["rung"], e["fallback"], e["weaker"], _RUNS_FIX))
+            raise SystemExit("%s: a Laya entry records its fallback ladder rung (text), fallback and weaker "
+                             "(booleans), got %r, %r, %r; %s"
+                             % (where, e["rung"], e["fallback"], e["weaker"], _RUNS_FIX))
     elif (e["rung"], e["fallback"], e["weaker"]) != (None, None, None):
         raise SystemExit("%s: a BERTurk entry has no rung, fallback or weaker (None), got %r, %r, %r; %s"
                          % (where, e["rung"], e["fallback"], e["weaker"], _RUNS_FIX))
@@ -860,8 +886,8 @@ def check_entry(e, block, mode, where="entry"):
         raise SystemExit("%s: seed %r is not draw %d's seed %r (the training seed is the draw seed); %s"
                          % (where, e["seed"], e["draw"], d["seed"], _RUNS_FIX))
     if e["digest"] != d["digest"]:
-        raise SystemExit("%s: digest %r is not frozen draw %d's %s; Phase 9 trains on the frozen lists only; %s"
-                         % (where, e["digest"], e["draw"], d["digest"], _RUNS_FIX))
+        raise SystemExit("%s: digest %r is not frozen draw %d's %s; the few-shot experiment trains on the frozen lists "
+                         "only; %s" % (where, e["digest"], e["draw"], d["digest"], _RUNS_FIX))
     want = base_seed_of(block, e["draw"], mode)
     if e["base_seed"] != want or not _int(e["base_seed"]):
         raise SystemExit("%s: base_seed %r, but draw %d continues from the base of seed %r under the %s protocol "
@@ -874,16 +900,16 @@ def check_entry(e, block, mode, where="entry"):
                              % (where, key, e["proof"][key], e["draw"], e["k"], n, _RUNS_FIX))
 
 
-def _where(i, e):
+def _where(i: int, e: Any) -> str:
     if isinstance(e, dict) and all(key in e for key in ("kind", "stage", "seed", "draw", "k")):
         return "runs manifest entry %d (%s)" % (i, slot_name((e["kind"], e["stage"], e["seed"], e["draw"], e["k"])))
     return "runs manifest entry %d" % i
 
 
-def check_runs(runs, protocol, pin, mode):
-    """The entries of a runs manifest (RUNS_SCHEMA) when it is the complete allow-list of this protocol and mode
-    (D-04, D-07, D-09): exactly RUNS_KEYS; protocol_sha256 the pin; mode `mode`; the frozen tags (sorted); WALL_RULE;
-    a decision {path, sha256}; every entry check_entry-valid; one entry per (kind, base seed) and per (kind, draw, k),
+def check_runs(runs: Any, protocol: dict[str, Any], pin: str, mode: str) -> list[dict[str, Any]]:
+    """The entries of a runs manifest (RUNS_SCHEMA) when it is the complete allow-list of this protocol and mode:
+    exactly RUNS_KEYS; protocol_sha256 the pin; mode `mode`; the frozen tags (sorted); WALL_RULE; a decision {path,
+    sha256}; every entry check_entry-valid; one entry per (kind, base seed) and per (kind, draw, k),
     no repeated train run id, dump run id or checkpoint name; every slot of slots(block, mode) present; entries sorted
     by entry_key; every continued entry's base_run_id the train_run_id of the listed base of its base_seed. SystemExit
     naming the first problem otherwise."""
@@ -900,7 +926,7 @@ def check_runs(runs, protocol, pin, mode):
                          "checkpoint is admitted only under the protocol it was trained for; %s"
                          % (runs["protocol_sha256"], pin, _RUNS_FIX))
     if runs["mode"] != mode:
-        raise SystemExit("the runs manifest lists the %r protocol, the D-08 decision record names %s; %s"
+        raise SystemExit("the runs manifest lists the %r protocol, the compute decision record names %s; %s"
                          % (runs["mode"], mode, _RUNS_FIX))
     if runs["tags"] != sorted(block["tags"]):
         raise SystemExit("the runs manifest names tags %r, the frozen held-out tags are %s; %s"
@@ -910,8 +936,8 @@ def check_runs(runs, protocol, pin, mode):
     dec = runs["decision"]
     if not isinstance(dec, dict) or sorted(dec) != ["path", "sha256"] or not all(isinstance(v, str) for v in
                                                                                  dec.values()):
-        raise SystemExit("the runs manifest's decision is %r, expected {path, sha256} of the D-08 record; %s"
-                         % (dec, _RUNS_FIX))
+        raise SystemExit("the runs manifest's decision is %r, expected {path, sha256} of the compute decision "
+                         "record; %s" % (dec, _RUNS_FIX))
     entries = runs["entries"]
     if not isinstance(entries, list):
         raise SystemExit("the runs manifest's entries are not a list; %s" % _RUNS_FIX)
@@ -950,10 +976,11 @@ def check_runs(runs, protocol, pin, mode):
     return entries
 
 
-def read_runs(protocol, pin, path=None):
+def read_runs(protocol: dict[str, Any], pin: str,
+              path: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
     """(runs manifest, sha256 of its bytes) of RUNS_PATH (read at call time) or `path`, or (None, None) when the file
-    does not exist; SystemExit on invalid JSON, a manifest check_runs refuses under read_mode(pin), or a D-08 decision
-    record whose bytes are not the ones the manifest names."""
+    does not exist; SystemExit on invalid JSON, a manifest check_runs refuses under read_mode(pin), or a compute
+    decision record whose bytes are not the ones the manifest names."""
     path = RUNS_PATH if path is None else path
     if not os.path.lexists(path):
         return None, None
@@ -970,15 +997,16 @@ def read_runs(protocol, pin, path=None):
     with open(DECISION_PATH, "rb") as f:
         have = sha256_bytes(f.read())
     if runs["decision"]["sha256"] != have:
-        raise SystemExit("%s names the D-08 decision record sha256 %s, but %s hashes to %s; the allow-list binds the "
-                         "decision it was written under; %s" % (path, runs["decision"]["sha256"], DECISION_PATH, have,
-                                                               _RUNS_FIX))
+        raise SystemExit("%s names the compute decision record sha256 %s, but %s hashes to %s; the allow-list binds "
+                         "the decision it was written under; %s"
+                         % (path, runs["decision"]["sha256"], DECISION_PATH, have, _RUNS_FIX))
     return runs, sha256_bytes(raw)
 
 
-def admitted(protocol, pin, kind, dump_run_id, path=None):
+def admitted(protocol: dict[str, Any], pin: str, kind: str, dump_run_id: str,
+             path: str | None = None) -> tuple[dict[str, Any], str] | None:
     """(entry, runs manifest sha256) of the listed entry of system `kind` whose dump_run_id is `dump_run_id`, or None
-    when it is not listed or no runs manifest exists (read_runs: the file is read and checked at every call, D-09)."""
+    when it is not listed or no runs manifest exists (read_runs: the file is read and checked at every call)."""
     runs, sha = read_runs(protocol, pin, path)
     if runs is None:
         return None

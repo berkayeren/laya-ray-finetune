@@ -1,33 +1,35 @@
-"""Frozen decision protocol (REP-01, ROADMAP Phase 8 criterion 1): build, bytes, pinned reader and gate helpers.
+"""Frozen decision protocol: build, bytes, pinned reader and gate helpers.
 
-REP-01 requires the decision rule, with a numeric threshold behind every criterion, and the few-shot protocol to be
-written down and frozen before any fine-tuned model is scored on test. protocol.json at the repo root is that record
-(A17). It is built once by build_protocol from the committed inputs and the code constants of pilot.verdict,
-pilot.metrics and pilot.fewshot, written by the freeze commit (plan 08-10) and never rebuilt after it: from then on
-the file is the source of truth. Its identity is the sha256 of its exact bytes (protocol_bytes: indent 2,
-ensure_ascii False, one trailing newline, UTF-8), pinned in PROTOCOL_SHA256 by the same commit; the pin lives here,
-never in the file it hashes. Every consumer (score.py's test and HOTELS gate, report.py --verdict, the few-shot
-runner) calls require_frozen, which reads the file once, hashes those bytes, compares them to the pin and parses the
-same bytes, so a re-serialised but equal file is refused too. require_frozen reads PROTOCOL_PATH and PROTOCOL_SHA256
-at call time, so no consumer captures a stale pin.
+The decision rule, with a numeric threshold behind every criterion, and the few-shot protocol are written down and
+frozen before any fine-tuned model is scored on test or HOTELS. protocol.json at the repo root is that record. It was
+built once by build_protocol from the committed inputs and the code constants of pilot.verdict, pilot.metrics and
+pilot.fewshot, written by the freeze commit and never rebuilt after it: from then on the file is the source of truth.
+Its identity is the sha256 of its exact bytes (protocol_bytes: indent 2, ensure_ascii False, one trailing newline,
+UTF-8), pinned in PROTOCOL_SHA256 by the same commit; the pin lives here, never in the file it hashes. Every consumer
+(score.py's test and HOTELS gate, report.py --verdict, the few-shot runner and trainers) calls require_frozen, which
+reads the file once, hashes those bytes, compares them to the pin and parses the same bytes, so a re-serialised but
+equal file is refused too. require_frozen reads PROTOCOL_PATH and PROTOCOL_SHA256 at call time, so no consumer captures
+a stale pin.
 
 gated_split(protocol, entry) names the gated split (test or hotels_probe) of a manifest entry whose sha256 and
 uids_sha256 are the protocol's; final_seed_allowed(protocol, kind, dump_run_id) is true for exactly the three final
 seeds of a system's committed final manifest.
 
-Decisions taken as 08-RESEARCH recommended, under the user's standing delegation (2026-10-21): A5 (a seed-averaged
-system uses its postfit record's theta.shipped at the record T), A14 (final seeds are scored on MPS, fp32,
---workers 0: the device the postfit T was fitted on), A15 (zero-shot Laya on HOTELS is an ungated reference row,
-scored on cpu with Ray workers 2 x 4 CPUs like its committed val dump), A17 (protocol.json at the repo root, the pin
-here) and A18 (every gating number uses the headline variant; raw is reported).
+Choices frozen with it, under the user's standing delegation (2026-10-21; protocol.json lists them all as assumptions
+A1-A19 and OQ1-OQ3): a seed-averaged system uses its postfit record's theta.shipped at the record T (A5); final seeds
+are scored on MPS, fp32, --workers 0, the device the postfit T was fitted on (A14); zero-shot Laya on HOTELS is an
+ungated reference row, scored on cpu with Ray workers 2 x 4 CPUs like its committed val dump (A15); protocol.json sits
+at the repo root with its pin here (A17); every gating number uses the headline variant and raw is reported (A18).
 
 The decision blocks are copies of code, never retyped: criteria is pilot.verdict.DEFAULT_CRITERIA, verdict its
 VERDICT_RULES and statuses, definitions the pilot.metrics and pilot.fewshot rule texts, fewshot the sampler's own
 pilot.fewshot.protocol_block(); collapse adds to DEFAULT_COLLAPSE the label prior's floors computed from its committed
 dumps (prior_floors: 10/41 on val and 520/2163 on test at its global val θ 0.12); known_at_freeze holds the in-sample
 val deltas of the two chosen selection candidates, computed by pilot.verdict.system_deltas, the function the verdict
-uses, so what was known at freeze time is disclosed; power_context, assumptions (A1-A19, Open Questions 1-3) and
-delegation are this module's literals.
+uses, so what was known at freeze time is disclosed; power_context, assumptions and delegation are this module's
+literals. Every literal copied into protocol.json (TITLE, FROZEN, SCORING, REFERENCES_RULE, VARIANT, SEED_AVERAGING,
+BOOTSTRAP_PROCEDURE, KNOWN_NOTE, POWER_CONTEXT, ASSUMPTIONS, DELEGATION) is kept byte for byte as frozen, including the
+planning labels some of them quote, so build_protocol still reproduces the frozen blocks.
 
 Stdlib only at import time: build_protocol and main import the numpy-using modules (pilot.metrics, pilot.dumps,
 pilot.verdict) inside the function, so score.py's gate never pays for them.
@@ -39,9 +41,9 @@ usage:
                                                              # PATH's own sha256 (a preview, no pin check); without
                                                              # PATH, of require_frozen()'s protocol
 
-render_markdown(protocol, sha256) is the README protocol block (plan 08-10 writes it between the README markers at the
-freeze and test-enforces it): every displayed value is read from the dict passed in, never from a code constant, every
-rule and definition text is shown verbatim, and rounding is for display only (2 decimals for points, 4 for metrics).
+render_markdown(protocol, sha256) is the README protocol block (the README holds it between the protocol markers and a
+test enforces it): every displayed value is read from the dict passed in, never from a code constant, every rule and
+definition text is shown verbatim, and rounding is for display only (2 decimals for points, 4 for metrics).
 """
 import argparse
 import copy
@@ -49,15 +51,18 @@ import json
 import os
 import re
 import subprocess
+from typing import Any, Iterable, Sequence
 
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, sha256_bytes, sha256_file,
                         write_atomic)
 
 SCHEMA = "protocol/1"
 PROTOCOL_PATH = os.path.join(REPO_ROOT, "protocol.json")
-# the sha256 of protocol.json's exact bytes, pinned by the freeze commit (plan 08-10, 2026-10-23); protocol.json is
-# never rebuilt or rewritten after it: the file, not build_protocol, is the source of truth from then on
+# the sha256 of protocol.json's exact bytes, pinned by the freeze commit (2026-10-23); protocol.json is never rebuilt
+# or rewritten after it: the file, not build_protocol, is the source of truth from then on
 PROTOCOL_SHA256 = "0d337d2019f9fcb1874fa0eb23f5f2547312e1675c832f886449d573cef54a8a"
+# every literal below that protocol.json holds is kept byte for byte as frozen, including the planning labels some of
+# them quote: protocol.json is never rewritten, and build_protocol must keep reproducing it
 TITLE = "Laya vs BERTurk on Turkish banking intents: the frozen decision protocol (REP-01)"
 UNITS = "fractions in [0, 1]; points = fraction x 100"
 FROZEN = {
@@ -220,12 +225,12 @@ REQUIRED_KEYS = ("schema", "title", "units", "frozen", "inputs", "splits", "syst
 
 # ---- bytes, writer and the pinned reader ----
 
-def protocol_bytes(protocol):
-    """The exact bytes of a protocol: indent 2, ensure_ascii False, one trailing newline, UTF-8 (REP-01 encoding)."""
+def protocol_bytes(protocol: dict[str, Any]) -> bytes:
+    """The exact bytes of a protocol: indent 2, ensure_ascii False, one trailing newline, UTF-8."""
     return (json.dumps(protocol, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
-def write_protocol(protocol, path):
+def write_protocol(protocol: dict[str, Any], path: str) -> str:
     """Write protocol_bytes(protocol) to `path` atomically; an existing path is refused (the protocol is frozen
     once). Returns the sha256 of the written bytes."""
     if os.path.lexists(path):
@@ -236,18 +241,18 @@ def write_protocol(protocol, path):
     return sha256_bytes(raw)
 
 
-def require_frozen(path=None, pin=None):
+def require_frozen(path: str | None = None, pin: str | None = None) -> tuple[dict[str, Any], str]:
     """(protocol dict, sha256) of the frozen protocol; SystemExit naming the fix unless the file exists, the pin is
     set, the file's bytes hash to the pin, and those same bytes parse to a protocol/1 object. With no argument it
     reads pilot.protocol.PROTOCOL_PATH and PROTOCOL_SHA256 at call time."""
     path = PROTOCOL_PATH if path is None else path
     pin = PROTOCOL_SHA256 if pin is None else pin
     if not os.path.isfile(path):
-        raise SystemExit("%s not found; the decision protocol must be frozen (plan 08-10) before any fine-tuned model "
-                         "is scored on test or HOTELS, the verdict is computed or the few-shot runner starts" % path)
+        raise SystemExit("%s not found; the decision protocol must be frozen before any fine-tuned model is scored on "
+                         "test or HOTELS, the verdict is computed or the few-shot runner starts" % path)
     if pin is None:
         raise SystemExit("the decision protocol is not frozen: pilot.protocol.PROTOCOL_SHA256 is unset; the freeze "
-                         "commit (plan 08-10) pins the sha256 of %s" % path)
+                         "commit pins the sha256 of %s" % path)
     with open(path, "rb") as f:
         raw = f.read()                                      # hash and parse the same bytes (no re-read window)
     have = sha256_bytes(raw)
@@ -257,7 +262,7 @@ def require_frozen(path=None, pin=None):
     return parse_protocol(raw, path, "restore it with `git checkout -- protocol.json`"), have
 
 
-def parse_protocol(raw, path, fix):
+def parse_protocol(raw: bytes, path: str, fix: str) -> dict[str, Any]:
     """The protocol/1 dict of `raw` (the bytes of `path`); SystemExit ending in `fix` unless they are UTF-8 JSON of an
     object with schema protocol/1 and every REQUIRED_KEYS key."""
     try:
@@ -276,7 +281,7 @@ def parse_protocol(raw, path, fix):
 
 # ---- the gate helpers (score.py, fewshot.py, report.py) ----
 
-def gated_split(protocol, entry):
+def gated_split(protocol: dict[str, Any], entry: dict[str, Any]) -> str | None:
     """"test" or "hotels_probe" when the manifest `entry` has both the sha256 and the uids_sha256 of that split in
     the protocol, else None."""
     splits = protocol.get("splits") or {}
@@ -287,7 +292,7 @@ def gated_split(protocol, entry):
     return None
 
 
-def final_seeds(protocol, kind):
+def final_seeds(protocol: dict[str, Any], kind: str) -> list[dict[str, Any]]:
     """The protocol's final seeds of system `kind`: [{seed, train_run_id, checkpoint_name, dump_run_id}]."""
     system = (protocol.get("systems") or {}).get(kind)
     if not isinstance(system, dict) or not isinstance(system.get("final_seeds"), list):
@@ -296,7 +301,7 @@ def final_seeds(protocol, kind):
     return system["final_seeds"]
 
 
-def final_seed_allowed(protocol, kind, dump_run_id):
+def final_seed_allowed(protocol: dict[str, Any], kind: str, dump_run_id: str) -> bool:
     """True when `dump_run_id` is one of the final seeds of system `kind` in the protocol (an unknown kind: False)."""
     if kind not in (protocol.get("systems") or {}):
         return False
@@ -305,7 +310,7 @@ def final_seed_allowed(protocol, kind, dump_run_id):
 
 # ---- the blocks ----
 
-def _read_json(root, rel):
+def _read_json(root: str, rel: str) -> tuple[Any, str]:
     """(parsed JSON, sha256 of the same bytes) of a committed file under root; SystemExit naming the git fix."""
     p = os.path.join(root, rel)
     try:
@@ -317,7 +322,8 @@ def _read_json(root, rel):
                          % (rel, e))
 
 
-def _committed(manifest_path):
+def _committed(manifest_path: str) -> dict[str, Any]:
+    """The parsed committed manifest; SystemExit for any other manifest path."""
     if not manifest_is_committed(manifest_path):
         raise SystemExit("%s is not the committed data/splits.json; the protocol is built from the committed splits "
                          "only (drop --manifest, or run `make data`)" % manifest_path)
@@ -325,7 +331,7 @@ def _committed(manifest_path):
         return json.load(f)
 
 
-def splits_block(manifest_path=DEFAULT_MANIFEST):
+def splits_block(manifest_path: str = DEFAULT_MANIFEST) -> dict[str, dict[str, Any]]:
     """The protocol's splits (test, hotels_probe with its ood_scoring_tags, val, selection_train, final_train): path,
     role, sha256, uids_sha256 and counts of the committed manifest; another manifest is refused."""
     m = _committed(manifest_path)
@@ -338,11 +344,15 @@ def splits_block(manifest_path=DEFAULT_MANIFEST):
     return out
 
 
-def _theta_summary(theta):
+def _theta_summary(theta: dict[str, Any]) -> dict[str, Any]:
+    """A postfit θ block as the protocol shows it: the global θ and the number of tags with their own θ."""
     return {"global": theta["global"], "n_per_tag": len(theta["per_tag"])}
 
 
-def _system(root, kind):
+def _system(root: str, kind: str) -> dict[str, Any]:
+    """The protocol's block of system `kind`: its postfit record and final manifest (paths and sha256s), the chosen
+    candidate's settings and the three final seeds; SystemExit unless the manifest is bound to the record, lists seeds
+    0, 1, 2 in order with distinct dump run ids, and the chosen candidate was scored on the protocol's device."""
     rec_rel, final_rel = "%s/%s.json" % (POSTFIT_DIR, kind), "%s/%s-final.json" % (POSTFIT_DIR, kind)
     record, rec_sha = _read_json(root, rec_rel)
     final, final_sha = _read_json(root, final_rel)
@@ -360,8 +370,8 @@ def _system(root, kind):
     c = record["chosen"]
     if (c.get("scorer") or {}).get("device") != SCORING["device"]:
         raise SystemExit("%s: the chosen candidate was scored on %r, the protocol scores final seeds on %s (the "
-                         "device the postfit T was fitted on, A14)" % (rec_rel, (c.get("scorer") or {}).get("device"),
-                                                                       SCORING["device"]))
+                         "device the postfit T was fitted on)" % (rec_rel, (c.get("scorer") or {}).get("device"),
+                                                                  SCORING["device"]))
     fs = [{"seed": s["seed"], "train_run_id": s["train_run_id"], "checkpoint_name": s["checkpoint_name"],
            "dump_run_id": s["dump_run_id"]} for s in seeds]
     ids = [s["dump_run_id"] for s in fs]
@@ -380,13 +390,13 @@ def _system(root, kind):
             "dump_run_ids": ids}
 
 
-def systems_block(root=REPO_ROOT):
+def systems_block(root: str = REPO_ROOT) -> dict[str, dict[str, Any]]:
     """The protocol's systems (laya, berturk) from the committed final manifests and postfit records: each final
     manifest refused unless bound to its record's sha256 and holding exactly seeds 0, 1, 2."""
     return {kind: _system(root, kind) for kind in KINDS}
 
 
-def inputs_block(root, systems):
+def inputs_block(root: str, systems: dict[str, dict[str, Any]]) -> dict[str, str]:
     """{repo-relative path: sha256} of every committed file the verdict reads, plus each chosen candidate's val
     sidecar; a missing input is refused."""
     rels = list(INPUT_PATHS) + ["results/dumps/%s/val.json" % systems[k]["chosen"]["dump_run_id"] for k in KINDS]
@@ -399,9 +409,9 @@ def inputs_block(root, systems):
     return out
 
 
-def git_code(root=REPO_ROOT):
+def git_code(root: str = REPO_ROOT) -> dict[str, Any]:
     """{"git_head", "dirty"} of the checkout the protocol is built in (dirty: a tracked file differs from HEAD)."""
-    def git(*args):
+    def git(*args: str) -> str:
         return subprocess.run(("git",) + args, cwd=root, capture_output=True, text=True, check=True).stdout
     try:
         return {"git_head": git("rev-parse", "HEAD").strip(),
@@ -410,14 +420,15 @@ def git_code(root=REPO_ROOT):
         raise SystemExit("git is needed to record the code state of the protocol (%s)" % e)
 
 
-def bootstrap_block():
-    """The frozen EVAL-07 bootstrap: B 10000, seed 0, level 0.95, coverage 80 ((d)'s abstention path), messages."""
+def bootstrap_block() -> dict[str, Any]:
+    """The frozen paired bootstrap block: B 10000, seed 0, level 0.95, coverage 80 ((d)'s abstention path), the
+    message as the resampling unit, the method and the procedure and extra-metric texts."""
     from pilot import metrics
     return {"B": 10000, "seed": 0, "level": 0.95, "coverage": 80, "unit": "message", "method": metrics.BOOT_METHOD,
             "procedure": BOOTSTRAP_PROCEDURE, "extra": metrics.BOOT_EXTRA_RULE}
 
 
-def verdict_block():
+def verdict_block() -> dict[str, Any]:
     """The verdict rules, the INCONCLUSIVE meaning, the provisional text and every status, copied from pilot.verdict."""
     from pilot import verdict as v
     return {"rules": list(v.VERDICT_RULES), "inconclusive_means": v.INCONCLUSIVE_MEANS,
@@ -427,7 +438,7 @@ def verdict_block():
                          "overall": [v.GO, v.NO_GO, v.INCONCLUSIVE]}}
 
 
-def definitions_block():
+def definitions_block() -> dict[str, str]:
     """The metric and rule texts the verdict applies, copied verbatim from the code that applies them."""
     from pilot import fewshot, metrics
     cal = metrics.CALIBRATION_RULES
@@ -439,14 +450,15 @@ def definitions_block():
             "fewshot_digest": fewshot.DIGEST_RULE}
 
 
-def _micro_counts(Y, P, theta):
+def _micro_counts(Y: Any, P: Any, theta: float) -> dict[str, int]:
+    """The summed TP, FP and FN over all tags of gold Y and probabilities P [n, 48] at the global θ."""
     from pilot import metrics
     tags = metrics.metrics(Y, P, theta)["per_tag"].values()
     return {k: int(sum(t[k] for t in tags)) for k in ("tp", "fp", "fn")}
 
 
-def prior_floors(manifest_path=DEFAULT_MANIFEST, root=REPO_ROOT):
-    """The label prior's collapse floors (A6) from its committed dumps: its global val θ (select_theta on val at
+def prior_floors(manifest_path: str = DEFAULT_MANIFEST, root: str = REPO_ROOT) -> dict[str, Any]:
+    """The label prior's collapse floors from its committed dumps: its global val θ (select_theta on val at
     T 1), and its micro-F1 at that θ on val and on test as exact fractions 2TP / (2TP + FP + FN) ("a/b") with the
     float values for display. Every key starts with prior_. The verdict recomputes them with this function."""
     from pilot import dumps, metrics, verdict
@@ -470,13 +482,14 @@ def prior_floors(manifest_path=DEFAULT_MANIFEST, root=REPO_ROOT):
     return out
 
 
-def collapse_block(manifest_path=DEFAULT_MANIFEST, root=REPO_ROOT):
+def collapse_block(manifest_path: str = DEFAULT_MANIFEST, root: str = REPO_ROOT) -> dict[str, Any]:
     """DEFAULT_COLLAPSE (the rule texts) plus the prior's val and test floors (prior_floors)."""
     from pilot import verdict
     return dict(copy.deepcopy(verdict.DEFAULT_COLLAPSE), **prior_floors(manifest_path, root))
 
 
-def known_at_freeze_block(manifest_path, root, systems, boot):
+def known_at_freeze_block(manifest_path: str, root: str, systems: dict[str, dict[str, Any]],
+                          boot: dict[str, Any]) -> dict[str, Any]:
     """The in-sample val deltas Laya - BERTurk of the two chosen selection candidates, computed by
     pilot.verdict.system_deltas (the verdict's own function): headline at each record's T and theta.shipped, raw at
     T 1 and theta.raw. Each val dump must be the one its record chose (dump_sha256)."""
@@ -509,7 +522,8 @@ def known_at_freeze_block(manifest_path, root, systems, boot):
     return out
 
 
-def build_protocol(manifest_path=DEFAULT_MANIFEST, root=REPO_ROOT, code=None):
+def build_protocol(manifest_path: str = DEFAULT_MANIFEST, root: str = REPO_ROOT,
+                   code: dict[str, Any] | None = None) -> dict[str, Any]:
     """The complete protocol/1 dict (REQUIRED_KEYS, in order) from the committed inputs and the code constants of
     pilot.verdict, pilot.metrics and pilot.fewshot; deterministic for a given `code` (else git_code(root))."""
     from pilot import fewshot, verdict
@@ -549,12 +563,12 @@ def build_protocol(manifest_path=DEFAULT_MANIFEST, root=REPO_ROOT, code=None):
 
 HTML_TAG = re.compile(r"<[A-Za-z/!?]")                     # text markdown would read as raw HTML
 
-def _num(x):
+def _num(x: Any) -> str:
     """A frozen number as stored (its JSON form: -0.02, 0.0, 2e-05, 80)."""
     return json.dumps(x)
 
 
-def _value(x, points=False):
+def _value(x: Any, points: bool = False) -> str:
     """Display form of a frozen value: a float fraction with its points when `points` (e.g. "-0.02 (-2.00 points)"),
     other numbers and null/booleans in JSON form, lists joined by ", ", dicts as "key: value" joined by "; ", strings
     verbatim (inside a code span when they hold an HTML-like tag such as <split>, which markdown would swallow)."""
@@ -571,13 +585,13 @@ def _value(x, points=False):
     return "`%s`" % x if HTML_TAG.search(x) and "`" not in x else str(x)
 
 
-def _table(header, rows):
+def _table(header: Sequence[str], rows: Iterable[Sequence[str]]) -> list[str]:
     """A markdown table (the pilot.postfit layout); cells hold names, numbers and hashes only, never rule texts."""
     lines = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
     return lines + ["| " + " | ".join(r) + " |" for r in rows]
 
 
-def _label(key, name=None):
+def _label(key: str, name: str | None = None) -> str:
     """A criterion or status key as shown: "a" -> "(a)" (with its name: "(a) non-inferiority"); a longer key is its
     name when given ("alternative GO"), else the key."""
     if len(key) == 1:
@@ -585,7 +599,8 @@ def _label(key, name=None):
     return key if name is None else name
 
 
-def _criteria_lines(criteria, units):
+def _criteria_lines(criteria: dict[str, dict[str, Any]], units: str) -> list[str]:
+    """The Criteria section: one table row per criterion or path with its frozen values, then every rule verbatim."""
     rows, rules, extra = [], [], []
     for key, c in criteria.items():
         label, head = _label(key), _label(key, c["name"])
@@ -603,7 +618,8 @@ def _criteria_lines(criteria, units):
             + ["", "Rules, as frozen:", ""] + rules + extra)
 
 
-def _collapse_lines(c):
+def _collapse_lines(c: dict[str, Any]) -> list[str]:
+    """The collapse rule section: the rule, where it applies, each component and the label prior's floors."""
     out = ["#### Collapse rule (b)", "", "- Rule: %s" % c["rule"], "- Applies to:"]
     for a in c["applies_to"]:
         out.append("  - %s (%s): %s" % (a["runs"], a["source"], ", ".join(a["components"])))
@@ -622,7 +638,8 @@ def _collapse_lines(c):
     return out
 
 
-def _verdict_lines(v):
+def _verdict_lines(v: dict[str, Any]) -> list[str]:
+    """The Verdict section: the numbered rules, the INCONCLUSIVE meaning, the provisional form and the statuses."""
     out = ["#### Verdict", "", "Units: %s." % v["units"], ""]
     out += ["%d. %s" % (i, r) for i, r in enumerate(v["rules"], 1)]
     out += ["", "- INCONCLUSIVE means: %s." % v["inconclusive_means"],
@@ -632,7 +649,7 @@ def _verdict_lines(v):
     return out
 
 
-def _bullets(d, depth=0):
+def _bullets(d: dict[str, Any], depth: int = 0) -> list[str]:
     """Nested bullets of a dict: "- key: value" for a scalar or a list of short items, a nested list for a dict or a
     list of sentences (every string verbatim)."""
     pad, out = "  " * depth, []
@@ -648,12 +665,13 @@ def _bullets(d, depth=0):
     return out
 
 
-def _short(sha):
+def _short(sha: str) -> str:
     """The first 12 hex characters of a sha256, for display (the full value is in protocol.json)."""
     return sha[:12]
 
 
-def _averaging_lines(p):
+def _averaging_lines(p: dict[str, Any]) -> list[str]:
+    """The seed averaging, θ and bootstrap section, ending with the scoring block."""
     b = p["bootstrap"]
     out = ["#### Seed averaging, θ and bootstrap", "", "Variant:", ""] + _bullets(p["variant"])
     out += ["", "Seed averaging:", ""] + _bullets(p["seed_averaging"])
@@ -664,7 +682,9 @@ def _averaging_lines(p):
     return out
 
 
-def _systems_lines(p):
+def _systems_lines(p: dict[str, Any]) -> list[str]:
+    """The systems, splits and inputs section: the chosen candidates, the final seeds, the splits, the references and
+    the sha256 of every input."""
     rows, seeds = [], []
     for kind, s in p["systems"].items():
         c = s["chosen"]
@@ -698,8 +718,10 @@ def _systems_lines(p):
     return out
 
 
-def _fewshot_lines(f):
-    out = ["#### Few-shot protocol (Phase 9 executes it unchanged)", ""]
+def _fewshot_lines(f: dict[str, Any]) -> list[str]:
+    """The few-shot protocol section: settings, source, eligibility, sampler, the draws (counted, never listed) and
+    the rules."""
+    out = ["#### Few-shot protocol (executed unchanged by the few-shot experiment)", ""]
     out += _table(("setting", "value"), [(k, _value(v)) for k, v in f.items()
                                          if not isinstance(v, dict) and k != "draws"])
     src, el = f["source"], f["eligibility"]
@@ -723,7 +745,8 @@ def _fewshot_lines(f):
     return out
 
 
-def _known_lines(k):
+def _known_lines(k: dict[str, Any]) -> list[str]:
+    """The known-at-freeze section: per variant the in-sample val deltas table, then the note."""
     out = ["#### Known at freeze (val, in-sample, one seed per model)", "",
            "In-sample val deltas Laya - BERTurk of the two chosen selection candidates (split %s, n = %s, in_sample "
            "%s): Laya %s, BERTurk %s." % (k["split"], _num(k["n"]), _value(k["in_sample"]), k["laya"], k["berturk"])]
@@ -743,12 +766,14 @@ def _known_lines(k):
     return out
 
 
-def _power_lines(pc):
+def _power_lines(pc: dict[str, Any]) -> list[str]:
+    """The power section: the label, then every estimate as a bullet."""
     return (["#### Power at the test size (research estimates)", "", "%s." % pc["label"], ""]
             + _bullets({k: v for k, v in pc.items() if k != "label"}))
 
 
-def _assumption_lines(p):
+def _assumption_lines(p: dict[str, Any]) -> list[str]:
+    """The assumptions (with their `taken` text once when all share it) and the delegation."""
     a = p["assumptions"]
     taken = {x["taken"] for x in a}
     out = ["#### Assumptions and delegation", ""]
@@ -761,8 +786,8 @@ def _assumption_lines(p):
     return out
 
 
-def render_markdown(protocol, sha256):
-    """The README protocol block (markdown, level-3 and level-4 headings; 08-10 writes the section heading): the
+def render_markdown(protocol: dict[str, Any], sha256: str) -> str:
+    """The README protocol block (markdown, level-3 and level-4 headings; the README holds the section heading): the
     protocol's sha256 and frozen-before sentence, the criteria with their thresholds in points, the collapse rule
     with the label prior's floors, the verdict rules, the seed averaging, θ and bootstrap, the systems, splits and
     inputs, the few-shot protocol with its draw digests, the in-sample deltas known at freeze, the power research
@@ -788,7 +813,8 @@ def render_markdown(protocol, sha256):
 
 # ---- CLI ----
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> str:
+    """The CLI; returns the rendered markdown (--render) or the sha256 (--build, --check)."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--build", action="store_true", help="build the protocol from the committed inputs to --out")

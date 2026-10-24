@@ -1,20 +1,20 @@
-"""The few-shot results record (Phase 9, FEW-02, D-10, D-12): the frozen primary and secondary metrics of the few-shot
-experiment, computed from the dumps the committed runs manifest lists, numpy only, no model.
+"""The few-shot results record: the frozen primary and secondary metrics of the few-shot experiment, computed from the
+dumps the committed runs manifest lists, numpy only, no model.
 
 What it reads, and nothing else:
 - the frozen protocol (pilot.protocol.require_frozen, by the caller) and its few-shot block: the held-out tags, k values,
   draws (digests, realised positives), rules.primary_metric.k and the bootstrap block (B, seed, level)
-- results/fewshot/runs.json through pilot.fewshot.read_runs (check_runs under the recorded D-08 mode, the decision
-  record bound by its sha256)
+- results/fewshot/runs.json through pilot.fewshot.read_runs (check_runs under the mode of the compute decision record,
+  that record bound by its sha256)
 - per listed entry its dumps under results/dumps/<dump_run_id>/ through pilot.dumps.load_dump (the only reader) and
-  read_gold: a masked base's val dump (ungated: no protocol_sha256, no fewshot_runs_sha256; its θ source, D-05) and every
+  read_gold: a masked base's val dump (ungated: no protocol_sha256, no fewshot_runs_sha256; its θ source) and every
   entry's test dump (gated: protocol_sha256 the pin, fewshot_runs_sha256 the manifest's sha256). Each sidecar must be of
   the entry's system kind, training run id and seed; every test dump must score one uid order (the draws and models are
   paired message by message) and be a full dump, and each split must be the frozen protocol's (sha256); a masked
   base's val dump must be of its test dump's source (SAME_SOURCE_KEYS: kind, checkpoint identity, shipped T, scorer
-  device, dtype and amp; 09-REVIEW WR-02), as report.py requires of any val θ source
+  device, dtype and amp), as report.py requires of any val θ source
 
-What it computes (D-12; protocol.json rules.primary_metric and rules.secondary_metrics):
+What it computes (protocol.json rules.primary_metric and rules.secondary_metrics):
 - primary: per new tag the average precision by pilot.metrics.AP_RULE on P = sigmoid(logit) at raw T = 1 on test (AP is
   T-invariant), macro over the held-out tags (pilot.metrics.new_tag_ap), per draw Laya - BERTurk at k = the frozen
   primary k; draws = the per-draw deltas and mean_delta = float(np.mean(np.asarray(draws, dtype=np.float64))), exactly
@@ -22,29 +22,32 @@ What it computes (D-12; protocol.json rules.primary_metric and rules.secondary_m
 - ap: per model the per-tag AP and macro-AP of every masked base ("s<seed>", k = 0) and continued run ("d<draw>-k<k>")
 - by_k: the primary block's per-draw table at every k: "0" (each draw's masked base, pilot.fewshot.base_seed_of) and
   every frozen k (k = 5 is the reported secondary)
-- theta (A1, THETA_RULE): each masked base's θ, pilot.metrics.select_theta on its own val dump at T = 1 over all 48
+- theta (THETA_RULE): each masked base's θ, pilot.metrics.select_theta on its own val dump at T = 1 over all 48
   columns; f1: new-tag (held-out columns) and old-tag (the other 42) micro-F1 = 2TP / (2TP + FP + FN) of the summed
   per-tag counts at that θ (0.0 when the denominator is 0), for every base and every continued run from it, and
   forgetting = the continued run's old-tag micro-F1 minus its base's
-- theta_trained (09-REVIEW CR-01, POST_HOC_LABEL: post hoc, not frozen, descriptive; not a decision input): the same
+- theta_trained (POST_HOC_LABEL: post hoc, not frozen, descriptive; not a decision input; added after the results were
+  seen, when BERTurk's new-tag micro-F1 read zero at the frozen reading): the same
   θ and f1 blocks with each masked base's θ chosen on its trained columns only (trained_theta, THETA_TRAINED_RULE),
   and the cause it discloses (THETA_CAUSE: a masked BERTurk base's untrained held-out rows sit near P = 0.5 on val
   and push its 48-column global θ up). The frozen reading (theta, f1) is unchanged; the primary block, by_k, the
   bootstrap and so criterion (d) read neither
-- bootstrap (A3, BOOT_PAIRING): per k a descriptive paired percentile interval of the mean-over-draws macro-AP delta on
+- bootstrap (BOOT_PAIRING): per k a descriptive paired percentile interval of the mean-over-draws macro-AP delta on
   one pilot.metrics.bootstrap_weights(n, B, seed) draw with the protocol's B, seed and level; a replicate in which a
   held-out tag has no positive is counted in n_undefined and left out, never scored as 0 (on the full split such a tag
   is refused by pilot.metrics.new_tag_ap)
 - wall_clock_s: the incremental wall clock of every continued run, copied from the runs manifest (WALL_RULE); positives:
   the realised positives per tag, draw and k, copied from the protocol's frozen draws
 
-render_markdown(record) is the README Phase 9 block (points with 2 decimals, AP and F1 with 3; rounding for display
-only); fewshot.py --render PATH prints it for a record of the frozen protocol.
+render_markdown(record) is the README few-shot results block (points with 2 decimals, AP and F1 with 3; rounding for
+display only); fewshot.py --render PATH prints it for a record of the frozen protocol.
 
 Values are float64 and never rounded (rounding happens only in render_markdown). The record holds no timestamp, no uid
 list, no message text and no local path (repo-relative paths, ids and digests), and is written as key-sorted JSON, so it
 rebuilds byte for byte from the same dumps, whatever order the runs manifest lists its entries in. Nothing in it is
-selected on test: θ comes only from each masked base's own val dump, AP needs no θ or T.
+selected on test: θ comes only from each masked base's own val dump, AP needs no θ or T. The rule and note texts the
+record holds (THETA_RULE, POST_HOC_LABEL, THETA_TRAINED_RULE, THETA_CAUSE, BOOT_PAIRING, NOTES) are kept byte for byte
+as committed, including the planning labels some of them quote, so the record still rebuilds unchanged.
 
 Numpy and stdlib only: never torch, scipy, sklearn, laya or Ray (sklearn's average_precision_score is a test oracle).
 
@@ -54,10 +57,11 @@ usage:
     fr.write_record(rec, fr.RECORD_PATH)
     print(fr.render_markdown(rec))
     python fewshot.py --report --out results/fewshot/fewshot.json      # make fewshot-reports
-    python fewshot.py --render results/fewshot/fewshot.json            # the README Phase 9 block
+    python fewshot.py --render results/fewshot/fewshot.json            # the README few-shot results block
 """
 import json
 import os
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 
@@ -69,6 +73,8 @@ RESULTS_SCHEMA = "fewshot-results/1"
 RECORD_PATH = os.path.join(REPO_ROOT, "results", "fewshot", "fewshot.json")
 PRIMARY_METRIC = "new_tag_macro_ap"
 KINDS = fewshot.KINDS                                       # ("laya", "berturk"): every delta is Laya - BERTurk
+# the rule and note texts below are copied into results/fewshot/fewshot.json and stay byte for byte as committed,
+# including the planning labels they quote
 THETA_RULE = ("A1: each masked base's θ is pilot.metrics.select_theta on its own val dump at T = 1 over all 48 columns "
               "(the val rule unchanged: a global θ on val micro-F1, a tag's own θ only with >= %d val positives); the "
               "held-out tags have fewer val positives, so they use the global θ; the base's θ is applied unchanged to "
@@ -104,24 +110,26 @@ NOTES = [
 ]
 
 
-def _manifest(manifest_path):
+def _manifest(manifest_path: str | None) -> str:
     return pilot.data.DEFAULT_MANIFEST if manifest_path is None else manifest_path
 
 
-def _root(dump_root):
+def _root(dump_root: str | None) -> str:
     return dumps.DUMP_ROOT if dump_root is None else dump_root
 
 
-def run_key(e):
+def run_key(e: dict[str, Any]) -> str:
     """The record key of a runs-manifest entry: "s<seed>" for a masked base, "d<draw>-k<k>" for a continued run."""
     return "s%d" % e["seed"] if e["stage"] == "base" else "d%d-k%d" % (e["draw"], e["k"])
 
 
-def _what(e, split):
+def _what(e: dict[str, Any], split: str) -> str:
     return "%s/%s (%s %s %s)" % (e["dump_run_id"], split, e["kind"], e["stage"], run_key(e))
 
 
-def load(entry, split, pin, runs_sha256, dump_root=None, manifest_path=None, uids_ref=None):
+def load(entry: dict[str, Any], split: str, pin: str, runs_sha256: str, dump_root: str | None = None,
+         manifest_path: str | None = None,
+         uids_ref: list[str] | None = None) -> tuple[np.ndarray, np.ndarray, list[str], dict[str, Any], str]:
     """(Y bool [n, 48], P float64 [n, 48] at T = 1, uids, sidecar, dump_sha256) of one listed entry's dump, verified
     by pilot.dumps.load_dump and bound to the entry (system kind, training run id, seed) and to the gate: a test dump
     carries protocol_sha256 == `pin` and fewshot_runs_sha256 == `runs_sha256`, a val dump (a masked base's θ source)
@@ -153,7 +161,7 @@ def load(entry, split, pin, runs_sha256, dump_root=None, manifest_path=None, uid
                                                                                          want))
     elif "protocol_sha256" in side or "fewshot_runs_sha256" in side:
         raise SystemExit("%s: the val dump carries protocol_sha256 or fewshot_runs_sha256; a masked base's θ source is "
-                         "its own ungated val dump (D-05)" % what)
+                         "its own ungated val dump" % what)
     if uids_ref is not None and uids != uids_ref:
         raise SystemExit("%s: the dump scores the %s messages in another uid order than the other few-shot dumps; "
                          "every model and draw is paired message by message (rescore the full split)" % (what, split))
@@ -164,14 +172,14 @@ def load(entry, split, pin, runs_sha256, dump_root=None, manifest_path=None, uid
     return Y, metrics.probabilities(logits, 1.0), uids, side, side["dump_sha256"]
 
 
-# the sidecar keys on which a masked base's val dump (its θ source) and its test dump must agree (09-REVIEW WR-02):
+# the sidecar keys on which a masked base's val dump (its θ source) and its test dump must agree:
 # report.SAME_SOURCE_KEYS without the checkpoint path, which a local checkpoint_identity binds (report.PATH_KEY; a test
 # keeps the two equal)
 SAME_SOURCE_KEYS = (("system", "kind"), ("system", "checkpoint_identity"), ("temperature", "shipped"),
                     ("scorer", "device"), ("scorer", "dtype"), ("scorer", "amp_enabled"))
 
 
-def same_source(entry, val_side, test_side):
+def same_source(entry: dict[str, Any], val_side: dict[str, Any], test_side: dict[str, Any]) -> None:
     """None when a masked base's val sidecar and test sidecar agree on SAME_SOURCE_KEYS (a missing key reads as None
     on both sides); SystemExit naming the base and the first key that differs otherwise. The val dump is ungated, so it
     could be rescored elsewhere (another device or scorer); its θ is applied only to a test dump of the same source,
@@ -188,16 +196,17 @@ def same_source(entry, val_side, test_side):
                                                                                     a, b))
 
 
-def _sorted_entries(runs):
+def _sorted_entries(runs: dict[str, Any]) -> list[dict[str, Any]]:
     return sorted(runs["entries"], key=fewshot.entry_key)
 
 
-def load_all(protocol, pin, runs, runs_sha256, dump_root=None, manifest_path=None):
+def load_all(protocol: dict[str, Any], pin: str, runs: dict[str, Any], runs_sha256: str, dump_root: str | None = None,
+             manifest_path: str | None = None) -> dict[str, Any]:
     """{"Y": {split: gold}, "P": {(split, kind, key): P}, "dumps": {dump_run_id: {split: dump_sha256}}, "split":
     {split: manifest entry}} of every dump the record reads, in entry_key order (so the result does not depend on the
     order the manifest lists its entries in); every test dump scores one uid order, every val dump one too, each
     split is the frozen protocol's (sha256), and each masked base's val and test dumps are of one source
-    (same_source, 09-REVIEW WR-02)."""
+    (same_source)."""
     manifest = _manifest(manifest_path)
     out = {"Y": {}, "P": {}, "dumps": {}, "split": {}}
     ref = {}
@@ -220,17 +229,17 @@ def load_all(protocol, pin, runs, runs_sha256, dump_root=None, manifest_path=Non
     return out
 
 
-def _ap(data, block, kind, key):
+def _ap(data: dict[str, Any], block: dict[str, Any], kind: str, key: str) -> dict[str, Any]:
     r = metrics.new_tag_ap(data["Y"]["test"], data["P"][("test", kind, key)], block["tags"])
     return {"per_tag": r["per_tag"], "macro": r["macro"]}
 
 
-def mean_delta(draws):
+def mean_delta(draws: Sequence[float]) -> float:
     """The aggregate criterion (d) reads: float(np.mean) of the per-draw deltas in float64 (pilot.verdict._fewshot)."""
     return float(np.mean(np.asarray(draws, dtype=np.float64)))
 
 
-def k_block(block, data, k, mode):
+def k_block(block: dict[str, Any], data: dict[str, Any], k: int, mode: str) -> dict[str, Any]:
     """{"per_draw": [{"draw", "laya", "berturk", "delta"}], "draws", "mean_delta"} of the new-tag macro-AP at `k`
     (k = 0: each draw's masked base, base_seed_of(draw, mode)), delta = Laya - BERTurk, in draw order."""
     per = []
@@ -242,7 +251,7 @@ def k_block(block, data, k, mode):
     return {"per_draw": per, "draws": draws, "mean_delta": mean_delta(draws)}
 
 
-def _primary_k(block):
+def _primary_k(block: dict[str, Any]) -> int:
     k = (block["rules"].get("primary_metric") or {}).get("k")
     if k not in block["k_values"]:
         raise SystemExit("the frozen primary metric's k %r is not one of the frozen k values %s; restore protocol.json "
@@ -250,19 +259,20 @@ def _primary_k(block):
     return k
 
 
-def _primary(block, data, mode):
+def _primary(block: dict[str, Any], data: dict[str, Any], mode: str) -> dict[str, Any]:
     k = _primary_k(block)
     return dict({"k": k, "metric": PRIMARY_METRIC}, **k_block(block, data, k, mode))
 
 
-def primary(protocol, pin, runs, runs_sha256, dump_root=None, manifest_path=None):
+def primary(protocol: dict[str, Any], pin: str, runs: dict[str, Any], runs_sha256: str, dump_root: str | None = None,
+            manifest_path: str | None = None) -> dict[str, Any]:
     """The primary block {"k", "metric", "per_draw", "draws", "mean_delta"} (see the module docstring) from the dumps
     the runs manifest `runs` lists."""
     block = fewshot._block(protocol)
     return _primary(block, load_all(protocol, pin, runs, runs_sha256, dump_root, manifest_path), runs["mode"])
 
 
-def subset_micro_f1(per_tag, tags):
+def subset_micro_f1(per_tag: dict[str, dict[str, Any]], tags: Iterable[str]) -> float:
     """Micro-F1 2TP / (2TP + FP + FN) of the tp/fp/fn counts of pilot.metrics.metrics()'s per_tag, summed over `tags`;
     0.0 when the denominator is 0."""
     tp = sum(per_tag[t]["tp"] for t in tags)
@@ -272,12 +282,13 @@ def subset_micro_f1(per_tag, tags):
     return 2 * tp / den if den else 0.0
 
 
-def _f1(data, kind, key, sel, held, old):
+def _f1(data: dict[str, Any], kind: str, key: str, sel: dict[str, Any], held: list[str],
+        old: list[str]) -> dict[str, float]:
     m = metrics.metrics(data["Y"]["test"], data["P"][("test", kind, key)], metrics.theta_vector(sel))["per_tag"]
     return {"new": subset_micro_f1(m, held), "old": subset_micro_f1(m, old)}
 
 
-def trained_theta(Y_val, P_val, held):
+def trained_theta(Y_val: np.ndarray, P_val: np.ndarray, held: Iterable[str]) -> dict[str, Any]:
     """THETA_TRAINED_RULE (post hoc, descriptive): pilot.metrics.select_theta of a masked base's val dump with the
     held-out columns excluded (gold False, P 0.0: no TP, FP or FN at any grid θ), so the global θ is the val micro-F1
     optimum of the trained columns and a held-out tag (no val positive left) gets no θ of its own."""
@@ -287,11 +298,12 @@ def trained_theta(Y_val, P_val, held):
     return metrics.select_theta(Y, P)
 
 
-def _theta_row(sel):
+def _theta_row(sel: dict[str, Any]) -> dict[str, Any]:
     return {"global": sel["global"], "per_tag": dict(sel["per_tag"]), "n_per_tag": len(sel["per_tag"])}
 
 
-def _f1_block(data, block, entries, mode, sels, held, old):
+def _f1_block(data: dict[str, Any], block: dict[str, Any], entries: list[dict[str, Any]], mode: str,
+              sels: dict[tuple[str, int], dict[str, Any]], held: list[str], old: list[str]) -> dict[str, Any]:
     """{kind: {"base": {key: {new, old}}, "continued": {key: {new, old, forgetting, base_seed}}}} of the micro-F1 at
     each masked base's θ in `sels` ({(kind, seed): select_theta result}), forgetting = old - the base's old."""
     f1 = {kind: {"base": {}, "continued": {}} for kind in KINDS}
@@ -308,7 +320,8 @@ def _f1_block(data, block, entries, mode, sels, held, old):
     return f1
 
 
-def ap_delta_bootstrap(Y, PA_by_draw, PB_by_draw, tags, B, seed, level):
+def ap_delta_bootstrap(Y: np.ndarray, PA_by_draw: Sequence[np.ndarray], PB_by_draw: Sequence[np.ndarray],
+                       tags: Iterable[str], B: int, seed: int | None, level: float) -> dict[str, Any]:
     """BOOT_PAIRING: {"delta", "ci", "B", "seed", "level", "method", "n_undefined", "pairing"} of the mean over draws of
     (A - B) new-tag macro-AP. Y is the gold [n, 48], PA_by_draw / PB_by_draw the per-draw probabilities of A (Laya) and
     B (BERTurk) on the same messages in the same order. delta is the full-data mean (mean_delta); every defined
@@ -329,7 +342,7 @@ def ap_delta_bootstrap(Y, PA_by_draw, PB_by_draw, tags, B, seed, level):
              for a, b in zip(PA_by_draw, PB_by_draw)]
     idx, _ = metrics.bootstrap_weights(Y.shape[0], B, seed)    # ONE draw shared by every model and draw (pairing)
 
-    def macro(y, s):
+    def macro(y: np.ndarray, s: np.ndarray) -> float:
         return float(sum(metrics.average_precision(y[:, i], s[:, i]) for i in range(len(cols))) / len(cols))
 
     reps, undefined = [], 0
@@ -344,7 +357,7 @@ def ap_delta_bootstrap(Y, PA_by_draw, PB_by_draw, tags, B, seed, level):
             "method": metrics.BOOT_METHOD, "n_undefined": int(undefined), "pairing": BOOT_PAIRING}
 
 
-def _boot_settings(protocol):
+def _boot_settings(protocol: Any) -> tuple[int, int | None, float]:
     boot = protocol.get("bootstrap") if isinstance(protocol, dict) else None
     if not isinstance(boot, dict) or not all(key in boot for key in ("B", "seed", "level")):
         raise SystemExit("the frozen protocol holds no bootstrap block with B, seed and level; restore protocol.json "
@@ -352,14 +365,15 @@ def _boot_settings(protocol):
     return boot["B"], boot["seed"], boot["level"]
 
 
-def _check(protocol, pin, runs):
+def _check(protocol: dict[str, Any], pin: str, runs: dict[str, Any]) -> str:
     """The recorded mode, after check_runs of `runs` in entry_key order under read_mode(pin) (any listing order)."""
     mode = fewshot.read_mode(pin)
     fewshot.check_runs(dict(runs, entries=_sorted_entries(runs)), protocol, pin, mode)
     return mode
 
 
-def record_of(protocol, pin, runs, runs_sha256, runs_path, dump_root=None, manifest_path=None):
+def record_of(protocol: dict[str, Any], pin: str, runs: dict[str, Any], runs_sha256: str, runs_path: str,
+              dump_root: str | None = None, manifest_path: str | None = None) -> dict[str, Any]:
     """The results record (RESULTS_SCHEMA) of a runs manifest `runs` whose bytes hash to `runs_sha256`, read from
     `runs_path`, and the dumps it lists; the entries may come in any order."""
     block = fewshot._block(protocol)
@@ -367,8 +381,9 @@ def record_of(protocol, pin, runs, runs_sha256, runs_path, dump_root=None, manif
     with open(fewshot.DECISION_PATH, "rb") as f:
         dec_sha = sha256_bytes(f.read())
     if runs["decision"]["sha256"] != dec_sha:
-        raise SystemExit("the runs manifest names the D-08 decision record sha256 %s, but %s hashes to %s; rebuild the "
-                         "runs manifest" % (runs["decision"]["sha256"], repo_relpath(fewshot.DECISION_PATH), dec_sha))
+        raise SystemExit("the runs manifest names the compute decision record sha256 %s, but %s hashes to %s; "
+                         "rebuild the runs manifest"
+                         % (runs["decision"]["sha256"], repo_relpath(fewshot.DECISION_PATH), dec_sha))
     data = load_all(protocol, pin, runs, runs_sha256, dump_root, manifest_path)
     fallback = block["rules"]["compute_fallback"]
     B, seed, level = _boot_settings(protocol)
@@ -383,7 +398,7 @@ def record_of(protocol, pin, runs, runs_sha256, runs_path, dump_root=None, manif
         ap[e["kind"]][e["stage"]][run_key(e)] = _ap(data, block, e["kind"], run_key(e))
         if e["stage"] == "base":
             Yv, Pv = data["Y"]["val"], data["P"][("val", e["kind"], run_key(e))]
-            sels[(e["kind"], e["seed"])] = sel = metrics.select_theta(Yv, Pv)          # A1, the frozen reading
+            sels[(e["kind"], e["seed"])] = sel = metrics.select_theta(Yv, Pv)          # THETA_RULE, the frozen reading
             theta[e["kind"]][run_key(e)] = _theta_row(sel)
             sels_tr[(e["kind"], e["seed"])] = sel = trained_theta(Yv, Pv, held)
             theta_tr[e["kind"]][run_key(e)] = _theta_row(sel)
@@ -425,7 +440,8 @@ def record_of(protocol, pin, runs, runs_sha256, runs_path, dump_root=None, manif
     }
 
 
-def build_record(protocol, pin, runs_path=None, dump_root=None, manifest_path=None):
+def build_record(protocol: dict[str, Any], pin: str, runs_path: str | None = None, dump_root: str | None = None,
+                 manifest_path: str | None = None) -> dict[str, Any]:
     """The results record of the committed runs manifest (pilot.fewshot.RUNS_PATH at call time, or `runs_path`) and
     the dumps it lists; SystemExit when there is no runs manifest or any check fails."""
     path = fewshot.RUNS_PATH if runs_path is None else runs_path
@@ -437,19 +453,19 @@ def build_record(protocol, pin, runs_path=None, dump_root=None, manifest_path=No
     return record_of(protocol, pin, runs, sha, path, dump_root, manifest_path)
 
 
-def record_bytes(record):
+def record_bytes(record: dict[str, Any]) -> bytes:
     """Key-sorted JSON, indent 2, UTF-8, one trailing newline (no timestamp: a rebuild is byte-identical)."""
     return (json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def write_record(record, path):
+def write_record(record: dict[str, Any], path: str) -> str:
     """Write the record atomically (a rebuild overwrites it); returns `path`."""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     write_atomic(path, record_bytes(record))
     return path
 
 
-def read_record(path):
+def read_record(path: str) -> tuple[dict[str, Any], str]:
     """(record, sha256 of the file bytes) of a few-shot results record; SystemExit on a missing file, invalid JSON or
     another schema."""
     if not os.path.isfile(path):
@@ -466,30 +482,30 @@ def read_record(path):
     return rec, sha256_bytes(raw)
 
 
-# ---- the README Phase 9 block (rounding for display only) ----
+# ---- the README few-shot results block (rounding for display only) ----
 
-def _md(header, rows):
+def _md(header: Sequence[str], rows: list[Sequence[str]]) -> list[str]:
     return ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"] + \
         ["| " + " | ".join(r) + " |" for r in rows]
 
 
-def _ap_text(x):
+def _ap_text(x: float | None) -> str:
     return "n/a" if x is None else "%.3f" % x
 
 
-def _points(x):
+def _points(x: float | None) -> str:
     return "n/a" if x is None else "%+.2f points" % (x * 100)
 
 
-def _ci(ci):
+def _ci(ci: Sequence[float] | None) -> str:
     return "n/a (every replicate undefined)" if ci is None else "[%+.2f, %+.2f] points" % (ci[0] * 100, ci[1] * 100)
 
 
-def _k_label(k):
+def _k_label(k: str) -> str:
     return "k = 0 (masked base)" if k == "0" else "k = %s" % k
 
 
-def _f1_table(f1):
+def _f1_table(f1: dict[str, Any]) -> list[str]:
     """The micro-F1 and forgetting table of an f1 block ({kind: {"base", "continued"}})."""
     rows = []
     for kind, name in (("laya", "Laya"), ("berturk", "BERTurk")):
@@ -505,13 +521,13 @@ def _f1_table(f1):
                                                                        "forgetting)"), rows)
 
 
-def render_markdown(record):
-    """The README Phase 9 block of a few-shot results record (deterministic; points with 2 decimals, AP and F1 with
-    3)."""
+def render_markdown(record: dict[str, Any]) -> str:
+    """The README few-shot results block of a few-shot results record (deterministic; points with 2 decimals, AP and
+    F1 with 3)."""
     r = record
     mode, dec = r["decision"]["mode"], r["decision"]
     p = r["primary"]
-    lines = ["### Few-shot new-intent results (Phase 9)", "",
+    lines = ["### Few-shot new-intent results", "",
              "Protocol `%s`, runs manifest `%s`, decision record `%s`, mode %s. Held-out tags: %s; k values %s; "
              "draws %s." % (r["protocol_sha256"][:12], r["runs"]["sha256"][:12], dec["sha256"][:12], mode,
                             ", ".join(r["tags"]), ", ".join("%d" % k for k in r["k_values"]),
