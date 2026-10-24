@@ -24,7 +24,15 @@ step's, in D-01 order), built from the committed records, protocol.json and the 
 with the D-04 disclosure before the first model step listed (pilot.reproduce.DISCLOSURE). It runs nothing and exits 0.
 No printed command passes --force or runs `make baselines`.
 
+--mode full (the default; = `make reproduce`) runs the whole pipeline in D-01 order (pilot.reproduce.run_full): data,
+val selection, final training, evaluation, few-shot, report. It skips every step its committed, hash-verified
+artifacts prove done, so on a finished tree only the report step (the eval-only rebuild above) runs. A todo step's
+commands run in order after the D-04 disclosure; the run stops at the first failing command (a protocol gate refusal
+is final) or at the first output that differs from the committed record or a protocol pin, and a gated scoring step
+runs only after the training steps that make its checkpoints ran in the same invocation.
+
 usage:
+    python reproduce.py                                # = make reproduce PYTHON=.venv/bin/python (--mode full)
     python reproduce.py --mode eval-only               # = make report PYTHON=.venv/bin/python
     python reproduce.py --mode eval-only --verify-checkpoints [--checkpoint-root DIR]
     python reproduce.py --mode eval-only --dry-run [--all]   # print the plan and the commands; run nothing
@@ -39,8 +47,9 @@ from pilot.data import REPO_ROOT
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--mode", choices=reproduce.MODES, required=True,
-                    help="eval-only: rebuild every report, the memo and the README blocks from the committed dumps")
+    ap.add_argument("--mode", choices=reproduce.MODES, default="full",
+                    help="full (default): every todo step in order, then the report; eval-only: rebuild every "
+                         "report, the memo and the README blocks from the committed dumps")
     ap.add_argument("--verify-checkpoints", action="store_true",
                     help="also re-hash the on-disk final seeds against their manifests (reported, not gated)")
     ap.add_argument("--checkpoint-root", metavar="DIR", default=None,
@@ -62,7 +71,8 @@ def main(argv=None):
     rows = reproduce.plan(REPO_ROOT)
     _, pin = protocol.require_frozen()
     print(reproduce.render_plan(rows, pin), end="", flush=True)
-    reproduce.eval_only(REPO_ROOT, verify=a.verify_checkpoints, checkpoint_root=a.checkpoint_root or REPO_ROOT)
+    run = reproduce.run_full if a.mode == "full" else reproduce.eval_only
+    run(REPO_ROOT, verify=a.verify_checkpoints, checkpoint_root=a.checkpoint_root or REPO_ROOT)
 
 
 if __name__ == "__main__":

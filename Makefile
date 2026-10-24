@@ -16,6 +16,7 @@
 #   make fewshot-scoring  score every few-shot checkpoint of results/fewshot/runs.json once (bases on val and test, continued models on test) behind the protocol gate (model, about 30 min on the M4; never rerun: the gate refuses an existing dump)
 #   make fewshot-reports  rebuild results/fewshot/fewshot.json from the committed few-shot dumps (no model)
 #   make memo  write results/final/memo.md, the one-page decision memo, from the committed records (no model)
+#   make reproduce  the whole pipeline in order (data, val selection, final training, evaluation, few-shot, report), skipping every step its committed, hash-verified artifacts prove done; MODE=eval-only is make report
 #   make report  eval-only: verify the protocol, splits and records, rebuild every report, the README blocks and the memo from the committed dumps (no training, no scoring); fails on any rebuilt file that differs
 PYTHON ?= python
 UV ?= uv
@@ -37,8 +38,9 @@ BERTURK_FINAL := berturk-c500b06ccf34-f37197ee-29446b61 berturk-1f0bb00cd6f7-a14
 FINAL := results/final
 FEWSHOT := results/fewshot
 FEWSHOT_ROOT ?= .
+MODE ?= full
 
-.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports fewshot-scoring fewshot-reports memo report
+.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports fewshot-scoring fewshot-reports memo reproduce report
 
 env:
 	$(PY312) -m venv $(VENV)
@@ -175,8 +177,11 @@ fewshot-reports:
 memo:
 	$(PYTHON) report.py --memo $(FINAL)/verdict.json --out $(FINAL)/memo.md > /dev/null
 
+reproduce:
+	$(PYTHON) reproduce.py --mode $(MODE) $(if $(VERIFY_CHECKPOINTS),--verify-checkpoints,)
+
 report:
-	$(PYTHON) reproduce.py --mode eval-only $(if $(VERIFY_CHECKPOINTS),--verify-checkpoints,)
+	$(MAKE) reproduce MODE=eval-only PYTHON="$(PYTHON)"
 
 clean-data:
 	rm -rf data/splits data/audit

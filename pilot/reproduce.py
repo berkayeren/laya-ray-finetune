@@ -51,8 +51,22 @@ step's with --all), with DISCLOSURE once before the first model step listed; it 
 disclosed, not run here: MPS retraining is not bit-identical, so it stops at the first output that differs from the
 committed record or a protocol pin, and the gate is never weakened.
 
+Full mode (D-01 to D-04; `make reproduce`, reproduce.py --mode full, the default): run_full takes plan() (so a
+partial, tampered or out-of-order tree is refused before any command), skips every done step ("skip NAME (done)"),
+runs each todo step's commands in D-01 order, evaluated just before the step runs (so a record an earlier step wrote
+feeds the next step's commands), and ends with report_step, the eval-only rebuild with its pre and post tree checks.
+DISCLOSURE prints once before the first model step; a selection run id is resolved with the step's --print-run-id
+command (capture_command) and substituted for RUN_ID; the first non-zero exit stops the run in one line naming the
+step and the command (a protocol gate refusal from score.py is final). After every step it ran, after_check re-reads
+the step's evidence: an artifact that is missing, fails its reader, differs from its protocol.json pin or differs
+from the bytes git HEAD holds for it (committed_bytes) stops the run with the D-04 reason. A gated scoring step
+(GATE_PRODUCERS) runs only when the steps that train its checkpoints ran in the same invocation; otherwise it is
+refused before any command, because the gated dumps are the exactly-once audit record. No command passes --force.
+On a finished tree every step through fewshot-reports is done, so only the report regenerates.
+
 usage:
     python -m pilot.reproduce --plan          # the 19-step plan of the working tree, each step done, todo or run
+    python reproduce.py                       # = make reproduce: every todo step in order, then the report
     python reproduce.py --mode eval-only      # = make report: verify, rebuild every report, the memo and the README
     python reproduce.py --mode eval-only --dry-run [--all]   # print the plan and the commands; run nothing
 """
@@ -498,7 +512,7 @@ README_BLOCKS = (
     ("results-table", ("report.py", "--table", "results/reports")),
     ("recommendation", ("report.py", "--recommendation", VERDICT)),
 )
-MODES = ("eval-only",)
+MODES = ("full", "eval-only")
 README = "README.md"
 
 
@@ -709,6 +723,12 @@ def _missing_refusal(step, items):
             "with `git checkout -- %s`" % (it["path"], step["name"], " ".join(it["files"])))
 
 
+def _print_verify(root, checkpoint_root, out):
+    for r in verify_checkpoints(root, checkpoint_root):
+        out("%s%s seed %s %s: %s%s" % (VERIFY_LINE, r["kind"], r["seed"], r["checkpoint_name"], r["status"],
+                                      " (%s)" % r["detail"] if r["detail"] else ""))
+
+
 def eval_only(root=REPO_ROOT, run=run_command, blocks=render_blocks, out=print, verify=False, checkpoint_root=None):
     """Eval-only (D-05): verify the tree through plan(), refuse before any command a step other than data that is
     not done (its first missing path and the step that makes it), run `make data` only when the local split files are
@@ -718,9 +738,7 @@ def eval_only(root=REPO_ROOT, run=run_command, blocks=render_blocks, out=print, 
         if step["name"] not in LOCAL + ALWAYS and st != "done":
             raise SystemExit(_missing_refusal(step, items))
     if verify:
-        for r in verify_checkpoints(root, checkpoint_root):
-            out("%s%s seed %s %s: %s%s" % (VERIFY_LINE, r["kind"], r["seed"], r["checkpoint_name"], r["status"],
-                                          " (%s)" % r["detail"] if r["detail"] else ""))
+        _print_verify(root, checkpoint_root, out)
     if dict((step["name"], st) for step, st, _ in rows)["data"] == "todo":
         out("eval-only data step: make data (the local split files are absent)")
         rc = run(("make", "data"), root)
@@ -1054,6 +1072,130 @@ def dry_run(root=REPO_ROOT, all_steps=False):
                        % (len(README_BLOCKS), ", ".join(name for name, _ in README_BLOCKS)))
     out += ["", "dry run: %d commands printed, nothing was run" % n]
     return "\n".join(out) + "\n"
+
+
+# ---- full mode (D-01 to D-04; `make reproduce`, reproduce.py --mode full): the todo steps in order, then the report ----
+
+GATE_PRODUCERS = {"final-scoring": ("laya-final", "berturk-final"), "fewshot-scoring": ("fewshot-continued",)}
+D04_STOP = ("a from-scratch run stops at the first output that differs from the committed record or a protocol.json "
+            "pin (D-04): the protocol gate admits only the frozen record's checkpoints; `git checkout -- results/` "
+            "restores the audit record")
+DEFERRED_RE = re.compile(r"once (\S+) exists")
+
+
+def capture_command(cmd, root):
+    """The last non-empty stdout line of one command tuple run in root without a shell (a --print-run-id command);
+    its stderr passes through. SystemExit naming the command when it exits non-zero."""
+    sys.stdout.flush()
+    r = subprocess.run(command_argv(cmd), cwd=root, stdout=subprocess.PIPE)
+    if r.returncode != 0:
+        raise SystemExit("`%s` exited %d; it prints the run id the later commands need" % (display(cmd), r.returncode))
+    lines = [l.strip() for l in r.stdout.decode("utf-8", "replace").splitlines() if l.strip()]
+    return lines[-1] if lines else ""
+
+
+def committed_bytes(root, rel):
+    """The bytes git HEAD holds for the repo-relative file rel in root, or None when git is missing, root is not the
+    top of a work tree, there is no HEAD or HEAD does not track rel as a file."""
+    top = _git(root, "rev-parse", "--show-toplevel")
+    if top is None or top.returncode != 0:
+        return None
+    if os.path.realpath(top.stdout.decode("utf-8", "surrogateescape").strip()) != os.path.realpath(root):
+        return None
+    r = _git(root, "cat-file", "blob", "HEAD:" + rel)
+    return r.stdout if r is not None and r.returncode == 0 else None
+
+
+def after_check(step, root, proto, pin):
+    """After a step ran: its evidence again, every item present and verified (the readers and the protocol.json pins
+    of the evidence functions), and every file of each item (a dump's npz and sidecar) equal to the bytes git HEAD
+    holds for it when HEAD tracks it; SystemExit (one line, the D-04 reason) at the first failure."""
+    name = step["name"]
+    items = step["evidence"](root, proto, pin, os.path.join(root, "data", "splits.json"))
+    if not items:
+        raise SystemExit("step %s ran, but it left no evidence to verify; %s" % (name, D04_STOP))
+    for it in items:
+        if not it["present"]:
+            raise SystemExit("step %s ran, but %s is missing; %s" % (name, it["label"], D04_STOP))
+        if not it["ok"]:
+            raise SystemExit("step %s ran, but %s; %s" % (name, it["reason"], D04_STOP))
+        for rel in it["files"]:
+            want = committed_bytes(root, rel)
+            if want is None:
+                continue
+            with open(os.path.join(root, rel), "rb") as f:
+                have = f.read()
+            if have != want:
+                raise SystemExit("step %s ran, but %s differs from the bytes git HEAD holds for it; %s"
+                                 % (name, rel, D04_STOP))
+
+
+def _gate_refusal(name):
+    return ("%s has no committed gated dumps while the steps that train its checkpoints are done: the gated dumps are "
+            "the exactly-once audit record and are never rescored; restore them with `git checkout -- results/dumps/`"
+            % name)
+
+
+def _substitute(cmd, rid):
+    return tuple(a.replace(RUN_ID, rid) for a in cmd)
+
+
+def run_full(root=REPO_ROOT, run=run_command, capture=capture_command, blocks=render_blocks, report=report_step,
+             out=print, verify=False, checkpoint_root=None):
+    """Full mode (D-01 to D-04): plan(root) (the 10-03 refusals), then every todo step in STEP_NAMES order, each
+    step's commands evaluated just before it runs, then the report step. A done step is skipped; a todo gated step
+    runs only after the steps that train its checkpoints (GATE_PRODUCERS) ran in this invocation, else it is refused
+    before any command; DISCLOSURE prints once before the first model step; a selection run id (RUN_ID) is resolved
+    with the step's --print-run-id command; the first non-zero exit stops the run naming the step and the command;
+    after_check stops it at the first output that differs from the committed record or a protocol pin."""
+    rows = plan(root)
+    proto, pin = protocol.require_frozen(os.path.join(root, "protocol.json"))
+    todo = {step["name"] for step, st, _ in rows if st == "todo"}
+    for step, st, _ in rows:                          # a gated step is never rerun around its own training
+        if st == "todo" and not all(p in todo for p in GATE_PRODUCERS.get(step["name"], ())):
+            raise SystemExit(_gate_refusal(step["name"]))
+    if verify:
+        _print_verify(root, checkpoint_root, out)
+    ran, disclosed = [], False
+    for step, st, _ in rows:
+        name = step["name"]
+        if name in ALWAYS:
+            continue
+        if st == "done":
+            out("skip %s (done)" % name)
+            continue
+        if not all(p in ran for p in GATE_PRODUCERS.get(name, ())):
+            raise SystemExit(_gate_refusal(name))
+        if step["model"] and not disclosed:
+            out(DISCLOSURE)
+            disclosed = True
+        lines = step_lines(name, root)
+        for cmd, note in lines:
+            if note and note.startswith("deferred"):
+                m = DEFERRED_RE.search(note)
+                raise SystemExit("%s needs %s, which the earlier step did not produce; %s"
+                                 % (name, m.group(1) if m else "a committed record", D04_STOP))
+        cmds = [c for c, _ in lines if c is not None]
+        if any(RUN_ID in a for c in cmds for a in c):
+            if not cmds or cmds[0][-1:] != ("--print-run-id",):
+                raise SystemExit("step %s holds %s but its first command is not a --print-run-id command"
+                                 % (name, RUN_ID))
+            out("run: " + display(cmds[0]))
+            rid = capture(cmds[0], root)
+            if not rid or RUN_ID in rid or not re.fullmatch(r"[A-Za-z0-9._-]+", rid):
+                raise SystemExit("step %s: `%s` printed no run id (%r)" % (name, display(cmds[0]), rid))
+            out("run id: " + rid)
+            cmds = [_substitute(c, rid) for c in cmds[1:]]
+        for cmd in cmds:
+            out("run: " + display(cmd))
+            rc = run(cmd, root)
+            if rc != 0:
+                raise SystemExit("step %s: `%s` exited %d; a protocol gate refusal printed above is final (D-04): a "
+                                 "from-scratch run stops there; otherwise fix the cause and rerun `make reproduce`, "
+                                 "which skips every finished step" % (name, display(cmd), rc))
+        after_check(step, root, proto, pin)
+        ran.append(name)
+    report(root, run, blocks, precheck=not [n for n in ran if n not in LOCAL], out=out)
 
 
 def main(argv=None):

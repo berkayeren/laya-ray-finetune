@@ -246,7 +246,7 @@ def test_eval_only_runs_no_model():
     for bad in (("bash", "-c", "make report"), ("make",), (), ("make report; rm -rf results",), ("make", "")):
         with pytest.raises(SystemExit):
             rp.command_argv(bad)
-    assert rp.MODES == ("eval-only",)
+    assert rp.MODES == ("full", "eval-only")
     assert rp.CHECKED == ("results/", "README.md", "protocol.json")
 
 
@@ -267,15 +267,56 @@ def test_readme_rewriter_reproduces_the_readme():
     assert rp.rewrite_blocks(raw.decode("utf-8"), renders).encode("utf-8") == raw
 
 
-def test_makefile_report_target():
-    assert recipe("report") == ["$(PYTHON) reproduce.py --mode eval-only "
-                                "$(if $(VERIFY_CHECKPOINTS),--verify-checkpoints,)"]
+def test_makefile_reproduce_and_report_targets():
+    """make reproduce is the one target (MODE ?= full); make report is its eval-only form, recursing into it (D-05)."""
+    assert recipe("reproduce") == ["$(PYTHON) reproduce.py --mode $(MODE) "
+                                   "$(if $(VERIFY_CHECKPOINTS),--verify-checkpoints,)"]
+    assert recipe("report") == ['$(MAKE) reproduce MODE=eval-only PYTHON="$(PYTHON)"']
     with open(os.path.join(REPO_ROOT, "Makefile"), encoding="utf-8") as f:
         text = f.read()
+    assert re.findall(r"^MODE \?= (.*)$", text, re.M) == ["full"]
+    assert not re.search(r"^MODE :?= ", text, re.M)
     phony = re.search(r"^\.PHONY: (.+)$", text, re.M)
-    assert phony and "report" in phony.group(1).split(), "report is not in .PHONY"
+    names = phony.group(1).split() if phony else []
+    assert {"reproduce", "report", "final-reports", "final-scoring", "memo"} <= set(names), names
+    assert re.search(r"^#   make reproduce  the whole pipeline in order \(data, val selection, final training, "
+                     r"evaluation, few-shot, report\), skipping every step its committed, hash-verified artifacts "
+                     r"prove done; MODE=eval-only is make report$", text, re.M)
     assert re.search(r"^#   make report  eval-only: .*fails on any rebuilt file that differs$", text, re.M)
-    assert "final-reports" in phony.group(1).split()
+    out = subprocess.run(["make", "-n", "report", "PYTHON=py", "VERIFY_CHECKPOINTS=1"], cwd=REPO_ROOT,
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert "py reproduce.py --mode eval-only --verify-checkpoints" in out.stdout.split("\n"), out.stdout
+    out = subprocess.run(["make", "-n", "reproduce", "PYTHON=py"], cwd=REPO_ROOT, capture_output=True, text=True)
+    assert out.returncode == 0 and out.stdout.split("\n")[0].rstrip() == "py reproduce.py --mode full", out.stdout
+
+
+def _data_done(monkeypatch):
+    """The data step's evidence stubbed to one verified item, so a test of the committed record needs no local
+    split files."""
+    step = rp.STEPS[rp.STEP_NAMES.index("data")]
+    monkeypatch.setitem(step, "evidence", lambda root, proto, pin, manifest: [
+        rp._item("data/splits/val.jsonl", True, True, "")])
+
+
+def test_full_mode_on_the_committed_tree_runs_only_the_report(monkeypatch):
+    _data_done(monkeypatch)
+    calls, reports, lines = [], [], []
+
+    def run(cmd, root):
+        calls.append(cmd)
+        return 0
+
+    def capture(cmd, root):
+        calls.append(cmd)
+        return "x"
+
+    def report(root, run, blocks, precheck=True, out=print):
+        reports.append((root, precheck))
+    rp.run_full(REPO_ROOT, run=run, capture=capture, blocks=None, report=report, out=lines.append)
+    assert calls == [] and reports == [(REPO_ROOT, True)], (calls, reports)
+    assert lines == ["skip %s (done)" % n for n in D01[:18]], lines
+    assert rp.DISCLOSURE not in lines and not [l for l in lines if l.startswith("run: ")]
 
 
 # ---- eval-only fail paths (tmp git repos and synthetic trees; the committed tree is never touched) ----
@@ -444,9 +485,12 @@ def _need_data():
 
 
 @pytest.mark.data
-def test_eval_only_end_to_end(tmp_path, monkeypatch):
+@pytest.mark.parametrize("how", ["eval-only", "make reproduce"])
+def test_eval_only_end_to_end(tmp_path, monkeypatch, how):
     """A fresh copy of the working tree (every tracked file, plus the local data/splits/ and data/audit/), committed
-    in a new repo: reproduce.py --mode eval-only exits 0, runs all 9 rebuild commands and leaves the copy clean."""
+    in a new repo: reproduce.py --mode eval-only, and `make reproduce` (full mode: every step from data to
+    fewshot-reports skipped as done, no command of a todo step), exit 0, run all 9 rebuild commands and leave the copy
+    clean."""
     import shutil
     _need_data()
     _git_env(monkeypatch)
@@ -464,11 +508,18 @@ def test_eval_only_end_to_end(tmp_path, monkeypatch):
                    check=True, capture_output=True)
     git_in(copy, "commit", "-q", "-m", "copy")
     assert rp.tree_changes(str(copy)) == []
-    out = subprocess.run([sys.executable, "reproduce.py", "--mode", "eval-only"], cwd=copy, capture_output=True,
-                         text=True, timeout=600)
+    argv = ([sys.executable, "reproduce.py", "--mode", "eval-only"] if how == "eval-only"
+            else ["make", "reproduce", "PYTHON=" + sys.executable])
+    out = subprocess.run(argv, cwd=copy, capture_output=True, text=True, timeout=600)
     assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
     lines = out.stdout.splitlines()
-    assert lines[0] == "reproduce in " + sys.executable
+    assert ("reproduce in " + sys.executable) in lines[:2], lines[:2]
+    skips = [l for l in lines if l.startswith("skip ")]
+    if how == "eval-only":
+        assert skips == []
+    else:
+        assert skips == ["skip %s (done)" % n for n in D01[:18]], skips
+        assert not [l for l in lines if l.startswith("run: ")] and rp.DISCLOSURE not in lines
     assert [l for l in lines if l.startswith("eval-only: ")] == ["eval-only: " + " ".join(c) for c in rp.REBUILD]
     assert "README blocks: 11 rendered, README.md unchanged" in lines
     assert lines[-1].startswith("eval-only done: ") and "git status clean" in lines[-1]
