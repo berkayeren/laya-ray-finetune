@@ -16,10 +16,13 @@
 The published verdict (plan 08-12, REP-02, REP-03, ROADMAP Phase 8 criteria 4 and 5):
 - `make final-reports` (no model) is the exact command list: LAYA_FINAL and BERTURK_FINAL are the protocol's final
   dump run ids in protocol order; per final seed one `report.py RUN_DIR --split test --postfit RECORD` line into
-  results/final/reports/<id>-test.json, then `report.py --verdict --out results/final/verdict.json`
+  results/final/reports/<id>-test.json, then `report.py --verdict --fewshot results/fewshot/fewshot.json --out
+  results/final/verdict.json` (09-12: the few-shot path of (d) applied)
 - results/final/verdict.json is verdict/1 of the frozen protocol (protocol.sha256 == PROTOCOL_SHA256); every criterion
   status and the overall verdict recompute with pilot.verdict's functions from the record's own numbers and the
-  frozen criteria block; the six per-seed reports sit at their postfit record's θ (theta_source bound by sha256, the
+  frozen criteria block, (d) with the verdict's own fewshot block (09-12: its record is results/fewshot/fewshot.json
+  by sha256, its k criteria (d)'s fewshot k, its status MET or NOT MET as recomputed, (d) PASS or FAIL, provisional
+  false); the six per-seed reports sit at their postfit record's θ (theta_source bound by sha256, the
   shipped val_selected θ == the record's theta.shipped, in_sample false) and their metrics are the verdict's
   per-seed rows
 - README.md's Phase 8 section holds exactly one GO block, equal to pilot.verdict.render_go of the committed verdict,
@@ -34,11 +37,16 @@ The published verdict (plan 08-12, REP-02, REP-03, ROADMAP Phase 8 criteria 4 an
   frozen, how the final seeds were scored once and how to read the GO block (INCONCLUSIVE counts as NO-GO and means
   collect bank data, provisional until Phase 9, the macro-F1 CI not resolvable, the in-sample val deltas, the θ never
   re-selected, latency reported, not gated, the recommendation in Phase 10), and holds no metric value of its own
-- data marker: verdict.json is report.verdict_report() serialised as report.py writes it, byte for byte, every
+- README.md's Phase 9 prose (09-12) says the few-shot path resolved the provisional mark without changing the
+  verdict exactly when decide gives the same verdict and rule with (d) PASS and with (d) FAIL for the committed (a),
+  (b) and alternative GO statuses
+- data marker: verdict.json is report.verdict_report(fewshot=results/fewshot/fewshot.json) serialised as report.py
+  writes it, byte for byte, every
   per-seed report is report.run_report(..., postfit=RECORD) and every confidence record (and SVG) is
   report.confidence_report of its dump and binding, byte for byte (needs `make data`)
 """
 import glob
+import hashlib
 import json
 import os
 import re
@@ -238,7 +246,8 @@ def report_lines():
             for kind, s in final_seeds()]
 
 
-VERDICT_LINE = "$(PYTHON) report.py --verdict --out $(FINAL)/verdict.json > /dev/null"
+VERDICT_LINE = "$(PYTHON) report.py --verdict --fewshot $(FEWSHOT)/fewshot.json --out $(FINAL)/verdict.json > /dev/null"
+FEWSHOT_RECORD = "results/fewshot/fewshot.json"
 CONF_SPLITS = ("test", "hotels_probe")
 REFERENCES = ((ZERO_SHOT, ("test", "hotels_probe")), ("prior", ("test",)))   # bound val_selected (the val rule)
 
@@ -316,7 +325,18 @@ def test_verdict_binds_the_frozen_protocol():
     alt = pilot.verdict.alternative_go(h["micro_f1"], crit["alternative_go"])
     cal = [p for p in crit["d"]["paths"] if p["path"] == "calibration"][0]["metric"]
     abst = [p for p in crit["d"]["paths"] if p["path"] == "abstention"][0]["metric"]
-    d = pilot.verdict.criterion_d(h[cal], h[abst], None, crit["d"])
+    few = v["fewshot"]                                      # 09-12: the few-shot record's form, never PENDING
+    assert few != {"status": pilot.verdict.PENDING, "phase": pilot.verdict.FEWSHOT_PHASE}, "the few-shot path is pending"
+    with open(os.path.join(REPO_ROOT, FEWSHOT_RECORD), "rb") as f:
+        assert few["record"] == {"path": FEWSHOT_RECORD, "sha256": hashlib.sha256(f.read()).hexdigest()}, few["record"]
+    fpath = [p for p in crit["d"]["paths"] if p["path"] == "fewshot"][0]
+    assert few["k"] == fpath["k"] and few["phase"] == pilot.verdict.FEWSHOT_PHASE, few
+    d = pilot.verdict.criterion_d(h[cal], h[abst], {"mean_delta": few["mean_delta"], "draws": few["draws"]},
+                                  crit["d"])
+    got_path = [p for p in d["paths"] if p["path"] == "fewshot"][0]
+    assert got_path["status"] in (pilot.verdict.MET, pilot.verdict.NOT_MET), got_path
+    assert few["status"] == got_path["status"], (few["status"], got_path["status"])
+    assert d["status"] in (pilot.verdict.PASS, pilot.verdict.FAIL), d["status"]
     rows = v["collapse"]["rows"]
     for r in rows:                                          # every collapse component recomputes from its own numbers
         for c in r["components"]:
@@ -346,7 +366,7 @@ def test_verdict_binds_the_frozen_protocol():
     assert v["criteria"]["c"]["status"] == pilot.verdict.REPORTED
     want = pilot.verdict.decide(a["status"], b["status"], d["status"], alt["status"])
     assert v["verdict"] == want, (v["verdict"], want)
-    assert v["fewshot"]["status"] == pilot.verdict.PENDING
+    assert v["verdict"]["provisional"] is False
 
 
 def test_per_seed_reports_match_the_verdict():
@@ -438,7 +458,8 @@ def test_final_results_rebuild():
     _need_data()
     proto, _ = protocol.require_frozen()
     with open(VERDICT, "rb") as f:
-        assert as_written(report.verdict_report()) == f.read(), "results/final/verdict.json does not rebuild"
+        assert as_written(report.verdict_report(fewshot=os.path.join(REPO_ROOT, FEWSHOT_RECORD))) == f.read(), \
+            "results/final/verdict.json does not rebuild"
     for kind, s in final_seeds():
         rel = "results/final/reports/%s-test.json" % s["dump_run_id"]
         got = report.run_report(os.path.join(DUMPS, s["dump_run_id"]), "test", DEFAULT_MANIFEST,
@@ -554,3 +575,40 @@ def test_final_confidence_records_rebuild():
         if r["split"]["name"] == "test":
             with open(os.path.join(REPO_ROOT, rel[:-len(".json")] + ".svg"), encoding="utf-8") as f:
                 assert report.render_svg(json.loads(json.dumps(got, ensure_ascii=False))) == f.read(), rel
+
+
+# ---- 09-12: the README Phase 9 prose ties the verdict to the few-shot path (D-13) ----
+
+PHASE9_HEADING = "## Few-shot new-intent experiment (Phase 9)"
+VERDICT_UNCHANGED = "The few-shot path resolved the provisional mark without changing the verdict"
+
+
+def phase9_prose():
+    """The README's Phase 9 prose: from the section heading to the first generated block's marker after it."""
+    with open(README, encoding="utf-8") as f:
+        text = f.read()
+    assert text.count(PHASE9_HEADING) == 1, "README.md has no single Phase 9 section"
+    lo = text.index(PHASE9_HEADING)
+    j = text.find("<!--", lo)
+    hi = text.find("\n## ", lo + len(PHASE9_HEADING))
+    assert lo < j and (hi < 0 or j < hi), "the Phase 9 section holds no generated block"
+    return " ".join(text[lo:j].split())
+
+
+def test_readme_phase9_states_the_verdict_unchanged():
+    """When decide gives the same verdict with (d) PASS and with (d) FAIL for the committed (a), (b) and alternative GO
+    statuses (the few-shot path cannot move it), the Phase 9 prose says the few-shot path resolved the provisional
+    mark without changing the verdict, and the committed verdict is that one, by the same rule; otherwise the prose
+    must not say so."""
+    v = committed_verdict()
+    s = v["verdict"]["statuses"]
+    met = pilot.verdict.decide(s["a"], s["b"], pilot.verdict.PASS, s["alternative_go"])
+    not_met = pilot.verdict.decide(s["a"], s["b"], pilot.verdict.FAIL, s["alternative_go"])
+    prose = phase9_prose()
+    if (met["verdict"], met["rule"]) == (not_met["verdict"], not_met["rule"]):
+        assert VERDICT_UNCHANGED in prose, "the Phase 9 prose must say %r" % VERDICT_UNCHANGED
+        assert (v["verdict"]["verdict"], v["verdict"]["rule"]) == (met["verdict"], met["rule"])
+        assert "the rule that fired are the ones Phase 8 published" in prose
+    else:
+        assert VERDICT_UNCHANGED not in prose, "the few-shot path can change the verdict; the prose must not say %r" \
+            % VERDICT_UNCHANGED

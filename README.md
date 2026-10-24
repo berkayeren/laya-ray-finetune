@@ -1314,16 +1314,17 @@ The GO block below is computed mechanically from the frozen thresholds and the c
 - Split test: n = 413 (15 no-intent).
 - Deltas: laya - berturk, seed-averaged, headline (T: laya 4.7698; berturk 0.7430; θ: laya theta.shipped; berturk theta.shipped); B = 10000, seed 0, 95% interval, percentile (numpy linear interpolation).
 - Units: deltas are Laya - BERTurk fractions in [0, 1] (points = fraction x 100), compared unrounded.
+- Few-shot path (Phase 9): k = 10, mean over 3 draws, mode primary; record results/fewshot/fewshot.json sha256 `dfdacc7fe510`.
 
 | criterion | status | numbers |
 |---|---|---|
 | (a) non-inferiority | INCONCLUSIVE | micro-F1 delta -1.72 points, CI [-3.63, +0.22]; macro-F1 delta +3.86 points, CI [+0.59, +6.79] (not resolvable at this test size (n = 413)) |
 | (b) seeds and no collapsed run | PASS | 8 runs, 0 collapsed; seeds laya 0, 1, 2; berturk 0, 1, 2 |
 | (c) latency | REPORTED (not gated) | reported, not gated; laya mps p50 0.332 s, p95 0.406 s (n = 624); laya cpu p50 0.682 s, p95 0.814 s (n = 624); berturk mps p50 0.009 s, p95 0.012 s (n = 624); berturk cpu p50 0.025 s, p95 0.027 s (n = 624) |
-| (d) a clear edge on calibration, abstention or few-shot learning | PENDING | calibration (brier): NOT MET, delta +0.34 points, CI [+0.21, +0.48]; abstention (precision_at_80): NOT MET, delta -9.05 points, CI [-11.96, -6.08]; fewshot (new_tag_macro_ap): PENDING (Phase 9) |
+| (d) a clear edge on calibration, abstention or few-shot learning | PASS | calibration (brier): NOT MET, delta +0.34 points, CI [+0.21, +0.48]; abstention (precision_at_80): NOT MET, delta -9.05 points, CI [-11.96, -6.08]; fewshot (new_tag_macro_ap): MET, mean delta +65.87 points |
 | alternative GO | NOT MET | micro-F1 delta -1.72 points, CI [-3.63, +0.22] |
 
-Statuses: (a) INCONCLUSIVE; (b) PASS; (c) REPORTED (not gated); (d) PENDING; alternative GO NOT MET.
+Statuses: (a) INCONCLUSIVE; (b) PASS; (c) REPORTED (not gated); (d) PASS; alternative GO NOT MET.
 
 **Verdict: INCONCLUSIVE**
 
@@ -1534,7 +1535,10 @@ in this section comes from the generated block below, and a test fails if the bl
 - **Compute fallback.** The compute fallback was not used: the decision record reads mode primary, so every draw
   continued from its own masked base seed and the base-model variance is captured.
 - **The GO block.** Criterion (d)'s few-shot path in the GO block reads this record's primary block at the frozen
-  threshold.
+  threshold. The few-shot path resolved the provisional mark without changing the verdict: criterion (d) is no
+  longer pending, and the verdict and the rule that fired are the ones Phase 8 published, because that rule
+  fires on criterion (a) before criterion (d) is read. The GO block is still the output of the frozen rule, not
+  the recommendation, which is Phase 10.
 
 Regenerate with `python fewshot.py --render results/fewshot/fewshot.json`.
 

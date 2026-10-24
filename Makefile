@@ -12,7 +12,7 @@
 #   make berturk-postfit   rebuild the Phase 6 BERTurk postfit record from the committed 30-epoch selection dumps (no model)
 #   make confidence-reports  rebuild the Phase 7 val confidence records from the committed dumps and postfit records (no model)
 #   make final-scoring  score the six final seeds once on test and HOTELS behind the protocol gate (model, about 35 min on the M4; never rerun: the gate refuses an existing dump)
-#   make final-reports  rebuild results/final/ (per-seed reports, verdict, confidence records) from the committed dumps (no model)
+#   make final-reports  rebuild results/final/ (per-seed reports, verdict with the few-shot record, confidence records) from the committed dumps (no model)
 #   make fewshot-scoring  score every few-shot checkpoint of results/fewshot/runs.json once (bases on val and test, continued models on test) behind the protocol gate (model, about 30 min on the M4; never rerun: the gate refuses an existing dump)
 #   make fewshot-reports  rebuild results/fewshot/fewshot.json from the committed few-shot dumps (no model)
 PYTHON ?= python
@@ -124,7 +124,7 @@ final-reports:
 	$(PYTHON) report.py results/dumps/berturk-c500b06ccf34-f37197ee-29446b61 --split test --postfit results/postfit/berturk.json --out $(FINAL)/reports/berturk-c500b06ccf34-f37197ee-29446b61-test.json > /dev/null
 	$(PYTHON) report.py results/dumps/berturk-1f0bb00cd6f7-a14835e4-29446b61 --split test --postfit results/postfit/berturk.json --out $(FINAL)/reports/berturk-1f0bb00cd6f7-a14835e4-29446b61-test.json > /dev/null
 	$(PYTHON) report.py results/dumps/berturk-06685feeb69f-faf017a7-29446b61 --split test --postfit results/postfit/berturk.json --out $(FINAL)/reports/berturk-06685feeb69f-faf017a7-29446b61-test.json > /dev/null
-	$(PYTHON) report.py --verdict --out $(FINAL)/verdict.json > /dev/null
+	$(PYTHON) report.py --verdict --fewshot $(FEWSHOT)/fewshot.json --out $(FINAL)/verdict.json > /dev/null
 	$(PYTHON) report.py --confidence results/dumps/laya-a6a866dd69fc-88cfaa80-cc216d59 --split test --postfit results/postfit/laya.json --out $(FINAL)/confidence/laya-a6a866dd69fc-88cfaa80-cc216d59-test.json > /dev/null
 	$(PYTHON) report.py --confidence results/dumps/laya-a6a866dd69fc-88cfaa80-cc216d59 --split hotels_probe --postfit results/postfit/laya.json --out $(FINAL)/confidence/laya-a6a866dd69fc-88cfaa80-cc216d59-hotels_probe.json > /dev/null
 	$(PYTHON) report.py --confidence results/dumps/laya-f43484c8aab4-b43eaa54-cc216d59 --split test --postfit results/postfit/laya.json --out $(FINAL)/confidence/laya-f43484c8aab4-b43eaa54-cc216d59-test.json > /dev/null

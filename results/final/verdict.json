@@ -871,8 +871,21 @@
     }
   ],
   "fewshot": {
-    "status": "PENDING",
-    "phase": 9
+    "status": "MET",
+    "phase": 9,
+    "k": 10,
+    "mean_delta": 0.6586517083947101,
+    "draws": [
+      0.6070644314449387,
+      0.6233174982434135,
+      0.745573195495778
+    ],
+    "record": {
+      "path": "results/fewshot/fewshot.json",
+      "sha256": "dfdacc7fe51090542443416dadf0077a3154cfe0b3a121a9d1e6bb1acaee77ad"
+    },
+    "mode": "primary",
+    "disclosure": null
   },
   "criteria": {
     "a": {
@@ -1147,7 +1160,7 @@
       "name": "latency"
     },
     "d": {
-      "status": "PENDING",
+      "status": "PASS",
       "paths": [
         {
           "path": "calibration",
@@ -1172,9 +1185,13 @@
         {
           "path": "fewshot",
           "metric": "new_tag_macro_ap",
-          "status": "PENDING",
-          "mean_delta": null,
-          "draws": null
+          "status": "MET",
+          "mean_delta": 0.6586517083947101,
+          "draws": [
+            0.6070644314449387,
+            0.6233174982434135,
+            0.745573195495778
+          ]
         }
       ],
       "reported_only": {
@@ -1200,14 +1217,14 @@
   "verdict": {
     "verdict": "INCONCLUSIVE",
     "provisional": false,
-    "if_fewshot_met": "INCONCLUSIVE",
-    "if_fewshot_not_met": "INCONCLUSIVE",
+    "if_fewshot_met": null,
+    "if_fewshot_not_met": null,
     "rule": 4,
     "means": "counts as NO-GO; collect bank data",
     "statuses": {
       "a": "INCONCLUSIVE",
       "b": "PASS",
-      "d": "PENDING",
+      "d": "PASS",
       "alternative_go": "NOT MET"
     }
   }
