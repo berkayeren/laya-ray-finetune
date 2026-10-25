@@ -437,7 +437,8 @@ def test_latency_view(tmp_path: Any) -> None:
     with pytest.raises(SystemExit) as e:
         pd.latency_view(root)
     assert "protocol input results/latency/berturk-mps.json not found" in str(e.value.code)
-    shutil.copy(os.path.join(REPO, "results/latency/berturk-mps.json"), os.path.join(root, "results/latency/x.json"))
+    for name in ("berturk-mps.json", "x.json"):
+        shutil.copy(os.path.join(REPO, "results/latency/berturk-mps.json"), os.path.join(root, "results/latency", name))
     with pytest.raises(SystemExit) as e:
         pd.latency_view(root)
     assert "results/latency/x.json is not a protocol.json input" in str(e.value.code)

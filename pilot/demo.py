@@ -37,6 +37,12 @@ Design notes:
   rows must equal the committed final manifest's `epochs` on SHARED_EPOCH_KEYS; the manifest's rows serve only that
   check. Without the checkpoints a system's training view is unavailable with the one-line refusal
   (training_unavailable), never filled from the manifests (the user decision of 2026-10-25, D-09).
+- The confidence, latency and few-shot group (D-10): the reliability diagrams are the committed SVG files, served by
+  exact name from the startup allow-list (svg_allow_list) and never redrawn, each with the run id of the confidence/1
+  record beside it and the val records' caveat verbatim (confidence_view); the latency/1 reports are protocol.json
+  inputs, hashed against their pins before load_reports (latency_view), and their per-message times stay on the
+  server; the few-shot results record is the one the checked verdict binds by sha256 (fewshot_view), every mean
+  shown a cell of pilot.fewshot_report.render_markdown's text. No view builder writes a file.
 
 This module never imports torch, transformers, laya, Ray, fastapi, starlette or uvicorn (a subprocess test guards it).
 
@@ -44,7 +50,8 @@ usage: from pilot import demo
        bindings = demo.protocol_bindings()                   # {kind: binding}, refused in one line on any mismatch
        answer = demo.system_answer(bindings["laya"], logits_by_seed, served_temperatures)
        views = demo.build_views()                            # {name: view or {"error", "source"}}: intents, verdict,
-                                                             # selection (GET /api/<name> of demo.py)
+                                                             # selection, confidence, latency, fewshot (GET /api/<name>)
+       svgs = demo.svg_allow_list()                          # {file name: repo-relative path} for GET /api/svg/<name>
        training = demo.training_system(binding, bound)        # one system's per-epoch rows of its bound seeds
 """
 import json
@@ -57,6 +64,7 @@ from typing import Any
 import numpy as np
 
 import pilot.berturk
+import pilot.fewshot_report
 import pilot.latency
 import pilot.memo
 import pilot.postfit
@@ -288,17 +296,11 @@ def _delta_entry(v: dict[str, Any], crit: str, key: str) -> dict[str, Any]:
     return e
 
 
-def verdict_view(root: str = REPO_ROOT, path: str | None = None) -> dict[str, Any]:
-    """The frozen verdict as data, mirroring report.py's --go-block, --final-table and --recommendation: the record's
-    bytes read once and hashed, parsed, pilot.protocol.require_frozen, pilot.verdict.check_record, then
-    pilot.verdict.render_go, render_final_table and pilot.memo.render_recommendation (equal to those three commands'
-    stdout). SystemExit on a missing or invalid record or one check_record refuses.
-
-    Returns {sources, verdict, means, tone, lines {verdict, rule, means, recommendation} (whole render lines without
-    their markdown markup), criteria [{criterion, status, tone, numbers}] (the GO table's cells), deltas [{criterion,
-    metric, delta_points, ci_points [lo, hi], delta_text, ci_text, direction, status}] (DELTA_ROWS: the record's
-    numbers x 100, unrounded; the texts in the GO render's formats), results and settings ({header, rows} of the
-    results-on-test tables), caveats (pilot.memo.CAVEATS), renders {go, final_table, recommendation}}."""
+def checked_verdict(root: str = REPO_ROOT, path: str | None = None) -> tuple[dict[str, Any], str, str, dict[str, Any],
+                                                                             str]:
+    """(verdict, repo-relative path, sha256 of its bytes, protocol, protocol pin) of the verdict record: its bytes read
+    once and hashed, parsed, pilot.protocol.require_frozen, then pilot.verdict.check_record on the record parsed
+    (report.py's sequence). SystemExit on a missing or invalid record or one check_record refuses."""
     path = os.path.join(root, VERDICT_RECORD) if path is None else path
     rel = repo_relpath(path)
     if not os.path.isfile(path):
@@ -313,6 +315,21 @@ def verdict_view(root: str = REPO_ROOT, path: str | None = None) -> dict[str, An
                          % (rel, e, VERDICT_RECORD)) from None
     proto, pin = pilot.protocol.require_frozen()
     pilot.verdict.check_record(v, proto, pin)
+    return v, rel, sha, proto, pin
+
+
+def verdict_view(root: str = REPO_ROOT, path: str | None = None) -> dict[str, Any]:
+    """The frozen verdict as data, mirroring report.py's --go-block, --final-table and --recommendation: the record's
+    bytes read once and hashed, parsed, pilot.protocol.require_frozen, pilot.verdict.check_record, then
+    pilot.verdict.render_go, render_final_table and pilot.memo.render_recommendation (equal to those three commands'
+    stdout). SystemExit on a missing or invalid record or one check_record refuses.
+
+    Returns {sources, verdict, means, tone, lines {verdict, rule, means, recommendation} (whole render lines without
+    their markdown markup), criteria [{criterion, status, tone, numbers}] (the GO table's cells), deltas [{criterion,
+    metric, delta_points, ci_points [lo, hi], delta_text, ci_text, direction, status}] (DELTA_ROWS: the record's
+    numbers x 100, unrounded; the texts in the GO render's formats), results and settings ({header, rows} of the
+    results-on-test tables), caveats (pilot.memo.CAVEATS), renders {go, final_table, recommendation}}."""
+    v, rel, sha, proto, _ = checked_verdict(root, path)
     go = pilot.verdict.render_go(v)
     table = pilot.verdict.render_final_table(v)
     rec = pilot.memo.render_recommendation(v, rel, sha, pilot.memo.facts(v, proto, root))
@@ -670,10 +687,143 @@ def confidence_view(root: str = REPO_ROOT) -> dict[str, Any]:
     return {"sources": [d for d, _ in SVG_DIRS], "val": out["val"], "test": out["test"], "caveats": caveats}
 
 
+# ---- latency: the protocol-bound latency/1 reports, reported, not gated (D-10) ----
+
+LATENCY_DIR = "results/latency"
+
+
+def latency_view(root: str = REPO_ROOT) -> dict[str, Any]:
+    """The latency reports as data: require_frozen, then every *.json under results/latency and every protocol.json
+    input there hashed against its inputs entry (bound_input: an unpinned, missing or changed report is refused naming
+    it), then pilot.latency.load_reports (schema and warm-up policy), whose reports must equal the bound bytes parsed.
+    Per-message times and the checked state never leave the server: each seed keeps its seed, checkpoint_name and
+    summary. render is pilot.latency.render_markdown's text (= latency.py --render results/latency).
+
+    Returns {sources, label (pilot.latency.LABEL), reports [{path, system, device, seeds [{seed, checkpoint_name,
+    summary}], pooled}] (sorted path order), render}."""
+    proto, _ = pilot.protocol.require_frozen()
+    inputs = proto.get("inputs") or {}
+    d = os.path.join(root, LATENCY_DIR)
+    names = sorted(n for n in os.listdir(d) if n.endswith(".json")) if os.path.isdir(d) else []
+    rels = sorted({LATENCY_DIR + "/" + n for n in names} | {r for r in inputs if r.startswith(LATENCY_DIR + "/")})
+    bound = {rel: _bound_json(bound_input(root, rel, inputs), rel) for rel in rels}
+    reports = pilot.latency.load_reports(d)
+    if reports != [bound[r] for r in rels]:
+        raise SystemExit("%s changed while it was read; restore it with `git checkout -- %s`"
+                         % (LATENCY_DIR, LATENCY_DIR))
+    out = [{"path": rel, "system": r["system"], "device": r["device"],
+            "seeds": [{"seed": s["seed"], "checkpoint_name": s["checkpoint_name"], "summary": s["summary"]}
+                      for s in r["seeds"]], "pooled": r["pooled"]} for rel, r in zip(rels, reports)]
+    return {"sources": rels + ["protocol.json"], "label": pilot.latency.LABEL, "reports": out,
+            "render": pilot.latency.render_markdown(reports)}
+
+
+# ---- few-shot: the results record the checked verdict binds (D-10) ----
+
+FEWSHOT_RECORD = "results/fewshot/fewshot.json"
+FEWSHOT_CAVEAT = "Few-shot:"                                # the pilot.memo.CAVEATS line shown above the forgetting
+AP_BY_K_HEADER = "| k | Laya | BERTurk |"                   # the render's "New-tag macro-AP by k" table
+
+
+def _fewshot_record(v: dict[str, Any], root: str, pin: str) -> tuple[dict[str, Any], str, str]:
+    """(record, repo-relative path, sha256) of the few-shot results record a checked verdict binds: its fewshot.record
+    path under root through pilot.fewshot_report.read_record, refused (report.memo_inputs' lines) unless the path is
+    repo-relative, the file's sha256 is the verdict's and the record was built under the frozen protocol pin."""
+    record = (v.get("fewshot") or {}).get("record")
+    rel, want = (record.get("path"), record.get("sha256")) if isinstance(record, dict) else (None, None)
+    if not isinstance(rel, str) or not isinstance(want, str) or os.path.isabs(rel) \
+            or os.path.normpath(rel).split(os.sep)[0] == os.pardir:
+        raise SystemExit("the verdict binds no repo-relative few-shot record (%r); %s"
+                         % (record, pilot.verdict.FEWSHOT_FIX))
+    path = os.path.join(root, rel)
+    if not os.path.isfile(path):
+        raise SystemExit("%s not found; build it with `make fewshot-reports`" % rel)
+    try:
+        rec, sha = pilot.fewshot_report.read_record(path)
+    except SystemExit as e:                                 # its line names the path it was given: name rel instead
+        raise SystemExit(str(e.code).replace(path, rel)) from None
+    if sha != want:
+        raise SystemExit("%s has sha256 %s, the verdict binds %s; rebuild it with `make fewshot-reports`, then "
+                         "`make final-reports`" % (rel, sha, want))
+    if rec.get("protocol_sha256") != pin:
+        raise SystemExit("%s was built under protocol sha256 %s, not the frozen %s; rebuild it with `make "
+                         "fewshot-reports`" % (rel, rec.get("protocol_sha256"), pin))
+    return rec, rel, sha
+
+
+def _ap_by_k(rec: dict[str, Any], render: str) -> dict[str, list[dict[str, Any]]]:
+    """{kind: [{k, mean, mean_text, draws}]} of the record's by_k, k ascending: draws are the per_draw values in
+    order, mean float(np.mean(draws)) as render_markdown computes it, mean_text "%.3f"; SystemExit unless every
+    mean_text is the cell of its model in the render's "New-tag macro-AP by k" row of its k."""
+    table = md_table(render, AP_BY_K_HEADER, "few-shot")
+    cells = {r[0]: r for r in table["rows"]}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for col, kind in enumerate(KINDS, 1):                   # the table's Laya and BERTurk columns, in KINDS order
+        out[kind] = []
+        for k in sorted(rec["by_k"], key=int):
+            draws = [d[kind] for d in rec["by_k"][k]["per_draw"]]
+            if not draws or any(isinstance(x, bool) or not isinstance(x, (int, float)) for x in draws):
+                raise SystemExit("%s: by_k %s holds a non-numeric %s AP; rebuild it with `make fewshot-reports`"
+                                 % (FEWSHOT_RECORD, k, kind))
+            mean = float(np.mean(draws))
+            label = "k = 0 (masked base)" if k == "0" else "k = %s" % k
+            if (cells.get(label) or [None] * 3)[col] != "%.3f" % mean:
+                raise SystemExit("the few-shot render's %r row does not show the %s mean %.3f; rebuild %s with `make "
+                                 "fewshot-reports`" % (label, kind, mean, FEWSHOT_RECORD))
+            out[kind].append({"k": int(k), "mean": mean, "mean_text": "%.3f" % mean,
+                              "draws": [float(x) for x in draws]})
+    return out
+
+
+def _forgetting(f1: dict[str, Any]) -> list[dict[str, Any]]:
+    """[{model, run, base_seed, new, old, forgetting}] of the record's f1 block in the render's forgetting-table order
+    (per model its masked bases, then its continued runs by draw and k); run is the render's Run cell, forgetting
+    None for a base."""
+    rows = []
+    for kind in KINDS:
+        for key in sorted(f1[kind]["base"], key=lambda x: int(x[1:])):
+            f = f1[kind]["base"][key]
+            rows.append({"model": kind, "run": "base seed %s, k = 0" % key[1:], "base_seed": int(key[1:]),
+                         "new": f["new"], "old": f["old"], "forgetting": None})
+        for key in sorted(f1[kind]["continued"], key=lambda x: tuple(int(v[1:]) for v in x.split("-"))):
+            f = f1[kind]["continued"][key]
+            d, k = (int(v[1:]) for v in key.split("-"))
+            rows.append({"model": kind, "run": "draw %d, k = %d" % (d, k), "base_seed": f["base_seed"],
+                         "new": f["new"], "old": f["old"], "forgetting": f["forgetting"]})
+    return rows
+
+
+def fewshot_view(root: str = REPO_ROOT, path: str | None = None) -> dict[str, Any]:
+    """The few-shot results as data: the verdict read and checked as verdict_view reads it (checked_verdict), then
+    the few-shot record it binds (its sha256 the verdict's fewshot.record.sha256, built under the frozen pin). render
+    is pilot.fewshot_report.render_markdown's text (= fewshot.py --render results/fewshot/fewshot.json); every mean
+    shown is a cell of that render. SystemExit on any mismatch.
+
+    Returns {sources, record {path, sha256}, primary_k, mean_delta_primary (record primary.mean_delta, unrounded),
+    mean_delta_text ("%+.2f points", the render's), ap_by_k {laya, berturk: [{k, mean, mean_text, draws}]},
+    forgetting [{model, run, base_seed, new, old, forgetting}], caveat (the pilot.memo.CAVEATS line starting
+    "Few-shot:"), notes (the record's), render}."""
+    v, vrel, _, _, pin = checked_verdict(root, path)
+    rec, rel, sha = _fewshot_record(v, root, pin)
+    render = pilot.fewshot_report.render_markdown(rec)
+    primary = rec["primary"]
+    delta_text = "%+.2f points" % (100 * primary["mean_delta"])
+    render_line(render, "| mean over draws |  |  | %s |" % delta_text, "few-shot")
+    caveat = [c for c in pilot.memo.CAVEATS if c.startswith(FEWSHOT_CAVEAT)]
+    if len(caveat) != 1:
+        raise SystemExit("pilot.memo.CAVEATS holds %d lines starting %r, not one" % (len(caveat), FEWSHOT_CAVEAT))
+    return {"sources": [VERDICT_RECORD if path is None else vrel, rel, "protocol.json"],
+            "record": {"path": rel, "sha256": sha},
+            "primary_k": primary["k"], "mean_delta_primary": primary["mean_delta"], "mean_delta_text": delta_text,
+            "ap_by_k": _ap_by_k(rec, render), "forgetting": _forgetting(rec["f1"]), "caveat": caveat[0],
+            "notes": list(rec["notes"]), "render": render}
+
+
 VIEWS: dict[str, Callable[[str], dict[str, Any]]] = {"intents": intents_view, "verdict": verdict_view,
-                                                     "selection": selection_view, "confidence": confidence_view}
+                                                     "selection": selection_view, "confidence": confidence_view,
+                                                     "latency": latency_view, "fewshot": fewshot_view}
 VIEW_SOURCES = {"intents": "intents.py", "verdict": VERDICT_RECORD, "selection": SELECTION_RECORDS["laya"][0],
-                "confidence": SVG_DIRS[0][0]}
+                "confidence": SVG_DIRS[0][0], "latency": LATENCY_DIR, "fewshot": FEWSHOT_RECORD}
 
 
 def build_views(root: str = REPO_ROOT) -> dict[str, dict[str, Any]]:
