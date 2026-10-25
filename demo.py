@@ -7,10 +7,10 @@ pilot.metrics.CONFIDENCE_RULE). The six final seeds load once, in this process, 
 dumps (latency.py's precedent): score.resolve_checkpoint + score.Predictor for Laya (fp32, autocast off, check_agent
 after every forward), score.check_berturk + score.load_bert for BERTurk (fp32, check_bert after every forward). No Ray
 module is imported. The views (GET /api/<name>, pilot.demo.VIEWS) are built once at startup from the committed
-records. The training view (GET /api/training) holds each final seed's per-epoch rows (Ray Train for Laya, the HF Trainer
-for BERTurk) read from its checkpoint in the loader's binding stage, after latency.bind_seed and before any model load
-(pilot.demo.training_system); a system whose checkpoints are missing or changed reads unavailable with the one line,
-and its rows are never taken from the committed final manifests (the user decision of 2026-10-25, D-09).
+records. The training view (GET /api/training) holds each final seed's per-epoch rows (Ray Train for Laya, the HF
+Trainer for BERTurk) read from its checkpoint in the loader's binding stage, after latency.bind_seed and before any
+model load (pilot.demo.training_system); a system whose checkpoints are missing or changed reads unavailable with the
+one line, and its rows are never taken from the committed final manifests (the user decision of 2026-10-25, D-09).
 
 What it never does: train, call score.main (so score.py's protocol gate is neither triggered nor weakened), write
 under results/, data/ or protocol.json, store or log message text (uvicorn's access log is off, FastAPI telemetry is
@@ -225,8 +225,8 @@ def start_loading(state: dict[str, Any], executor: ThreadPoolExecutor,
 def create_app(state: dict[str, Any], executor: ThreadPoolExecutor, views: dict[str, dict[str, Any]],
                ui_dist: str | None = None) -> Any:
     """The FastAPI app: GET /api/status, POST /api/classify, GET /api/training, GET /api/<view>, then the built UI at /
-    (when ui_dist is given). Docs, OpenAPI and telemetry are off; only the Host 127.0.0.1 or localhost is served; no CORS. No handler
-    prints or logs a body."""
+    (when ui_dist is given). Docs, OpenAPI and telemetry are off; only the Host 127.0.0.1 or localhost is served; no
+    CORS. No handler prints or logs a body."""
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse
     from starlette.middleware.trustedhost import TrustedHostMiddleware
