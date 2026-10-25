@@ -692,3 +692,83 @@
   font-weight: var(--weight-semibold);
   line-height: var(--leading-heading);
 }
+
+/* confidence, latency and few-shot view: one section per record view, each with its own heading and error */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  min-width: 0;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: var(--text-heading);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-heading);
+}
+
+.sectionSuffix {
+  margin-left: var(--space-sm);
+  font-size: var(--text-label);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-label);
+  color: var(--ink-secondary);
+}
+
+.sectionSuffix::before {
+  content: "· ";
+}
+
+.caveatLine {
+  margin: 0 0 var(--space-md);
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+  color: var(--ink-secondary);
+  overflow-wrap: anywhere;
+}
+
+.section > .caveatLine {
+  margin: 0;
+}
+
+/* a served reliability SVG: the full card width, its 1120:550 ratio reserved before it loads, never redrawn */
+.diagram {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1120 / 550;
+  background: var(--color-surface);
+}
+
+.diagramMissing {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-sm);
+  width: 100%;
+  aspect-ratio: 1120 / 550;
+  padding: var(--space-md);
+  box-sizing: border-box;
+  border: 1px dashed var(--color-axis);
+  border-radius: var(--radius-card);
+}
+
+.diagramCaption {
+  margin: var(--space-sm) 0 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.monoCaption {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.notes {
+  margin-top: var(--space-md);
+}

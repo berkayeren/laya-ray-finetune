@@ -7,6 +7,7 @@
 
 import type { ComponentType } from "react";
 import { LoadingCard } from "./common";
+import ConfidenceView from "./ConfidenceView";
 import SelectionView from "./SelectionView";
 import TrainingView from "./TrainingView";
 import VerdictView from "./VerdictView";
@@ -35,6 +36,7 @@ export const VIEW_COMPONENTS: Partial<Record<ViewKey, ComponentType>> = {
   training: TrainingView,
   selection: SelectionView,
   verdict: VerdictView,
+  confidence: ConfidenceView,
 };
 
 export default function Dashboard({ view }: { view: ViewKey }) {
