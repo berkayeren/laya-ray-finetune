@@ -142,10 +142,139 @@ export interface SelectionData {
   superseded: SupersededRun[];
 }
 
+// --- GET /api/training and the training key of GET /api/status ---------------------------------------------------
+// The rows come only from each final seed's checkpoint run record (Ray Train for Laya, the HF Trainer for BERTurk);
+// a system whose checkpoints are missing or changed reads unavailable with the server's one line (D-09).
+
+export type TrainingReadiness = "loading" | "ready";
+
+// the one key of GET /api/status this view reads
+export interface TrainingStatus {
+  training: TrainingReadiness;
+}
+
+// one epoch row: {field: value} in the system's fields order; a value may be null (peak_driver_bytes off MPS)
+export type EpochValue = number | string | boolean | null;
+export type EpochRow = Record<string, EpochValue>;
+
+export interface TrainingSeed {
+  seed: number;
+  checkpoint_name: string;
+  train_run_id: string;
+  device: string | null;
+  n_train_messages: number | null;
+  rows: EpochRow[];
+}
+
+export interface TrainingOk {
+  status: "ok";
+  fields: string[];
+  total_train_s: number;
+  seeds: TrainingSeed[];
+}
+
+export interface TrainingUnavailable {
+  status: "unavailable";
+  message: string;
+}
+
+export type TrainingSystem = TrainingOk | TrainingUnavailable;
+
+export interface TrainingReady {
+  status: "ready";
+  systems: { laya: TrainingSystem; berturk: TrainingSystem };
+}
+
+export type TrainingData = { status: "loading" } | TrainingReady;
+
+// --- GET /api/confidence --------------------------------------------------------------------------------------------
+
+export interface Diagram {
+  svg: string;
+  path: string;
+  run_id: string;
+  split: string;
+}
+
+export interface ConfidenceData {
+  sources: string[];
+  val: Diagram[];
+  test: Diagram[];
+  caveats: string[];
+}
+
+// --- GET /api/latency -----------------------------------------------------------------------------------------------
+
+// a latency/1 summary, in seconds
+export interface LatencySummary {
+  n: number;
+  min: number;
+  p50: number;
+  p95: number;
+  mean: number;
+  max: number;
+}
+
+export interface LatencySeed {
+  seed: number;
+  checkpoint_name: string;
+  summary: LatencySummary;
+}
+
+export interface LatencyReport {
+  path: string;
+  system: string;
+  device: string;
+  seeds: LatencySeed[];
+  pooled: LatencySummary;
+}
+
+export interface LatencyData {
+  sources: string[];
+  label: string;
+  reports: LatencyReport[];
+  render: string;
+}
+
+// --- GET /api/fewshot -----------------------------------------------------------------------------------------------
+
+export interface ApAtK {
+  k: number;
+  mean: number;
+  mean_text: string;
+  draws: number[];
+}
+
+export interface ForgettingRow {
+  model: string;
+  run: string;
+  base_seed: number;
+  new: number | null;
+  old: number | null;
+  forgetting: number | null;
+}
+
+export interface FewshotData {
+  sources: string[];
+  record: RecordRef;
+  primary_k: number;
+  mean_delta_primary: number;
+  mean_delta_text: string;
+  ap_by_k: { laya: ApAtK[]; berturk: ApAtK[] };
+  forgetting: ForgettingRow[];
+  caveat: string;
+  notes: string[];
+  render: string;
+}
+
 // --- the view endpoints -------------------------------------------------------------------------------------------
 
-// GET /api/{name} -> its view type; useView(name) reads this map (plans 11-11 and 11-12 add their views here)
+// GET /api/{name} -> its view type; useView(name) reads this map. GET /api/training is not here: it has its own
+// loading protocol (TrainingView polls GET /api/status until training reads ready).
 export interface ViewMap {
   verdict: VerdictData;
   selection: SelectionData;
+  confidence: ConfidenceData;
+  latency: LatencyData;
+  fewshot: FewshotData;
 }

@@ -13,6 +13,7 @@
 //   SegmentedControl   role="radiogroup"; arrow keys move the selection; the selected segment in the accent
 //   ShowTable          the "Show table" toggle: swaps a chart for a table of the same values
 //   DataTable          header + rows; a wide table scrolls inside its card, never the page
+//   Tile               a stat tile: label, value and an optional note
 //   COLORS             the series and chart-ink hex values of the UI-SPEC (SVG attributes cannot read CSS variables)
 //
 // Each dashboard view opens with the h1 that Dashboard.tsx renders, then its SourceCaption.
@@ -310,6 +311,17 @@ export function DataTable({ header, rows, caption, wrap = false }: DataTableProp
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+// A stat tile: the label, the value (heading size, tabular figures) and an optional muted note.
+export function Tile({ label, value, note }: { label: string; value: string; note?: string }) {
+  return (
+    <div className={css.tile}>
+      <p className={css.tileLabel}>{label}</p>
+      <p className={css.tileValue}>{value}</p>
+      {note !== undefined && <p className={css.tileNote}>{note}</p>}
     </div>
   );
 }

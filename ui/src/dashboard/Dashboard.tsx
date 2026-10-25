@@ -1,13 +1,14 @@
 // The dashboard frame (11-UI-SPEC.md "Dashboard view", D-10): the 240px sidebar with the four views in the UI-SPEC's
 // order and the content column (max 1200px) holding the view of the current hash route. Every route goes through one
-// table, VIEW_COMPONENTS: the val selection view (plan 11-11) and the verdict view (plan 11-10) are registered; plan
-// 11-12 adds the training and the confidence views. A route without a component in the table shows the shared LoadingCard.
+// table, VIEW_COMPONENTS: the training view and the confidence view (plan 11-12), the val selection view (plan 11-11) and
+// the verdict view (plan 11-10). A route without a component in the table shows the shared LoadingCard.
 // Each view opens with its h1 (rendered here) and then its own one-line source caption (SourceCaption, from the
 // sources field of the records it reads). Navigation is by hash links only, so the back button works.
 
 import type { ComponentType } from "react";
 import { LoadingCard } from "./common";
 import SelectionView from "./SelectionView";
+import TrainingView from "./TrainingView";
 import VerdictView from "./VerdictView";
 import css from "./dashboard.module.css";
 
@@ -31,6 +32,7 @@ export function viewHash(key: ViewKey): string {
 }
 
 export const VIEW_COMPONENTS: Partial<Record<ViewKey, ComponentType>> = {
+  training: TrainingView,
   selection: SelectionView,
   verdict: VerdictView,
 };

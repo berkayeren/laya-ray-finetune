@@ -15,7 +15,7 @@
 import { useId, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { formatMetric, formatTemperature, formatTheta } from "../format";
-import { COLORS, Card, DataTable, ShowTable, SourceCaption, StatusBadge, ViewGate, useView } from "./common";
+import { COLORS, Card, DataTable, ShowTable, SourceCaption, StatusBadge, Tile, ViewGate, useView } from "./common";
 import type { Candidate, Chosen, ReferenceCheck, SelectionSystem, SupersededRun } from "./types";
 import css from "./dashboard.module.css";
 
@@ -240,16 +240,6 @@ function CandidateTable({ system, runs }: { system: SelectionSystem; runs: Super
 }
 
 // --- the settings tiles and the edge lines ------------------------------------------------------------------------
-
-function Tile({ label, value, note }: { label: string; value: string; note?: string }) {
-  return (
-    <div className={css.tile}>
-      <p className={css.tileLabel}>{label}</p>
-      <p className={css.tileValue}>{value}</p>
-      {note !== undefined && <p className={css.tileNote}>{note}</p>}
-    </div>
-  );
-}
 
 function SettingsTiles({ chosen }: { chosen: Chosen }) {
   return (
