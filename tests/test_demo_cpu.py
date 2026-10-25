@@ -24,6 +24,7 @@ import pytest
 import demo
 import pilot.data
 import pilot.latency
+import pilot.runs
 import score
 from conftest import make_raw
 from intents import INTENTS, QUESTIONS
@@ -64,22 +65,49 @@ def write_record(path: Path, kind: str, temperature: float, per_tag: dict[str, f
     return str(path)
 
 
-def write_manifest(path: Path, kind: str, record: str, seeds: list[tuple[int, str, dict[str, Any], str, float]],
-                   record_sha256: str | None = None) -> str:
-    """A synthetic postfit-final/1 manifest of `seeds` [(seed, checkpoint_name, identity, dump_run_id, T)], bound to
-    `record`'s sha256 (or `record_sha256`)."""
+Seed = tuple[int, str, dict[str, Any], str, float, list[dict[str, Any]]]
+
+
+def write_manifest(path: Path, kind: str, record: str, seeds: list[Seed], record_sha256: str | None = None) -> str:
+    """A synthetic postfit-final/1 manifest of `seeds` [(seed, checkpoint_name, identity, dump_run_id, T, epochs)],
+    bound to `record`'s sha256 (or `record_sha256`); each seed's "epochs" holds its rows on pd.SHARED_EPOCH_KEYS, as
+    postfit.py --final-manifest writes them."""
     m = {"schema": "postfit-final/1",
          "postfit": {"path": "results/postfit/synthetic.json",
                      "sha256": record_sha256 or pilot.data.sha256_file(record)},
          "final_split": "final_train", "chosen": {},
          "seeds": [{"seed": seed, "train_run_id": "%s-final_train-s%d-synthetic" % (kind, seed),
-                    "checkpoint_name": name, "checkpoint_identity": ident, "dump_run_id": rid, "temperature": t}
-                   for seed, name, ident, rid, t in seeds]}
+                    "checkpoint_name": name, "checkpoint_identity": ident, "dump_run_id": rid, "temperature": t,
+                    "epochs": [{k: r[k] for k in pd.SHARED_EPOCH_KEYS} for r in epochs]}
+                   for seed, name, ident, rid, t, epochs in seeds]}
     if kind == "berturk":
         m["system_kind"] = "berturk"
     with open(path, "w", encoding="utf-8") as f:
         json.dump(m, f, ensure_ascii=False, indent=2)
     return str(path)
+
+
+def ray_rows(seed: int) -> list[dict[str, Any]]:
+    """Three synthetic Ray Train epoch rows of a tiny Laya seed, every pilot.runs.EPOCH_FIELDS key set (CPU: the
+    driver and allocator fields None), with losses distinct per seed."""
+    return [{"epoch": e, "loss": 0.7 / e + 0.0123456789 * (seed + 1), "train_s": 10.0 * e + seed + 0.25,
+             "save_s": 0.5, "optimizer_steps": 4 * e, "n_items": 40, "peak_total_bytes": 1000 * e + seed,
+             "peak_driver_bytes": None, "peak_rss_bytes": 1000 * e + seed, "current_allocated_bytes": None,
+             "swap_delta_bytes": 0, "segment": 0, "resumed": False} for e in (1, 2, 3)]
+
+
+def write_ray_record(ckpt: str, seed: int) -> list[dict[str, Any]]:
+    """Give a tiny Laya checkpoint a training.ray_train.record (device cpu, 12 train messages, ray_rows(seed)) in its
+    rl_agent_config.json, as ray_train.py writes one; call it before the checkpoint's identity is taken. Returns the
+    rows."""
+    path = os.path.join(ckpt, "rl_agent_config.json")
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    rows = ray_rows(seed)
+    cfg.setdefault("training", {})["ray_train"] = {"record": {"device": "cpu", "n_train_messages": 12, "epochs": rows}}
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    return rows
 
 
 @pytest.fixture(scope="module")
@@ -90,11 +118,12 @@ def tiny(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
     from tiny_berturk import tiny_base
     tmp = tmp_path_factory.mktemp("demo_tiny")
     root = tmp / "ckpts"
-    seeds: dict[str, list[tuple[int, str, dict[str, Any], str, float]]] = {"laya": [], "berturk": []}
+    seeds: dict[str, list[Seed]] = {"laya": [], "berturk": []}
     for seed in (0, 1):
         name = "ckpt-s%d" % seed
-        ident = identity(tiny_checkpoint(root / name, temperature=LAYA_T, seed=seed))
-        seeds["laya"].append((seed, name, ident, dumps.run_id("laya", ident), LAYA_T))
+        rows = write_ray_record(tiny_checkpoint(root / name, temperature=LAYA_T, seed=seed), seed)
+        ident = identity(str(root / name))
+        seeds["laya"].append((seed, name, ident, dumps.run_id("laya", ident), LAYA_T, rows))
     raw, raw_sha256 = make_raw(str(tmp / "raw"))
     out_dir = str(tmp / "data")
     pilot.data.prepare(raw, out_dir, raw_sha256)
@@ -112,7 +141,8 @@ def tiny(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
         name = "bert-s%d" % seed
         shutil.copytree(storage / rid / "exports" / export, root / name)
         ident = berturk.identity(str(root / name))
-        seeds["berturk"].append((seed, name, ident, berturk.dump_run_id(ident), BERT_T))
+        rows = berturk.read_record(str(root / name), ident)["record"]["epochs"]
+        seeds["berturk"].append((seed, name, ident, berturk.dump_run_id(ident), BERT_T, rows))
     out: dict[str, Any] = {"root": str(root), "seeds": seeds, "tmp": str(tmp)}
     for kind, T in (("laya", LAYA_T), ("berturk", BERT_T)):
         rec = write_record(tmp / ("%s.json" % kind), kind, T)
@@ -155,7 +185,7 @@ def independent_answer(tiny: dict[str, Any], kind: str, text: str) -> dict[str, 
     with open(tiny[kind]["record"], encoding="utf-8") as f:
         shipped = json.load(f)["chosen"]["theta"]["shipped"]
     Ps = []
-    for seed, name, ident, _, _ in tiny["seeds"][kind]:
+    for seed, name, ident, _, _, _ in tiny["seeds"][kind]:
         ckpt = os.path.join(tiny["root"], name)
         if kind == "laya":
             model_dir, expected = score.resolve_checkpoint(ckpt, ident)
@@ -180,7 +210,7 @@ def test_chat_answer_equals_the_verdict_definition(tiny: dict[str, Any],
                                                    loaded: tuple[dict[str, Any], ThreadPoolExecutor, Any]) -> None:
     state, _, app = loaded
     with client(app) as c:
-        assert c.get("/api/status").json() == {"chat": "ready", "message": None, "device": "cpu"}
+        assert c.get("/api/status").json() == {"chat": "ready", "message": None, "device": "cpu", "training": "ready"}
         r = c.post("/api/classify", json={"text": TEXT})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -201,6 +231,50 @@ def test_chat_answer_equals_the_verdict_definition(tiny: dict[str, Any],
                                  "sha256": pilot.data.sha256_file(tiny[kind]["record"])}
     assert [s["check"]() for k in pd.KINDS for s in state["systems"][k]["seeds"]] == \
         [{"device": "cpu", "dtype": "torch.float32", "amp_enabled": False}] * 4
+
+
+def checkpoint_rows(root: str, kind: str, name: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """(run record, epoch rows on the kind's EPOCH_FIELDS) read straight from a seed dir's file, without pilot.demo."""
+    if kind == "laya":
+        with open(os.path.join(root, name, "rl_agent_config.json"), encoding="utf-8") as f:
+            record = json.load(f)["training"]["ray_train"]["record"]
+        fields = pilot.runs.EPOCH_FIELDS
+    else:
+        with open(os.path.join(root, name, berturk.RECORD), encoding="utf-8") as f:
+            record = json.load(f)["record"]
+        fields = berturk.EPOCH_FIELDS
+    return record, [{k: r[k] for k in fields} for r in record["epochs"]]
+
+
+def test_training_rows_from_bound_checkpoints(tiny: dict[str, Any],
+                                              loaded: tuple[dict[str, Any], ThreadPoolExecutor, Any]) -> None:
+    """GET /api/training serves every seed's per-epoch rows as its checkpoint records them (the tiny Laya seeds' Ray
+    Train rows, the tiny BERTurk exports' HF Trainer rows: 1 and 2 epochs), the kind's EPOCH_FIELDS and the sum of
+    train_s; /api/status reads training ready."""
+    _, _, app = loaded
+    with client(app) as c:
+        assert c.get("/api/status").json()["training"] == "ready"
+        r = c.get("/api/training")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body) == {"status", "systems"} and body["status"] == "ready" and set(body["systems"]) == set(pd.KINDS)
+    for kind, fields in (("laya", pilot.runs.EPOCH_FIELDS), ("berturk", berturk.EPOCH_FIELDS)):
+        t = body["systems"][kind]
+        assert set(t) == {"status", "fields", "total_train_s", "seeds"} and t["status"] == "ok", t
+        assert t["fields"] == list(fields)
+        total = 0.0
+        assert [s["seed"] for s in t["seeds"]] == [0, 1]
+        for got, (seed, name, _, _, _, _) in zip(t["seeds"], tiny["seeds"][kind]):
+            record, rows = checkpoint_rows(tiny["root"], kind, name)
+            assert got == {"seed": seed, "checkpoint_name": name,
+                           "train_run_id": "%s-final_train-s%d-synthetic" % (kind, seed), "device": "cpu",
+                           "n_train_messages": record["n_train_messages" if kind == "laya" else "n_messages"],
+                           "rows": rows}
+            assert [list(row) for row in got["rows"]] == [list(fields)] * len(rows)
+            total += sum(row["train_s"] for row in rows)
+        assert t["total_train_s"] == total
+    assert [len(s["rows"]) for s in body["systems"]["laya"]["seeds"]] == [3, 3]
+    assert [len(s["rows"]) for s in body["systems"]["berturk"]["seeds"]] == [1, 2]
 
 
 def test_no_ray_at_serving_time(tiny: dict[str, Any]) -> None:
@@ -262,7 +336,8 @@ def assert_refused(paths: dict[str, Any], root: str, start: str, device: str = "
         assert msg.startswith(start), msg
         assert "\n" not in msg
         with client(app) as c:
-            assert c.get("/api/status").json() == {"chat": "refused", "message": msg, "device": device}
+            assert c.get("/api/status").json() == {"chat": "refused", "message": msg, "device": device,
+                                                   "training": "ready"}
             r = c.post("/api/classify", json={"text": TEXT})
             assert (r.status_code, r.json()) == (503, {"error": msg})
             r = c.get("/api/intents")
@@ -287,7 +362,7 @@ def variant(tiny: dict[str, Any], tmp_path: Path, kind: str, record_t: float | N
     record_sha256) rewritten under tmp_path."""
     T = LAYA_T if kind == "laya" else BERT_T
     rec = write_record(tmp_path / ("%s.json" % kind), kind, T if record_t is None else record_t)
-    seeds = [s[:4] + ((s[4] if manifest_t is None else manifest_t),) for s in tiny["seeds"][kind]]
+    seeds = [s[:4] + ((s[4] if manifest_t is None else manifest_t),) + s[5:] for s in tiny["seeds"][kind]]
     man = write_manifest(tmp_path / ("%s-final.json" % kind), kind, rec, seeds, record_sha256)
     return dict({k: tiny[k] for k in pd.KINDS}, **{kind: {"record": rec, "manifest": man}})
 
@@ -418,10 +493,12 @@ def test_loading_state_answers_503(tiny: dict[str, Any]) -> None:
         assert started.wait(TIMEOUT)
         app = demo.create_app(state, ex, pd.build_views(REPO))
         with client(app) as c:
-            assert c.get("/api/status").json() == {"chat": "loading", "message": None, "device": "cpu"}
+            assert c.get("/api/status").json() == {"chat": "loading", "message": None, "device": "cpu",
+                                                   "training": "loading"}
             r = c.post("/api/classify", json={"text": TEXT})
             assert (r.status_code, r.json()) == (503, {"error": pd.LOADING_TEXT})
             assert c.get("/api/intents").status_code == 200
+            assert (c.get("/api/training").status_code, c.get("/api/training").json()) == (200, {"status": "loading"})
         release.set()
         future.result(timeout=TIMEOUT)
     assert state["chat"] == pd.READY, state["message"]

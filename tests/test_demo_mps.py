@@ -18,8 +18,10 @@ import numpy as np
 import pytest
 
 import demo
+import pilot.berturk
 import pilot.data
 import pilot.protocol
+import pilot.runs
 from pilot import demo as pd
 from pilot import metrics
 
@@ -46,17 +48,30 @@ def _threads() -> Iterator[None]:
     torch.set_num_threads(n)
 
 
-def test_real_final_seeds_on_mps(_threads: None) -> None:
-    import torch
-    from starlette.testclient import TestClient
-    if not torch.backends.mps.is_available():
-        pytest.fail("the mps marker needs Apple MPS; run it on the M4, or deselect it with -m 'not mps'")
+def seed_root() -> str:
+    """The main checkout, skipping the test (naming the missing dirs) unless it holds every final seed dir of
+    protocol.json."""
     root = main_root()
     proto, _ = pilot.protocol.require_frozen()
     names = [s["checkpoint_name"] for k in pd.KINDS for s in pilot.protocol.final_seeds(proto, k)]
     missing = [n for n in names if not os.path.isdir(os.path.join(root, n))]
     if missing:
         pytest.skip("the final seed dirs %s are not in the main checkout %s" % (", ".join(missing), root))
+    return root
+
+
+def git_status_clean() -> None:
+    st = subprocess.run(["git", "status", "--porcelain", "--", "results", "data", "protocol.json"],
+                        cwd=pilot.data.REPO_ROOT, capture_output=True, text=True, check=True).stdout
+    assert st == "", st
+
+
+def test_real_final_seeds_on_mps(_threads: None) -> None:
+    import torch
+    from starlette.testclient import TestClient
+    if not torch.backends.mps.is_available():
+        pytest.fail("the mps marker needs Apple MPS; run it on the M4, or deselect it with -m 'not mps'")
+    root = seed_root()
     bindings = pd.protocol_bindings(pilot.data.REPO_ROOT)
     state = demo.new_state("mps")
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="demo-model")
@@ -67,7 +82,10 @@ def test_real_final_seeds_on_mps(_threads: None) -> None:
         assert state["chat"] == pd.READY, state["message"]
         app = demo.create_app(state, executor, pd.build_views(pilot.data.REPO_ROOT))
         with TestClient(app, base_url="http://127.0.0.1") as c:
-            assert c.get("/api/status").json() == {"chat": "ready", "message": None, "device": "mps"}
+            assert c.get("/api/status").json() == {"chat": "ready", "message": None, "device": "mps",
+                                                   "training": "ready"}
+            tr = c.get("/api/training").json()
+            assert tr["status"] == "ready" and [tr["systems"][k]["status"] for k in pd.KINDS] == ["ok", "ok"], tr
             r = c.post("/api/classify", json={"text": TEXT})
         assert r.status_code == 200, r.text
         body = r.json()
@@ -98,6 +116,33 @@ def test_real_final_seeds_on_mps(_threads: None) -> None:
                 assert ident == s["checkpoint_identity"]
     finally:
         executor.shutdown(wait=True)
-    st = subprocess.run(["git", "status", "--porcelain", "--", "results", "data", "protocol.json"],
-                        cwd=pilot.data.REPO_ROOT, capture_output=True, text=True, check=True).stdout
-    assert st == "", st
+    git_status_clean()
+
+
+def test_real_training_rows() -> None:
+    """The binding stage only (demo.bind_seeds, then pilot.demo.training_system; no model load, no MPS use): the six
+    real final seeds' per-epoch rows, Ray Train's for Laya (3 seeds x 3 epochs) and the HF Trainer's for BERTurk
+    (3 seeds x 29 epochs), each equal to the committed final manifest's epochs on SHARED_EPOCH_KEYS."""
+    root = seed_root()
+    bindings = pd.protocol_bindings(pilot.data.REPO_ROOT)
+    t = time.perf_counter()
+    for kind, fields, n_rows in (("laya", pilot.runs.EPOCH_FIELDS, 3), ("berturk", pilot.berturk.EPOCH_FIELDS, 29)):
+        b = bindings[kind]
+        view = pd.training_system(b, demo.bind_seeds(b, root))
+        assert view["status"] == "ok" and view["fields"] == list(fields)
+        assert len(view["seeds"]) == len(b["seeds"]) == 3
+        total = 0.0
+        for got, ms in zip(view["seeds"], b["seeds"]):
+            assert (got["seed"], got["checkpoint_name"], got["train_run_id"]) == \
+                (ms["seed"], ms["checkpoint_name"], ms["train_run_id"])
+            assert got["device"] == "mps" and isinstance(got["n_train_messages"], int)
+            assert len(got["rows"]) == n_rows and all(list(r) == list(fields) for r in got["rows"])
+            assert [{k: r[k] for k in pd.SHARED_EPOCH_KEYS} for r in got["rows"]] == ms["epochs"]
+            total += sum(r["train_s"] for r in got["rows"])
+            print("demo training %s seed %d: %d rows, %d train messages, train_s %.1f"
+                  % (kind, got["seed"], len(got["rows"]), got["n_train_messages"],
+                     sum(r["train_s"] for r in got["rows"])))
+        assert view["total_train_s"] == total
+        print("demo training %s: total train_s %.1f over %d seeds" % (kind, total, len(view["seeds"])))
+    print("demo training: binding stage %.1f s" % (time.perf_counter() - t))
+    git_status_clean()

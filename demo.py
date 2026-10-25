@@ -7,7 +7,10 @@ pilot.metrics.CONFIDENCE_RULE). The six final seeds load once, in this process, 
 dumps (latency.py's precedent): score.resolve_checkpoint + score.Predictor for Laya (fp32, autocast off, check_agent
 after every forward), score.check_berturk + score.load_bert for BERTurk (fp32, check_bert after every forward). No Ray
 module is imported. The views (GET /api/<name>, pilot.demo.VIEWS) are built once at startup from the committed
-records.
+records. The training view (GET /api/training) holds each final seed's per-epoch rows (Ray Train for Laya, the HF Trainer
+for BERTurk) read from its checkpoint in the loader's binding stage, after latency.bind_seed and before any model load
+(pilot.demo.training_system); a system whose checkpoints are missing or changed reads unavailable with the one line,
+and its rows are never taken from the committed final manifests (the user decision of 2026-10-25, D-09).
 
 What it never does: train, call score.main (so score.py's protocol gate is neither triggered nor weakened), write
 under results/, data/ or protocol.json, store or log message text (uvicorn's access log is off, FastAPI telemetry is
@@ -52,6 +55,7 @@ UI_DIST = os.path.join(REPO_ROOT, "ui", "dist")
 TELEMETRY = {"tracing": False, "metrics": False, "logs": False, "operation_spans": False, "auto_configure": False}
 CLASSIFY_FAILED = "classification failed (%s); try again; if it repeats, restart `make demo`"
 LOAD_FAILED = "loading the final seeds failed (%s); restart `make demo`"
+TRAINING_FAILED = "reading the %s run records failed (%s); restore the final seeds"
 NOT_JSON_TYPE = "the request body must be sent as Content-Type application/json; send {\"text\": \"...\"}"
 BODY_TOO_LARGE = "the request body is larger than %d bytes; send one message of at most %d characters" % (
     pd.MAX_BODY_BYTES, pd.MAX_CHARS)
@@ -141,28 +145,74 @@ def classify(systems: dict[str, dict[str, Any]], text: str) -> dict[str, dict[st
 
 
 def new_state(device: str) -> dict[str, Any]:
-    """The chat state before loading: {chat: loading, message: None, device, systems: None}."""
-    return {"chat": pd.LOADING, "message": None, "device": device, "systems": None}
+    """The state before loading: {chat: loading, message: None, device, systems: None, training: {},
+    training_status: loading}."""
+    return {"chat": pd.LOADING, "message": None, "device": device, "systems": None, "training": {},
+            "training_status": pd.LOADING}
+
+
+def _line(e: SystemExit) -> str:
+    """The one line of a refusal (newlines replaced by spaces)."""
+    return str(e.code).replace("\n", " ")
+
+
+def training_entry(binding: dict[str, Any], bound: list[tuple[dict[str, Any], str, dict[str, Any]]]) -> dict[str, Any]:
+    """pilot.demo.training_system of one bound system, or its unavailable entry: a SystemExit's one line, any other
+    exception TRAINING_FAILED naming only its type. Never raises, so one system's rows never hide the other's."""
+    try:
+        return pd.training_system(binding, bound)
+    except SystemExit as e:
+        return pd.training_unavailable(_line(e))
+    except Exception as e:
+        return pd.training_unavailable(TRAINING_FAILED % (binding["kind"], type(e).__name__))
 
 
 def load_job(state: dict[str, Any], bindings_fn: Callable[[], dict[str, dict[str, Any]]], root: str, device: str,
              threads: int) -> None:
-    """On the worker thread: bind both systems (bindings_fn), bind every seed dir of both before any load, load them,
-    run one warm-up classify of pd.WARMUP_TEXT (output discarded), then set the state ready. A SystemExit sets it
-    refused with its one line; any other exception refused with LOAD_FAILED naming only the exception type."""
+    """On the worker thread, the binding stage, then the load. Binding: both systems (bindings_fn), then every seed dir
+    of each system separately (bind_seeds: hashes only) and, for a system whose seeds all bound, its training rows
+    (training_entry); a system that failed binding gets its unavailable entry with its one line, and a bindings_fn
+    refusal gives both systems its line. state["training"] is published and training_status set ready before any
+    model loads, whether or not the models load. Load: only when both systems bound (else the chat is refused with
+    the first failing system's line), every seed loaded, one warm-up classify of pd.WARMUP_TEXT (output discarded),
+    then the chat ready. A SystemExit sets the chat refused with its one line; any other exception refused with
+    LOAD_FAILED naming only the exception type."""
+    training: dict[str, dict[str, Any]] = {}
     try:
-        bindings = bindings_fn()
-        bound = {kind: bind_seeds(bindings[kind], root) for kind in pd.KINDS}
+        try:
+            bindings = bindings_fn()
+        except SystemExit as e:
+            training.update({kind: pd.training_unavailable(_line(e)) for kind in pd.KINDS})
+            raise
+        bound, failed = {}, []
+        for kind in pd.KINDS:
+            try:
+                bound[kind] = bind_seeds(bindings[kind], root)
+            except SystemExit as e:
+                failed.append(_line(e))
+                training[kind] = pd.training_unavailable(_line(e))
+                continue
+            training[kind] = training_entry(bindings[kind], bound[kind])
+        state["training"] = training
+        state["training_status"] = pd.READY             # the binding stage is over: before any model loads
+        if failed:
+            raise SystemExit(failed[0])
         systems = {kind: load_system(bindings[kind], bound[kind], device, threads) for kind in pd.KINDS}
         classify(systems, pd.WARMUP_TEXT)
         state["systems"] = systems
         state["chat"] = pd.READY
     except SystemExit as e:
-        state["message"] = str(e.code).replace("\n", " ")
+        state["message"] = _line(e)
         state["chat"] = pd.REFUSED
     except Exception as e:
         state["message"] = LOAD_FAILED % type(e).__name__
         state["chat"] = pd.REFUSED
+    finally:
+        if state["training_status"] != pd.READY:        # the binding stage itself ended in a refusal or a failure
+            for kind in pd.KINDS:
+                training.setdefault(kind, pd.training_unavailable(state["message"] or LOAD_FAILED % "unknown"))
+            state["training"] = training
+            state["training_status"] = pd.READY
 
 
 def start_loading(state: dict[str, Any], executor: ThreadPoolExecutor,
@@ -174,8 +224,8 @@ def start_loading(state: dict[str, Any], executor: ThreadPoolExecutor,
 
 def create_app(state: dict[str, Any], executor: ThreadPoolExecutor, views: dict[str, dict[str, Any]],
                ui_dist: str | None = None) -> Any:
-    """The FastAPI app: GET /api/status, POST /api/classify, GET /api/<view>, then the built UI at / (when ui_dist is
-    given). Docs, OpenAPI and telemetry are off; only the Host 127.0.0.1 or localhost is served; no CORS. No handler
+    """The FastAPI app: GET /api/status, POST /api/classify, GET /api/training, GET /api/<view>, then the built UI at /
+    (when ui_dist is given). Docs, OpenAPI and telemetry are off; only the Host 127.0.0.1 or localhost is served; no CORS. No handler
     prints or logs a body."""
     from fastapi import FastAPI, Request
     from fastapi.responses import JSONResponse
@@ -190,7 +240,14 @@ def create_app(state: dict[str, Any], executor: ThreadPoolExecutor, views: dict[
 
     @app.get("/api/status")
     def status() -> dict[str, Any]:
-        return {"chat": state["chat"], "message": state["message"], "device": state["device"]}
+        return {"chat": state["chat"], "message": state["message"], "device": state["device"],
+                "training": state["training_status"]}
+
+    @app.get("/api/training")
+    def training() -> dict[str, Any]:
+        if state["training_status"] != pd.READY:
+            return {"status": pd.LOADING}
+        return {"status": pd.READY, "systems": state["training"]}
 
     @app.post("/api/classify")
     async def classify_route(request: Request) -> Any:

@@ -30,6 +30,13 @@ Design notes:
   check is hashed against protocol.json's inputs entry before it is parsed (bound_input); the superseded BERTurk
   history comes from pilot.berturk.load_superseded (its own pinned sha256s). Its renders are postfit.py --render and
   --render-berturk's.
+- The training view (training_system) holds each final seed's per-epoch rows as its checkpoint recorded them: Ray
+  Train's rows (pilot.runs.EPOCH_FIELDS) from the rl_agent_config.json bytes whose sha256 is the bound identity's
+  config_sha256 (laya_epochs), the HF Trainer's rows (pilot.berturk.EPOCH_FIELDS) through pilot.berturk.read_record
+  (berturk_epochs). demo.py reads them only after latency.bind_seed bound the seed dir, before any model loads. The
+  rows must equal the committed final manifest's `epochs` on SHARED_EPOCH_KEYS; the manifest's rows serve only that
+  check. Without the checkpoints a system's training view is unavailable with the one-line refusal
+  (training_unavailable), never filled from the manifests (the user decision of 2026-10-25, D-09).
 
 This module never imports torch, transformers, laya, Ray, fastapi, starlette or uvicorn (a subprocess test guards it).
 
@@ -38,6 +45,7 @@ usage: from pilot import demo
        answer = demo.system_answer(bindings["laya"], logits_by_seed, served_temperatures)
        views = demo.build_views()                            # {name: view or {"error", "source"}}: intents, verdict,
                                                              # selection (GET /api/<name> of demo.py)
+       training = demo.training_system(binding, bound)        # one system's per-epoch rows of its bound seeds
 """
 import json
 import math
@@ -52,6 +60,7 @@ import pilot.latency
 import pilot.memo
 import pilot.postfit
 import pilot.protocol
+import pilot.runs
 import pilot.verdict
 from intents import QUESTIONS
 from pilot import metrics
@@ -460,6 +469,135 @@ def selection_view(root: str = REPO_ROOT) -> dict[str, Any]:
     sources = [p for pair in SELECTION_RECORDS.values() for p in pair] + [BERTURK_REFERENCE, "protocol.json"] + \
         [s["entry"][k] for s in superseded for k in ("record", "reference")]
     return {"sources": sources, "systems": systems, "reference": ref, "superseded": sup}
+
+
+# ---- the training runs: per-epoch rows of every final seed, read from its bound checkpoint (D-09, D-10) ----
+
+# the epoch keys the committed final manifests hold (postfit.py --final-manifest), compared with every checkpoint's rows
+SHARED_EPOCH_KEYS = ("epoch", "loss", "train_s", "peak_total_bytes", "swap_delta_bytes")
+TRAINING_FIELDS = {"laya": pilot.runs.EPOCH_FIELDS, "berturk": pilot.berturk.EPOCH_FIELDS}
+
+
+def _where(ckpt: str, name: str | None = None) -> str:
+    """--checkpoint-root/<dir>[/<file>] of a seed dir: the form latency.bind_seed names it in, never a local path."""
+    where = "--checkpoint-root/" + os.path.basename(os.path.normpath(ckpt))
+    return where if name is None else where + "/" + name
+
+
+def _epoch_rows(epochs: Any, fields: tuple[str, ...], where: str) -> list[dict[str, Any]]:
+    """Each epoch row of a run record restricted to `fields`, in that order; SystemExit when the record has no list
+    of epoch rows or a row lacks one of the fields."""
+    if not isinstance(epochs, list):
+        raise SystemExit("%s: the run record has no list of epoch rows; restore the final seed" % where)
+    rows = []
+    for row in epochs:
+        missing = [k for k in fields if not isinstance(row, dict) or k not in row]
+        if missing:
+            raise SystemExit("%s: run record epoch %s lacks %s; restore the final seed"
+                             % (where, row.get("epoch") if isinstance(row, dict) else None, ", ".join(missing)))
+        rows.append({k: row[k] for k in fields})
+    return rows
+
+
+def laya_epochs(ckpt: str, ident: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """(record, rows) of a bound Laya final seed: rl_agent_config.json read once as bytes, parsed only when their
+    sha256 is ident's config_sha256 (score.training_block's sequence), its training.ray_train.record, and every epoch
+    row restricted to pilot.runs.EPOCH_FIELDS in that order. SystemExit on changed bytes, invalid JSON, no record or a
+    row lacking a field."""
+    where = _where(ckpt, "rl_agent_config.json")
+    try:
+        with open(os.path.join(ckpt, "rl_agent_config.json"), "rb") as f:
+            raw = f.read()
+    except OSError as e:
+        raise SystemExit("%s cannot be read (%s); restore the final seed" % (where, e.strerror or type(e).__name__))
+    if sha256_bytes(raw) != ident.get("config_sha256"):
+        raise SystemExit("%s changed after it was hashed; restore the final seed" % where)
+    try:
+        cfg = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise SystemExit("%s is not valid JSON; restore the final seed" % where) from None
+    tr = cfg.get("training") if isinstance(cfg, dict) else None
+    rt = tr.get("ray_train") if isinstance(tr, dict) else None
+    record = rt.get("record") if isinstance(rt, dict) else None
+    if not isinstance(record, dict) or not record:
+        raise SystemExit("%s holds no training.ray_train.record; restore the final seed" % where)
+    return record, _epoch_rows(record.get("epochs"), pilot.runs.EPOCH_FIELDS, where)
+
+
+def berturk_epochs(ckpt: str, ident: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """(record, rows) of a bound BERTurk final seed: berturk_train.json through pilot.berturk.read_record (bytes whose
+    sha256 is ident's record_sha256), its run record ["record"], and every epoch row restricted to
+    pilot.berturk.EPOCH_FIELDS in that order. SystemExit, naming the seed dir, on any refusal."""
+    where = _where(ckpt, pilot.berturk.RECORD)
+    try:
+        rec = pilot.berturk.read_record(ckpt, ident)
+    except SystemExit as e:
+        raise SystemExit("%s: %s" % (_where(ckpt), str(e.code).replace("\n", " "))) from None
+    except OSError as e:
+        raise SystemExit("%s cannot be read (%s); restore the final seed" % (where, e.strerror or type(e).__name__))
+    record = rec.get("record")
+    if not isinstance(record, dict) or not record:
+        raise SystemExit("%s holds no run record; restore the final seed" % where)
+    return record, _epoch_rows(record.get("epochs"), pilot.berturk.EPOCH_FIELDS, where)
+
+
+def _shared(rows: Any) -> list[dict[str, Any]] | None:
+    """rows restricted to SHARED_EPOCH_KEYS (a missing key reads None); None when rows is not a list of objects."""
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        return None
+    return [{k: r.get(k) for k in SHARED_EPOCH_KEYS} for r in rows]
+
+
+def _differs_on(have: list[dict[str, Any]], want: list[dict[str, Any]] | None) -> str:
+    """Where a seed's rows differ from its manifest's on SHARED_EPOCH_KEYS: the row count, or the first differing
+    row's epoch and keys; "" when they are equal."""
+    if want is None:
+        return "the epochs entry (the manifest has no list of epoch rows)"
+    if len(have) != len(want):
+        return "the number of rows (%d, the manifest %d)" % (len(have), len(want))
+    for h, w in zip(have, want):
+        keys = [k for k in SHARED_EPOCH_KEYS if h[k] != w[k] or type(h[k]) is not type(w[k])]
+        if keys:
+            return "epoch %s: %s" % (h["epoch"], ", ".join(keys))
+    return ""
+
+
+def training_system(binding: dict[str, Any], bound: list[tuple[dict[str, Any], str, dict[str, Any]]]) -> dict[str, Any]:
+    """The training view of one system from its bound seeds [(manifest seed, checkpoint dir, identity)] (demo.bind_seeds,
+    after latency.bind_seed): each seed's rows read from its checkpoint (laya_epochs or berturk_epochs), refused unless
+    they equal the manifest seed's `epochs` on SHARED_EPOCH_KEYS. The manifest's rows serve only that check and are
+    never returned: rows come only from the checkpoints (the user decision of 2026-10-25, D-09).
+
+    Returns {status: "ok", fields (the kind's EPOCH_FIELDS), total_train_s (the sum of train_s over every row of every
+    seed), seeds [{seed, checkpoint_name, train_run_id, device, n_train_messages, rows [{field: value}]}]}; SystemExit
+    with one line on any refusal."""
+    kind = binding["kind"]
+    if kind not in TRAINING_FIELDS:
+        raise SystemExit("no training rows for system %r; the systems are %s" % (kind, ", ".join(TRAINING_FIELDS)))
+    read = laya_epochs if kind == "laya" else berturk_epochs
+    seeds, total = [], 0.0
+    for s, ckpt, ident in bound:
+        record, rows = read(ckpt, ident)
+        on = _differs_on(_shared(rows) or [], _shared(s.get("epochs")))
+        if on:
+            raise SystemExit("%s: the run record's epoch rows differ from the final manifest's on %s; restore the final "
+                             "seed" % (_where(ckpt), on))
+        for r in rows:
+            t = r["train_s"]
+            if isinstance(t, bool) or not isinstance(t, (int, float)) or not math.isfinite(t):
+                raise SystemExit("%s: run record epoch %s has train_s %r, not a finite number; restore the final seed"
+                                 % (_where(ckpt), r["epoch"], t))
+            total += float(t)
+        n = record.get("n_train_messages") if kind == "laya" else record.get("n_messages")
+        seeds.append({"seed": s["seed"], "checkpoint_name": s["checkpoint_name"], "train_run_id": s["train_run_id"],
+                      "device": record.get("device"), "n_train_messages": n, "rows": rows})
+    return {"status": "ok", "fields": list(TRAINING_FIELDS[kind]), "total_train_s": total, "seeds": seeds}
+
+
+def training_unavailable(line: str) -> dict[str, Any]:
+    """The training view of a system whose seeds or rows were refused: {status: "unavailable", message: the one line}.
+    It never carries rows from anywhere else (no fallback to the final manifests' epochs, D-09)."""
+    return {"status": "unavailable", "message": str(line).replace("\n", " ")}
 
 
 VIEWS: dict[str, Callable[[str], dict[str, Any]]] = {"intents": intents_view, "verdict": verdict_view,
