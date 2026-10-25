@@ -5,7 +5,9 @@ exactly as the frozen verdict's seed-averaged definition computes it.
 Two tiny Laya seeds come from tests/tiny_laya.py (T 1.3); two tiny BERTurk seeds are the epoch-001 and epoch-002 exports
 of one 2-epoch berturk_train.py run on CPU over the synthetic snapshot of tests/conftest.py (T 1.0). The records' chosen
 θ is 0.5 with one per-tag θ (0.3 for the first INTENTS tag). The startup refusals and the request validation are tested
-here too. Offline, no Ray, no weights: runs in `make test`.
+here too, and so are the D-13 guardrails: the loopback-only bind with no --host flag, the CLI defaults, the unbuilt-UI
+refusal, the trusted-host gate, docs and telemetry off, and a sentinel message that reaches no output. Offline, no Ray,
+no weights: runs in `make test`.
 """
 import json
 import os
@@ -633,3 +635,88 @@ def test_trusted_host_accepts_local_names(loaded: tuple[dict[str, Any], ThreadPo
     _, _, app = loaded
     with TestClient(app, base_url=base_url) as c:
         assert c.get("/api/status").status_code == 200
+
+
+# ---- no docs, no telemetry, no message text in any output (D-13) ----
+
+MESSAGE_SENTINEL = "SENTINEL-c41d Kartımı kaybettim"
+
+
+@pytest.mark.parametrize("with_ui", [False, True])
+def test_docs_and_openapi_off(loaded: tuple[dict[str, Any], ThreadPoolExecutor, Any], tmp_path: Path,
+                              with_ui: bool) -> None:
+    """/docs, /redoc and /openapi.json answer 404, with and without the built UI mounted at /."""
+    state, executor, _ = loaded
+    ui = None
+    if with_ui:
+        (tmp_path / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+        ui = str(tmp_path)
+    app = demo.create_app(state, executor, pd.build_views(REPO), ui)
+    assert (app.docs_url, app.redoc_url, app.openapi_url) == (None, None, None)
+    with client(app) as c:
+        for path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"):
+            r = c.get(path)
+            assert r.status_code == 404, (path, r.status_code)
+            assert "swagger" not in r.text.lower() and "redoc" not in r.text.lower()
+        if with_ui:
+            assert c.get("/").status_code == 200
+
+
+def test_telemetry_off(loaded: tuple[dict[str, Any], ThreadPoolExecutor, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """create_app passes telemetry=demo.TELEMETRY (every flag False, every key one fastapi's TelemetryConfig knows) and
+    the three doc URLs None; the app's effective config keeps every flag False even with FASTAPI_OTEL_AUTO_CONFIGURE
+    set, and its native telemetry is disabled."""
+    import fastapi
+    from fastapi.telemetry import TelemetryConfig
+    state, executor, _ = loaded
+    seen: list[dict[str, Any]] = []
+    real = fastapi.FastAPI
+
+    def recording(*a: Any, **k: Any) -> Any:
+        seen.append(k)
+        return real(*a, **k)
+    monkeypatch.setattr(fastapi, "FastAPI", recording)
+    monkeypatch.setenv("FASTAPI_OTEL_AUTO_CONFIGURE", "true")
+    app = demo.create_app(state, executor, pd.build_views(REPO))
+    assert len(seen) == 1
+    k = seen[0]
+    assert k["telemetry"] == demo.TELEMETRY and (k["docs_url"], k["redoc_url"], k["openapi_url"]) == (None,) * 3
+    assert demo.TELEMETRY == {"tracing": False, "metrics": False, "logs": False, "operation_spans": False,
+                              "auto_configure": False}
+    assert set(demo.TELEMETRY) <= set(TelemetryConfig.__annotations__)
+    assert all(app._telemetry[f] is False for f in demo.TELEMETRY)
+    assert app._native_telemetry.enabled() is False
+
+
+def test_no_log_of_message_text(loaded: tuple[dict[str, Any], ThreadPoolExecutor, Any],
+                                capfd: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture) -> None:
+    """A sentinel message classified through the tiny seeds (and sent in a refused body and through a failing
+    forward) appears in no captured stdout or stderr (file-descriptor level), no log record of any logger at DEBUG,
+    no response body and nowhere in the chat state."""
+    import logging
+    state, _, app = loaded
+    caplog.set_level(logging.DEBUG)                         # the root logger: every library's records propagate here
+    capfd.readouterr()
+    with client(app) as c:
+        r = c.post("/api/classify", json={"text": MESSAGE_SENTINEL})
+        assert r.status_code == 200, r.status_code
+        assert set(r.json()) == {"laya", "berturk"}
+        bad = c.post("/api/classify", json={"text": MESSAGE_SENTINEL, "extra": 1})
+        assert bad.status_code == 400
+    responses = r.text + bad.text
+
+    def fail(text: str) -> Any:
+        raise ValueError(text)                              # an exception carrying the text must not reach output
+    systems = {k: dict(v, seeds=[dict(s, forward=fail) for s in v["seeds"]]) for k, v in state["systems"].items()}
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        with client(demo.create_app(dict(state, systems=systems), ex, pd.build_views(REPO))) as c:
+            failed = c.post("/api/classify", json={"text": MESSAGE_SENTINEL})
+            assert failed.status_code == 500
+    responses += failed.text
+    out, err = capfd.readouterr()
+    logged = [rec.getMessage() for rec in caplog.records] + [caplog.text]
+    for needle in (MESSAGE_SENTINEL, "SENTINEL-c41d", json.dumps(MESSAGE_SENTINEL)[1:-1]):
+        assert needle not in out and needle not in err, "message text reached stdout or stderr"
+        assert not [m for m in logged if needle in m], "message text reached a log record"
+        assert needle not in responses, "message text was echoed"
+        assert needle not in repr(state), "message text was stored in the chat state"
