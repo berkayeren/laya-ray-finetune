@@ -1,6 +1,12 @@
 """The demo's record views, offline and model-free: the verdict view against report.py's --go-block, --final-table and
 --recommendation renders of the committed results/final/verdict.json, byte for byte, with every verdict string a whole
-line (or a table row) of a frozen render; served by demo.create_app's GET /api/<view> without any model loaded.
+line (or a table row) of a frozen render; the val selection view against postfit.py --render and --render-berturk, with
+the candidates, the reference check and the superseded BERTurk runs from the committed records; served by
+demo.create_app's GET /api/<view> without any model loaded.
+
+Per-view refusal: a tampered verdict copy (check_record) or a changed postfit record (protocol.json's input sha256)
+breaks only its own view (503 {error, source}), every other view keeps answering; no view holds a local path; the
+status tones come from pilot.verdict's constants. Runs in `make test`.
 """
 import json
 import os
@@ -165,3 +171,103 @@ def test_selection_candidates_and_reference() -> None:
     assert s["sources"][:5] == ["results/postfit/laya.json", "results/postfit/laya-final.json",
                                 "results/postfit/berturk.json", "results/postfit/berturk-final.json",
                                 "results/postfit/berturk-reference.json"]
+
+
+def tampered_verdict(tmp_path: Any) -> str:
+    """A copy of the committed verdict whose criterion (a) status is edited to PASS (check_record recomputes it)."""
+    import pilot.verdict
+    v = read_json("results/final/verdict.json")
+    assert v["criteria"]["a"]["status"] != pilot.verdict.PASS
+    v["criteria"]["a"]["status"] = pilot.verdict.PASS
+    path = os.path.join(str(tmp_path), "verdict.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(v, f, ensure_ascii=False, indent=2)
+    return path
+
+
+def test_tampered_verdict_refused_in_its_view_only(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import functools
+    copy = tampered_verdict(tmp_path)
+    with pytest.raises(SystemExit) as e:
+        pd.verdict_view(path=copy)
+    want = {"error": str(e.value.code).replace("\n", " "), "source": "results/final/verdict.json"}
+    monkeypatch.setitem(pd.VIEWS, "verdict", functools.partial(pd.verdict_view, path=copy))
+    views = pd.build_views(REPO)
+    assert views["verdict"] == want
+    for name in ("selection", "intents"):
+        assert not pd.view_refused(views[name]), name
+    assert views["selection"] == pd.selection_view()
+    resp = get("verdict", views)
+    assert resp.status_code == 503
+    assert resp.json() == want
+    for name in ("selection", "intents"):
+        resp = get(name, views)
+        assert resp.status_code == 200, name
+        assert resp.json() == views[name]
+
+
+def test_invalid_verdict_json_refused(tmp_path: Any) -> None:
+    path = os.path.join(str(tmp_path), "verdict.json")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"schema": "verdict/1",')
+    with pytest.raises(SystemExit) as e:
+        pd.verdict_view(path=path)
+    msg = str(e.value.code)
+    assert "is not valid JSON" in msg
+    assert "restore it with `git checkout -- results/final/verdict.json`" in msg
+
+
+def test_changed_postfit_refused_in_selection_only(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+    root = str(tmp_path / "repo")
+    for rel in ("results/postfit", "results/superseded"):
+        shutil.copytree(os.path.join(REPO, rel), os.path.join(root, rel))
+    assert pd.selection_view(root) == pd.selection_view()     # the untouched copy is the committed view
+    with open(os.path.join(root, "results/postfit/laya.json"), "ab") as f:
+        f.write(b" ")
+    with pytest.raises(SystemExit) as e:
+        pd.selection_view(root)
+    assert "protocol input results/postfit/laya.json changed" in str(e.value.code)
+    assert "git checkout -- results/postfit/laya.json" in str(e.value.code)
+    monkeypatch.setitem(pd.VIEWS, "selection", lambda _root: pd.selection_view(root))
+    views = pd.build_views(REPO)
+    assert views["selection"] == {"error": str(e.value.code).replace("\n", " "), "source": "results/postfit/laya.json"}
+    assert views["verdict"] == pd.verdict_view()
+    assert not pd.view_refused(views["intents"])
+    assert get("selection", views).status_code == 503
+    assert get("verdict", views).status_code == 200
+
+
+def paths_of(x: Any) -> list[Any]:
+    """Every value under a "path" key, anywhere in a JSON-like value."""
+    if isinstance(x, dict):
+        return [v for k, v in x.items() if k == "path"] + [p for v in x.values() for p in paths_of(v)]
+    if isinstance(x, list):
+        return [p for v in x for p in paths_of(v)]
+    return []
+
+
+def test_views_hold_no_local_paths() -> None:
+    views = pd.build_views(REPO)
+    assert not any(pd.view_refused(v) for v in views.values()), views
+    text = json.dumps(views, ensure_ascii=False)
+    assert os.path.realpath(REPO) not in text and REPO not in text
+    assert os.path.expanduser("~") not in text
+    paths = paths_of(views)
+    assert paths
+    for p in paths:
+        assert isinstance(p, str) and p and not os.path.isabs(p), p
+        assert not p.startswith("..") and not p.startswith("<outside-repo>") and "\\" not in p, p
+        assert os.path.exists(os.path.join(REPO, p)), p
+    for v in views.values():
+        for p in v.get("sources", []):
+            assert not os.path.isabs(p) and os.path.exists(os.path.join(REPO, p)), p
+
+
+def test_status_tone() -> None:
+    import pilot.verdict as pv
+    assert pd.tone(pv.PASS) == "positive"
+    assert pd.tone(pv.FAIL) == "negative"
+    assert pd.tone(pv.INCONCLUSIVE) == "caution"
+    for s in (pv.MET, pv.NOT_MET, pv.REPORTED, pv.PENDING, "ok", "investigate", None):
+        assert pd.tone(s) == "neutral", s
