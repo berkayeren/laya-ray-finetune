@@ -124,9 +124,9 @@ def load_system(binding: dict[str, Any], bound: list[tuple[dict[str, Any], str, 
     import torch
     if device == "mps" and not torch.backends.mps.is_available():
         raise SystemExit("--device mps, but MPS is not available here; use --device cpu")
-    load = _laya_seed if binding["kind"] == "laya" else _berturk_seed
+    load_seed = _laya_seed if binding["kind"] == "laya" else _berturk_seed
     return {"binding": binding, "device": device,
-            "seeds": [load(binding, s, ckpt, ident, device, threads) for s, ckpt, ident in bound]}
+            "seeds": [load_seed(binding, s, ckpt, ident, device, threads) for s, ckpt, ident in bound]}
 
 
 def classify(systems: dict[str, dict[str, Any]], text: str) -> dict[str, dict[str, Any]]:
