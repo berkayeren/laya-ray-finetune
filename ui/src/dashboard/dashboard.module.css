@@ -349,6 +349,105 @@
   margin: 0;
 }
 
+/* val selection view: two cards side by side from a 960px content width (Laya left, BERTurk right) */
+
+.pairWrap {
+  container-type: inline-size;
+}
+
+.pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-lg);
+  align-items: start;
+}
+
+@container (min-width: 960px) {
+  .pair {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  min-width: 0;
+}
+
+.swatch {
+  display: inline-block;
+  width: var(--swatch);
+  height: var(--swatch);
+  margin-right: var(--space-sm);
+  border-radius: 2px;
+  vertical-align: baseline;
+}
+
+.chartCaption {
+  margin: calc(-1 * var(--space-sm)) 0 var(--space-sm);
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  color: var(--ink-muted);
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+.tile {
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-card);
+  padding: var(--space-sm) var(--space-md);
+  min-width: 0;
+}
+
+.tileLabel,
+.tileNote {
+  margin: 0;
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  color: var(--ink-secondary);
+}
+
+.tileNote {
+  color: var(--ink-muted);
+}
+
+.tileValue {
+  margin: 0;
+  font-size: var(--text-heading);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-heading);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.edgeBlock {
+  margin-top: var(--space-md);
+}
+
+.edgeTitle {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--text-label);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-label);
+}
+
+.edgeLines {
+  margin: 0;
+  padding-left: var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  overflow-wrap: anywhere;
+}
+
 /* below 720px: the sidebar becomes a horizontal scrolling view list above the content */
 
 @media (max-width: 719px) {
