@@ -50,6 +50,7 @@ usage: from pilot import demo
 import json
 import math
 import os
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -601,9 +602,78 @@ def training_unavailable(line: str) -> dict[str, Any]:
     return {"status": "unavailable", "message": str(line).replace("\n", " ")}
 
 
+# ---- the confidence group: the committed reliability diagrams, served byte for byte (D-10) ----
+
+# (directory, split) of the committed reliability SVGs: the val records' and the final seeds' test records' (a
+# hotels_probe record has no diagram); the demo serves exactly these files and redraws none of them
+SVG_DIRS = (("results/confidence", "val"), ("results/final/confidence", "test"))
+SVG_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+-(val|test)\.svg$")
+CONFIDENCE_SCHEMA = "confidence/1"                          # = report.CONFIDENCE_SCHEMA
+
+
+def svg_allow_list(root: str = REPO_ROOT) -> dict[str, str]:
+    """{file name: repo-relative path} of every committed reliability SVG: the *-val.svg names under
+    results/confidence, then the *-test.svg names under results/final/confidence, each in sorted os.listdir order and
+    matching SVG_NAME_RE with its directory's split; a symlink or a non-file is never listed. Built once at startup:
+    GET /api/svg/{name} looks a name up here exactly and never joins a request into a path."""
+    out = {}
+    for rel_dir, split in SVG_DIRS:
+        d = os.path.join(root, rel_dir)
+        if not os.path.isdir(d):
+            continue
+        for name in sorted(os.listdir(d)):
+            m = SVG_NAME_RE.match(name)
+            p = os.path.join(d, name)
+            if m and m.group(1) == split and os.path.isfile(p) and not os.path.islink(p):
+                out[name] = rel_dir + "/" + name
+    return out
+
+
+def _confidence_record(root: str, rel: str, name: str, split: str) -> dict[str, Any]:
+    """The confidence/1 record beside a reliability SVG (same stem, .json); SystemExit naming the restore unless it is
+    valid JSON of that schema whose run_id and split name the SVG (<run_id>-<split>.svg) and, for a val record, which
+    is in_sample with a caveat string."""
+    if not os.path.isfile(os.path.join(root, rel)):
+        raise SystemExit("%s has no confidence record %s; restore it with `git checkout -- %s`"
+                         % (name, rel, rel))
+    with open(os.path.join(root, rel), "rb") as f:
+        r = _bound_json(f.read(), rel)
+    sp = r.get("split") if isinstance(r.get("split"), dict) else {}
+    if r.get("schema") != CONFIDENCE_SCHEMA or not isinstance(r.get("run_id"), str) or sp.get("name") != split \
+            or "%s-%s.svg" % (r["run_id"], split) != name:
+        raise SystemExit("%s is not the %s %s record of %s; restore it with `git checkout -- %s`"
+                         % (rel, CONFIDENCE_SCHEMA, split, name, rel))
+    if split == "val" and (r.get("in_sample") is not True or not isinstance(r.get("caveat"), str)):
+        raise SystemExit("%s is a val record without in_sample true and its caveat; restore it with `git checkout -- "
+                         "%s`" % (rel, rel))
+    return r
+
+
+def confidence_view(root: str = REPO_ROOT) -> dict[str, Any]:
+    """The reliability diagrams as data: one entry per svg_allow_list SVG, its run id and split from the confidence/1
+    record beside it; the val records' caveat fields (report.IN_SAMPLE_CAVEAT), unique, in order, passed verbatim.
+    SystemExit on a missing or mismatched record or when either split has no diagram.
+
+    Returns {sources, val: [{svg, path, run_id, split}], test: [{svg, path, run_id, split}], caveats: [str]}."""
+    out: dict[str, list[dict[str, Any]]] = {"val": [], "test": []}
+    caveats: list[str] = []
+    for name, rel in svg_allow_list(root).items():
+        split = "val" if name.endswith("-val.svg") else "test"
+        r = _confidence_record(root, rel[:-len(".svg")] + ".json", name, split)
+        out[split].append({"svg": name, "path": rel, "run_id": r["run_id"], "split": split})
+        if split == "val" and r["caveat"] not in caveats:
+            caveats.append(r["caveat"])
+    for rel_dir, split in SVG_DIRS:
+        if not out[split]:
+            raise SystemExit("%s holds no %s reliability diagram; restore it with `git checkout -- %s`"
+                             % (rel_dir, split, rel_dir))
+    return {"sources": [d for d, _ in SVG_DIRS], "val": out["val"], "test": out["test"], "caveats": caveats}
+
+
 VIEWS: dict[str, Callable[[str], dict[str, Any]]] = {"intents": intents_view, "verdict": verdict_view,
-                                                     "selection": selection_view}
-VIEW_SOURCES = {"intents": "intents.py", "verdict": VERDICT_RECORD, "selection": SELECTION_RECORDS["laya"][0]}
+                                                     "selection": selection_view, "confidence": confidence_view}
+VIEW_SOURCES = {"intents": "intents.py", "verdict": VERDICT_RECORD, "selection": SELECTION_RECORDS["laya"][0],
+                "confidence": SVG_DIRS[0][0]}
 
 
 def build_views(root: str = REPO_ROOT) -> dict[str, dict[str, Any]]:

@@ -7,10 +7,12 @@ pilot.metrics.CONFIDENCE_RULE). The six final seeds load once, in this process, 
 dumps (latency.py's precedent): score.resolve_checkpoint + score.Predictor for Laya (fp32, autocast off, check_agent
 after every forward), score.check_berturk + score.load_bert for BERTurk (fp32, check_bert after every forward). No Ray
 module is imported. The views (GET /api/<name>, pilot.demo.VIEWS) are built once at startup from the committed
-records. The training view (GET /api/training) holds each final seed's per-epoch rows (Ray Train for Laya, the HF
-Trainer for BERTurk) read from its checkpoint in the loader's binding stage, after latency.bind_seed and before any
-model load (pilot.demo.training_system); a system whose checkpoints are missing or changed reads unavailable with the
-one line, and its rows are never taken from the committed final manifests (the user decision of 2026-10-25, D-09).
+records; GET /api/svg/<name> serves a committed reliability diagram byte for byte, looked up by exact name in the
+allow-list built once at startup (pilot.demo.svg_allow_list). The training view (GET /api/training) holds each final
+seed's per-epoch rows (Ray Train for Laya, the HF Trainer for BERTurk) read from its checkpoint in the loader's binding
+stage, after latency.bind_seed and before any model load (pilot.demo.training_system); a system whose checkpoints are
+missing or changed reads unavailable with the one line, and its rows are never taken from the committed final
+manifests (the user decision of 2026-10-25, D-09).
 
 What it never does: train, call score.main (so score.py's protocol gate is neither triggered nor weakened), write
 under results/, data/ or protocol.json, store or log message text (uvicorn's access log is off, FastAPI telemetry is
@@ -56,6 +58,11 @@ TELEMETRY = {"tracing": False, "metrics": False, "logs": False, "operation_spans
 CLASSIFY_FAILED = "classification failed (%s); try again; if it repeats, restart `make demo`"
 LOAD_FAILED = "loading the final seeds failed (%s); restart `make demo`"
 TRAINING_FAILED = "reading the %s run records failed (%s); restore the final seeds"
+UNKNOWN_DIAGRAM = "unknown diagram"
+DIAGRAM_UNREADABLE = "diagram %s cannot be read; restore it with `git checkout -- %s`"
+# an SVG response is never sniffed as another type, and opened on its own it runs nothing and loads nothing
+SVG_HEADERS = {"X-Content-Type-Options": "nosniff",
+               "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"}
 NOT_JSON_TYPE = "the request body must be sent as Content-Type application/json; send {\"text\": \"...\"}"
 BODY_TOO_LARGE = "the request body is larger than %d bytes; send one message of at most %d characters" % (
     pd.MAX_BODY_BYTES, pd.MAX_CHARS)
@@ -223,12 +230,14 @@ def start_loading(state: dict[str, Any], executor: ThreadPoolExecutor,
 
 
 def create_app(state: dict[str, Any], executor: ThreadPoolExecutor, views: dict[str, dict[str, Any]],
-               ui_dist: str | None = None) -> Any:
-    """The FastAPI app: GET /api/status, POST /api/classify, GET /api/training, GET /api/<view>, then the built UI at /
-    (when ui_dist is given). Docs, OpenAPI and telemetry are off; only the Host 127.0.0.1 or localhost is served; no
-    CORS. No handler prints or logs a body."""
+               ui_dist: str | None = None, svgs: dict[str, str] | None = None) -> Any:
+    """The FastAPI app: GET /api/status, POST /api/classify, GET /api/training, GET /api/svg/<name>, GET /api/<view>,
+    then the built UI at / (when ui_dist is given). svgs is the startup allow-list {file name: repo-relative path}
+    (pilot.demo.svg_allow_list): /api/svg/<name> serves a listed file's bytes as image/svg+xml, every other name 404.
+    Docs, OpenAPI and telemetry are off; only the Host 127.0.0.1 or localhost is served; no CORS. No handler prints or
+    logs a body, and no handler writes a file."""
     from fastapi import FastAPI, Request
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, Response
     from starlette.middleware.trustedhost import TrustedHostMiddleware
     from starlette.staticfiles import StaticFiles
 
@@ -271,6 +280,20 @@ def create_app(state: dict[str, Any], executor: ThreadPoolExecutor, views: dict[
         except Exception as e:
             return error(500, CLASSIFY_FAILED % type(e).__name__)
 
+    allowed = dict(svgs or {})                          # copied once: the allow-list never changes after startup
+
+    @app.get("/api/svg/{name}")
+    def svg(name: str) -> Any:
+        rel = allowed.get(name)                         # an exact-name lookup: the request never becomes a path
+        if rel is None:
+            return error(404, UNKNOWN_DIAGRAM)
+        try:
+            with open(os.path.join(REPO_ROOT, rel), "rb") as f:
+                body = f.read()
+        except OSError:
+            return error(404, DIAGRAM_UNREADABLE % (name, rel))
+        return Response(body, media_type="image/svg+xml", headers=SVG_HEADERS)
+
     @app.get("/api/{name}")
     def view(name: str) -> Any:
         if name not in views:
@@ -301,7 +324,7 @@ def main(argv: list[str] | None = None) -> None:
     state = new_state(a.device)
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="demo-model")
     views = pd.build_views(REPO_ROOT)
-    app = create_app(state, executor, views, UI_DIST)
+    app = create_app(state, executor, views, UI_DIST, pd.svg_allow_list(REPO_ROOT))
     start_loading(state, executor, functools.partial(pd.protocol_bindings, REPO_ROOT), a.checkpoint_root, a.device,
                   a.threads)
     print("demo on http://127.0.0.1:%d (local only; stores nothing); the chat opens when the six final checkpoints "

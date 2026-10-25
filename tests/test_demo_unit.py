@@ -271,3 +271,119 @@ def test_status_tone() -> None:
     assert pd.tone(pv.INCONCLUSIVE) == "caution"
     for s in (pv.MET, pv.NOT_MET, pv.REPORTED, pv.PENDING, "ok", "investigate", None):
         assert pd.tone(s) == "neutral", s
+
+
+# ---- the confidence group: the committed reliability SVGs behind the startup allow-list (D-10, T-11-20) ----
+
+def svg_client(svgs: dict[str, str] | None = None) -> Any:
+    """A TestClient over an app whose SVG allow-list is `svgs` (default pd.svg_allow_list(REPO)), no model loaded."""
+    from starlette.testclient import TestClient
+    ex = ThreadPoolExecutor(max_workers=1)
+    app = demo.create_app(demo.new_state("cpu"), ex, {}, svgs=pd.svg_allow_list(REPO) if svgs is None else svgs)
+    return TestClient(app, base_url="http://127.0.0.1")
+
+
+def committed(rel_dir: str, suffix: str) -> list[str]:
+    """The tracked file names under rel_dir ending in suffix, sorted (git ls-files, never a directory walk)."""
+    out = subprocess.run(["git", "ls-files", "-z", "--", rel_dir], cwd=REPO, check=True, capture_output=True,
+                         text=True, encoding="utf-8").stdout
+    return sorted(os.path.basename(p) for p in out.split("\0") if p.endswith(suffix) and
+                  os.path.dirname(p) == rel_dir)
+
+
+def test_svg_allow_list_is_the_committed_diagrams() -> None:
+    svgs = pd.svg_allow_list(REPO)
+    val, test = committed("results/confidence", "-val.svg"), committed("results/final/confidence", "-test.svg")
+    assert (len(val), len(test)) == (3, 8)
+    assert list(svgs) == val + test
+    assert svgs == {**{n: "results/confidence/" + n for n in val}, **{n: "results/final/confidence/" + n for n in test}}
+    assert not any(n.endswith("hotels_probe.svg") for n in svgs)
+
+
+def test_svg_allow_list_skips_other_names(tmp_path: Any) -> None:
+    root = str(tmp_path)
+    for rel_dir, _ in pd.SVG_DIRS:
+        os.makedirs(os.path.join(root, rel_dir))
+    for rel in ("results/confidence/a-val.svg", "results/final/confidence/b-test.svg",
+                "results/confidence/c-test.svg", "results/final/confidence/d-val.svg",
+                "results/confidence/e-val.json", "results/confidence/bad name-val.svg"):
+        with open(os.path.join(root, rel), "w", encoding="utf-8") as f:
+            f.write("<svg/>")
+    os.makedirs(os.path.join(root, "results/confidence/dir-val.svg"))
+    os.symlink(os.path.join(REPO, "protocol.json"), os.path.join(root, "results/confidence/link-val.svg"))
+    assert pd.svg_allow_list(root) == {"a-val.svg": "results/confidence/a-val.svg",
+                                       "b-test.svg": "results/final/confidence/b-test.svg"}
+
+
+def test_svg_served_byte_for_byte() -> None:
+    svgs = pd.svg_allow_list(REPO)
+    with svg_client(svgs) as c:
+        for name, rel in svgs.items():
+            r = c.get("/api/svg/%s" % name)
+            assert r.status_code == 200, name
+            assert r.headers["content-type"].split(";")[0] == "image/svg+xml"
+            assert r.headers["x-content-type-options"] == "nosniff"
+            with open(os.path.join(REPO, rel), "rb") as f:
+                assert r.content == f.read(), name
+
+
+@pytest.mark.parametrize("path", ["/api/svg/nothing-val.svg", "/api/svg/..%2Fprotocol.json",
+                                  "/api/svg/..%2F..%2Fprotocol.json", "/api/svg/laya-zeroshot-7b928d82-val.json",
+                                  "/api/svg/results%2Fconfidence%2Flaya-zeroshot-7b928d82-val.svg",
+                                  "/api/svg/results/confidence/laya-zeroshot-7b928d82-val.svg",
+                                  "/api/svg/laya-zeroshot-7b928d82-hotels_probe.svg", "/api/svg/protocol.json"])
+def test_svg_refuses_unlisted_names(path: str) -> None:
+    with svg_client() as c:
+        r = c.get(path)
+        assert r.status_code == 404, path
+        assert b"<svg" not in r.content and b'"schema"' not in r.content, path
+
+
+def test_svg_route_without_an_allow_list() -> None:
+    with svg_client({}) as c:
+        r = c.get("/api/svg/laya-zeroshot-7b928d82-val.svg")
+        assert (r.status_code, r.json()) == (404, {"error": demo.UNKNOWN_DIAGRAM})
+
+
+def test_confidence_view() -> None:
+    import report
+    view = pd.confidence_view(REPO)
+    svgs = pd.svg_allow_list(REPO)
+    assert view["sources"] == ["results/confidence", "results/final/confidence"]
+    assert [e["svg"] for e in view["val"]] + [e["svg"] for e in view["test"]] == list(svgs)
+    assert (len(view["val"]), len(view["test"])) == (3, 8)
+    for split in ("val", "test"):
+        for e in view[split]:
+            assert set(e) == {"svg", "path", "run_id", "split"}
+            assert e["split"] == split and e["path"] == svgs[e["svg"]]
+            rec = read_json(e["path"][:-len(".svg")] + ".json")
+            assert e["run_id"] == rec["run_id"] and e["svg"] == "%s-%s.svg" % (rec["run_id"], split)
+    caveats = []
+    for e in view["val"]:
+        rec = read_json(e["path"][:-len(".svg")] + ".json")
+        if rec["caveat"] not in caveats:
+            caveats.append(rec["caveat"])
+    assert view["caveats"] == caveats == [report.IN_SAMPLE_CAVEAT]
+    resp = get("confidence")
+    assert resp.status_code == 200
+    assert resp.json() == view
+
+
+def test_confidence_view_refuses_a_mismatched_record(tmp_path: Any) -> None:
+    import shutil
+    root = str(tmp_path / "repo")
+    for rel_dir, _ in pd.SVG_DIRS:
+        shutil.copytree(os.path.join(REPO, rel_dir), os.path.join(root, rel_dir))
+    assert pd.confidence_view(root) == pd.confidence_view(REPO)
+    rel = "results/confidence/laya-zeroshot-7b928d82-val.json"
+    rec = read_json(rel)
+    rec["run_id"] = "laya-other"
+    with open(os.path.join(root, rel), "w", encoding="utf-8") as f:
+        json.dump(rec, f)
+    with pytest.raises(SystemExit) as e:
+        pd.confidence_view(root)
+    assert str(e.value.code).startswith("%s is not the confidence/1 val record" % rel)
+    os.remove(os.path.join(root, rel))
+    with pytest.raises(SystemExit) as e:
+        pd.confidence_view(root)
+    assert "git checkout -- %s" % rel in str(e.value.code)
