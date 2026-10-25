@@ -21,6 +21,15 @@ Design notes:
 - parse_classify_body's refusals are fixed one-line texts that never contain the submitted text, and the text it
   returns is unchanged (no strip, lowercasing, folding or normalization), as latency.py feeds texts.
 - A view builder's refusal (SystemExit) becomes that view's {"error", "source"}; every other view keeps serving.
+- The verdict view mirrors report.py's --go-block, --final-table and --recommendation: the verdict record's bytes
+  read once, pilot.protocol.require_frozen, then pilot.verdict.check_record, then the three frozen renders. Every
+  verdict string it carries is a whole line (or a table cell) of those renders or a field of the record, and every
+  charted delta is the record's own number; the demo writes no sentence. Each status carries a tone computed here from
+  pilot.verdict's status constants, so the UI never needs a verdict word.
+- The selection view reads only protocol-bound inputs: each postfit record, final manifest and the BERTurk reference
+  check is hashed against protocol.json's inputs entry before it is parsed (bound_input); the superseded BERTurk
+  history comes from pilot.berturk.load_superseded (its own pinned sha256s). Its renders are postfit.py --render and
+  --render-berturk's.
 
 This module never imports torch, transformers, laya, Ray, fastapi, starlette or uvicorn (a subprocess test guards it).
 
@@ -36,12 +45,15 @@ from typing import Any
 
 import numpy as np
 
+import pilot.berturk
 import pilot.latency
+import pilot.memo
 import pilot.postfit
 import pilot.protocol
+import pilot.verdict
 from intents import QUESTIONS
 from pilot import metrics
-from pilot.data import REPO_ROOT, repo_relpath
+from pilot.data import REPO_ROOT, repo_relpath, sha256_bytes
 
 HOST = "127.0.0.1"                                          # loopback only: demo.py has no --host flag
 PORT = 8765
@@ -198,8 +210,129 @@ def intents_view(root: str) -> dict[str, Any]:
             "confidence_rule": metrics.CONFIDENCE_RULE}
 
 
-VIEWS: dict[str, Callable[[str], dict[str, Any]]] = {"intents": intents_view}
-VIEW_SOURCES = {"intents": "intents.py"}
+# the tone of a status, computed here so the UI source never holds a verdict word; every other status is neutral
+STATUS_TONE = {pilot.verdict.PASS: "positive", pilot.verdict.FAIL: "negative", pilot.verdict.INCONCLUSIVE: "caution"}
+VERDICT_RECORD = "results/final/verdict.json"
+# the four charted deltas, in order: (criterion label, metric label, criterion key, metric key, direction); (a)'s
+# entry is criteria.a[metric key], (d)'s the criteria.d.paths item whose metric is the metric key
+DELTA_ROWS = (("(a)", "micro-F1", "a", "micro", "higher is better"),
+              ("(a)", "macro-F1", "a", "macro", "higher is better"),
+              ("(d)", "Brier", "d", "brier", "lower is better"),
+              ("(d)", "precision at 80% coverage", "d", "precision_at_80", "higher is better"))
+
+
+def tone(status: Any) -> str:
+    """The display tone of a status: STATUS_TONE's (PASS positive, FAIL negative, INCONCLUSIVE caution) or neutral."""
+    return STATUS_TONE.get(status, "neutral") if isinstance(status, str) else "neutral"
+
+
+def render_line(text: str, prefix: str, what: str) -> str:
+    """The one line of `text` starting with `prefix`; SystemExit naming `what` and the prefix when there are zero or
+    several such lines (the demo shows whole render lines only)."""
+    hits = [l for l in text.split("\n") if l.startswith(prefix)]
+    if len(hits) != 1:
+        raise SystemExit("the %s render holds %d lines starting %r, not one; restore its records with `git checkout -- "
+                         "results`" % (what, len(hits), prefix))
+    return hits[0]
+
+
+def md_table(text: str, header_prefix: str, what: str) -> dict[str, list[Any]]:
+    """{header: [cells], rows: [[cells]]} of the one markdown table of `text` whose header line starts with
+    header_prefix: the |---| separator skipped, then every following line starting "|" up to the first other line.
+    Cells are the line stripped of its outer "|" and split on " | ", each stripped. SystemExit naming `what` when there
+    is no such header, several, or no separator."""
+    lines = text.split("\n")
+    at = [i for i, l in enumerate(lines) if l.startswith(header_prefix)]
+    if len(at) != 1:
+        raise SystemExit("the %s render holds %d tables headed %r, not one; restore its records with `git checkout -- "
+                         "results`" % (what, len(at), header_prefix))
+    i = at[0]
+
+    def cells(line: str) -> list[str]:
+        return [c.strip() for c in line.strip().strip("|").split(" | ")]
+
+    if i + 1 >= len(lines) or not lines[i + 1].startswith("|---"):
+        raise SystemExit("the %s render's table headed %r has no |---| separator; restore its records with "
+                         "`git checkout -- results`" % (what, header_prefix))
+    rows = []
+    for l in lines[i + 2:]:
+        if not l.startswith("|"):
+            break
+        rows.append(cells(l))
+    return {"header": cells(lines[i]), "rows": rows}
+
+
+def _delta_entry(v: dict[str, Any], crit: str, key: str) -> dict[str, Any]:
+    """The verdict record's {delta, ci} (plus status for (d)) of one DELTA_ROWS entry; SystemExit when it is absent."""
+    c = v["criteria"][crit]
+    if crit == "a":
+        e = c.get(key)
+    else:
+        hits = [p for p in c.get("paths") or [] if p.get("metric") == key]
+        e = hits[0] if len(hits) == 1 else None
+    if not isinstance(e, dict) or "delta" not in e or not isinstance(e.get("ci"), list) or len(e["ci"]) != 2:
+        raise SystemExit("the verdict record has no criterion (%s) %s delta and CI; restore it with `git checkout -- "
+                         "%s`" % (crit, key, VERDICT_RECORD))
+    return e
+
+
+def verdict_view(root: str = REPO_ROOT, path: str | None = None) -> dict[str, Any]:
+    """The frozen verdict as data, mirroring report.py's --go-block, --final-table and --recommendation: the record's
+    bytes read once and hashed, parsed, pilot.protocol.require_frozen, pilot.verdict.check_record, then
+    pilot.verdict.render_go, render_final_table and pilot.memo.render_recommendation (equal to those three commands'
+    stdout). SystemExit on a missing or invalid record or one check_record refuses.
+
+    Returns {sources, verdict, means, tone, lines {verdict, rule, means, recommendation} (whole render lines without
+    their markdown markup), criteria [{criterion, status, tone, numbers}] (the GO table's cells), deltas [{criterion,
+    metric, delta_points, ci_points [lo, hi], delta_text, ci_text, direction, status}] (DELTA_ROWS: the record's
+    numbers x 100, unrounded; the texts in the GO render's formats), results and settings ({header, rows} of the
+    results-on-test tables), caveats (pilot.memo.CAVEATS), renders {go, final_table, recommendation}}."""
+    path = os.path.join(root, VERDICT_RECORD) if path is None else path
+    rel = repo_relpath(path)
+    if not os.path.isfile(path):
+        raise SystemExit("verdict record %s not found; restore it with `git checkout -- %s`" % (rel, VERDICT_RECORD))
+    with open(path, "rb") as f:
+        raw = f.read()                                      # hash and parse the same bytes (report.py's sequence)
+    sha = sha256_bytes(raw)
+    try:
+        v = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as e:
+        raise SystemExit("verdict record %s is not valid JSON (%s); restore it with `git checkout -- %s`"
+                         % (rel, e, VERDICT_RECORD)) from None
+    proto, pin = pilot.protocol.require_frozen()
+    pilot.verdict.check_record(v, proto, pin)
+    go = pilot.verdict.render_go(v)
+    table = pilot.verdict.render_final_table(v)
+    rec = pilot.memo.render_recommendation(v, rel, sha, pilot.memo.facts(v, proto, root))
+    word = v["verdict"]["verdict"]
+    go_lines = go.split("\n")
+    rule = render_line(go, "- Rule ", "GO block")
+    at = go_lines.index(rule) + 1
+    means = go_lines[at] if at < len(go_lines) else ""
+    if not means.startswith("- %s " % word):
+        raise SystemExit("the GO block's line after %r is %r, not the meaning of %s; restore %s with `git checkout -- "
+                         "%s`" % (rule, means, word, rel, VERDICT_RECORD))
+    lines = {"verdict": render_line(go, "**Verdict: ", "GO block").strip("*"), "rule": rule[2:], "means": means[2:],
+             "recommendation": render_line(rec, "**Recommendation: ", "recommendation").strip("*")}
+    criteria = [{"criterion": r[0], "status": r[1], "tone": tone(r[1]), "numbers": r[2]}
+                for r in md_table(go, pilot.memo.GO_TABLE_HEADER, "GO block")["rows"]]
+    deltas = []
+    for label, metric, crit, key, direction in DELTA_ROWS:
+        e = _delta_entry(v, crit, key)
+        d, (lo, hi) = 100 * e["delta"], (100 * e["ci"][0], 100 * e["ci"][1])
+        deltas.append({"criterion": label, "metric": metric, "delta_points": d, "ci_points": [lo, hi],
+                       "delta_text": "%+.2f points" % d, "ci_text": "CI [%+.2f, %+.2f]" % (lo, hi),
+                       "direction": direction, "status": e.get("status") if crit == "d" else None})
+    return {"sources": [rel, "protocol.json"], "verdict": word, "means": v["verdict"]["means"], "tone": tone(word),
+            "lines": lines, "criteria": criteria, "deltas": deltas,
+            "results": md_table(table, pilot.memo.RESULTS_TABLE_HEADER, "results-on-test"),
+            "settings": md_table(table, "| system | T |", "results-on-test settings"),
+            "caveats": list(pilot.memo.CAVEATS),
+            "renders": {"go": go, "final_table": table, "recommendation": rec}}
+
+
+VIEWS: dict[str, Callable[[str], dict[str, Any]]] = {"intents": intents_view, "verdict": verdict_view}
+VIEW_SOURCES = {"intents": "intents.py", "verdict": VERDICT_RECORD}
 
 
 def build_views(root: str = REPO_ROOT) -> dict[str, dict[str, Any]]:
