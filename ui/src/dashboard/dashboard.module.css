@@ -321,6 +321,34 @@
   line-height: var(--leading-body);
 }
 
+/* charts: Recharts on a white card; the tooltip holds the server's own texts */
+
+.chart {
+  width: 100%;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.chartTip {
+  max-width: 320px;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--color-surface);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-card);
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  font-variant-numeric: tabular-nums;
+}
+
+.chartTipTitle {
+  margin: 0 0 var(--space-xs);
+  font-weight: var(--weight-semibold);
+}
+
+.chartTipLine {
+  margin: 0;
+}
+
 /* below 720px: the sidebar becomes a horizontal scrolling view list above the content */
 
 @media (max-width: 719px) {
