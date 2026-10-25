@@ -21,6 +21,7 @@ import pytest
 
 import demo
 import pilot.data
+import pilot.latency
 import score
 from conftest import make_raw
 from intents import INTENTS, QUESTIONS
@@ -536,3 +537,99 @@ def test_argument_errors_and_missing_ui_build(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(demo, "start_loading", lambda *a, **k: pytest.fail("loading started without a UI build"))
     with pytest.raises(SystemExit, match="ui/dist/index.html not found; build the UI first"):
         demo.main(["--device", "cpu"])
+
+
+# ---- guardrails (D-13, D-14, the user decision of 2026-10-25): loopback only, no --host, local Host names only ----
+
+def run_main(argv: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, list[Any]]:
+    """demo.main(argv) with uvicorn.run and demo.start_loading as recorders and demo.UI_DIST a tmp dir holding
+    index.html. Returns {"run": [(args, kwargs)], "loading": [(args, kwargs)]} in call order."""
+    import uvicorn
+    calls: dict[str, list[Any]] = {"run": [], "loading": []}
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+    monkeypatch.setattr(demo, "UI_DIST", str(dist))
+    monkeypatch.setattr(demo, "start_loading", lambda *a, **k: calls["loading"].append((a, k)))
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: calls["run"].append((a, k)))
+    demo.main(argv)
+    return calls
+
+
+def test_loopback_bind_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """main() serves on 127.0.0.1:8765 with uvicorn's access log off and log level warning; loading starts on the
+    repo root with --device mps."""
+    calls = run_main([], monkeypatch, tmp_path)
+    assert len(calls["run"]) == 1 and len(calls["loading"]) == 1
+    (args, kwargs), = calls["run"]
+    assert len(args) == 1 and kwargs == {"host": "127.0.0.1", "port": 8765, "access_log": False,
+                                         "log_level": "warning"}
+    assert pd.HOST == "127.0.0.1" and pd.PORT == 8765
+    (largs, _), = calls["loading"]
+    assert largs[3:] == (REPO, "mps", pilot.latency.THREADS)
+
+
+def test_loopback_bind_with_another_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = run_main(["--port", "9001", "--device", "cpu"], monkeypatch, tmp_path)
+    (_, kwargs), = calls["run"]
+    assert kwargs == {"host": "127.0.0.1", "port": 9001, "access_log": False, "log_level": "warning"}
+
+
+@pytest.mark.parametrize("var", ["HOST", "UVICORN_HOST", "DEMO_HOST"])
+def test_loopback_host_ignores_the_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, var: str) -> None:
+    """The host is the constant pilot.demo.HOST: no environment variable moves it."""
+    monkeypatch.setenv(var, "0.0.0.0")
+    (_, kwargs), = run_main([], monkeypatch, tmp_path)["run"]
+    assert kwargs["host"] == "127.0.0.1"
+
+
+def test_no_host_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    """The parser has exactly --device (mps|cpu, default mps), --checkpoint-root (default the repo root), --port
+    (default 8765) and --threads; no option names a host, and --host or --device cuda is an argument error."""
+    ap = demo.parser()
+    opts = sorted(o for a in ap._actions for o in a.option_strings)
+    assert opts == sorted(["--checkpoint-root", "--device", "--port", "--threads", "-h", "--help"])
+    assert not [o for o in opts if "host" in o.lower()]
+    a = ap.parse_args([])
+    assert (a.device, a.port, a.checkpoint_root, a.threads) == ("mps", 8765, REPO, pilot.latency.THREADS)
+    assert next(x for x in ap._actions if "--device" in x.option_strings).choices == ("mps", "cpu")
+    for argv in (["--host", "0.0.0.0"], ["--host=127.0.0.1"], ["--device", "cuda"], ["--bind", "0.0.0.0"]):
+        with pytest.raises(SystemExit) as e:
+            ap.parse_args(argv)
+        assert e.value.code == 2, argv
+    capsys.readouterr()
+
+
+def test_main_refuses_unbuilt_ui(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A ui/dist without index.html is refused naming the build command, before loading starts or uvicorn runs."""
+    import uvicorn
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "assets.js").write_text("", encoding="utf-8")
+    monkeypatch.setattr(demo, "UI_DIST", str(tmp_path / "dist"))
+    monkeypatch.setattr(demo, "start_loading", lambda *a, **k: pytest.fail("loading started without a UI build"))
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: pytest.fail("uvicorn ran without a UI build"))
+    with pytest.raises(SystemExit) as e:
+        demo.main(["--device", "cpu"])
+    assert "npm --prefix ui run build" in str(e.value.code) and "\n" not in str(e.value.code)
+
+
+@pytest.mark.parametrize("host", ["evil.example", "127.0.0.1.evil.example", "localhost.evil.example", "0.0.0.0",
+                                  "192.168.1.5", "[::1]"])
+def test_trusted_host_refuses_other_hosts(loaded: tuple[dict[str, Any], ThreadPoolExecutor, Any], host: str) -> None:
+    """A request addressed to any other Host (a DNS-rebinding page, a LAN address) answers 400 on every route."""
+    from starlette.testclient import TestClient
+    _, _, app = loaded
+    with TestClient(app, base_url="http://%s" % host) as c:
+        assert c.get("/api/status").status_code == 400
+        assert c.get("/api/intents").status_code == 400
+        assert c.post("/api/classify", json={"text": TEXT}).status_code == 400
+
+
+@pytest.mark.parametrize("base_url", ["http://127.0.0.1", "http://localhost", "http://127.0.0.1:8765",
+                                      "http://localhost:9001"])
+def test_trusted_host_accepts_local_names(loaded: tuple[dict[str, Any], ThreadPoolExecutor, Any],
+                                          base_url: str) -> None:
+    from starlette.testclient import TestClient
+    _, _, app = loaded
+    with TestClient(app, base_url=base_url) as c:
+        assert c.get("/api/status").status_code == 200
