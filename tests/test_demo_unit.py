@@ -387,3 +387,126 @@ def test_confidence_view_refuses_a_mismatched_record(tmp_path: Any) -> None:
     with pytest.raises(SystemExit) as e:
         pd.confidence_view(root)
     assert "git checkout -- %s" % rel in str(e.value.code)
+
+
+# ---- latency and few-shot: the protocol-bound records, agreeing with their README renders (D-10, T-11-24) ----
+
+def keys_of(x: Any) -> set[str]:
+    """Every dict key anywhere in a JSON-like value."""
+    if isinstance(x, dict):
+        return set(x) | {k for v in x.values() for k in keys_of(v)}
+    if isinstance(x, list):
+        return {k for v in x for k in keys_of(v)}
+    return set()
+
+
+def test_latency_view(tmp_path: Any) -> None:
+    import shutil
+    import pilot.latency
+    view = pd.latency_view(REPO)
+    assert view["label"] == pilot.latency.LABEL == "reported, not gated"
+    assert view["render"] == run_stdout("latency.py", "--render", "results/latency")
+    names = ["%s-%s.json" % sd for sd in (("berturk", "cpu"), ("berturk", "mps"), ("laya", "cpu"), ("laya", "mps"))]
+    assert [r["path"] for r in view["reports"]] == ["results/latency/" + n for n in names]
+    assert view["sources"] == ["results/latency/" + n for n in names] + ["protocol.json"]
+    assert "times_s" not in keys_of(view) and "state" not in keys_of(view)
+    for r in view["reports"]:
+        rec = read_json(r["path"])
+        assert set(r) == {"path", "system", "device", "seeds", "pooled"}
+        assert (r["system"], r["device"]) == (rec["system"], rec["device"])
+        assert r["pooled"] == rec["pooled"]
+        assert r["seeds"] == [{"seed": s["seed"], "checkpoint_name": s["checkpoint_name"], "summary": s["summary"]}
+                              for s in rec["seeds"]]
+        assert len(r["seeds"]) == 3
+    resp = get("latency")
+    assert resp.status_code == 200
+    assert resp.json() == view
+    # a report whose bytes differ from protocol.json's pin is refused naming it, and so is an unpinned report
+    root = str(tmp_path / "repo")
+    shutil.copytree(os.path.join(REPO, "results/latency"), os.path.join(root, "results/latency"))
+    assert pd.latency_view(root) == view
+    rel = "results/latency/laya-cpu.json"
+    with open(os.path.join(root, rel), "ab") as f:
+        f.write(b" ")
+    with pytest.raises(SystemExit) as e:
+        pd.latency_view(root)
+    assert "protocol input %s changed" % rel in str(e.value.code)
+    assert "git checkout -- %s" % rel in str(e.value.code)
+    shutil.copy(os.path.join(REPO, rel), os.path.join(root, rel))
+    os.remove(os.path.join(root, "results/latency/berturk-mps.json"))
+    with pytest.raises(SystemExit) as e:
+        pd.latency_view(root)
+    assert "protocol input results/latency/berturk-mps.json not found" in str(e.value.code)
+    shutil.copy(os.path.join(REPO, "results/latency/berturk-mps.json"), os.path.join(root, "results/latency/x.json"))
+    with pytest.raises(SystemExit) as e:
+        pd.latency_view(root)
+    assert "results/latency/x.json is not a protocol.json input" in str(e.value.code)
+
+
+def by_k_row(render: str, k: int) -> list[str]:
+    """The cells of the row of k in the render's "New-tag macro-AP by k (mean over draws)" table."""
+    lines = render.split("\n")
+    at = lines.index("#### New-tag macro-AP by k (mean over draws)")
+    label = "k = 0 (masked base)" if k == 0 else "k = %d" % k
+    hits = [l for l in lines[at:] if l.startswith("| %s |" % label)]
+    return [c.strip() for c in hits[0].strip().strip("|").split(" | ")]
+
+
+def test_fewshot_view(tmp_path: Any) -> None:
+    import shutil
+    import numpy as np
+    view = pd.fewshot_view(REPO)
+    rec = read_json("results/fewshot/fewshot.json")
+    verdict = read_json("results/final/verdict.json")
+    assert view["record"] == verdict["fewshot"]["record"] == {"path": "results/fewshot/fewshot.json",
+                                                               "sha256": view["record"]["sha256"]}
+    assert view["sources"] == ["results/final/verdict.json", "results/fewshot/fewshot.json", "protocol.json"]
+    render = view["render"]
+    assert render + "\n" == run_stdout("fewshot.py", "--render", "results/fewshot/fewshot.json")
+    assert sorted(view["ap_by_k"]) == ["berturk", "laya"]
+    for kind, col in (("laya", 1), ("berturk", 2)):
+        rows = view["ap_by_k"][kind]
+        assert [r["k"] for r in rows] == [0, 5, 10]
+        for r in rows:
+            draws = [d[kind] for d in rec["by_k"][str(r["k"])]["per_draw"]]
+            assert r["draws"] == draws and len(draws) == 3
+            assert r["mean"] == float(np.mean(draws))
+            assert r["mean_text"] == "%.3f" % r["mean"]
+            assert by_k_row(render, r["k"])[col] == r["mean_text"], (kind, r["k"])
+    assert view["primary_k"] == rec["primary"]["k"] == 10
+    assert view["mean_delta_primary"] == rec["primary"]["mean_delta"]
+    assert view["mean_delta_text"] == "%+.2f points" % (100 * rec["primary"]["mean_delta"])
+    assert "| mean over draws |  |  | %s |" % view["mean_delta_text"] in render.split("\n")
+    assert [c for c in pilot.memo.CAVEATS if c.startswith("Few-shot:")] == [view["caveat"]]
+    assert view["notes"] == rec["notes"]
+    for kind in ("laya", "berturk"):
+        rows = [r for r in view["forgetting"] if r["model"] == kind]
+        base, cont = [r for r in rows if r["forgetting"] is None], [r for r in rows if r["forgetting"] is not None]
+        assert (len(base), len(cont)) == (3, 6), kind
+        for r in rows:
+            assert set(r) == {"model", "run", "base_seed", "new", "old", "forgetting"}
+        for r in base:
+            f = rec["f1"][kind]["base"]["s%d" % r["base_seed"]]
+            assert (r["run"], r["new"], r["old"]) == ("base seed %d, k = 0" % r["base_seed"], f["new"], f["old"])
+        for r in cont:
+            d, k = (int(v) for v in r["run"].replace("draw ", "").split(", k = "))
+            f = rec["f1"][kind]["continued"]["d%d-k%d" % (d, k)]
+            assert (r["base_seed"], r["new"], r["old"], r["forgetting"]) == (f["base_seed"], f["new"], f["old"],
+                                                                            f["forgetting"])
+    resp = get("fewshot")
+    assert resp.status_code == 200
+    assert resp.json() == view
+    # a few-shot record whose sha256 is not the one the checked verdict binds is refused
+    root = str(tmp_path / "repo")
+    for rel in ("results/final/verdict.json", "results/fewshot/fewshot.json"):
+        os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
+        shutil.copy(os.path.join(REPO, rel), os.path.join(root, rel))
+    assert pd.fewshot_view(root) == view
+    with open(os.path.join(root, "results/fewshot/fewshot.json"), "ab") as f:
+        f.write(b" ")
+    with pytest.raises(SystemExit) as e:
+        pd.fewshot_view(root)
+    msg = str(e.value.code)
+    assert msg.startswith("results/fewshot/fewshot.json has sha256 ")
+    assert "the verdict binds %s" % view["record"]["sha256"] in msg
+    assert REPO not in msg
