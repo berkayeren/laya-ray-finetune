@@ -7,7 +7,9 @@ ui/index.html (comments included), and no ui/src path the root .gitignore would 
 The chat contracts: the six example messages of ui/src/examples.ts are demo-authored and never the message text of a
 split file (test_examples_are_not_dataset_text, data marker: it compares them with every local data/splits/*.jsonl
 after normalization and never prints a split text), together they cover the Turkish letters, and the chat copy of the
-UI-SPEC appears in ui/src exactly.
+UI-SPEC appears in ui/src exactly. The dashboard contracts: the dashboard copy of the UI-SPEC appears in ui/src exactly
+(test_dashboard_copy_contract), and the routes are #/chat and the four #/dashboard/ views in the UI-SPEC's order, each
+with a component in Dashboard.tsx's VIEW_COMPONENTS (test_dashboard_routes).
 
 test_built_bundle_is_served needs `npm --prefix ui ci && npm --prefix ui run build` first (it skips, naming that
 command, while ui/dist/index.html is absent); test_examples_are_not_dataset_text needs `make data` (it skips, naming
@@ -297,3 +299,68 @@ def test_chat_copy_contract() -> None:
     source = "\n".join(texts)
     missing = [c for c in CHAT_COPY if c not in source]
     assert missing == [], "chat copy missing from ui/src: %s" % missing
+
+
+# --- the dashboard: copy and routes ------------------------------------------------------------------------------
+
+# 11-UI-SPEC.md Copywriting Contract and "Dashboard view": the dashboard and header copy, each exactly as written there
+DASHBOARD_COPY = (
+    "Training runs",
+    "Val selection",
+    "Test results and verdict",
+    "Confidence, latency and few-shot",
+    "View the frozen render",
+    "Superseded, never current",
+    "Show superseded runs",
+    "Training curves unavailable",
+    "Every other dashboard view reads results/ and still works.",
+    "Reported, not gated",
+    "Val (in-sample)",
+    "Diagram unavailable",
+    "Verdict unavailable",
+    "Could not read",
+    "Loss values are not comparable across the two models: they train on different objectives.",
+    "Local demo · stores nothing",
+    "Laya vs BERTurk: Turkish banking intent demo",
+)
+# (route key, sidebar label) of the four dashboard views, in the UI-SPEC's sidebar order
+DASHBOARD_VIEWS = (("training", "Training runs"), ("selection", "Val selection"),
+                   ("verdict", "Test results and verdict"), ("confidence", "Confidence, latency and few-shot"))
+VIEW_ENTRY_RE = re.compile(r'\{\s*key:\s*"([a-z]+)",\s*label:\s*"([^"]+)"\s*\}')
+VIEW_COMPONENTS_RE = re.compile(r"export const VIEW_COMPONENTS[^=]*=\s*\{([^}]*)\}", re.S)
+COMPONENT_ENTRY_RE = re.compile(r"^\s*([a-z]+):\s*([A-Za-z]+),?\s*$", re.M)
+
+
+def ui_source_text() -> str:
+    """Every file of ui_sources() joined by newlines."""
+    texts = []
+    for rel in ui_sources():
+        with open(os.path.join(REPO, rel), encoding="utf-8") as f:
+            texts.append(f.read())
+    return "\n".join(texts)
+
+
+def test_dashboard_copy_contract() -> None:
+    source = ui_source_text()
+    missing = [c for c in DASHBOARD_COPY if c not in source]
+    assert missing == [], "dashboard copy missing from ui/src: %s" % missing
+
+
+def test_dashboard_routes() -> None:
+    with open(os.path.join(UI, "src", "App.tsx"), encoding="utf-8") as f:
+        app = f.read()
+    assert '"#/chat"' in app, "ui/src/App.tsx does not route #/chat"
+    with open(os.path.join(UI, "src", "dashboard", "Dashboard.tsx"), encoding="utf-8") as f:
+        dash = f.read()
+    assert '"#/dashboard/"' in dash, "Dashboard.tsx does not build the #/dashboard/ view hashes"
+    assert tuple(VIEW_ENTRY_RE.findall(dash)) == DASHBOARD_VIEWS, "Dashboard.tsx VIEWS differ from the UI-SPEC"
+    table = VIEW_COMPONENTS_RE.search(dash)
+    assert table is not None, "Dashboard.tsx has no VIEW_COMPONENTS table"
+    components = dict(COMPONENT_ENTRY_RE.findall(table.group(1)))
+    missing = [k for k, _ in DASHBOARD_VIEWS if k not in components]
+    assert missing == [], "views without a component in VIEW_COMPONENTS: %s" % missing
+    for key, component in components.items():
+        assert os.path.isfile(os.path.join(UI, "src", "dashboard", component + ".tsx")), \
+            "VIEW_COMPONENTS maps %s to %s, which has no ui/src/dashboard/%s.tsx" % (key, component, component)
+        assert re.search(r'^import %s from "\./%s";$' % (component, component), dash, re.M), \
+            "Dashboard.tsx does not import %s" % component
