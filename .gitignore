@@ -234,3 +234,7 @@ __marimo__/
 /ckpt*/
 *.safetensors
 .DS_Store
+
+# demo UI (npm install and vite build outputs)
+/ui/node_modules/
+/ui/dist/
