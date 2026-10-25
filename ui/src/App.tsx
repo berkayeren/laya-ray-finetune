@@ -1,18 +1,12 @@
 // The app shell: the header and the live chat status read from GET /api/status (demo.py). While the six final seeds
 // load the status is polled every second; a startup refusal shows the server's one line verbatim; a server that does
-// not answer shows the unreachable copy. The chat thread of the ready state is rendered by a later plan (11-06).
-// Every string the server sends is rendered as a React text node.
+// not answer shows the unreachable copy. Once the status reads ready the chat view (ui/src/chat/ChatView.tsx) is
+// rendered. Every string the server sends is rendered as a React text node.
 
 import { useEffect, useState, type CSSProperties } from "react";
+import ChatView from "./chat/ChatView";
+import type { Status } from "./chat/types";
 import { getJSON } from "./http";
-
-type ChatState = "loading" | "ready" | "refused";
-
-interface Status {
-  chat: ChatState;
-  message: string | null;
-  device: string;
-}
 
 type View =
   | { kind: "loading" }
@@ -159,7 +153,7 @@ function ChatStatus({ view }: { view: View }) {
       </div>
     );
   }
-  return null;
+  return <ChatView />;
 }
 
 export default function App() {

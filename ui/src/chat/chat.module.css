@@ -1,0 +1,303 @@
+/* The chat view and its reply card (11-UI-SPEC.md "Chat view", "Typography", "Color"). Only tokens.css custom
+   properties; a column sets --series to its model's series colour, which colours the swatch, the chip edge and the
+   confidence bar fill (never text). Text keeps the letter case of the source and of the server strings. */
+
+.view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+/* empty state */
+
+.empty {
+  padding: 0 0 var(--space-lg);
+}
+
+.emptyHeading {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--text-heading);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-heading);
+}
+
+.emptyBody {
+  margin: 0;
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+  color: var(--ink-secondary);
+}
+
+/* thread */
+
+.thread {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.bubble {
+  align-self: flex-end;
+  max-width: 70%;
+  margin: 0;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--color-user-bubble);
+  color: var(--ink-primary);
+  border-radius: var(--radius-bubble);
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.pending,
+.error {
+  margin: 0;
+  padding: var(--space-md);
+  background: var(--color-surface);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-card);
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+}
+
+.pending {
+  color: var(--ink-secondary);
+}
+
+/* reply card */
+
+.card {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-xl);
+  padding: var(--space-md);
+  background: var(--color-surface);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-card);
+}
+
+.column {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.swatch {
+  width: var(--swatch);
+  height: var(--swatch);
+  border-radius: 50%;
+  background: var(--series);
+  flex: none;
+}
+
+.columnTitle {
+  margin: 0;
+  font-size: var(--text-heading);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-heading);
+}
+
+.caption {
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  color: var(--ink-secondary);
+}
+
+.settings {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: var(--chip-height);
+  max-width: 100%;
+  padding: var(--space-xs) var(--space-sm) var(--space-xs) var(--space-sm);
+  background: var(--color-surface);
+  border: 1px solid var(--color-axis);
+  border-left: 4px solid var(--series);
+  border-radius: var(--radius-chip);
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+}
+
+.chipTag {
+  font-family: var(--font-mono);
+  font-weight: var(--weight-semibold);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.chipValue {
+  font-weight: var(--weight-regular);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.noIntent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.noIntentHeading {
+  margin: 0;
+  font-size: var(--text-body);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-body);
+}
+
+.noIntentBody {
+  margin: 0;
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  color: var(--ink-secondary);
+}
+
+.confidence {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.confidenceRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+}
+
+.confidenceLabel {
+  font-weight: var(--weight-semibold);
+}
+
+.confidenceValue {
+  font-variant-numeric: tabular-nums;
+}
+
+.bar {
+  flex: 1 1 auto;
+  min-width: var(--space-2xl);
+  height: var(--bar-height);
+  border-radius: var(--radius-badge);
+  background: var(--color-hairline);
+  overflow: hidden;
+}
+
+.barFill {
+  display: block;
+  height: 100%;
+  background: var(--series);
+}
+
+.hint {
+  margin: 0;
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  color: var(--ink-secondary);
+}
+
+/* input */
+
+.inputBar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-hairline);
+}
+
+.inputRow {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-sm);
+}
+
+.textarea {
+  flex: 1 1 auto;
+  min-height: var(--control-min);
+  max-height: 160px;
+  padding: var(--space-sm);
+  border: 1px solid var(--color-axis);
+  border-radius: var(--radius-card);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+  color: var(--ink-primary);
+  background: var(--color-surface);
+  resize: vertical;
+}
+
+.textarea::placeholder {
+  color: var(--ink-muted);
+}
+
+.cta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-height: var(--control-min);
+  padding: 0 var(--space-md);
+  border: 0;
+  border-radius: var(--radius-card);
+  background: var(--color-accent);
+  color: var(--color-surface);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+}
+
+.cta:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.cta:disabled {
+  background: var(--color-disabled);
+  cursor: not-allowed;
+}
+
+.note {
+  margin: 0;
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  color: var(--ink-muted);
+}
