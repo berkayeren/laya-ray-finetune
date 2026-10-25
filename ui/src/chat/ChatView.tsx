@@ -2,14 +2,16 @@
 // answers, and the input. A message is posted unchanged as {text} to POST /api/classify; one request is in flight at a
 // time. The thread lives in React state only: nothing is written to any browser store or cookie, no URL holds message
 // text, and a reload empties the thread. GET /api/intents is read once: its INTENTS tag order (the order of every
-// answer's probabilities) and its confidence_rule, which every reply card shows on the confidence info icon (omitted
-// while the response is missing, never invented). Every server string is rendered as a React text node.
+// answer's arrays) and each tag's question text, passed down as one tag lookup (the chips' and the 48-tag rows'
+// tooltips), and its confidence_rule, which every reply card shows on the confidence info icon. While the response is
+// missing these are omitted, never invented. Every server string is rendered as a React text node.
 // ChatView takes no props (plans 11-09 and 11-10 rely on that signature).
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { getJSON, postJSON } from "../http";
 import { SendIcon } from "../icons";
 import ReplyCard from "./ReplyCard";
+import type { TagLookup } from "./TagPanel";
 import type { ClassifyResponse, Intents } from "./types";
 import css from "./chat.module.css";
 
@@ -54,11 +56,11 @@ function useIntents(): Intents | null {
 
 interface TurnProps {
   turn: Turn;
-  tagIndex: ReadonlyMap<string, number> | null;
+  tags: TagLookup | null;
   confidence_rule: string | null;
 }
 
-function TurnView({ turn, tagIndex, confidence_rule }: TurnProps) {
+function TurnView({ turn, tags, confidence_rule }: TurnProps) {
   return (
     <li className={css.turn}>
       <p className={css.bubble} lang="tr">
@@ -69,7 +71,7 @@ function TurnView({ turn, tagIndex, confidence_rule }: TurnProps) {
           {PENDING_COPY}
         </p>
       )}
-      {turn.state === "done" && <ReplyCard reply={turn.reply} tagIndex={tagIndex} confidence_rule={confidence_rule} />}
+      {turn.state === "done" && <ReplyCard reply={turn.reply} tags={tags} confidence_rule={confidence_rule} />}
       {turn.state === "error" && (
         <p className={css.error} role="alert">
           {turn.error === null ? UNREACHABLE_COPY : requestError(turn.error)}
@@ -84,8 +86,9 @@ export default function ChatView() {
   const [text, setText] = useState("");
   const nextId = useRef(0);
   const intents = useIntents();
-  const tagIndex = useMemo(
-    () => (intents === null ? null : new Map(intents.tags.map((t, i) => [t.tag, i] as const))),
+  const tags = useMemo<TagLookup | null>(
+    () =>
+      intents === null ? null : new Map(intents.tags.map((t, index) => [t.tag, { index, question: t.question }] as const)),
     [intents],
   );
   const confidence_rule = intents === null ? null : intents.confidence_rule;
@@ -125,7 +128,7 @@ export default function ChatView() {
       ) : (
         <ol className={css.thread}>
           {turns.map((t) => (
-            <TurnView key={t.id} turn={t} tagIndex={tagIndex} confidence_rule={confidence_rule} />
+            <TurnView key={t.id} turn={t} tags={tags} confidence_rule={confidence_rule} />
           ))}
         </ol>
       )}

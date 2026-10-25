@@ -140,8 +140,21 @@
   gap: var(--space-sm);
 }
 
+/* a chip's li holds the tooltip anchor, which holds the focusable chip; min-width 0 lets a long tag name wrap */
+.chipItem {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chipItem > span {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .chip {
   display: inline-flex;
+  min-width: 0;
   align-items: center;
   gap: var(--space-sm);
   min-height: var(--chip-height);
@@ -244,6 +257,125 @@
   font-size: var(--text-label);
   line-height: var(--leading-label);
   color: var(--ink-secondary);
+}
+
+/* the "Show all 48 tags" disclosure and its ranked panel */
+
+.disclosure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.disclosureTrigger {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-badge);
+  background: none;
+  color: var(--color-accent);
+  font-family: var(--font-sans);
+  font-size: var(--text-label);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-label);
+  cursor: pointer;
+}
+
+.tagPanel {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tagItem {
+  display: flex;
+  flex-direction: column;
+}
+
+.tagItem > span {
+  min-width: 0;
+}
+
+/* name | track | value | caption; the caption keeps its place and shows on hover and focus */
+.tagRow {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: var(--chip-height);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(var(--space-2xl), 96px) 56px max-content;
+  align-items: center;
+  column-gap: var(--space-sm);
+  border-radius: var(--radius-badge);
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+}
+
+.tagName,
+.tagNamePredicted {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-weight: var(--weight-regular);
+}
+
+.tagNamePredicted {
+  font-weight: var(--weight-semibold);
+}
+
+.tagNamePredicted > svg {
+  flex: none;
+}
+
+.tagText {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tagTrack {
+  position: relative;
+  height: var(--bar-height);
+  border-radius: var(--radius-badge);
+  background: var(--color-hairline);
+}
+
+.tagFill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-badge);
+  background: var(--series);
+}
+
+.tagTick {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--ink-primary);
+}
+
+.tagValue {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.tagCaption {
+  color: var(--ink-secondary);
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+}
+
+.tagRow:hover .tagCaption,
+.tagRow:focus .tagCaption {
+  opacity: 1;
 }
 
 /* input */
