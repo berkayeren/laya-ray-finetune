@@ -1,172 +1,124 @@
-// The app shell: the header and the live chat status read from GET /api/status (demo.py). While the six final seeds
-// load the status is polled every second; a startup refusal shows the server's one line verbatim; a server that does
-// not answer shows the unreachable copy. Once the status reads ready the chat view (ui/src/chat/ChatView.tsx) is
-// rendered. Every string the server sends is rendered as a React text node.
+// The app shell (11-UI-SPEC.md "App shell"): the 56px header with the title, the tabs "Chat" and "Dashboard", the
+// frozen-verdict pill and the note "Local demo · stores nothing", over the view of the current hash route.
+//
+// Routes (window.location.hash and the hashchange event, no router dependency): #/chat, the default, and
+// #/dashboard/{training|selection|verdict|confidence}; #/dashboard alone means #/dashboard/training. Every navigation
+// is a hash link, so the browser's back button works across them.
+//
+// The chat route renders ChatView with no props whatever the chat status: ChatView polls GET /api/status itself and
+// owns the chat's loading, refused and unreachable states. It stays mounted (hidden) while a dashboard view is open,
+// so switching tabs keeps the conversation; a reload still empties it (nothing is stored).
+//
+// The verdict pill reads GET /api/verdict once. It is hidden while the request is pending and when the server does not
+// answer; when the record view is refused it reads "Verdict unavailable" (the verdict view shows the refusal); when it
+// answers, it shows the status badge of the record's verdict with the server's tone, then the record's means text,
+// both from the API, never typed here. It opens #/dashboard/verdict.
 
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useState } from "react";
 import ChatView from "./chat/ChatView";
-import type { Status } from "./chat/types";
+import Dashboard, { DEFAULT_VIEW, isViewKey, type ViewKey } from "./dashboard/Dashboard";
+import { StatusBadge } from "./dashboard/common";
+import type { VerdictData } from "./dashboard/types";
 import { getJSON } from "./http";
-
-type View =
-  | { kind: "loading" }
-  | { kind: "ready"; device: string }
-  | { kind: "refused"; message: string }
-  | { kind: "unreachable" };
-
-const POLL_MS = 1000;
+import css from "./App.module.css";
 
 const TITLE = "Laya vs BERTurk: Turkish banking intent demo";
+const TITLE_SHORT = "Laya vs BERTurk";
 const NOTE = "Local demo · stores nothing";
-const LOADING_COPY =
-  "Loading the six final checkpoints… The chat opens when they are ready; the dashboard already works.";
-const UNAVAILABLE_HEADING = "Chat unavailable";
-const UNAVAILABLE_TAIL = "The dashboard still works.";
-const UNREACHABLE_COPY =
-  "The demo server is not responding. Check that `make demo` is still running in your terminal, then reload this page.";
+const VERDICT_UNAVAILABLE = "Verdict unavailable";
+const VERDICT_HREF = "#/dashboard/verdict";
 
-const styles: Record<string, CSSProperties> = {
-  header: {
-    height: "var(--header-height)",
-    background: "var(--color-surface)",
-    borderBottom: "1px solid var(--color-hairline)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: "var(--space-md)",
-    padding: "0 var(--space-lg)",
-  },
-  title: {
-    margin: 0,
-    fontSize: "var(--text-heading)",
-    fontWeight: "var(--weight-semibold)",
-    lineHeight: "var(--leading-heading)",
-  },
-  note: {
-    fontSize: "var(--text-label)",
-    lineHeight: "var(--leading-label)",
-    color: "var(--ink-muted)",
-  },
-  main: {
-    maxWidth: "var(--chat-max)",
-    margin: "0 auto",
-    padding: "var(--space-3xl) var(--space-lg) var(--space-lg)",
-  },
-  card: {
-    background: "var(--color-surface)",
-    border: "1px solid var(--color-hairline)",
-    borderRadius: "var(--radius-card)",
-    padding: "var(--space-md)",
-  },
-  body: {
-    margin: 0,
-    fontSize: "var(--text-body)",
-    lineHeight: "var(--leading-body)",
-  },
-  heading: {
-    margin: "0 0 var(--space-sm)",
-    fontSize: "var(--text-heading)",
-    fontWeight: "var(--weight-semibold)",
-    lineHeight: "var(--leading-heading)",
-  },
-  refusal: {
-    margin: "0 0 var(--space-sm)",
-    padding: "var(--space-sm) var(--space-md)",
-    background: "var(--color-code)",
-    borderRadius: "var(--radius-card)",
-    fontFamily: "var(--font-mono)",
-    fontSize: "var(--text-label)",
-    lineHeight: "var(--leading-label)",
-    whiteSpace: "pre-wrap",
-    overflowWrap: "anywhere",
-  },
-  secondary: {
-    margin: 0,
-    fontSize: "var(--text-body)",
-    lineHeight: "var(--leading-body)",
-    color: "var(--ink-secondary)",
-  },
-};
+type Route = { page: "chat" } | { page: "dashboard"; view: ViewKey };
 
-function toView(s: Status): View {
-  if (s.chat === "ready") {
-    return { kind: "ready", device: s.device };
+// #/chat (and anything unknown) -> the chat; #/dashboard[/view] -> that dashboard view
+function parseRoute(hash: string): Route {
+  const parts = hash.replace(/^#\/?/, "").split("/");
+  if (parts[0] !== "dashboard") {
+    return { page: "chat" };
   }
-  if (s.chat === "refused") {
-    return { kind: "refused", message: s.message ?? "" };
-  }
-  return { kind: "loading" };
+  const view = parts[1] ?? "";
+  return { page: "dashboard", view: isViewKey(view) ? view : DEFAULT_VIEW };
 }
 
-function useChatStatus(): View {
-  const [view, setView] = useState<View>({ kind: "loading" });
+function useRoute(): Route {
+  const [route, setRoute] = useState<Route>(() => parseRoute(window.location.hash));
+  useEffect(() => {
+    const onHash = (): void => setRoute(parseRoute(window.location.hash));
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  return route;
+}
+
+type Pill = { kind: "hidden" } | { kind: "unavailable" } | { kind: "ok"; verdict: string; tone: string; means: string };
+
+function usePill(): Pill {
+  const [pill, setPill] = useState<Pill>({ kind: "hidden" });
   useEffect(() => {
     let cancelled = false;
-    let timer: number | undefined;
-    const poll = async (): Promise<void> => {
-      const r = await getJSON<Status>("/api/status");
+    void getJSON<VerdictData>("/api/verdict").then((r) => {
       if (cancelled) {
         return;
       }
-      if (!r.ok) {
-        setView({ kind: "unreachable" });
-        return;
+      if (r.ok) {
+        setPill({ kind: "ok", verdict: r.data.verdict, tone: r.data.tone, means: r.data.means });
+      } else {
+        setPill(r.status === null ? { kind: "hidden" } : { kind: "unavailable" });
       }
-      const next = toView(r.data);
-      setView(next);
-      if (next.kind === "loading") {
-        timer = window.setTimeout(poll, POLL_MS);
-      }
-    };
-    void poll();
+    });
     return () => {
       cancelled = true;
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-      }
     };
   }, []);
-  return view;
+  return pill;
 }
 
-function ChatStatus({ view }: { view: View }) {
-  if (view.kind === "loading") {
-    return (
-      <div style={styles.card} role="status" aria-live="polite">
-        <p style={styles.body}>{LOADING_COPY}</p>
-      </div>
-    );
+function VerdictPill({ pill }: { pill: Pill }) {
+  if (pill.kind === "hidden") {
+    return null;
   }
-  if (view.kind === "refused") {
-    return (
-      <div style={styles.card} role="alert">
-        <h2 style={styles.heading}>{UNAVAILABLE_HEADING}</h2>
-        <p style={styles.refusal}>{view.message}</p>
-        <p style={styles.secondary}>{UNAVAILABLE_TAIL}</p>
-      </div>
-    );
-  }
-  if (view.kind === "unreachable") {
-    return (
-      <div style={styles.card} role="alert">
-        <p style={styles.body}>{UNREACHABLE_COPY}</p>
-      </div>
-    );
-  }
-  return <ChatView />;
+  return (
+    <a className={css.pill} href={VERDICT_HREF}>
+      {pill.kind === "ok" ? (
+        <>
+          <StatusBadge status={pill.verdict} tone={pill.tone} />
+          <span className={css.pillMeans}>{pill.means}</span>
+        </>
+      ) : (
+        <span className={css.pillMeans}>{VERDICT_UNAVAILABLE}</span>
+      )}
+    </a>
+  );
 }
 
 export default function App() {
-  const view = useChatStatus();
+  const route = useRoute();
+  const pill = usePill();
+  const chat = route.page === "chat";
   return (
     <>
-      <header style={styles.header}>
-        <h1 style={styles.title}>{TITLE}</h1>
-        <span style={styles.note}>{NOTE}</span>
+      <header className={css.header}>
+        <span className={css.title}>
+          <span className={css.titleFull}>{TITLE}</span>
+          <span className={css.titleShort}>{TITLE_SHORT}</span>
+        </span>
+        <nav className={css.tabs} aria-label="Views">
+          <a className={css.tab} href="#/chat" aria-current={chat ? "page" : undefined}>
+            Chat
+          </a>
+          <a className={css.tab} href="#/dashboard" aria-current={chat ? undefined : "page"}>
+            Dashboard
+          </a>
+        </nav>
+        <div className={css.end}>
+          <VerdictPill pill={pill} />
+          <span className={css.note}>{NOTE}</span>
+        </div>
       </header>
-      <main style={styles.main}>
-        <ChatStatus view={view} />
+      <main className={css.chat} hidden={!chat}>
+        <ChatView />
       </main>
+      {route.page === "dashboard" && <Dashboard view={route.view} />}
     </>
   );
 }

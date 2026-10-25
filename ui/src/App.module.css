@@ -1,0 +1,123 @@
+/* The app shell (11-UI-SPEC.md "App shell", "Layout and Navigation"): the 56px header and the chat column. Only
+   tokens.css custom properties. Below 720px the title shortens and the verdict pill wraps under the tabs. */
+
+.header {
+  min-height: var(--header-height);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-lg);
+  padding: 0 var(--space-lg);
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-hairline);
+}
+
+.title {
+  font-size: var(--text-heading);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-heading);
+}
+
+.titleShort {
+  display: none;
+}
+
+.tabs {
+  display: flex;
+  align-self: stretch;
+  gap: var(--space-md);
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  min-height: var(--header-height);
+  padding: 0 var(--space-xs);
+  border-bottom: 2px solid transparent;
+  color: var(--ink-secondary);
+  font-size: var(--text-label);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-label);
+  text-decoration: none;
+}
+
+.tab:hover {
+  color: var(--ink-primary);
+}
+
+.tab[aria-current="page"] {
+  color: var(--ink-primary);
+  border-bottom-color: var(--color-accent);
+}
+
+.end {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm) var(--space-md);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: var(--control-min);
+  color: var(--ink-primary);
+  text-decoration: none;
+}
+
+.pillMeans {
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+}
+
+.pill:hover .pillMeans {
+  text-decoration: underline;
+}
+
+.note {
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  color: var(--ink-muted);
+}
+
+/* the chat column: 1024px, centered; ChatView's input bar sticks to the viewport bottom */
+
+.chat {
+  max-width: var(--chat-max);
+  margin: 0 auto;
+  padding: var(--space-lg) var(--space-lg) 0;
+}
+
+.chat[hidden] {
+  display: none;
+}
+
+@media (max-width: 719px) {
+  .header {
+    padding: var(--space-sm) var(--space-md);
+    row-gap: var(--space-xs);
+  }
+
+  .titleFull {
+    display: none;
+  }
+
+  .titleShort {
+    display: inline;
+  }
+
+  .tab {
+    min-height: var(--control-min);
+  }
+
+  .end {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+
+  .chat {
+    padding: var(--space-md) var(--space-md) 0;
+  }
+}

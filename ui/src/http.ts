@@ -1,13 +1,14 @@
 // Same-origin JSON requests to the demo backend (demo.py on 127.0.0.1). Every call resolves to a discriminated
 // result and never throws:
 //   {ok: true, data}                        the server answered 2xx with JSON;
-//   {ok: false, status: number, error}      the server answered an HTTP error; error is its one-line "error" field;
+//   {ok: false, status: number, error, source}  the server answered an HTTP error; error is its one-line "error"
+//                                           field and source its "source" field (the record a view read), or null;
 //   {ok: false, status: null, error: ""}    the server did not answer (unreachable).
 // Paths are same-origin only ("/api/..."), so the page never reaches another host.
 
 export type Result<T> =
   | { ok: true; data: T }
-  | { ok: false; status: number; error: string }
+  | { ok: false; status: number; error: string; source: string | null }
   | { ok: false; status: null; error: "" };
 
 const UNREACHABLE = { ok: false, status: null, error: "" } as const;
@@ -22,11 +23,10 @@ async function toResult<T>(response: Response): Promise<Result<T>> {
   if (response.ok) {
     return { ok: true, data: body as T };
   }
-  const error =
-    body !== null && typeof body === "object" && typeof (body as { error?: unknown }).error === "string"
-      ? (body as { error: string }).error
-      : "HTTP " + response.status;
-  return { ok: false, status: response.status, error };
+  const fields = body !== null && typeof body === "object" ? (body as { error?: unknown; source?: unknown }) : {};
+  const error = typeof fields.error === "string" ? fields.error : "HTTP " + response.status;
+  const source = typeof fields.source === "string" ? fields.source : null;
+  return { ok: false, status: response.status, error, source };
 }
 
 export async function getJSON<T>(path: string): Promise<Result<T>> {
