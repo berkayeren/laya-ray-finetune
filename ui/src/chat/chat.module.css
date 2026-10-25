@@ -11,7 +11,7 @@
 /* empty state */
 
 .empty {
-  padding: 0 0 var(--space-lg);
+  padding: var(--space-3xl) 0 0;
 }
 
 .emptyHeading {
@@ -59,7 +59,6 @@
   overflow-wrap: anywhere;
 }
 
-.pending,
 .error {
   margin: 0;
   padding: var(--space-md);
@@ -70,20 +69,121 @@
   line-height: var(--leading-body);
 }
 
-.pending {
+.replySlot {
+  position: relative;
+}
+
+/* visually hidden, still read by screen readers (the "Reply received" live region) */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* the loading reply card: the pending copy over two column skeletons */
+.pendingLine {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
   color: var(--ink-secondary);
+}
+
+.skeletonTitle,
+.skeletonBar {
+  border-radius: var(--radius-badge);
+  background: linear-gradient(90deg, var(--color-hairline) 0%, var(--color-code) 50%, var(--color-hairline) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+}
+
+.skeletonTitle {
+  width: 50%;
+  height: var(--space-lg);
+}
+
+.skeletonBar {
+  height: var(--chip-height);
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeletonTitle,
+  .skeletonBar {
+    animation: none;
+    background: var(--color-hairline);
+  }
+}
+
+/* chat unavailable and server unreachable */
+.notice {
+  padding: var(--space-md);
+  background: var(--color-surface);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-card);
+}
+
+.noticeHeading {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--text-heading);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-heading);
+}
+
+.refusal {
+  margin: 0 0 var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--color-code);
+  border-radius: var(--radius-card);
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.noticeBody {
+  margin: 0;
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+  color: var(--ink-secondary);
+}
+
+.link {
+  color: var(--color-accent);
 }
 
 /* reply card */
 
 .card {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--space-xl);
   padding: var(--space-md);
   background: var(--color-surface);
   border: 1px solid var(--color-hairline);
   border-radius: var(--radius-card);
+}
+
+/* below 720px the two columns stack, Laya first */
+@media (max-width: 719px) {
+  .card {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .column {
@@ -302,13 +402,14 @@
   min-width: 0;
 }
 
-/* name | track | value | caption; the caption keeps its place and shows on hover and focus */
+/* name | track | value | caption, fixed widths after the name so every row's bar, tick and value line up across the
+   48 rows (each row is its own grid); the caption keeps its place and shows on hover and focus */
 .tagRow {
   flex: 1 1 auto;
   min-width: 0;
   min-height: var(--chip-height);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(var(--space-2xl), 96px) 56px max-content;
+  grid-template-columns: minmax(0, 1fr) 80px 56px 128px;
   align-items: center;
   column-gap: var(--space-sm);
   border-radius: var(--radius-badge);
@@ -409,7 +510,13 @@
   line-height: var(--leading-body);
   color: var(--ink-primary);
   background: var(--color-surface);
-  resize: vertical;
+  resize: none;
+  overflow-y: hidden;
+}
+
+.textarea:disabled {
+  background: var(--color-code);
+  cursor: not-allowed;
 }
 
 .textarea::placeholder {
@@ -441,9 +548,131 @@
   cursor: not-allowed;
 }
 
+.examples {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.examplesLabel {
+  font-size: var(--text-label);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-label);
+  color: var(--ink-secondary);
+}
+
+.exampleList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.example {
+  min-height: var(--chip-height);
+  max-width: 100%;
+  padding: var(--space-xs) var(--space-md);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-chip);
+  background: var(--color-surface);
+  color: var(--ink-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.example:hover:not(:disabled) {
+  border-color: var(--color-accent);
+}
+
+.example:disabled {
+  color: var(--ink-muted);
+  cursor: not-allowed;
+}
+
+.status {
+  margin: 0;
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+  color: var(--ink-secondary);
+}
+
+.counter,
+.counterLimit {
+  margin: 0;
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-muted);
+  text-align: right;
+}
+
+.counterLimit {
+  color: var(--ink-secondary);
+}
+
+.noteRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
 .note {
   margin: 0;
   font-size: var(--text-label);
   line-height: var(--leading-label);
   color: var(--ink-muted);
+}
+
+.textButton {
+  min-height: 24px;
+  padding: 0 var(--space-xs);
+  border: 0;
+  border-radius: var(--radius-badge);
+  background: none;
+  color: var(--ink-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  cursor: pointer;
+}
+
+.textButton:hover {
+  color: var(--ink-primary);
+}
+
+.confirm {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.confirmCaption {
+  font-size: var(--text-label);
+  line-height: var(--leading-label);
+  color: var(--ink-secondary);
+}
+
+.destructive {
+  min-height: 24px;
+  padding: 0 var(--space-sm);
+  border: 0;
+  border-radius: var(--radius-badge);
+  background: var(--color-destructive);
+  color: var(--color-surface);
+  font-family: var(--font-sans);
+  font-size: var(--text-label);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-label);
+  cursor: pointer;
 }
