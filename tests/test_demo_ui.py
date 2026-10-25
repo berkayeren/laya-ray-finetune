@@ -4,13 +4,21 @@ tarballs with sha512 integrity, no install script), ui/.npmrc's install policy, 
 no verdict word, question text, browser storage, cookie, inner HTML, case-changing CSS or external URL in ui/src or
 ui/index.html (comments included), and no ui/src path the root .gitignore would swallow.
 
+The chat contracts: the six example messages of ui/src/examples.ts are demo-authored and never the message text of a
+split file (test_examples_are_not_dataset_text, data marker: it compares them with every local data/splits/*.jsonl
+after normalization and never prints a split text), together they cover the Turkish letters, and the chat copy of the
+UI-SPEC appears in ui/src exactly.
+
 test_built_bundle_is_served needs `npm --prefix ui ci && npm --prefix ui run build` first (it skips, naming that
-command, while ui/dist/index.html is absent); every other test reads only tracked files. Runs in `make test`.
+command, while ui/dist/index.html is absent); test_examples_are_not_dataset_text needs `make data` (it skips, naming
+it, while data/splits holds no *.jsonl); every other test reads only tracked files. Runs in `make test` (the data test
+under `make test-all` or `pytest -m data`).
 """
 import json
 import os
 import re
 import subprocess
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -208,3 +216,84 @@ def test_ui_folder_names_are_not_ignored() -> None:
         if ignored(rel):
             problems.append("%s is gitignored" % rel)
     assert problems == [], problems
+
+
+# --- the chat: example messages and copy -------------------------------------------------------------------------
+
+EXAMPLES_TS = os.path.join(UI, "src", "examples.ts")
+DQ_RE = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
+TURKISH_LETTERS = ("ğ", "ü", "ş", "ı", "ö", "ç", "İ")
+# 11-UI-SPEC.md Copywriting Contract: the chat copy, each exactly as written there
+CHAT_COPY = (
+    "Classify message",
+    "Classify a Turkish banking message",
+    "Each message is classified on its own: the models see no earlier messages. "
+    "This local demo stores and logs nothing.",
+    "Type a Turkish banking message",
+    "Try an example",
+    "Laya and BERTurk are classifying…",
+    "Loading the six final checkpoints…",
+    "No intent",
+    "No tag reached its threshold θ for this message.",
+    "Low means route to a human.",
+    "Chat unavailable",
+    "The dashboard still works.",
+    "Open the dashboard",
+    "Clear messages",
+    "Keep messages",
+    "Remove every message from this tab? Nothing is stored, so they cannot be restored.",
+    "Show all 48 tags",
+)
+
+
+def example_strings() -> list[str]:
+    """The double-quoted strings of ui/src/examples.ts (the file holds exactly the example messages)."""
+    with open(EXAMPLES_TS, encoding="utf-8") as f:
+        return DQ_RE.findall(f.read())
+
+
+def normalize(text: str) -> str:
+    """text casefolded with the Turkish dotted and dotless i folded together (ı -> i, and the combining dot U+0307 that
+    casefold leaves on İ dropped, so a case change cannot hide a copy), punctuation (Unicode category P*) removed and
+    whitespace runs collapsed to one space."""
+    folded = text.casefold().replace("\u0307", "").replace("ı", "i")
+    kept = "".join(ch for ch in folded if not unicodedata.category(ch).startswith("P"))
+    return " ".join(kept.split())
+
+
+@pytest.mark.data
+def test_examples_are_not_dataset_text() -> None:
+    examples = example_strings()
+    assert len(examples) == 6, "ui/src/examples.ts holds %d double-quoted strings, not 6" % len(examples)
+    split_dir = os.path.join(REPO, "data", "splits")
+    names = sorted(n for n in os.listdir(split_dir) if n.endswith(".jsonl")) if os.path.isdir(split_dir) else []
+    if not names:
+        pytest.skip("data/splits holds no *.jsonl to compare the examples against; run `make data`")
+    wanted = {normalize(e): i for i, e in enumerate(examples)}
+    hits = []
+    for name in names:
+        with open(os.path.join(split_dir, name), "rb") as f:
+            rows = pilot.data.parse_jsonl(f.read())
+        assert rows, "%s holds no row" % name
+        found = {wanted[k] for k in {normalize(r["state"]) for r in rows} if k in wanted}
+        # only the example's index and the split file name: never a split text
+        hits += ["example %d in %s" % (i, name) for i in sorted(found)]
+    assert hits == [], "examples equal to a split message: %s" % hits
+
+
+def test_examples_cover_turkish_letters() -> None:
+    examples = example_strings()
+    assert len(examples) == 6
+    joined = "".join(examples)
+    missing = [ch for ch in TURKISH_LETTERS if ch not in joined]
+    assert missing == [], "the examples together lack %s" % missing
+
+
+def test_chat_copy_contract() -> None:
+    texts = []
+    for rel in ui_sources():
+        with open(os.path.join(REPO, rel), encoding="utf-8") as f:
+            texts.append(f.read())
+    source = "\n".join(texts)
+    missing = [c for c in CHAT_COPY if c not in source]
+    assert missing == [], "chat copy missing from ui/src: %s" % missing
