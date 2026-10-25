@@ -1,0 +1,118 @@
+/* Design tokens of the demo UI, exactly the values of 11-UI-SPEC.md (Spacing Scale, Typography, Color, Layout).
+   tests/test_demo_ui.py checks every custom property below against the spec. Text keeps the letter case it has in the
+   source and in the records: CSS never changes it, because that breaks the Turkish dotted and dotless i. */
+
+:root {
+  color-scheme: light;
+
+  /* spacing (multiples of 4) */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+  --space-3xl: 64px;
+
+  /* type: 4 sizes, 2 weights */
+  --text-label: 14px;
+  --text-body: 16px;
+  --text-heading: 20px;
+  --text-display: 28px;
+  --weight-regular: 400;
+  --weight-semibold: 600;
+  --leading-label: 1.4;
+  --leading-body: 1.5;
+  --leading-heading: 1.25;
+  --leading-display: 1.2;
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+  /* colour: dominant, secondary, accent, destructive */
+  --color-dominant: #f9f9f7;
+  --color-surface: #ffffff;
+  --color-accent: #0f766e;
+  --color-accent-hover: #0d6660;
+  --color-disabled: #c3c2b7;
+  --color-destructive: #d03b3b;
+
+  /* ink and chrome */
+  --ink-primary: #0b0b0b;
+  --ink-secondary: #52514e;
+  --ink-muted: #6b6a66;
+  --color-hairline: #e1e0d9;
+  --color-axis: #c3c2b7;
+  --color-user-bubble: #f0efec;
+  --color-code: #f6f5f2;
+
+  /* series (chart marks, bars, identity swatches; never text) */
+  --series-laya: #2a78d6;
+  --series-berturk: #eb6834;
+  --series-superseded: #898781;
+  --series-reference: #52514e;
+
+  /* status tones: text, fill, border */
+  --tone-positive-text: #006300;
+  --tone-positive-fill: #e3f4e3;
+  --tone-positive-border: #0ca30c;
+  --tone-negative-text: #b42318;
+  --tone-negative-fill: #fdeaea;
+  --tone-negative-border: #d03b3b;
+  --tone-caution-text: #7a4d00;
+  --tone-caution-fill: #fdf0d5;
+  --tone-caution-border: #fab219;
+  --tone-neutral-text: #52514e;
+  --tone-neutral-fill: #f0efec;
+  --tone-neutral-border: #c3c2b7;
+
+  /* fixed sizes */
+  --header-height: 56px;
+  --sidebar-width: 240px;
+  --chat-max: 1024px;
+  --content-max: 1200px;
+  --control-min: 44px;
+  --chip-height: 28px;
+  --badge-height: 24px;
+  --bar-height: 8px;
+  --swatch: 12px;
+  --chart-height: 280px;
+  --chart-height-sm: 240px;
+  --radius-card: 8px;
+  --radius-bubble: 16px;
+  --radius-chip: 14px;
+  --radius-badge: 4px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--color-dominant);
+  color: var(--ink-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+td,
+th {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
