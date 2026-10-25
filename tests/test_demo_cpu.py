@@ -6,8 +6,10 @@ Two tiny Laya seeds come from tests/tiny_laya.py (T 1.3); two tiny BERTurk seeds
 of one 2-epoch berturk_train.py run on CPU over the synthetic snapshot of tests/conftest.py (T 1.0). The records' chosen
 θ is 0.5 with one per-tag θ (0.3 for the first INTENTS tag). The startup refusals and the request validation are tested
 here too, and so are the D-13 guardrails: the loopback-only bind with no --host flag, the CLI defaults, the unbuilt-UI
-refusal, the trusted-host gate, docs and telemetry off, and a sentinel message that reaches no output. Offline, no Ray,
-no weights: runs in `make test`.
+refusal, the trusted-host gate, docs and telemetry off, and a sentinel message that reaches no output. The training
+view: the tiny Laya seeds carry a synthetic Ray Train run record (the BERTurk exports their real one), served by GET
+/api/training from the bound checkpoints only, per model unavailable when a seed dir is missing, refused when the rows
+differ from the manifest's, never filled from the manifest. Offline, no Ray, no weights: runs in `make test`.
 """
 import json
 import os
@@ -476,6 +478,88 @@ def test_refuses_a_changed_protocol_in_one_line(tiny: dict[str, Any], tmp_path: 
         demo.start_loading(state, ex, pd.protocol_bindings, tiny["root"], "cpu", 1).result(timeout=TIMEOUT)
     assert state["chat"] == pd.REFUSED and "the frozen protocol is" in state["message"]
     assert "git checkout -- protocol.json" in state["message"]
+
+
+# ---- the training view: per model, from the checkpoints only, never a fallback (D-09, the user decision of 2026-10-25)
+
+def training_of(paths: dict[str, Any], root: str) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """(state, /api/training JSON, its text) after loading `paths` from `root`; /api/status must read training ready
+    and /api/intents must answer 200 whatever the chat state."""
+    state, executor, app = load(paths, root)
+    try:
+        with client(app) as c:
+            st = c.get("/api/status").json()
+            assert st["training"] == "ready" and st["chat"] == state["chat"], st
+            r = c.get("/api/training")
+            assert r.status_code == 200, r.text
+            assert c.get("/api/intents").status_code == 200
+    finally:
+        executor.shutdown(wait=True)
+    return state, r.json(), r.text
+
+
+def test_training_unavailable_without_checkpoints(tiny: dict[str, Any], tmp_path: Path) -> None:
+    """ckpt-s1 removed: Laya's training view is unavailable with latency.bind_seed's one line (no rows), BERTurk's
+    still charts, and the chat is refused with the same line."""
+    root = copy_root(tiny, tmp_path)
+    shutil.rmtree(os.path.join(root, "ckpt-s1"))
+    state, body, _ = training_of(tiny, root)
+    laya, bert = body["systems"]["laya"], body["systems"]["berturk"]
+    assert body["status"] == "ready" and set(laya) == {"status", "message"} and laya["status"] == "unavailable"
+    assert laya["message"].startswith("--checkpoint-root/ckpt-s1 (seed 1) not found") and "\n" not in laya["message"]
+    assert state["chat"] == pd.REFUSED and state["message"] == laya["message"] and state["systems"] is None
+    assert bert["status"] == "ok" and [len(s["rows"]) for s in bert["seeds"]] == [1, 2]
+    want = [checkpoint_rows(root, "berturk", n)[1] for n in ("bert-s0", "bert-s1")]
+    assert [s["rows"] for s in bert["seeds"]] == want
+
+
+def test_training_refuses_rows_that_differ_from_the_manifest(tiny: dict[str, Any], tmp_path: Path) -> None:
+    """A manifest whose loss on seed 1's last epoch differs from the checkpoint's makes that model's training view
+    unavailable with one line naming the seed dir, the epoch and the key; the other model still charts and the chat
+    (bound seeds, so it loads) answers."""
+    for kind in pd.KINDS:
+        T = LAYA_T if kind == "laya" else BERT_T
+        d = tmp_path / kind
+        d.mkdir()
+        seeds = list(tiny["seeds"][kind])
+        s1 = seeds[1]
+        rows = [dict(r) for r in s1[5]]
+        rows[-1]["loss"] = rows[-1]["loss"] + 1e-6
+        seeds[1] = s1[:5] + (rows,)
+        rec = write_record(d / ("%s.json" % kind), kind, T)
+        man = write_manifest(d / ("%s-final.json" % kind), kind, rec, seeds)
+        paths = dict({k: tiny[k] for k in pd.KINDS}, **{kind: {"record": rec, "manifest": man}})
+        state, body, _ = training_of(paths, tiny["root"])
+        got, other = body["systems"][kind], body["systems"]["berturk" if kind == "laya" else "laya"]
+        assert got == {"status": "unavailable",
+                       "message": "--checkpoint-root/%s: the run record's epoch rows differ from the final manifest's "
+                                  "on epoch %d: loss; restore the final seed" % (s1[1], rows[-1]["epoch"])}, got
+        assert other["status"] == "ok" and len(other["seeds"]) == 2
+        assert state["chat"] == pd.READY, state["message"]
+
+
+def test_training_never_reads_the_manifest_rows(tiny: dict[str, Any], tmp_path: Path) -> None:
+    """Every seed dir removed: both training views are unavailable, and the /api/training JSON holds none of the
+    manifests' epoch values (the manifest rows are never a fallback)."""
+    root = copy_root(tiny, tmp_path)
+    for kind in pd.KINDS:
+        for s in tiny["seeds"][kind]:
+            shutil.rmtree(os.path.join(root, s[1]))
+    state, body, text = training_of(tiny, root)
+    assert state["chat"] == pd.REFUSED
+    for kind in pd.KINDS:
+        t = body["systems"][kind]
+        assert set(t) == {"status", "message"} and t["status"] == "unavailable", t
+        first = tiny["seeds"][kind][0][1]
+        assert t["message"].startswith("--checkpoint-root/%s (seed 0) not found" % first), t
+    assert "rows" not in text and "total_train_s" not in text
+    for kind in pd.KINDS:
+        with open(tiny[kind]["manifest"], encoding="utf-8") as f:
+            manifest = json.load(f)
+        values = [r[k] for s in manifest["seeds"] for r in s["epochs"] for k in ("loss", "train_s")]
+        assert values
+        for v in values:
+            assert repr(v) not in text and json.dumps(v) not in text, (kind, v)
 
 
 def test_loading_state_answers_503(tiny: dict[str, Any]) -> None:
