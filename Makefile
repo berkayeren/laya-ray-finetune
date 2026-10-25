@@ -18,6 +18,7 @@
 #   make memo  write results/final/memo.md, the one-page decision memo, from the committed records (no model)
 #   make reproduce  the whole pipeline in order (data, val selection, final training, evaluation, few-shot, report), skipping every step its committed, hash-verified artifacts prove done; MODE=eval-only is make report
 #   make report  eval-only: verify the protocol, splits and records, rebuild every report, the README blocks and the memo from the committed dumps (no training, no scoring); fails on any rebuilt file that differs
+#   make demo  build the UI (npm ci + vite build into ui/dist, gitignored) and serve the local demo on http://127.0.0.1:8765 (DEMO_DEVICE=cpu for CPU); chat with both fine-tuned systems and the results dashboard; stores nothing, never trains or scores
 PYTHON ?= python
 UV ?= uv
 PY312 ?= python3.12
@@ -39,8 +40,9 @@ FINAL := results/final
 FEWSHOT := results/fewshot
 FEWSHOT_ROOT ?= .
 MODE ?= full
+DEMO_DEVICE ?= mps
 
-.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports fewshot-scoring fewshot-reports memo reproduce report
+.PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports fewshot-scoring fewshot-reports memo reproduce report demo
 
 env:
 	$(PY312) -m venv $(VENV)
@@ -182,6 +184,11 @@ reproduce:
 
 report:
 	$(MAKE) reproduce MODE=eval-only PYTHON="$(PYTHON)"
+
+demo:
+	npm --prefix ui ci
+	npm --prefix ui run build
+	$(PYTHON) demo.py --device $(DEMO_DEVICE)
 
 clean-data:
 	rm -rf data/splits data/audit

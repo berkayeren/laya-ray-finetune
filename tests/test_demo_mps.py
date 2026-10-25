@@ -7,10 +7,23 @@ The seed dirs (ckpt-final-s0..2, ckpt-berturk-final-s0..2) are gitignored and li
 looks for them there (the dirname of git's common dir, so a worktree finds them too) and is skipped, naming the missing
 dirs, when any is absent. Needs Apple MPS and about 6 GiB of free memory, so it is excluded from `make test`: run
 `pytest -m mps tests/test_demo_mps.py` on the M4, with no other MPS job running.
+
+test_cli_serves_end_to_end runs the server command of `make demo` (`python demo.py --device mps`, here on a free port
+with --checkpoint-root the main checkout) as a subprocess through uvicorn: ready on the six seeds, both answers, every
+dashboard route, 127.0.0.1 only (the machine's other address refused, a foreign Host header 400) and the classified
+text in neither of its output streams. It needs the built UI (`npm --prefix ui run build`) and is skipped without it.
 """
+import gc
+import http.client
+import json
 import os
+import pathlib
+import socket
 import subprocess
+import sys
 import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Iterator
 
@@ -145,4 +158,117 @@ def test_real_training_rows() -> None:
         assert view["total_train_s"] == total
         print("demo training %s: total train_s %.1f over %d seeds" % (kind, total, len(view["seeds"])))
     print("demo training: binding stage %.1f s" % (time.perf_counter() - t))
+    git_status_clean()
+
+
+E2E_TEXT = "SENTINEL-e2e Hesabımdaki güncel bakiyeyi öğrenmek istiyorum."     # demo-authored; the sentinel is searched
+E2E_SENTINEL = "SENTINEL-e2e"
+E2E_ROUTES = ("/", "/api/verdict", "/api/selection", "/api/training", "/api/confidence", "/api/latency", "/api/fewshot")
+
+
+def free_port() -> int:
+    """A port free on 127.0.0.1 right now: bind port 0, read the port the kernel chose, close the socket."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def get(url: str, data: bytes | None = None, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
+    """(status, body) of one request; an HTTP error status is returned, never raised."""
+    req = urllib.request.Request(url, data=data, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def non_loopback_ipv4() -> str | None:
+    """The machine's outward IPv4 address (a UDP connect sends no packet; getsockname names the chosen source), or
+    None when there is none or it is a 127.x address."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("192.0.2.1", 9))
+            addr = s.getsockname()[0]
+    except OSError:
+        return None
+    return None if addr.startswith("127.") or addr == "0.0.0.0" else addr
+
+
+def test_cli_serves_end_to_end(tmp_path: pathlib.Path) -> None:
+    root = seed_root()
+    if not os.path.isfile(os.path.join(demo.UI_DIST, "index.html")):
+        pytest.skip("ui/dist/index.html not found; build the UI first with `npm --prefix ui run build`")
+    if "torch" in sys.modules:                          # free what the in-process tests above left on MPS
+        import torch
+        gc.collect()
+        torch.mps.empty_cache()
+    port = free_port()
+    base = "http://127.0.0.1:%d" % port
+    out_path, err_path = os.path.join(tmp_path, "stdout.txt"), os.path.join(tmp_path, "stderr.txt")
+    with open(out_path, "wb") as out, open(err_path, "wb") as err:
+        proc = subprocess.Popen([sys.executable, "demo.py", "--device", "mps", "--checkpoint-root", root,
+                                 "--port", str(port)], cwd=pilot.data.REPO_ROOT, stdout=out, stderr=err)
+    try:
+        t, status = time.perf_counter(), None
+        while time.perf_counter() - t < LOAD_TIMEOUT:
+            assert proc.poll() is None, "demo.py exited with %s" % proc.returncode
+            try:
+                code, body = get(base + "/api/status")
+                status = json.loads(body) if code == 200 else None
+            except (urllib.error.URLError, ConnectionError, TimeoutError):
+                status = None
+            if status and status["chat"] in (pd.READY, "refused"):
+                break
+            time.sleep(1)
+        load_s = time.perf_counter() - t
+        assert status is not None and status["chat"] == pd.READY, status
+        assert status["training"] == "ready" and status["device"] == "mps", status
+        print("demo cli: ready after %.1f s (process start, load, warm-up)" % load_s)
+
+        code, body = get(base + "/api/classify", data=json.dumps({"text": E2E_TEXT}).encode("utf-8"),
+                         headers={"Content-Type": "application/json"})
+        assert code == 200, body
+        ans = json.loads(body)
+        assert set(ans) == {"laya", "berturk"}
+        for kind in pd.KINDS:
+            assert len(ans[kind]["probabilities"]) == 48
+            print("demo cli %s: predicted %s, confidence %.4f" % (kind, ans[kind]["predicted"], ans[kind]["confidence"]))
+
+        for route in E2E_ROUTES:
+            code, body = get(base + route)
+            assert code == 200, (route, body[:200])
+            if route == "/api/training":
+                tr = json.loads(body)
+                assert [tr["systems"][k]["status"] for k in pd.KINDS] == ["ok", "ok"], tr
+            if route == "/api/confidence":
+                svg = json.loads(body)["val"][0]["svg"]
+        code, body = get(base + "/api/svg/" + svg)
+        assert code == 200 and body.lstrip().startswith(b"<"), (svg, code)
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        try:
+            conn.request("GET", "/api/status", headers={"Host": "evil.example"})
+            assert conn.getresponse().status == 400
+        finally:
+            conn.close()
+
+        addr = non_loopback_ipv4()
+        if addr is None:
+            print("demo cli: no non-loopback IPv4 address on this machine; the refused-connection check is skipped")
+        else:
+            with pytest.raises((ConnectionRefusedError, TimeoutError)):
+                socket.create_connection((addr, port), timeout=5).close()
+            print("demo cli: a connection to %s:%d is refused (bound to 127.0.0.1 only)" % (addr, port))
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=30)
+    for path in (out_path, err_path):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        assert E2E_SENTINEL not in text, "%s holds the classified text" % os.path.basename(path)
     git_status_clean()
