@@ -123,6 +123,9 @@ are hash-registered too, so later stages can trust the flag list.
 | `reproduce.py` | the one-command reproduction CLI over `pilot/reproduce.py`: `--mode full` (`make reproduce`) or `--mode eval-only` (`make report`), `--dry-run` and `--all` (print the plan and the commands, run nothing), `--verify-checkpoints` and `--checkpoint-root` (re-hash the on-disk final seeds, reported, not gated) |
 | `pilot/reproduce.py` | torch-free step registry of the one-command reproduction: the pipeline steps in order (`STEP_NAMES`), each decided done only by its committed, hash-verified artifacts (`plan`), the eval-only rebuild (`eval_only`), the full run (`run_full`), the printed commands (`dry_run`) and the final-seed re-hash (`verify_checkpoints`) |
 | `pilot/memo.py` | the recommendation and decision memo, renders of the frozen verdict with no number of their own: the README recommendation block (`render_recommendation`), the one-page memo (`render_memo`) and its caveats (`CAVEATS`) |
+| `demo.py` | the local demo server: FastAPI + uvicorn on 127.0.0.1 only; it loads the six final seeds in-process through `score.py`'s loaders (fp32, no Ray) and serves the chat and the dashboard (`make demo`) |
+| `pilot/demo.py` | torch-free binding and record views of the demo: the seed-averaged answer mirrored from the frozen verdict's definition (`system_answer`) and the dashboard views behind `require_frozen` and `check_record` (`build_views`) |
+| `ui/` | the React + TypeScript UI of the demo, built by Vite; its `package-lock.json` is committed, the built `ui/dist` is not |
 | `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`), postfit records (`postfit/`: `laya*.json`, and `berturk.json`, `berturk-reference.json`, `berturk-final.json`), the two discarded BERTurk selection runs kept as disclosed history (`superseded/berturk-tied-head-lr/`, `superseded/berturk-10-epoch-grid/`, never current), the val confidence records and reliability diagrams (`confidence/`) and latency reports (`latency/`); the final seeds' gated test and HOTELS dumps and the zero-shot HOTELS reference (`dumps/`), and the verdict, per-seed test reports and test/HOTELS confidence records with their diagrams (`final/`); `fewshot/` holds the compute decision record (`projection.json`), the runs manifest (`runs.json`, the allow-list) and the few-shot results record (`fewshot.json`), and `dumps/` the few-shot dumps (each masked base on val and test, each continued run on test); and `final/memo.md`, the generated one-page decision memo |
 | `tests/` | pytest suite (markers `unit`, `data`, `weights`, `ray`, `mps`) |
 
@@ -227,6 +230,10 @@ python reproduce.py --mode eval-only --verify-checkpoints   # what make report V
 make memo                   # results/final/memo.md, the one-page decision memo, from the committed records
 python report.py --memo results/final/verdict.json --out results/final/memo.md
 python report.py --recommendation results/final/verdict.json   # the README recommendation block
+
+# the local demo UI (chat with both fine-tuned systems + results dashboard)
+make demo                   # build the UI, then serve it on http://127.0.0.1:8765 (the models on MPS)
+make demo DEMO_DEVICE=cpu   # the same with the models on the CPU
 ```
 
 `make reproduce` decides each step by its committed, hash-verified artifacts (the records and dumps under
@@ -1873,3 +1880,39 @@ The smoke run proves the pipeline (Ray Train → calibrated Laya checkpoint → 
 accuracy: it saw 8% of the training data with the encoder frozen. A real result needs a full
 fine-tune with the encoder unfrozen. Two Ray workers ran one DDP epoch here before the 7 GB sandbox
 ran out of memory (each worker holds ~2.6 GB); use ≥16 GB per worker.
+
+## Demo UI
+
+`make demo` starts a local, single-user demo over the finished, frozen results. The chat takes one Turkish banking
+message and shows what fine-tuned Laya and fine-tuned BERTurk each predict for it, side by side. Each answer is the
+seed-averaged system the frozen verdict judged: the three final seeds' probabilities at their served temperature,
+averaged, the tags at or above the postfit record's θ, the probability of every tag and the message confidence of the
+one confidence rule. The dashboard has four groups: the frozen verdict and the results on test, the val selection of
+both models, the training runs (the Ray Train per-epoch rows of the Laya final seeds and the HF Trainer rows of the
+BERTurk final seeds), and the confidence, latency and few-shot records.
+
+Building the UI needs Node 22.12 or newer and npm. `make demo` runs `npm --prefix ui ci`, `npm --prefix ui run build`
+(into `ui/dist`, gitignored) and `python demo.py --device mps`, which serves the page on http://127.0.0.1:8765.
+`make demo DEMO_DEVICE=cpu` runs the models on the CPU instead. The server listens on 127.0.0.1 only and has no flag to
+bind elsewhere; a request with another Host header is refused. `python demo.py --port N` serves on another port, and
+`--checkpoint-root DIR` names the directory that holds the final seed dirs (default the repo root).
+
+The demo reads the committed records under `results/` and `protocol.json`, each behind the checks `report.py` uses
+(`require_frozen`, the verdict's `check_record`, and every postfit record, final manifest and latency report hashed
+against its pin in `protocol.json`). It also reads the six local final checkpoints (`ckpt-final-s0..2` and
+`ckpt-berturk-final-s0..2`), each bound to its final manifest before it loads, then loaded once in the demo's process
+through `score.py`'s loaders, in fp32 and without Ray.
+
+Chat answers are not evaluation results: a message typed here, even one copied from the test split, produces no record
+and changes nothing frozen. The results are the committed dumps and records described above.
+
+The demo never trains, never scores into `results/dumps` and never goes through or weakens the protocol gate (it never
+calls `score.py`'s scoring entry point). It writes nothing under `results/`, `data/` or `protocol.json`, and it stores
+and logs no message text: uvicorn's access log is off and no handler prints a request body.
+
+The six fp32 seeds take about 5 GiB of MPS memory once loaded (about 6 GiB after the first answers). Run one MPS job at
+a time: nothing else should train, score or time on MPS while the demo runs.
+
+The final seed dirs are gitignored and live only in the checkout that trained them. Without them the chat refuses in
+one line naming the missing dir, the training view reads unavailable for that model, and every view built from
+`results/` still works.
