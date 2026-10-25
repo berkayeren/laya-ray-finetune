@@ -36,6 +36,8 @@ This module never imports torch, transformers, laya, Ray, fastapi, starlette or 
 usage: from pilot import demo
        bindings = demo.protocol_bindings()                   # {kind: binding}, refused in one line on any mismatch
        answer = demo.system_answer(bindings["laya"], logits_by_seed, served_temperatures)
+       views = demo.build_views()                            # {name: view or {"error", "source"}}: intents, verdict,
+                                                             # selection (GET /api/<name> of demo.py)
 """
 import json
 import math
@@ -331,8 +333,138 @@ def verdict_view(root: str = REPO_ROOT, path: str | None = None) -> dict[str, An
             "renders": {"go": go, "final_table": table, "recommendation": rec}}
 
 
-VIEWS: dict[str, Callable[[str], dict[str, Any]]] = {"intents": intents_view, "verdict": verdict_view}
-VIEW_SOURCES = {"intents": "intents.py", "verdict": VERDICT_RECORD}
+# each system's postfit record and final manifest, and the BERTurk reference check: protocol.json inputs, every one
+SELECTION_RECORDS = {"laya": ("results/postfit/laya.json", "results/postfit/laya-final.json"),
+                     "berturk": ("results/postfit/berturk.json", "results/postfit/berturk-final.json")}
+BERTURK_REFERENCE = "results/postfit/berturk-reference.json"
+# the Laya val selection render's edge lines, in render order (BERTurk's block is served whole, without edge lines)
+EDGE_PREFIXES = ("- Grid edge:", "- Bounds:", "- θ grid edge:", "- Per-tag θ grid edge:")
+
+
+def bound_input(root: str, rel: str, inputs: dict[str, str]) -> bytes:
+    """The bytes of root/rel, read once; SystemExit naming the fix unless protocol.json's inputs list rel and the bytes
+    hash to its sha256 there (the file is then the one the frozen protocol was built on)."""
+    if rel not in inputs:
+        raise SystemExit("%s is not a protocol.json input; the demo reads protocol-bound records only "
+                         "(restore protocol.json with `git checkout -- protocol.json`)" % rel)
+    path = os.path.join(root, rel)
+    if not os.path.isfile(path):
+        raise SystemExit("protocol input %s not found; restore it with `git checkout -- %s`" % (rel, rel))
+    with open(path, "rb") as f:
+        raw = f.read()
+    have = sha256_bytes(raw)
+    if have != inputs[rel]:
+        raise SystemExit("protocol input %s changed: sha256 %s, the frozen protocol has %s; restore it with "
+                         "`git checkout -- %s`" % (rel, have, inputs[rel], rel))
+    return raw
+
+
+def _bound_json(raw: bytes, rel: str) -> dict[str, Any]:
+    """The JSON object of a bound input's bytes; SystemExit naming the restore otherwise."""
+    try:
+        obj = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as e:
+        raise SystemExit("%s is not valid JSON (%s); restore it with `git checkout -- %s`" % (rel, e, rel)) from None
+    if not isinstance(obj, dict):
+        raise SystemExit("%s is not a JSON object; restore it with `git checkout -- %s`" % (rel, rel))
+    return obj
+
+
+def _bound_record(root: str, rel: str, inputs: dict[str, str], kind: str) -> tuple[dict[str, Any], str]:
+    """(record, sha256) of a protocol-bound postfit record of `kind`, parsed by pilot.postfit.read_record; SystemExit
+    unless its bytes are protocol.json's and it is a record of `kind`."""
+    want = sha256_bytes(bound_input(root, rel, inputs))
+    record, sha = pilot.postfit.read_record(os.path.join(root, rel))
+    if sha != want or record.get("system_kind") != kind:
+        raise SystemExit("%s changed while it was read, or is a record of %s, not %s; restore it with `git checkout "
+                         "-- %s`" % (rel, record.get("system_kind"), kind, rel))
+    return record, sha
+
+
+def _bound_to(obj: dict[str, Any], rel: str, record_rel: str, record_sha: str) -> dict[str, Any]:
+    """obj, refused unless its postfit.sha256 is the record's (as postfit.py --render and --render-berturk check)."""
+    got = (obj.get("postfit") or {}).get("sha256")
+    if got != record_sha:
+        raise SystemExit("%s is bound to postfit record %s, not %s (%s); restore both with `git checkout -- %s %s`"
+                         % (rel, got, record_sha, record_rel, rel, record_rel))
+    return obj
+
+
+def _candidate(c: dict[str, Any]) -> dict[str, Any]:
+    """{epoch, fraction [2TP, 2TP + FP + FN] (unreduced, as the render prints it), score (pilot.postfit.score),
+    val_micro_f1_at_global_theta, temperature, theta_global} of one postfit candidate."""
+    o = c["objective"]
+    return {"epoch": c["epoch"], "fraction": [2 * o["tp"], 2 * o["tp"] + o["fp"] + o["fn"]],
+            "score": float(pilot.postfit.score(c)), "val_micro_f1_at_global_theta": c["val_micro_f1_at_global_theta"],
+            "temperature": c["temperature"], "theta_global": c["theta"]["shipped"]["global"]}
+
+
+def _chosen(record: dict[str, Any]) -> dict[str, Any]:
+    """The record's chosen settings: epoch, schedule, T, θ shipped and raw (global, own-θ count), encoder and head LR."""
+    ch = record["chosen"]
+    th = ch["theta"]
+    return {"epoch": ch["epoch"], "epochs_schedule": ch["epochs_schedule"], "temperature": ch["temperature"],
+            "theta_shipped_global": th["shipped"]["global"], "n_own_theta": len(th["shipped"]["per_tag"]),
+            "theta_raw_global": th["raw"]["global"], "n_own_theta_raw": len(th["raw"]["per_tag"]),
+            "encoder_lr": ch["encoder_lr"], "head_lr": (ch.get("canonical") or {}).get("head_lr")}
+
+
+def selection_view(root: str = REPO_ROOT) -> dict[str, Any]:
+    """Both models' val selection as data, from protocol-bound inputs only: require_frozen, then every postfit record,
+    final manifest and the BERTurk reference check hashed against protocol.json's inputs entry before it is parsed
+    (bound_input), each manifest and the reference bound to its record; the superseded BERTurk runs through
+    pilot.berturk.load_superseded (its pinned sha256s). The renders are postfit.py --render's
+    (pilot.postfit.render_markdown) and --render-berturk's (pilot.berturk.render_markdown). SystemExit on any
+    mismatch.
+
+    Returns {sources, systems {laya, berturk: {kind, record {path, sha256}, candidates [{epoch, fraction, score,
+    val_micro_f1_at_global_theta, temperature, theta_global}], chosen {epoch, epochs_schedule, temperature,
+    theta_shipped_global, n_own_theta, theta_raw_global, n_own_theta_raw, encoder_lr, head_lr}, edge_lines (Laya's
+    EDGE_PREFIXES lines without "- ", BERTurk []), render}}, reference {record {path, sha256}, fraction, value,
+    threshold, status, tone, reference, threshold_rule}, superseded [{name, label, fraction, value, change,
+    user_choice, candidates [{epoch, score}]}]}."""
+    proto, _ = pilot.protocol.require_frozen()
+    inputs = proto.get("inputs") or {}
+    records, finals = {}, {}
+    for kind, (rel, final_rel) in SELECTION_RECORDS.items():
+        records[kind] = _bound_record(root, rel, inputs, kind)
+        finals[kind] = _bound_to(_bound_json(bound_input(root, final_rel, inputs), final_rel), final_rel, rel,
+                                 records[kind][1])
+    raw_ref = bound_input(root, BERTURK_REFERENCE, inputs)
+    reference = _bound_to(_bound_json(raw_ref, BERTURK_REFERENCE), BERTURK_REFERENCE, SELECTION_RECORDS["berturk"][0],
+                          records["berturk"][1])
+    superseded = pilot.berturk.load_superseded(root)
+    renders = {"laya": pilot.postfit.render_markdown(records["laya"][0], finals["laya"]),
+               "berturk": pilot.berturk.render_markdown(records["berturk"][0], reference, finals["berturk"],
+                                                        superseded)}
+    systems = {}
+    for kind, (record, sha) in records.items():
+        edges = [render_line(renders[kind], p, "Laya val selection")[2:] for p in EDGE_PREFIXES] \
+            if kind == "laya" else []
+        systems[kind] = {"kind": kind, "record": {"path": SELECTION_RECORDS[kind][0], "sha256": sha},
+                         "candidates": [_candidate(c) for c in record["candidates"]], "chosen": _chosen(record),
+                         "edge_lines": edges, "render": renders[kind]}
+    value = reference.get("value") or {}
+    ref = {"record": {"path": BERTURK_REFERENCE, "sha256": sha256_bytes(raw_ref)}, "fraction": value.get("fraction"),
+           "value": value.get("val_micro_f1_at_global_theta"), "threshold": reference.get("threshold"),
+           "status": reference.get("status"), "tone": tone(reference.get("status")),
+           "reference": reference.get("reference"), "threshold_rule": reference.get("threshold_rule")}
+    sup = []
+    for s in superseded:
+        e, sv = s["entry"], (s["reference"].get("value") or {})
+        sup.append({"name": e["name"], "label": "superseded: %s" % e["name"], "fraction": sv.get("fraction"),
+                    "value": sv.get("val_micro_f1_at_global_theta"), "change": e["change"],
+                    "user_choice": dict(e["user_choice"]),
+                    "candidates": [{"epoch": c["epoch"], "score": float(pilot.postfit.score(c))}
+                                   for c in s["record"]["candidates"]]})
+    sources = [p for pair in SELECTION_RECORDS.values() for p in pair] + [BERTURK_REFERENCE, "protocol.json"] + \
+        [s["entry"][k] for s in superseded for k in ("record", "reference")]
+    return {"sources": sources, "systems": systems, "reference": ref, "superseded": sup}
+
+
+VIEWS: dict[str, Callable[[str], dict[str, Any]]] = {"intents": intents_view, "verdict": verdict_view,
+                                                     "selection": selection_view}
+VIEW_SOURCES = {"intents": "intents.py", "verdict": VERDICT_RECORD, "selection": SELECTION_RECORDS["laya"][0]}
 
 
 def build_views(root: str = REPO_ROOT) -> dict[str, dict[str, Any]]:
