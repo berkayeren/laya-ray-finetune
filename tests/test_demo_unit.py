@@ -80,3 +80,88 @@ def test_verdict_view_matches_report_renders() -> None:
     resp = get("verdict")
     assert resp.status_code == 200
     assert resp.json() == view
+
+
+LAYA_RENDER = ("postfit.py", "--render", "results/postfit/laya.json", "results/postfit/laya-final.json")
+BERTURK_RENDER = ("postfit.py", "--render-berturk", "results/postfit/berturk.json",
+                  "results/postfit/berturk-reference.json", "results/postfit/berturk-final.json")
+
+
+def read_json(rel: str) -> Any:
+    with open(os.path.join(REPO, rel), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_selection_view_matches_postfit_renders() -> None:
+    s = pd.selection_view()
+    laya, bert = s["systems"]["laya"], s["systems"]["berturk"]
+    assert laya["render"] == run_stdout(*LAYA_RENDER)
+    assert bert["render"] == run_stdout(*BERTURK_RENDER)
+    laya_lines = laya["render"].split("\n")
+    assert len(laya["edge_lines"]) == 4
+    at = []
+    for prefix, line in zip(pd.EDGE_PREFIXES, laya["edge_lines"]):
+        assert ("- " + line).startswith(prefix), (prefix, line)
+        assert "- " + line in laya_lines, line
+        at.append(laya_lines.index("- " + line))
+    assert at == sorted(at)
+    assert bert["edge_lines"] == []
+    assert [k for k in ("laya", "berturk") if s["systems"][k]["kind"] == k] == ["laya", "berturk"]
+    for kind in ("laya", "berturk"):
+        assert s["systems"][kind]["record"] == {"path": "results/postfit/%s.json" % kind,
+                                                "sha256": pilot.data.sha256_file(
+                                                    os.path.join(REPO, "results/postfit/%s.json" % kind))}
+    resp = get("selection")
+    assert resp.status_code == 200
+    assert resp.json() == s
+
+
+def test_selection_candidates_and_reference() -> None:
+    import pilot.berturk
+    import pilot.postfit
+    s = pd.selection_view()
+    for kind, n in (("laya", 4), ("berturk", 30)):
+        view = s["systems"][kind]
+        record = read_json("results/postfit/%s.json" % kind)
+        assert len(view["candidates"]) == n == len(record["candidates"])
+        for c, rc in zip(view["candidates"], record["candidates"]):
+            o = rc["objective"]
+            assert c["epoch"] == rc["epoch"]
+            assert c["fraction"] == [2 * o["tp"], 2 * o["tp"] + o["fp"] + o["fn"]]
+            assert c["score"] == float(pilot.postfit.score(rc))
+            assert "%.4f (%d/%d)" % (c["val_micro_f1_at_global_theta"], *c["fraction"]) in view["render"]
+            assert c["temperature"] == rc["temperature"]
+            assert c["theta_global"] == rc["theta"]["shipped"]["global"]
+        ch, rch = view["chosen"], record["chosen"]
+        assert ch["epoch"] == rch["epoch"]
+        assert ch["epochs_schedule"] == rch["epochs_schedule"]
+        assert ch["temperature"] == rch["temperature"]
+        assert ch["theta_shipped_global"] == rch["theta"]["shipped"]["global"]
+        assert ch["theta_raw_global"] == rch["theta"]["raw"]["global"]
+        assert ch["n_own_theta"] == len(rch["theta"]["shipped"]["per_tag"])
+        assert ch["n_own_theta_raw"] == len(rch["theta"]["raw"]["per_tag"])
+        assert ch["encoder_lr"] == rch["encoder_lr"]
+        assert ch["head_lr"] == rch["canonical"]["head_lr"]
+    ref, rref = s["reference"], read_json("results/postfit/berturk-reference.json")
+    assert ref["fraction"] == rref["value"]["fraction"] == [389, 478]
+    assert ref["value"] == rref["value"]["val_micro_f1_at_global_theta"]
+    assert ref["threshold"] == rref["threshold"]
+    assert ref["status"] == rref["status"]
+    assert ref["tone"] == pd.tone(rref["status"])
+    assert ref["reference"] == rref["reference"]
+    assert ref["threshold_rule"] == rref["threshold_rule"]
+    assert ref["record"]["path"] == "results/postfit/berturk-reference.json"
+    assert [x["label"] for x in s["superseded"]] == ["superseded: berturk-tied-head-lr",
+                                                     "superseded: berturk-10-epoch-grid"]
+    for x, entry in zip(s["superseded"], pilot.berturk.SUPERSEDED):
+        assert x["name"] == entry["name"]
+        assert x["change"] == entry["change"]
+        assert x["user_choice"] == entry["user_choice"]
+        rec, refx = read_json(entry["record"]), read_json(entry["reference"])
+        assert x["fraction"] == refx["value"]["fraction"]
+        assert x["value"] == refx["value"]["val_micro_f1_at_global_theta"]
+        assert x["candidates"] == [{"epoch": c["epoch"], "score": float(pilot.postfit.score(c))}
+                                   for c in rec["candidates"]]
+    assert s["sources"][:5] == ["results/postfit/laya.json", "results/postfit/laya-final.json",
+                                "results/postfit/berturk.json", "results/postfit/berturk-final.json",
+                                "results/postfit/berturk-reference.json"]
