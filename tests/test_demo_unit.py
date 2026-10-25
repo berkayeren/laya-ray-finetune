@@ -6,7 +6,16 @@ demo.create_app's GET /api/<view> without any model loaded.
 
 Per-view refusal: a tampered verdict copy (check_record) or a changed postfit record (protocol.json's input sha256)
 breaks only its own view (503 {error, source}), every other view keeps answering; no view holds a local path; the
-status tones come from pilot.verdict's constants. Runs in `make test`.
+status tones come from pilot.verdict's constants.
+
+The confidence, latency and few-shot group: the SVG allow-list is exactly the committed *-val.svg and *-test.svg files,
+GET /api/svg/<name> serves each byte for byte and answers 404 to any other name (traversal included); the confidence
+view's run ids come from the records beside the SVGs and its caveat is report.IN_SAMPLE_CAVEAT; the latency view equals
+latency.py --render's text, holds no per-message time and refuses a report that is not protocol.json's; the few-shot
+view equals fewshot.py --render's text, every mean a cell of its table, and refuses a record the verdict does not bind.
+The app writes nothing: around a real tiny-seed load and a call of every route, every byte under results/, data/ and
+protocol.json, the whole repo's git status and its file list are unchanged; no view holds a uid or message text. Runs
+in `make test`.
 """
 import json
 import os
@@ -21,6 +30,10 @@ import demo
 import pilot.data
 import pilot.memo
 from pilot import demo as pd
+# the CPU test's module-scoped tiny final seeds (and its helpers), imported so pytest uses them here (as
+# test_latency_mps.py imports from test_latency_cpu.py): a real classify call for the no-write snapshot
+from test_demo_cpu import TEXT, bindings_of, client, tiny
+from test_repo_hygiene import HOTEL_UID_RE, UID_RE
 
 pytestmark = pytest.mark.unit
 
@@ -511,3 +524,81 @@ def test_fewshot_view(tmp_path: Any) -> None:
     assert msg.startswith("results/fewshot/fewshot.json has sha256 ")
     assert "the verdict binds %s" % view["record"]["sha256"] in msg
     assert REPO not in msg
+
+
+# ---- the app writes nothing (D-13, DEMO-05, T-11-22) and no view carries a uid or message text (T-11-23) ----
+
+# the trees the path listing skips: git's own store, the interpreter's and npm's installs, and bytecode caches
+UNLISTED = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache"}
+
+
+def snapshot() -> dict[str, Any]:
+    """{hashes: sha256 of every file under results/, data/splits.json and protocol.json; status: `git status
+    --porcelain --untracked-files=all` of the whole repo; paths: every file path in the repo outside UNLISTED trees
+    (so a write to a gitignored path is seen too)}."""
+    hashes = {}
+    for dirpath, dirnames, filenames in os.walk(os.path.join(REPO, "results")):
+        dirnames.sort()
+        for n in sorted(filenames):
+            p = os.path.join(dirpath, n)
+            hashes[os.path.relpath(p, REPO)] = pilot.data.sha256_file(p)
+    for rel in ("data/splits.json", "protocol.json"):
+        hashes[rel] = pilot.data.sha256_file(os.path.join(REPO, rel))
+    status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=REPO, check=True,
+                            capture_output=True, text=True, encoding="utf-8").stdout
+    paths = set()
+    for dirpath, dirnames, filenames in os.walk(REPO):
+        dirnames[:] = [d for d in dirnames if d not in UNLISTED]
+        paths |= {os.path.relpath(os.path.join(dirpath, n), REPO) for n in filenames}
+    return {"hashes": hashes, "status": status, "paths": paths}
+
+
+def test_no_write_under_results_data_or_protocol(tiny: dict[str, Any]) -> None:
+    import torch
+    threads = torch.get_num_threads()                   # the loaders set torch's process-wide thread count
+    before = snapshot()
+    assert len(before["hashes"]) > 100 and before["paths"]
+    views = pd.build_views(REPO)
+    assert not any(pd.view_refused(v) for v in views.values()), views
+    svgs = pd.svg_allow_list(REPO)
+    state = demo.new_state("cpu")
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="demo-model")
+    try:
+        demo.start_loading(state, executor, lambda: bindings_of(tiny), tiny["root"], "cpu", 1).result(timeout=TIMEOUT)
+        assert state["chat"] == pd.READY, state["message"]
+        app = demo.create_app(state, executor, views, svgs=svgs)
+        with client(app) as c:
+            for route in ("status", "intents", "verdict", "selection", "training", "confidence", "latency",
+                          "fewshot", "svg/" + next(iter(svgs))):
+                r = c.get("/api/" + route)
+                assert r.status_code == 200, (route, r.text[:300])
+            r = c.post("/api/classify", json={"text": TEXT})
+            assert r.status_code == 200, r.text[:300]
+            assert set(r.json()) == set(pd.KINDS)
+    finally:
+        executor.shutdown(wait=True)
+        torch.set_num_threads(threads)
+    after = snapshot()
+    assert after["hashes"] == before["hashes"]
+    assert after["status"] == before["status"]
+    assert after["paths"] == before["paths"], sorted(after["paths"] ^ before["paths"])
+
+
+def strings_of(x: Any) -> list[str]:
+    """Every string value (never a key) anywhere in a JSON-like value."""
+    if isinstance(x, dict):
+        return [s for v in x.values() for s in strings_of(v)]
+    if isinstance(x, list):
+        return [s for v in x for s in strings_of(v)]
+    return [x] if isinstance(x, str) else []
+
+
+def test_views_hold_no_uid_or_message_text() -> None:
+    views = pd.build_views(REPO)
+    assert not any(pd.view_refused(v) for v in views.values()), views
+    assert set(views) == {"intents", "verdict", "selection", "confidence", "latency", "fewshot"}
+    for name, v in views.items():
+        v = json.loads(json.dumps(v, ensure_ascii=False))     # the JSON the route serves
+        uids = [s for s in strings_of(v) if UID_RE.match(s) or HOTEL_UID_RE.match(s)]
+        assert not uids, (name, uids[:3])
+        assert not keys_of(v) & {"state", "text", "times_s"}, (name, keys_of(v) & {"state", "text", "times_s"})
