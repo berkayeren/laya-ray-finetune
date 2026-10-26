@@ -862,6 +862,34 @@ def test_load_stops_at_the_next_seed(tiny: dict[str, Any], monkeypatch: pytest.M
     assert state["training_status"] == pd.READY
 
 
+def test_binding_stops_at_the_next_seed(tiny: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """11-REVIEW IN-09: bind_seeds hashes no further seed once stopped() reads true, so a Ctrl-C during the binding
+    stage waits for the one seed being hashed, not for the whole system: load_job with stop set during the first
+    seed's hashing hashes no other seed, reads no training rows, loads nothing and refuses the chat with STOPPED."""
+    bindings = bindings_of(tiny)
+    real = demo.latency.bind_seed
+    hashed = []
+    monkeypatch.setattr(demo.latency, "bind_seed", lambda *a: hashed.append(a[2]["seed"]) or real(*a))
+    with pytest.raises(SystemExit) as e:
+        demo.bind_seeds(bindings["laya"], tiny["root"], lambda: len(hashed) >= 1)
+    assert e.value.code == demo.STOPPED and hashed == [bindings["laya"]["seeds"][0]["seed"]]
+    no_load(monkeypatch)
+    monkeypatch.setattr(pd, "training_system", lambda *a: pytest.fail("training rows were read after stop"))
+    state = demo.new_state("cpu")
+
+    def stop_while_hashing(*a: Any) -> Any:
+        hashed.append(a[2]["seed"])
+        state["stop"] = True
+        return real(*a)
+    hashed.clear()
+    monkeypatch.setattr(demo.latency, "bind_seed", stop_while_hashing)
+    demo.load_job(state, lambda: bindings, tiny["root"], "cpu", 1)
+    assert len(hashed) == 1
+    assert (state["chat"], state["message"], state["systems"]) == (pd.REFUSED, demo.STOPPED, None)
+    assert state["training_status"] == pd.READY
+    assert state["training"] == {k: pd.training_unavailable(demo.STOPPED) for k in pd.KINDS}
+
+
 def test_loopback_bind_with_another_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls = run_main(["--port", "9001", "--device", "cpu"], monkeypatch, tmp_path)
     (_, kwargs), = calls["run"]

@@ -85,10 +85,17 @@ def parser() -> argparse.ArgumentParser:
     return ap
 
 
-def bind_seeds(binding: dict[str, Any], root: str) -> list[tuple[dict[str, Any], str, dict[str, Any]]]:
+def bind_seeds(binding: dict[str, Any], root: str,
+               stopped: Callable[[], bool] | None = None) -> list[tuple[dict[str, Any], str, dict[str, Any]]]:
     """[(manifest seed, checkpoint dir, identity)] of every bound seed under `root`, via latency.bind_seed (identity
-    and dump run id); hashes only, run for every seed before any load."""
-    return [(s,) + latency.bind_seed(binding["kind"], root, s) for s in binding["seeds"]]
+    and dump run id); hashes only, run for every seed before any load. SystemExit(STOPPED) before a seed's hashing
+    once stopped() is true (the server is shutting down)."""
+    out = []
+    for s in binding["seeds"]:
+        if stopped is not None and stopped():
+            raise SystemExit(STOPPED)
+        out.append((s,) + latency.bind_seed(binding["kind"], root, s))
+    return out
 
 
 def _laya_seed(binding: dict[str, Any], s: dict[str, Any], ckpt: str, ident: dict[str, Any], device: str,
@@ -204,10 +211,12 @@ def load_job(state: dict[str, Any], bindings_fn: Callable[[], dict[str, dict[str
     refusal gives both systems its line. state["training"] is published and training_status set ready before any
     model loads, whether or not the models load. Load: only when both systems bound (else the chat is refused with
     the first failing system's line), every seed loaded, one warm-up classify of pd.WARMUP_TEXT (output discarded),
-    then the chat ready. Once state["stop"] is set, no further system is bound and no further seed loads (SystemExit
-    STOPPED), so a shutdown waits for at most the one seed in flight. A SystemExit sets the chat refused with its one line; any other exception refused with
-    LOAD_FAILED naming only the exception type."""
+    then the chat ready. Once state["stop"] is set, no further seed is hashed or loaded (SystemExit STOPPED), so a
+    shutdown waits for at most the one seed in flight (its hashing or its load) or one system's training rows. A
+    SystemExit sets the chat refused with its one line; any other exception refused with LOAD_FAILED naming only the
+    exception type."""
     training: dict[str, dict[str, Any]] = {}
+    stopped = functools.partial(state.get, "stop", False)
     try:
         try:
             bindings = bindings_fn()
@@ -216,11 +225,13 @@ def load_job(state: dict[str, Any], bindings_fn: Callable[[], dict[str, dict[str
             raise
         bound, failed = {}, []
         for kind in pd.KINDS:
-            if state.get("stop"):
+            if stopped():
                 raise SystemExit(STOPPED)
             try:
-                bound[kind] = bind_seeds(bindings[kind], root)
+                bound[kind] = bind_seeds(bindings[kind], root, stopped)
             except SystemExit as e:
+                if e.code == STOPPED:
+                    raise
                 failed.append(_line(e))
                 training[kind] = pd.training_unavailable(_line(e))
                 continue
@@ -233,7 +244,6 @@ def load_job(state: dict[str, Any], bindings_fn: Callable[[], dict[str, dict[str
         state["training_status"] = pd.READY             # the binding stage is over: before any model loads
         if failed:
             raise SystemExit(failed[0])
-        stopped = functools.partial(state.get, "stop", False)
         systems = {kind: load_system(bindings[kind], bound[kind], device, threads, stopped) for kind in pd.KINDS}
         if stopped():
             raise SystemExit(STOPPED)
