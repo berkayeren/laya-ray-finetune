@@ -1011,3 +1011,59 @@ def test_fewshot_proof_of_a_continued_run_needs_one_new_tag_item_per_support_row
         ray_train.fewshot_proof(_proof_cfg("continued"), dict(per_q, card=3), 6, 6)
     with pytest.raises(SystemExit, match="built 6 items, the frozen Laya item rule gives 5"):
         ray_train.fewshot_proof(_proof_cfg("continued"), per_q, 6, 5)
+
+
+# main's train config keys, in order, before tune mode existed: the literal keys, then resolve()'s, then rung
+MAIN_CONFIG_KEYS = ["data", "data_sha256", "base_dir", "driver_node_id", "base_sha256", "epochs", "micro_batch",
+                    "grad_accum", "encoder_lr", "head_lr", "loss", "freeze_encoder", "freeze_embeddings",
+                    "shuffle_options", "max_len", "head_max_len", "max_messages", "neg", "seed", "expect_env",
+                    "run_id", "canonical", "code", "storage", "export_epochs", "fail_after_epoch", "stop_after_epoch",
+                    "postfit", "mask_tags", "fewshot", "fewshot_rows", "fewshot_base", "tensorboard", "provenance",
+                    "device", "amp", "grad_checkpointing", "cpus_per_worker", "neg_seed", "adamw_foreach",
+                    "adamw_fused", "rung"]
+TUNE_BLOCK = {"source": "selection_train", "train_folds": list(range(12)), "dev_folds": [12, 13],
+              "train_uids_sha256": "a" * 64, "dev_uids_sha256": "b" * 64}
+
+
+def _train_config(tune: dict[str, Any] | None = None) -> dict[str, Any]:
+    from pilot import runs
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    a = ray_train.parser().parse_args(["--data", "d.jsonl", "--out", "o",
+                                       "--manifest", os.path.join(repo, "data", "splits.json")])
+    r = ray_train.resolve(a)
+    canon = runs.canonical(ray_train.identity_values(a, r, ENTRY, "multilingual", BASE_IDENT))
+    kw = {} if tune is None else {"tune": tune}
+    return ray_train.train_config(a, r, ENTRY, "/base", BASE_IDENT, {"model.safetensors": "b" * 64}, {}, "node-0",
+                                  runs.run_id(canon), canon, **kw)
+
+
+def test_train_config_is_mains_config() -> None:
+    """train_config, the one builder main and tune.py's Laya trial share, gives main's former keys in the former order
+    with no tune key; a search's block is added after rung and changes no other value; main passes no tune."""
+    import ast
+    cfg = _train_config()
+    assert list(cfg) == MAIN_CONFIG_KEYS and "tune" not in cfg
+    trial = _train_config(TUNE_BLOCK)
+    assert list(trial) == MAIN_CONFIG_KEYS + ["tune"] and trial["tune"] == TUNE_BLOCK
+    assert {k: v for k, v in trial.items() if k != "tune"} == cfg
+    assert cfg["rung"] == "none" and cfg["canonical"] == trial["canonical"] and "tune" not in cfg["canonical"]
+    with open(ray_train.__file__, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    calls = [n for n in ast.walk(main) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "train_config"]
+    assert len(calls) == 1 and "tune" not in {k.arg for k in calls[0].keywords} and len(calls[0].args) == 10
+
+
+def test_identity_values_tune_defaults_to_none() -> None:
+    """identity_values gives tune None unless a search passes its block, so _rid of every command is unchanged."""
+    from pilot import runs
+    a = ray_train.parser().parse_args(["--data", "d.jsonl", "--out", "o"])
+    r = ray_train.resolve(a)
+    vals = ray_train.identity_values(a, r, ENTRY, "multilingual", BASE_IDENT)
+    assert "tune" in vals and vals["tune"] is None
+    rid = runs.run_id(runs.canonical(vals))
+    assert rid == _rid("--data", "d.jsonl", "--out", "o")
+    assert "tune" not in runs.canonical(vals)
+    trial = ray_train.identity_values(a, r, ENTRY, "multilingual", BASE_IDENT, tune=TUNE_BLOCK)
+    assert trial["tune"] == TUNE_BLOCK and runs.run_id(runs.canonical(trial)) != rid

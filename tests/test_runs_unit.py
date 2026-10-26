@@ -312,3 +312,91 @@ def test_canonical_keeps_mask_tags_and_fewshot_only_when_set() -> None:
     assert runs.run_id(cont) not in (rid, runs.run_id(base))
     with pytest.raises(ValueError, match="missing mask_tags, fewshot"):
         runs.canonical({k: v for k, v in plain.items() if k not in ("mask_tags", "fewshot")})
+
+
+TUNE_BLOCK = {"source": "selection_train", "train_folds": list(range(12)), "dev_folds": [12, 13],
+              "train_uids_sha256": "a" * 64, "dev_uids_sha256": "b" * 64}
+
+
+def test_tune_key_dropped_when_none_and_named_when_set() -> None:
+    """tune (a search trial's tuning partition) is an IDENTITY key dropped when None: every run outside a search keeps
+    the id it had before the key existed, a partition block changes it, and the key must still be given (as None)."""
+    import hashlib
+    assert "tune" in runs.IDENTITY and "tune" in runs.DROPPED_WHEN_NONE and "tune" not in runs.NOT_IDENTITY
+    plain = _identity(stop_after_epoch=None, postfit_sha256=None, base_files_sha256=None, mask_tags=None, fewshot=None,
+                      tune=None)
+    canon = runs.canonical(plain)
+    assert "tune" not in canon
+    without = {k: v for k, v in plain.items() if v is not None or k not in runs.DROPPED_WHEN_NONE}
+    assert "tune" not in without and canon == without
+    blob = json.dumps(without, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    rid = runs.run_id(canon)
+    assert rid == "laya-selection_train-neg8-s0-" + hashlib.sha256(blob).hexdigest()[:8]
+    trial = runs.canonical(dict(plain, tune=TUNE_BLOCK))
+    assert trial["tune"] == TUNE_BLOCK and list(trial)[-1] == "tune"
+    assert runs.run_id(trial) != rid
+    assert runs.run_id(runs.canonical(dict(plain, tune=dict(TUNE_BLOCK, dev_uids_sha256="c" * 64)))) \
+        not in (rid, runs.run_id(trial))
+    with pytest.raises(ValueError, match="missing tune;"):
+        runs.canonical({k: v for k, v in plain.items() if k != "tune"})
+
+
+# committed Laya canonical configs whose keys are not all current IDENTITY keys: (path, sorted extra keys). They are
+# counted and left out of the recomputation (never forced through canonical); none exists today
+LEFT_OUT: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+
+def _tracked_json(prefix: str) -> list[str]:
+    out = subprocess.run(["git", "ls-files", "-z", "--", prefix], cwd=REPO_ROOT, check=True, capture_output=True,
+                         text=True, encoding="utf-8").stdout
+    return [f for f in out.split("\0") if f.endswith(".json")]
+
+
+def _load(rel: str) -> Any:
+    with open(os.path.join(REPO_ROOT, rel), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _committed_laya_canonicals() -> list[tuple[str, str, dict[str, Any]]]:
+    """(where, recorded run id, canonical) of every committed Laya training canonical under results/: the training
+    block of each tracked fine-tuned Laya dump sidecar, and the chosen run and every candidate of
+    results/postfit/laya.json."""
+    out = []
+    for rel in _tracked_json("results/dumps"):
+        d = _load(rel)
+        tr = d.get("training")
+        if isinstance(tr, dict) and d["system"]["kind"] == "laya":
+            out.append((rel, tr["run_id"], tr["canonical"]))
+    record = _load("results/postfit/laya.json")
+    out.append(("results/postfit/laya.json chosen", record["chosen"]["train_run_id"], record["chosen"]["canonical"]))
+    for i, cand in enumerate(record["candidates"]):
+        assert cand["system_kind"] == "laya"
+        out.append(("results/postfit/laya.json candidate %d" % i, cand["train_run_id"], cand["canonical"]))
+    return out
+
+
+def test_committed_laya_run_ids_are_unchanged_by_the_tune_key() -> None:
+    """Every committed Laya canonical rebuilds through runs.canonical with every IDENTITY key given (tune as None) and
+    recomputes to its recorded run id: the chosen selection run, the three final seeds and every Laya few-shot run
+    among them."""
+    found = _committed_laya_canonicals()
+    left = tuple((where, tuple(sorted(set(c) - set(runs.IDENTITY)))) for where, _rid, c in found
+                 if not set(c) <= set(runs.IDENTITY))
+    assert left == LEFT_OUT, "%d committed Laya canonical(s) hold keys IDENTITY no longer has: %r" % (len(left), left)
+    checked, bad = set(), []
+    for where, rid, c in found:
+        if not set(c) <= set(runs.IDENTITY):
+            continue
+        vals = {k: c.get(k) for k in runs.IDENTITY}
+        assert vals["tune"] is None, where
+        canon = runs.canonical(vals)
+        if canon != c or runs.run_id(canon) != rid:
+            bad.append((where, rid, runs.run_id(canon)))
+        checked.add(rid)
+    assert not bad, bad
+    final = [s["train_run_id"] for s in _load("results/postfit/laya-final.json")["seeds"]]
+    fewshot = [e["train_run_id"] for e in _load("results/fewshot/runs.json")["entries"] if e["kind"] == "laya"]
+    assert len(final) == 3 and len(fewshot) == 9, (final, fewshot)
+    want = {"laya-selection_train-neg8-s0-d92447f4", *final, *fewshot}
+    assert want <= checked, sorted(want - checked)
+    assert len(found) - len(left) >= len(want)
