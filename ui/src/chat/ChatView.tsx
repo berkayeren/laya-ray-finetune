@@ -1,19 +1,21 @@
 // The chat view (D-07, D-13): a thread of turns, each the user's message and one reply card holding both systems'
 // answers, and the sticky input bar (InputBar). A message is posted unchanged as {text} to POST /api/classify (UTF-8
 // JSON); one request is in flight at a time. The thread lives in React state only: nothing is written to any browser
-// store or cookie, no URL holds message text, and a reload empties the thread. GET /api/intents is read once: its
-// INTENTS tag order (the order of every answer's arrays) and each tag's question text, passed down as one tag lookup
-// (the chips' and the 48-tag rows' tooltips), and its confidence_rule, which every reply card shows on the confidence
-// info icon. While the response is missing these are omitted, never invented. Every server string is rendered as a
-// React text node.
+// store or cookie, no URL holds message text, and a reload empties the thread. GET /api/intents is read until it
+// first answers 200: its INTENTS tag order (the order of every answer's arrays) and each tag's question text, passed
+// down as one tag lookup (the chips' and the 48-tag rows' tooltips), and its confidence_rule, which every reply card
+// shows on the confidence info icon. While the response is missing these are omitted, never invented. Every server
+// string is rendered as a React text node.
 //
-// ChatView owns the chat area's states. It polls GET /api/status every second while the status reads loading, and
-// keeps polling with a capped backoff (RETRY_MS doubling up to RETRY_MAX_MS) while the server does not answer, so a
-// restarted or briefly unreachable server is picked up without a reload:
+// ChatView owns the chat area's states. It polls GET /api/status every second while the status reads loading, every
+// RETRY_MAX_MS while it reads refused (a refusal is fixed by a restart of `make demo`, and the restarted server is
+// picked up), and with a capped backoff (RETRY_MS doubling up to RETRY_MAX_MS) while the server does not answer, so
+// no state is one only a reload leaves:
 //   loading      the empty state and the examples stay visible, the input is disabled and says the six final
 //                checkpoints are loading (the dashboard already works); an HTTP error from /api/status reads loading
 //                too and is retried;
-//   refused      "Chat unavailable", the server's one line verbatim in mono, and a link to the dashboard;
+//   refused      "Chat unavailable", the server's one line verbatim in mono, and a link to the dashboard; left as
+//                soon as the status changes;
 //   unreachable  the server-unreachable copy, until the server answers again;
 //   ready        the chat. A failed request re-reads /api/status once, so a chat the server refused after a forward
 //                (a device or dtype check) shows "Chat unavailable" with its line instead of staying open.
@@ -48,7 +50,8 @@ const UNAVAILABLE_TAIL = "The dashboard still works.";
 const DASHBOARD_LINK = "Open the dashboard";
 const DASHBOARD_HREF = "#/dashboard/verdict";
 const UNREACHABLE_COPY =
-  "The demo server is not responding. Check that `make demo` is still running in your terminal, then reload this page.";
+  "The demo server is not responding. Check that `make demo` is still running in your terminal; this page reconnects " +
+  "when it answers again.";
 
 function requestError(message: string): string {
   return `Classification failed: ${message}. Try again; if it repeats, restart \`make demo\`.`;
@@ -76,8 +79,9 @@ function toMode(s: Status): ChatMode {
   return { kind: "loading" };
 }
 
-// GET /api/status, polled every second while it reads loading; a failed poll (unanswered: unreachable, an HTTP
-// error: loading) is retried after RETRY_MS, doubling up to RETRY_MAX_MS, and the first answer ends the backoff.
+// GET /api/status, polled every POLL_MS while it reads loading and every RETRY_MAX_MS while it reads refused (a
+// restarted server is picked up); a failed poll (unanswered: unreachable, an HTTP error: loading) is retried after
+// RETRY_MS, doubling up to RETRY_MAX_MS, and the first answer ends the backoff. Only ready schedules no poll.
 // recheck() polls once more now (after a failed request), cancelling any scheduled poll.
 function useChatMode(): [ChatMode, () => void] {
   const [mode, setMode] = useState<ChatMode>({ kind: "loading" });
@@ -102,6 +106,8 @@ function useChatMode(): [ChatMode, () => void] {
       setMode(next);
       if (next.kind === "loading") {
         timer = window.setTimeout(() => void poll(), POLL_MS);
+      } else if (next.kind === "refused") {
+        timer = window.setTimeout(() => void poll(), RETRY_MAX_MS);
       }
     };
     again.current = () => {
@@ -124,17 +130,29 @@ function useChatMode(): [ChatMode, () => void] {
   return [mode, recheck];
 }
 
+// GET /api/intents, asked again every RETRY_MAX_MS until it answers 200 (a restarted server is picked up)
 function useIntents(): Intents | null {
   const [intents, setIntents] = useState<Intents | null>(null);
   useEffect(() => {
     let cancelled = false;
-    void getJSON<Intents>("/api/intents").then((r) => {
-      if (!cancelled && r.ok) {
-        setIntents(r.data);
+    let timer: number | undefined;
+    const fetchIntents = async (): Promise<void> => {
+      const r = await getJSON<Intents>("/api/intents");
+      if (cancelled) {
+        return;
       }
-    });
+      if (r.ok) {
+        setIntents(r.data);
+      } else {
+        timer = window.setTimeout(() => void fetchIntents(), RETRY_MAX_MS);
+      }
+    };
+    void fetchIntents();
     return () => {
       cancelled = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
     };
   }, []);
   return intents;

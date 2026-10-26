@@ -43,9 +43,9 @@ const PLOT_H = CHART_H - MARGIN_TOP - MARGIN_BOTTOM - X_AXIS_H;
 // --- data -----------------------------------------------------------------------------------------------------------
 
 // GET /api/training; while it reads loading, GET /api/status every POLL_MS until training reads ready, then
-// GET /api/training once more. Any HTTP error is that view's error; an unanswered request reads unreachable and
-// retries GET /api/status after RETRY_MS, doubling up to RETRY_MAX_MS, so a restarted server is picked up without a
-// reload.
+// GET /api/training once more. Any HTTP error is that view's error, asked again every RETRY_MAX_MS; an unanswered
+// request reads unreachable and retries GET /api/status after RETRY_MS, doubling up to RETRY_MAX_MS, so a restarted
+// server is picked up without a reload.
 function useTraining(): ViewState<TrainingReady> {
   const [state, setState] = useState<ViewState<TrainingReady>>({ kind: "loading" });
   useEffect(() => {
@@ -58,7 +58,9 @@ function useTraining(): ViewState<TrainingReady> {
         timer = window.setTimeout(() => void pollStatus(), retry);
         retry = Math.min(retry * 2, RETRY_MAX_MS);
       } else {
+        retry = RETRY_MS;
         setState({ kind: "error", error: r.error, source: r.source ?? null });
+        timer = window.setTimeout(() => void pollStatus(), RETRY_MAX_MS);
       }
     };
     const pollStatus = async (): Promise<void> => {

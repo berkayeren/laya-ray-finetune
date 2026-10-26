@@ -375,21 +375,33 @@ def read_ui(rel: str) -> str:
 
 
 def hook_body(rel: str, name: str) -> str:
-    """The text of `function name(` in ui/src/<rel> up to the next line holding only "}" (the hook's closing brace)."""
-    m = re.search(r"^function %s\(.*?^\}$" % name, read_ui(rel), re.S | re.M)
+    """The text of `function name(` (or `export function name<`) in ui/src/<rel> up to the next line holding only "}"
+    (the hook's closing brace)."""
+    m = re.search(r"^(?:export )?function %s[(<].*?^\}$" % name, read_ui(rel), re.S | re.M)
     assert m is not None, "ui/src/%s has no function %s" % (rel, name)
     return m.group(0)
 
 
 def test_status_polls_retry_after_a_failure() -> None:
     """useChatMode reschedules its poll on a failed /api/status answer (unreachable or an HTTP error) with a capped
-    backoff, a failed classify re-reads /api/status (so a chat the server refused shows as refused), and useTraining
-    reschedules its status poll on an unanswered request: none ends in a state only a reload leaves."""
+    backoff and keeps polling while the chat reads refused (11-REVIEW WR-07: a server refusal is fixed by a restart of
+    `make demo`, which the page must pick up), a failed classify re-reads /api/status (so a chat the server refused
+    shows as refused), useTraining reschedules its status poll on an unanswered request and on an HTTP error, useView
+    and useIntents fetch again until they answer: none ends in a state only a reload leaves, so no copy tells the user
+    to reload."""
     chat = hook_body("chat/ChatView.tsx", "useChatMode")
     failed = re.search(r"if \(!r\.ok\) \{(.*?)\n      \}", chat, re.S)
     assert failed is not None, "useChatMode has no failed-poll branch"
     assert "window.setTimeout(() => void poll(), retry)" in failed.group(1), "a failed status poll is not retried"
     assert "RETRY_MAX_MS" in failed.group(1), "the status retry has no backoff cap"
+    refused = re.search(r'\} else if \(next\.kind === "refused"\) \{(.*?)\n      \}', chat, re.S)
+    assert refused is not None and "window.setTimeout(() => void poll(), RETRY_MAX_MS)" in refused.group(1), \
+        "a refused chat never polls /api/status again (11-REVIEW WR-07)"
+    view = hook_body("dashboard/common.tsx", "useView")
+    assert "window.setTimeout(() => void fetchView(), retry)" in view, "an unanswered view request is not retried"
+    assert "window.setTimeout(() => void fetchView(), RETRY_MAX_MS)" in view, "a refused view is never asked again"
+    intents = hook_body("chat/ChatView.tsx", "useIntents")
+    assert "window.setTimeout(() => void fetchIntents(), RETRY_MAX_MS)" in intents, "/api/intents is not retried"
     send = re.search(r"const send = useCallback\((.*?)\n  \);", read_ui("chat/ChatView.tsx"), re.S)
     assert send is not None and re.search(r"if \(!r\.ok\) \{\s*recheck\(\);", send.group(1)), \
         "a failed classify does not re-read /api/status (11-REVIEW WR-05)"
@@ -398,6 +410,10 @@ def test_status_polls_retry_after_a_failure() -> None:
     assert unanswered is not None, "useTraining has no unanswered-request branch"
     assert "window.setTimeout(() => void pollStatus(), retry)" in unanswered.group(1), \
         "an unanswered training request is not retried"
+    assert "window.setTimeout(() => void pollStatus(), RETRY_MAX_MS)" in training, \
+        "a training request answered with an HTTP error is never asked again"
+    said = [rel for rel in ui_sources() if "reload this page" in read_ui(os.path.relpath(rel, "ui/src"))]
+    assert said == [], "UI copy still tells the user to reload, though every state recovers: %s" % said
 
 
 # --- the per-view error: the server's line verbatim, no fix of the UI's (11-REVIEW WR-03) -------------------------

@@ -2,7 +2,7 @@
 // "UI Considerations"). No component here writes a status word, a verdict sentence, a caveat or a number of its own:
 // each one shows the strings and values its props carry, as React text nodes.
 //
-//   useView(name)      GET /api/{name} once: loading | ok {data} | error {error, source} | unreachable
+//   useView(name)      GET /api/{name} until it answers 200: loading | ok {data} | error {error, source} | unreachable
 //   ViewGate           renders the loading block, the per-view error or the unreachable copy, else its children(data)
 //   SourceCaption      the one-line mono caption naming the records a view reads (the view's own sources field)
 //   Card               white, hairline border, radius 8px, 16px padding; an optional h2 title
@@ -39,7 +39,10 @@ export const COLORS = {
 } as const;
 
 const UNREACHABLE_COPY =
-  "The demo server is not responding. Check that `make demo` is still running in your terminal, then reload this page.";
+  "The demo server is not responding. Check that `make demo` is still running in your terminal; this page reconnects " +
+  "when it answers again.";
+const RETRY_MS = 1000; // the first retry after an unanswered request
+const RETRY_MAX_MS = 5000; // the backoff cap, and the interval at which a refused view asks again
 
 // --- data -----------------------------------------------------------------------------------------------------------
 
@@ -49,14 +52,20 @@ export type ViewState<T> =
   | { kind: "error"; error: string; source: string | null }
   | { kind: "unreachable" };
 
-// GET /api/{name}, fetched once per mount, typed by ViewMap. A 503 carries the record view's {error, source}; any
-// other HTTP error has no source (null), never an invented one.
+// GET /api/{name}, typed by ViewMap, fetched on mount and again until it answers 200: an unanswered request after
+// RETRY_MS, doubling up to RETRY_MAX_MS, and an HTTP error every RETRY_MAX_MS. The views are built once at server
+// startup, so a refused view (whose line ends in its fix and a restart) shows the restarted server's view without a
+// reload. A 503 carries the record view's {error, source}; any other HTTP error has no source (null), never an
+// invented one.
 export function useView<K extends keyof ViewMap>(name: K): ViewState<ViewMap[K]> {
   const [state, setState] = useState<ViewState<ViewMap[K]>>({ kind: "loading" });
   useEffect(() => {
     let cancelled = false;
+    let timer: number | undefined;
+    let retry = RETRY_MS;
     setState({ kind: "loading" });
-    void getJSON<ViewMap[K]>("/api/" + name).then((r) => {
+    const fetchView = async (): Promise<void> => {
+      const r = await getJSON<ViewMap[K]>("/api/" + name);
       if (cancelled) {
         return;
       }
@@ -64,12 +73,20 @@ export function useView<K extends keyof ViewMap>(name: K): ViewState<ViewMap[K]>
         setState({ kind: "ok", data: r.data });
       } else if (r.status === null) {
         setState({ kind: "unreachable" });
+        timer = window.setTimeout(() => void fetchView(), retry);
+        retry = Math.min(retry * 2, RETRY_MAX_MS);
       } else {
+        retry = RETRY_MS;
         setState({ kind: "error", error: r.error, source: r.source });
+        timer = window.setTimeout(() => void fetchView(), RETRY_MAX_MS);
       }
-    });
+    };
+    void fetchView();
     return () => {
       cancelled = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
     };
   }, [name]);
   return state;
