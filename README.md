@@ -1892,7 +1892,9 @@ both models, the training runs (the Ray Train per-epoch rows of the Laya final s
 BERTurk final seeds), and the confidence, latency and few-shot records.
 
 Building the UI needs Node 22.12 or newer and npm. `make demo` runs `npm --prefix ui ci`, `npm --prefix ui run build`
-(into `ui/dist`, gitignored) and `python demo.py --device mps`, which serves the page on http://127.0.0.1:8765.
+(into `ui/dist`, gitignored) and `python demo.py --device mps`, which serves the page on http://127.0.0.1:8765. The
+clean install from the committed `ui/package-lock.json` is skipped while `ui/node_modules` holds the stamp an earlier
+`npm ci` left of that exact lockfile; a changed lockfile or a deleted `ui/node_modules` installs again.
 `make demo DEMO_DEVICE=cpu` runs the models on the CPU instead. The server listens on 127.0.0.1 only and has no flag to
 bind elsewhere; a request with another Host header is refused. `python demo.py --port N` serves on another port, and
 `--checkpoint-root DIR` names the directory that holds the final seed dirs (default the repo root).

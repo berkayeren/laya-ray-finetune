@@ -535,3 +535,58 @@ def test_http_result_never_carries_null_data(tmp_path: Any) -> None:
                                     {"ok": False, "status": 503, "error": "x", "source": "y"},
                                     {"ok": False, "status": 500, "error": "HTTP 500", "source": None},
                                     {"ok": False, "status": None, "error": ""}]
+
+
+FAKE_NPM = """#!/bin/sh
+echo "$*" >> "$NPM_LOG"
+if [ "$3" = "ci" ]; then
+  rm -rf ui/node_modules && mkdir -p ui/node_modules
+  if [ -n "$NPM_CI_FAILS" ]; then exit 1; fi
+fi
+exit 0
+"""
+
+
+def test_make_demo_runs_npm_ci_only_for_a_new_lockfile(tmp_path: Any) -> None:
+    """11-REVIEW IN-04: `make demo` (the committed Makefile, in a scratch tree with a fake npm on PATH and PYTHON=echo)
+    runs `npm --prefix ui ci` on the first run, skips it while ui/node_modules holds the stamp of this exact
+    ui/package-lock.json, and runs it again after the lockfile changes or ui/node_modules is removed; a failing npm ci
+    fails the target and leaves no stamp, so the next run installs again. The build runs every time."""
+    import shutil
+    make = shutil.which("make")
+    if make is None:
+        pytest.skip("make is not installed")
+    tree, bin_dir = tmp_path / "tree", tmp_path / "bin"
+    (tree / "ui").mkdir(parents=True)
+    bin_dir.mkdir()
+    shutil.copy(os.path.join(REPO, "Makefile"), tree / "Makefile")
+    shutil.copy(os.path.join(UI, "package-lock.json"), tree / "ui" / "package-lock.json")
+    (bin_dir / "npm").write_text(FAKE_NPM, encoding="utf-8")
+    (bin_dir / "npm").chmod(0o755)
+    log = tmp_path / "npm.log"
+    stamp = tree / "ui" / "node_modules" / ".demo-package-lock.json"
+
+    def run(fails: bool = False) -> tuple[int, list[str]]:
+        log.write_text("", encoding="utf-8")
+        env = dict(os.environ, PATH="%s%s%s" % (bin_dir, os.pathsep, os.environ["PATH"]), NPM_LOG=str(log))
+        env.pop("NPM_CI_FAILS", None)
+        if fails:
+            env["NPM_CI_FAILS"] = "1"
+        p = subprocess.run([make, "-s", "demo", "PYTHON=echo"], cwd=tree, env=env, capture_output=True, text=True,
+                           encoding="utf-8", timeout=60)
+        return p.returncode, log.read_text(encoding="utf-8").splitlines()
+
+    ci, build = "--prefix ui ci", "--prefix ui run build"
+    assert run() == (0, [ci, build]) and stamp.read_bytes() == (tree / "ui" / "package-lock.json").read_bytes()
+    assert run() == (0, [build])
+    with open(tree / "ui" / "package-lock.json", "a", encoding="utf-8") as f:
+        f.write("\n")
+    assert run() == (0, [ci, build])
+    assert run() == (0, [build])
+    shutil.rmtree(tree / "ui" / "node_modules")
+    assert run() == (0, [ci, build])
+    with open(tree / "ui" / "package-lock.json", "a", encoding="utf-8") as f:
+        f.write("\n")
+    code, calls = run(fails=True)
+    assert code != 0 and calls == [ci] and not stamp.exists()
+    assert run() == (0, [ci, build])

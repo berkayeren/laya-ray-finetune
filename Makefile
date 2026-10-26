@@ -18,7 +18,7 @@
 #   make memo  write results/final/memo.md, the one-page decision memo, from the committed records (no model)
 #   make reproduce  the whole pipeline in order (data, val selection, final training, evaluation, few-shot, report), skipping every step its committed, hash-verified artifacts prove done; MODE=eval-only is make report
 #   make report  eval-only: verify the protocol, splits and records, rebuild every report, the README blocks and the memo from the committed dumps (no training, no scoring); fails on any rebuilt file that differs
-#   make demo  build the UI (npm ci + vite build into ui/dist, gitignored) and serve the local demo on http://127.0.0.1:8765 (DEMO_DEVICE=cpu for CPU); chat with both fine-tuned systems and the results dashboard; stores nothing, never trains or scores
+#   make demo  build the UI (npm ci, skipped while ui/node_modules holds the stamp of this exact ui/package-lock.json, + vite build into ui/dist, gitignored) and serve the local demo on http://127.0.0.1:8765 (DEMO_DEVICE=cpu for CPU); chat with both fine-tuned systems and the results dashboard; stores nothing, never trains or scores
 PYTHON ?= python
 UV ?= uv
 PY312 ?= python3.12
@@ -41,6 +41,9 @@ FEWSHOT := results/fewshot
 FEWSHOT_ROOT ?= .
 MODE ?= full
 DEMO_DEVICE ?= mps
+# written into ui/node_modules (gitignored) only after `npm --prefix ui ci` succeeds: a byte copy of the lockfile it
+# installed. npm ci deletes ui/node_modules first, so a changed lockfile or a removed ui/node_modules installs again
+DEMO_STAMP := ui/node_modules/.demo-package-lock.json
 
 .PHONY: env lock lock-check data weights test test-all test-unit clean-data baselines baseline-reports laya-postfit berturk-postfit confidence-reports final-scoring final-reports fewshot-scoring fewshot-reports memo reproduce report demo
 
@@ -186,7 +189,11 @@ report:
 	$(MAKE) reproduce MODE=eval-only PYTHON="$(PYTHON)"
 
 demo:
-	npm --prefix ui ci
+	@if cmp -s ui/package-lock.json $(DEMO_STAMP); then \
+		echo "npm --prefix ui ci skipped: ui/node_modules was installed from this ui/package-lock.json"; \
+	else \
+		echo "npm --prefix ui ci"; npm --prefix ui ci && cp ui/package-lock.json $(DEMO_STAMP); \
+	fi
 	npm --prefix ui run build
 	$(PYTHON) demo.py --device $(DEMO_DEVICE)
 
