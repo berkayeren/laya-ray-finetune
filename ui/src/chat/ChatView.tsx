@@ -19,10 +19,11 @@
 //   unreachable  the server-unreachable copy, until the server answers again;
 //   ready        the chat. A failed request re-reads /api/status once, so a chat the server refused after a forward
 //                (a device or dtype check) shows "Chat unavailable" with its line instead of staying open.
-// A pending turn shows the loading reply card (two column skeletons); a failed request keeps the user bubble and shows
-// the request-error copy (or the unreachable copy when the server did not answer) in place of the reply card. The
-// backend answers with both systems or neither, so a reply card never shows one column alone. The thread is a
-// role="log"; the view follows the newest turn only when the user was already at the bottom.
+// A pending turn shows the loading reply card (two column skeletons); a failed request keeps the user bubble and shows,
+// in place of the reply card, the server's one line verbatim (it ends in its own fix: try again, a restart, or what
+// to send instead), an HTTP error without a line of the server's with the restart hint, or the unreachable copy when
+// the server did not answer. The backend answers with both systems or neither, so a reply card never shows one column
+// alone. The thread is a role="log"; the view follows the newest turn only when the user was already at the bottom.
 // ChatView takes no props (plan 11-10 relies on that signature).
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -53,8 +54,9 @@ const UNREACHABLE_COPY =
   "The demo server is not responding. Check that `make demo` is still running in your terminal; this page reconnects " +
   "when it answers again.";
 
-function requestError(message: string): string {
-  return `Classification failed: ${message}. Try again; if it repeats, restart \`make demo\`.`;
+// an HTTP error whose body held no line of the server's (so no fix of its own)
+function unexplained(error: string): string {
+  return `Classification failed (${error}); if it repeats, restart \`make demo\`.`;
 }
 
 type ChatMode =
@@ -63,7 +65,7 @@ type ChatMode =
   | { kind: "refused"; message: string }
   | { kind: "unreachable" };
 
-// error: the server's one-line message, or null when the server did not answer
+// error: the text shown, or null when the server did not answer
 type Turn =
   | { id: number; text: string; state: "pending" }
   | { id: number; text: string; state: "done"; reply: ClassifyResponse }
@@ -198,7 +200,7 @@ function TurnView({ turn, tags, confidence_rule }: TurnProps) {
         {turn.state === "done" && <ReplyCard reply={turn.reply} tags={tags} confidence_rule={confidence_rule} />}
         {turn.state === "error" && (
           <p className={css.error} role="alert">
-            {turn.error === null ? UNREACHABLE_COPY : requestError(turn.error)}
+            {turn.error === null ? UNREACHABLE_COPY : turn.error}
           </p>
         )}
         <span className={css.srOnly} aria-live="polite">
@@ -278,7 +280,8 @@ export default function ChatView() {
           if (r.ok) {
             return { id, text: message, state: "done", reply: r.data };
           }
-          return { id, text: message, state: "error", error: r.status === null ? null : r.error };
+          const error = r.status === null ? null : r.served ? r.error : unexplained(r.error);
+          return { id, text: message, state: "error", error };
         }),
       );
       if (!r.ok) {

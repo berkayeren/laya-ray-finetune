@@ -531,16 +531,16 @@ def run_node_ts(tmp_path: Any, probe: str, module_uri: str) -> Any:
 
 def test_http_result_never_carries_null_data(tmp_path: Any) -> None:
     """11-REVIEW IN-03: ui/src/http.ts run under node's type stripping with a stubbed fetch: a 2xx whose body is not
-    JSON (or is JSON null) is {ok: false, status, error: "HTTP <status> (not JSON)", source: null}, never {ok: true,
-    data: null}, which would throw inside a polling chain; JSON, an HTTP error and an unanswered request keep their
-    results. Skips without node 22.6 or newer."""
+    JSON (or is JSON null) is {ok: false, status, error: "HTTP <status> (not JSON)", source: null, served: false},
+    never {ok: true, data: null}, which would throw inside a polling chain; JSON, an HTTP error (served true only with
+    the server's "error" line) and an unanswered request keep their results. Skips without node 22.6 or newer."""
     import pathlib
     out = run_node_ts(tmp_path, HTTP_PROBE, pathlib.Path(UI, "src", "http.ts").as_uri())
-    not_json = {"ok": False, "status": 200, "error": "HTTP 200 (not JSON)", "source": None}
+    not_json = {"ok": False, "status": 200, "error": "HTTP 200 (not JSON)", "source": None, "served": False}
     assert out == [not_json, not_json, {"ok": True, "data": {"a": 1}},
-                                    {"ok": False, "status": 503, "error": "x", "source": "y"},
-                                    {"ok": False, "status": 500, "error": "HTTP 500", "source": None},
-                                    {"ok": False, "status": None, "error": ""}]
+                   {"ok": False, "status": 503, "error": "x", "source": "y", "served": True},
+                   {"ok": False, "status": 500, "error": "HTTP 500", "source": None, "served": False},
+                   {"ok": False, "status": None, "error": ""}]
 
 
 FAKE_NPM = """#!/bin/sh
@@ -615,3 +615,14 @@ def test_format_lr_reads_a_null_head_lr_as_na(tmp_path: Any) -> None:
     probe = ("const { formatLR } = await import(process.argv[2]);\n"
              "console.log(JSON.stringify([null, 2e-05, 0.0001, 0.00001, 0].map(formatLR)));\n")
     assert run_node_ts(tmp_path, probe, pathlib.Path(module).as_uri()) == ["n/a", "2e-05", "0.0001", "1e-05", "0"]
+
+
+def test_chat_request_error_is_the_server_line_verbatim() -> None:
+    """11-REVIEW IN-07: a failed classify shows the server's one line as it is (CLASSIFY_FAILED and CHAT_BROKEN already
+    end in their fix), never wrapped in a second "classification failed" or a "Try again" after a refusal that ended
+    the chat; only an HTTP error without a line of the server's (served false) gets the UI's restart hint."""
+    chat = read_ui("chat/ChatView.tsx")
+    assert "{turn.error === null ? UNREACHABLE_COPY : turn.error}" in chat, "the turn error is not shown verbatim"
+    assert "const error = r.status === null ? null : r.served ? r.error : unexplained(r.error);" in chat
+    assert "Try again" not in chat and "requestError" not in chat
+    assert demo.CLASSIFY_FAILED.startswith("classification failed (") and demo.CHAT_BROKEN.endswith("`make demo`")
