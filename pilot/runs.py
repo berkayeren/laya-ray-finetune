@@ -55,9 +55,10 @@ IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_conf
 #   postfit: a path, represented in IDENTITY by postfit_sha256
 #   fewshot_base, fewshot_draw, fewshot_k: the few-shot modes, represented in IDENTITY by fewshot (the protocol binding,
 #     pilot.fewshot.binding) and, for a masked base, mask_tags
+#   tensorboard: where rank 0 writes the TensorBoard event files (outputs, not training; pilot.tensorboard)
 NOT_IDENTITY = ("data", "base", "out", "storage", "manifest", "cpus_per_worker", "object_store_gb", "gpu",
                 "print_run_id", "fail_after_epoch", "export_epochs", "postfit", "fewshot_base", "fewshot_draw",
-                "fewshot_k")
+                "fewshot_k", "tensorboard")
 # IDENTITY keys canonical() leaves out when their value is None. base_files_sha256 is the pilot.dumps.files_digest of a
 # local base's tokenizer/ and encoder/ files and None for the pinned base, whose files the pin fixes.
 # The committed compute probe id laya-selection_train-neg8-s0-db11040d (the compute checkpoint, trained with a

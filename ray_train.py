@@ -158,7 +158,7 @@ from ray.train import Checkpoint, CheckpointConfig, FailureConfig, RunConfig, Sc
 from ray.train.torch import TorchTrainer
 
 from pilot import laya_adapter as la
-from pilot import dumps, fewshot, pins, postfit, protocol, runs, spike
+from pilot import dumps, fewshot, pins, postfit, protocol, runs, spike, tensorboard
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, refuse_held_out,
                         repo_relpath, sha256_bytes, sha256_file, verify_split_file)
 from pilot.weights import (check_tokenizer_config_rewritable, check_tokenizer_config_rewritten, checkpoint_digests,
@@ -650,6 +650,19 @@ def write_export(inner: torch.nn.Module, tok: Any, ecfg: dict[str, Any], run_dir
     return final
 
 
+def tb_writer(c: dict[str, Any], rank: int, start_epoch: int, stop: int, per_epoch: int, segment: int) -> Any | None:
+    """The TensorBoard writer of this run segment, or None: rank 0 only, with --tensorboard set (c["tensorboard"], the
+    absolute DIR/RUN_ID) and an epoch left to train (a rerun that only writes the final checkpoint opens none).
+
+    One event file per run segment (pilot.tensorboard.segment_suffix(segment)). Its purge step is the first optimizer
+    step after the resumed epoch, start_epoch * per_epoch + 1, so TensorBoard hides the stale steps a killed partial
+    epoch logged, while every completed epoch's steps (at or below start_epoch * per_epoch) survive.
+    """
+    if rank != 0 or not c.get("tensorboard") or start_epoch >= stop:
+        return None
+    return tensorboard.open_writer(c["tensorboard"], start_epoch * per_epoch + 1, tensorboard.segment_suffix(segment))
+
+
 def train_loop_per_worker(c: dict[str, Any]) -> None:
     """One Ray Train worker: load (or resume) the base, build and shard the items, train the epochs DDP, report each
     epoch's checkpoint, and on rank 0 report the final laya checkpoint. `c` is the driver's train config (main)."""
@@ -704,10 +717,11 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
     # the few-shot masking proof: counted from the items laya built, refused on every rank before training
     fs_proof = fewshot_proof(c, la.items_per_question(train_items), len(train_items), counted) \
         if c.get("fewshot") else None
-    # driver-local absolute paths (data, base_dir, storage), the run's node id, the raw env dict and the frozen uid
-    # lists (fewshot_rows) stay out of every checkpoint (the env is recorded only as KEY=VALUE strings in the run record)
-    ray_cfg = {k: v for k, v in c.items()
-               if k not in ("data", "base_dir", "storage", "driver_node_id", "expect_env", "fewshot_rows")}
+    # driver-local absolute paths (data, base_dir, storage), the run's node id, the raw env dict, the frozen uid
+    # lists (fewshot_rows) and the TensorBoard logdir (tensorboard: a driver-local absolute path, never recorded) stay
+    # out of every checkpoint (the env is recorded only as KEY=VALUE strings in the run record)
+    ray_cfg = {k: v for k, v in c.items() if k not in ("data", "base_dir", "storage", "driver_node_id", "expect_env",
+                                                       "fewshot_rows", "tensorboard")}
     per_rank = len(train_items) // world                    # equal shards keep DDP collectives in step
     if per_rank == 0:                                       # same on every rank: never publish an untrained "fine-tune"
         raise SystemExit("no training items per rank (%d items, %d workers); use more messages or fewer workers"
@@ -764,7 +778,8 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
     opt = torch.optim.AdamW(groups, weight_decay=WEIGHT_DECAY, **impl)
     mb, accum = c["micro_batch"], c["grad_accum"]
     steps_per_epoch = -(-len(shard) // mb)
-    updates = c["epochs"] * -(-steps_per_epoch // accum)
+    per_epoch = -(-steps_per_epoch // accum)                # optimizer steps per epoch
+    updates = c["epochs"] * per_epoch
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(1, updates), eta_min=1e-6)
     scaler = torch.amp.GradScaler("cuda") if amp else None
     params = [p for g in groups for p in g["params"]]
@@ -834,93 +849,116 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
             print("dropped export(s) %s of a killed segment beyond epoch %d" % (", ".join(gone), start_epoch),
                   flush=True)
     note_exports()
+    # TensorBoard (rank 0, --tensorboard): the global step is the 1-based optimizer-step count,
+    # epoch * per_epoch + steps
+    tb = tb_writer(c, rank, start_epoch, stop, per_epoch, segment["segment"])
+    if tb is not None:
+        print("tensorboard events -> %s (segment %d, purge step %d)"
+              % (c["tensorboard"], segment["segment"], start_epoch * per_epoch + 1), flush=True)
     last = {"epoch": start_epoch, "loss": rows_out[-1]["loss"] if rows_out else None}
-    for epoch in range(start_epoch, stop):
-        t_epoch = time.time()
-        order = list(shard)
-        random.Random(c["seed"] + 1000 * epoch + rank).shuffle(order)
-        sigma = la.sigma_at(epoch, c["epochs"], 0.4, 0.1)
-        total, n, steps = 0.0, 0, 0
-        mem_reset()
-        mem_sync()
-        swap0, t0 = spike.swap_used(), time.perf_counter()
-        opt.zero_grad(set_to_none=True)
-        for s in range(0, len(order), mb):
-            batch = la.collate_items([[la.encode_item(tok, it, max_len, head_max_len,
-                                                      la.draw_option_order(it, rng, shuffle), parallel)
-                                       for it in order[s:s + mb]]], tok.pad_token_id)
-            step_now = (n + 1) % accum == 0 or s + mb >= len(order)
-            # skip the gradient all-reduce on accumulation steps
-            sync = nullcontext() if step_now or not hasattr(model, "no_sync") else model.no_sync()
-            with mps_oom_exit(epoch + 1, n + 1, c["rung"]), sync:
-                logits = la.forward(model, batch, device, amp, c["freeze_encoder"])
-                mask, target = batch["marker_mask"].to(device), batch["target"].to(device)
-                if c["loss"] == "rlcd":
-                    loss = la.rlcd_loss(logits, target, mask, batch["qtype"].to(device), sigma)
-                else:
-                    loss = la.soft_ce_loss(logits, target, mask)
-                (scaler.scale(loss / accum) if scaler else loss / accum).backward()
-            mem_sample()
-            n += 1
-            if step_now:
-                with mps_oom_exit(epoch + 1, n, c["rung"]):   # the step closes micro-batch n
-                    if scaler:
-                        scaler.unscale_(opt)
-                    torch.nn.utils.clip_grad_norm_(params, CLIP_GRAD_NORM)
-                    (scaler.step(opt), scaler.update()) if scaler else opt.step()
-                    sched.step()
-                    opt.zero_grad(set_to_none=True)
-                steps += 1
+    try:                                                    # a failure, an OOM exit or the test hook still flush tb
+        for epoch in range(start_epoch, stop):
+            t_epoch = time.time()
+            order = list(shard)
+            random.Random(c["seed"] + 1000 * epoch + rank).shuffle(order)
+            sigma = la.sigma_at(epoch, c["epochs"], 0.4, 0.1)
+            total, n, steps = 0.0, 0, 0
+            mem_reset()
+            mem_sync()
+            swap0, t0 = spike.swap_used(), time.perf_counter()
+            if tb is not None:                              # the micro-batch losses of the step being accumulated
+                window = {"loss": 0.0, "n": 0}
+            opt.zero_grad(set_to_none=True)
+            for s in range(0, len(order), mb):
+                batch = la.collate_items([[la.encode_item(tok, it, max_len, head_max_len,
+                                                          la.draw_option_order(it, rng, shuffle), parallel)
+                                           for it in order[s:s + mb]]], tok.pad_token_id)
+                step_now = (n + 1) % accum == 0 or s + mb >= len(order)
+                # skip the gradient all-reduce on accumulation steps
+                sync = nullcontext() if step_now or not hasattr(model, "no_sync") else model.no_sync()
+                with mps_oom_exit(epoch + 1, n + 1, c["rung"]), sync:
+                    logits = la.forward(model, batch, device, amp, c["freeze_encoder"])
+                    mask, target = batch["marker_mask"].to(device), batch["target"].to(device)
+                    if c["loss"] == "rlcd":
+                        loss = la.rlcd_loss(logits, target, mask, batch["qtype"].to(device), sigma)
+                    else:
+                        loss = la.soft_ce_loss(logits, target, mask)
+                    (scaler.scale(loss / accum) if scaler else loss / accum).backward()
                 mem_sample()
-            total += loss.item()
-        mem_sync()
-        train_s, swap_delta = time.perf_counter() - t0, spike.swap_used() - swap0
-        row = dict(zip(runs.EPOCH_FIELDS, (epoch + 1, total / max(1, n), train_s, 0.0, steps, len(shard),
-                                           peak["total"], peak["driver"], peak["rss"], mem_current(),
-                                           swap_delta, segment["segment"], segment["resumed"])))
-        rows_out.append(row)
-        metrics = {"epoch": epoch + 1, "loss": row["loss"], "epoch_seconds": round(time.time() - t_epoch, 1),
-                   "train_s": train_s}
-        if rank == 0:
-            print("epoch %d/%d%s loss %.4f train %.1fs peak %.2f GiB swap %+.0f MiB"
-                  % (epoch + 1, c["epochs"], " (stop after %d)" % stop if stop != c["epochs"] else "", row["loss"],
-                     train_s, row["peak_total_bytes"] / 2**30, swap_delta / 2**20), flush=True)
+                n += 1
+                if step_now:
+                    with mps_oom_exit(epoch + 1, n, c["rung"]):   # the step closes micro-batch n
+                        if scaler:
+                            scaler.unscale_(opt)
+                        torch.nn.utils.clip_grad_norm_(params, CLIP_GRAD_NORM)
+                        (scaler.step(opt), scaler.update()) if scaler else opt.step()
+                        sched.step()
+                        opt.zero_grad(set_to_none=True)
+                    steps += 1
+                    mem_sample()
+                lv = loss.item()
+                total += lv
+                if tb is not None:
+                    window["loss"] += lv
+                    window["n"] += 1
+                    if step_now:                            # after the closing micro-batch's loss
+                        tensorboard.write(tb, epoch * per_epoch + steps, {"train/loss": window["loss"] / window["n"]})
+                        window = {"loss": 0.0, "n": 0}
+            mem_sync()
+            train_s, swap_delta = time.perf_counter() - t0, spike.swap_used() - swap0
+            row = dict(zip(runs.EPOCH_FIELDS, (epoch + 1, total / max(1, n), train_s, 0.0, steps, len(shard),
+                                               peak["total"], peak["driver"], peak["rss"], mem_current(),
+                                               swap_delta, segment["segment"], segment["resumed"])))
+            rows_out.append(row)
+            metrics = {"epoch": epoch + 1, "loss": row["loss"], "epoch_seconds": round(time.time() - t_epoch, 1),
+                       "train_s": train_s}
+            if rank == 0:
+                print("epoch %d/%d%s loss %.4f train %.1fs peak %.2f GiB swap %+.0f MiB"
+                      % (epoch + 1, c["epochs"], " (stop after %d)" % stop if stop != c["epochs"] else "", row["loss"],
+                         train_s, row["peak_total_bytes"] / 2**30, swap_delta / 2**20), flush=True)
 
-        # Epoch checkpoint: rank 0's fp32 train state + every rank's RNG; never the fp16 laya export
-        if device.type == "mps":
-            torch.mps.empty_cache()                         # the allocator cache before the state copies to CPU
-        gc.collect()
-        name = "epoch-%03d" % (epoch + 1)
-        with tempfile.TemporaryDirectory() as d:
-            t_save = time.perf_counter()
-            if rank == 0:
-                with mps_oom_exit(epoch + 1, None, c["rung"], "while saving the checkpoint"):
-                    if c["export_epochs"]:
-                        ecfg = epoch_config(cfg, max_len, head_max_len,
-                                            dict(ray_cfg, record=export_record(record, name)), epoch + 1)
-                        write_export(inner, tok, ecfg, run_dir, name)
-                        note_exports()
-                    path = os.path.join(d, "train_state.pt")
-                    torch.save({"kind": "train_state", "run_id": c["run_id"], "canonical": c["canonical"],
-                                "epoch": epoch + 1, "model": inner.state_dict(), "opt": opt.state_dict(),
-                                "sched": sched.state_dict(), "scaler": scaler.state_dict() if scaler else None,
-                                "history": rows_out, "segments": segments}, path)
-                record["train_state_bytes"] = os.path.getsize(path)
-            torch.save({"torch": torch.get_rng_state(), "device": device_rng_state(device), "option": rng.getstate()},
-                       os.path.join(d, "rng-rank%d.pt" % rank))
-            row["save_s"] = time.perf_counter() - t_save    # the state above holds 0.0; save.json carries the time
-            if rank == 0:
-                with open(os.path.join(d, SAVE_META), "w", encoding="utf-8") as f:
-                    json.dump({"epoch": epoch + 1, "save_s": row["save_s"]}, f)
-            ray.train.report(metrics, checkpoint=Checkpoint.from_directory(d),
-                             checkpoint_dir_name="epoch-%03d" % (epoch + 1))
-            # plus Ray's persist (the train-state copy into storage, the rotation): a per-epoch cost the compute
-            # projection charges per epoch; the next epoch's state and the final record carry it,
-            # save.json (the resumed epoch's row) only the time up to the report
-            row["save_s"] = time.perf_counter() - t_save
-        if c["fail_after_epoch"] == epoch + 1:              # test hook: every rank fails after the checkpoint
-            raise RuntimeError("simulated failure after epoch %d (--fail-after-epoch)" % (epoch + 1))
-        last = metrics
+            # Epoch checkpoint: rank 0's fp32 train state + every rank's RNG; never the fp16 laya export
+            if device.type == "mps":
+                torch.mps.empty_cache()                         # the allocator cache before the state copies to CPU
+            gc.collect()
+            name = "epoch-%03d" % (epoch + 1)
+            with tempfile.TemporaryDirectory() as d:
+                t_save = time.perf_counter()
+                if rank == 0:
+                    with mps_oom_exit(epoch + 1, None, c["rung"], "while saving the checkpoint"):
+                        if c["export_epochs"]:
+                            ecfg = epoch_config(cfg, max_len, head_max_len,
+                                                dict(ray_cfg, record=export_record(record, name)), epoch + 1)
+                            write_export(inner, tok, ecfg, run_dir, name)
+                            note_exports()
+                        path = os.path.join(d, "train_state.pt")
+                        torch.save({"kind": "train_state", "run_id": c["run_id"], "canonical": c["canonical"],
+                                    "epoch": epoch + 1, "model": inner.state_dict(), "opt": opt.state_dict(),
+                                    "sched": sched.state_dict(), "scaler": scaler.state_dict() if scaler else None,
+                                    "history": rows_out, "segments": segments}, path)
+                    record["train_state_bytes"] = os.path.getsize(path)
+                torch.save({"torch": torch.get_rng_state(), "device": device_rng_state(device),
+                            "option": rng.getstate()},
+                           os.path.join(d, "rng-rank%d.pt" % rank))
+                row["save_s"] = time.perf_counter() - t_save    # the state above holds 0.0; save.json carries the time
+                if rank == 0:
+                    with open(os.path.join(d, SAVE_META), "w", encoding="utf-8") as f:
+                        json.dump({"epoch": epoch + 1, "save_s": row["save_s"]}, f)
+                ray.train.report(metrics, checkpoint=Checkpoint.from_directory(d),
+                                 checkpoint_dir_name="epoch-%03d" % (epoch + 1))
+                # plus Ray's persist (the train-state copy into storage, the rotation): a per-epoch cost the compute
+                # projection charges per epoch; the next epoch's state and the final record carry it,
+                # save.json (the resumed epoch's row) only the time up to the report
+                row["save_s"] = time.perf_counter() - t_save
+            if tb is not None:                              # at the step that closes the epoch, below any later purge
+                tensorboard.write(tb, (epoch + 1) * per_epoch, {"epoch/loss": row["loss"]})
+            if c["fail_after_epoch"] == epoch + 1:              # test hook: every rank fails after the checkpoint
+                raise RuntimeError("simulated failure after epoch %d (--fail-after-epoch)" % (epoch + 1))
+            last = metrics
+    finally:
+        if tb is not None:
+            tb.close()
+
 
     # Publish the final checkpoint from rank 0: uncalibrated (T = 1; postfit.py fits T on val later), or, for a
     # --postfit final seed, serving the record's val-fitted T bit for bit (a JSON float round trip, never rounded), which
@@ -1014,6 +1052,9 @@ def parser() -> argparse.ArgumentParser:
                          "replay set")
     ap.add_argument("--fewshot-k", type=int, default=None,
                     help="few-shot: the frozen k of the --fewshot-draw support set")
+    ap.add_argument("--tensorboard", default=None, metavar="DIR",
+                    help="write live TensorBoard scalars from rank 0 to DIR/RUN_ID/ (off by default; not part of the "
+                         "run id; never under results/, data/, ui/, protocol.json, --storage or --out)")
     ap.add_argument("--fail-after-epoch", type=int, default=None, help=argparse.SUPPRESS)   # test hook, never an env var
     return ap
 
@@ -1068,6 +1109,9 @@ def main(argv: list[str] | None = None) -> None:
         ap.error("--device mps trains on one Ray worker (one GPU, no MPS collective backend); use --workers 1")
     if a.amp and r["device"] in ("mps", "cpu"):
         ap.error("--amp is CUDA-only (the MPS fine-tune is measured with AMP off); drop --amp")
+    # the event-file dir is refused before the split read, any fetch, ray.init and --print-run-id; it creates nothing
+    tb_outputs = {"--storage": a.storage, "--out": a.out}
+    tb_root = tensorboard.check_logdir(a.tensorboard, tb_outputs) if a.tensorboard is not None else None
     proto = pin = block = mode = None
     if a.fewshot_base or continued:                         # the frozen protocol first, before the split is read
         proto, pin = protocol.require_frozen()
@@ -1136,6 +1180,8 @@ def main(argv: list[str] | None = None) -> None:
         fewshot.check_continued(proto, pin, "laya", canon, base_info["canonical"], base_info["run_id"],
                                 a.fewshot_draw, a.fewshot_k, mode)
     rid = runs.run_id(canon)                                # the Ray experiment name: storage/<rid> is the resume dir
+    # DIR/RUN_ID again: a run dir that is itself a symlink into a guarded place is refused too
+    tb_dir = tensorboard.check_logdir(os.path.join(tb_root, rid), tb_outputs) if tb_root is not None else None
     if a.print_run_id:
         print(rid)
         return
@@ -1176,6 +1222,8 @@ def main(argv: list[str] | None = None) -> None:
                 "fewshot_rows": ({"support": sorted(sel["support"]), "replay": sorted(sel["replay"]),
                                   "tags": list(block["tags"])} if sel is not None else None),
                 "fewshot_base": base_info,
+                # the absolute DIR/RUN_ID of the event files (or None): the worker leaves it out of ray_cfg
+                "tensorboard": tb_dir,
                 "provenance": provenance(entry, a.manifest, a.base, base_dir, base_ident)}, **r)
     cfg["rung"] = runs.rung_label(cfg)                      # derived from the flags, into the record and the config
     trainer = TorchTrainer(

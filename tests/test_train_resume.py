@@ -3,7 +3,8 @@
 The run_id comes from the command's canonical config and seed and names the Ray experiment dir, so the same command
 always lands in storage/<run_id>/ and a different seed in another dir; --print-run-id prints it without starting Ray.
 A killed run resumes byte for byte, a finished run reruns without training, and a read-only base tokenizer/ or low
-disk is refused before Ray starts.
+disk is refused before Ray starts. A run with --tensorboard keeps the run id, the weights and the checkpoint configs
+of the run without it, and its rank-0 event files hold the per-step and per-epoch scalars, one file per run segment.
 Runs in `make test` under the ray marker (CPU only, no weights or data).
 """
 import os
@@ -16,6 +17,8 @@ from typing import Any
 import pytest
 
 import pilot.data
+import pilot.tensorboard
+import tb_events
 from conftest import make_raw
 from pilot import runs
 from tiny_laya import tiny_checkpoint
@@ -26,6 +29,7 @@ REPO = pilot.data.REPO_ROOT
 TIMEOUT = 600
 Prepared = tuple[Path, list[Any]]                           # the prepared fixture: (work dir, ARGS)
 FullRun = tuple[str, Path]                                  # the full_run fixture: (run id, out dir)
+TbRun = tuple[str, Path, Path]                              # the tb_run fixture: (run id, out dir, tensorboard root)
 
 
 def _run(*args: Any, ok: bool = True) -> subprocess.CompletedProcess:
@@ -238,3 +242,68 @@ def test_low_disk_is_refused_before_ray(prepared: Prepared, tmp_path: Path, monk
     with pytest.raises(SystemExit, match="GiB free under --storage"):
         ray_train.main(args + ["--out", str(tmp_path / "o"), "--storage", str(tmp_path / "s")])
     assert not (tmp_path / "s").exists() and not (tmp_path / "o").exists()
+
+
+@pytest.fixture(scope="module")
+def tb_run(prepared: Prepared) -> TbRun:
+    """(rid, out dir, tensorboard root) of one uninterrupted run of ARGS with --tensorboard, into storage tb-a; its
+    --print-run-id creates nothing, the tensorboard root included."""
+    d, args = prepared
+    rid = _run("ray_train.py", *args, "--out", d / "x", "--storage", d / "tb-a", "--tensorboard", d / "tb",
+               "--print-run-id").stdout.strip()
+    assert not (d / "tb").exists() and not (d / "tb-a").exists()
+    _run("ray_train.py", *args, "--storage", d / "tb-a", "--out", d / "tb-full", "--tensorboard", d / "tb")
+    return rid, d / "tb-full", d / "tb"
+
+
+def _configs(rid: str, out: Path, storage: Path) -> list[Path]:
+    """The rl_agent_config.json of the final checkpoint and of every epoch export of the run."""
+    return [out / "rl_agent_config.json"] + sorted((storage / rid / "exports").glob("*/rl_agent_config.json"))
+
+
+@pytest.mark.timeout(600)
+def test_tensorboard_keeps_the_run_id_and_the_weights(prepared: Prepared, full_run: FullRun, tb_run: TbRun) -> None:
+    d, _ = prepared
+    rid, full = full_run
+    tb_rid, out, _ = tb_run
+    assert tb_rid == rid
+    assert _sha256(out / "model.safetensors") == _sha256(full / "model.safetensors")
+    assert (d / "tb-a" / rid).is_dir()
+
+
+@pytest.mark.timeout(600)
+def test_tensorboard_never_enters_a_checkpoint_config(prepared: Prepared, full_run: FullRun, tb_run: TbRun) -> None:
+    import json
+    d, _ = prepared
+    rid, full = full_run
+    _, out, root = tb_run
+    with open(full / "rl_agent_config.json", encoding="utf-8") as f:
+        keys = set(json.load(f)["training"]["ray_train"])
+    assert "tensorboard" not in keys
+    paths = _configs(rid, out, d / "tb-a")
+    assert len(paths) == 3, paths                                   # the final config and two epoch exports
+    for path in paths:
+        raw = path.read_bytes()
+        assert str(root).encode() not in raw and os.path.realpath(root).encode() not in raw, path
+        assert set(json.loads(raw)["training"]["ray_train"]) == keys, path
+
+
+@pytest.mark.timeout(600)
+def test_tensorboard_events_hold_the_loss_per_step_and_epoch(tb_run: TbRun) -> None:
+    rid, out, root = tb_run
+    files = tb_events.event_files(str(root / rid))
+    assert len(files) == 1 and files[0].endswith(".segment-000"), files
+    events = tb_events.read_events(str(root / rid))
+    rows = runs.read_record(str(out))["epochs"]
+    total = sum(row["optimizer_steps"] for row in rows)
+    assert sorted(tb_events.scalars(events, "train/loss")) == list(range(1, total + 1))
+    ends, cum = [], 0
+    for row in rows:
+        cum += row["optimizer_steps"]
+        ends.append(cum)
+    epoch_loss = tb_events.scalars(events, "epoch/loss")
+    assert sorted(epoch_loss) == ends
+    for step, row in zip(ends, rows):
+        assert epoch_loss[step] == pytest.approx(row["loss"], rel=1e-6)
+    assert (1, 1) in {(step, value) for _, step, kind, value in events if kind == "session_log"}
+    assert {kind for _, _, kind, _ in events} <= set(pilot.tensorboard.TAGS) | {"file_version", "session_log"}
