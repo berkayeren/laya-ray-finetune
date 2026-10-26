@@ -423,20 +423,34 @@ def test_distinct_suffixes_keep_both_writers(tmp_path: Path) -> None:
     assert tb_events.scalars(tb_events.read_events(logdir), "train/loss") == {1: 1.0, 2: 2.0}
 
 
-def test_same_suffix_in_one_second_truncates(tmp_path: Path) -> None:
+def test_event_file_name_shape(tmp_path: Path) -> None:
+    """The premise of the suffix rule, pinned to the locked tensorboardX (2.6.5): EventsWriter names a file
+    events.out.tfevents.<10-digit second>.<host name><suffix> and opens it 'wb'. A lock bump that changes the name fails
+    here, deterministically, so the uniqueness argument of segment_suffix and pid_suffix is re-checked."""
+    import socket
+    logdir = str(tmp_path / "rid")
+    _one_writer(logdir, 1, ptb.segment_suffix(3, 7))
+    (name,) = [os.path.basename(f) for f in tb_events.event_files(logdir)]
+    head = "events.out.tfevents."
+    assert name.startswith(head) and name.endswith("." + socket.gethostname() + ".segment-003.pid7"), name
+    assert len(name[len(head):].split(".")[0]) == 10 and name[len(head):].split(".")[0].isdigit(), name
+
+
+def test_same_suffix_in_one_second_truncates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The negative control of the suffix rule: two writers with one suffix, opened in one second, share one file name
-    (a 10-digit second and the host name) and the second truncates the first ('wb'). Fails, never skips, when no
-    attempt stays within one second."""
-    for attempt in range(5):
-        logdir = str(tmp_path / ("try-%d" % attempt))
-        t0 = str(time.time())[:10]
-        _one_writer(logdir, 1, ".same")
-        _one_writer(logdir, 2, ".same")
-        files = tb_events.event_files(logdir)
-        if len(files) == 1 and os.path.basename(files[0]).split(".")[3] == t0:
-            assert tb_events.scalars(tb_events.read_events(logdir), "train/loss") == {2: 2.0}
-            return
-    pytest.fail("no attempt opened both writers within one second; the truncation could not be shown")
+    and the second truncates the first ('wb'). The second is pinned (tensorboardX's event_file_writer clock is a fixed
+    value), so the control depends on no wall-clock timing; the name's shape is test_event_file_name_shape's."""
+    import types
+    monkeypatch.setattr("tensorboardX.event_file_writer.time", types.SimpleNamespace(time=lambda: 1700000000.25))
+    logdir = str(tmp_path / "rid")
+    _one_writer(logdir, 1, ".same")
+    _one_writer(logdir, 2, ".same")
+    files = tb_events.event_files(logdir)
+    assert len(files) == 1 and ".1700000000." in os.path.basename(files[0]), files
+    assert tb_events.scalars(tb_events.read_events(logdir), "train/loss") == {2: 2.0}
+    _one_writer(logdir, 3, ptb.segment_suffix(0, 1))         # the suffix rule: another file in the same second
+    _one_writer(logdir, 4, ptb.segment_suffix(0, 2))
+    assert len(tb_events.event_files(logdir)) == 3
 
 
 def test_the_purge_step_hides_a_killed_epochs_partial_steps(tmp_path: Path) -> None:
