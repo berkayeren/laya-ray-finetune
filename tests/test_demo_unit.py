@@ -19,6 +19,7 @@ in `make test`.
 """
 import json
 import os
+import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -620,3 +621,13 @@ def test_docs_state_the_confidence_group_is_unpinned() -> None:
         assert "every view behind" not in text, "%s claims every demo view is pinned" % rel
         said = [p for p in UNPINNED_PHRASES if p in text.lower()]
         assert said, "%s does not say the confidence view is unpinned" % rel
+    # 11-REVIEW IN-06: a README table row or prose paragraph that says which views sit behind the checks must name
+    # the confidence view as the exception in that same row or paragraph
+    with open(os.path.join(REPO, "README.md"), encoding="utf-8") as f:
+        text = f.read()
+    units = [ln for ln in text.splitlines() if ln.startswith("|")]
+    units += [" ".join(p.split()) for p in re.split(r"\n\s*\n", text) if not p.lstrip().startswith("|")]
+    claims = [u for u in units if re.search(r"views? (?:are )?behind|`build_views`", u)]
+    assert len(claims) >= 2, "README.md no longer says which demo views are behind the checks (row and prose)"
+    overstated = [u[:80] for u in claims if "confidence" not in u]
+    assert overstated == [], "README.md claims the views are pinned without the confidence exception: %s" % overstated
