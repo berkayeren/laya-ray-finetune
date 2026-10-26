@@ -511,27 +511,33 @@ console.log(JSON.stringify(out));
 """
 
 
+def run_node_ts(tmp_path: Any, probe: str, module_uri: str) -> Any:
+    """The JSON a node ES module `probe` prints, run with --experimental-strip-types on the TypeScript module at
+    module_uri (process.argv[2]); skips without node, or with a node older than 22.6 (no type stripping)."""
+    import shutil
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    path = os.path.join(str(tmp_path), "probe.mjs")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(probe)
+    p = subprocess.run([node, "--experimental-strip-types", "--no-warnings", path, module_uri], capture_output=True,
+                       text=True, encoding="utf-8", timeout=60)
+    if p.returncode != 0 and ("strip-types" in p.stderr or "Unknown file extension" in p.stderr):
+        pytest.skip("this node cannot strip TypeScript types (needs 22.6 or newer)")
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout)
+
+
 def test_http_result_never_carries_null_data(tmp_path: Any) -> None:
     """11-REVIEW IN-03: ui/src/http.ts run under node's type stripping with a stubbed fetch: a 2xx whose body is not
     JSON (or is JSON null) is {ok: false, status, error: "HTTP <status> (not JSON)", source: null}, never {ok: true,
     data: null}, which would throw inside a polling chain; JSON, an HTTP error and an unanswered request keep their
     results. Skips without node 22.6 or newer."""
     import pathlib
-    import shutil
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("node is not installed")
-    probe = os.path.join(str(tmp_path), "probe.mjs")
-    with open(probe, "w", encoding="utf-8") as f:
-        f.write(HTTP_PROBE)
-    http_ts = pathlib.Path(UI, "src", "http.ts").as_uri()
-    p = subprocess.run([node, "--experimental-strip-types", "--no-warnings", probe, http_ts], capture_output=True,
-                       text=True, encoding="utf-8", timeout=60)
-    if p.returncode != 0 and ("strip-types" in p.stderr or "Unknown file extension" in p.stderr):
-        pytest.skip("this node cannot strip TypeScript types (needs 22.6 or newer)")
-    assert p.returncode == 0, p.stderr
+    out = run_node_ts(tmp_path, HTTP_PROBE, pathlib.Path(UI, "src", "http.ts").as_uri())
     not_json = {"ok": False, "status": 200, "error": "HTTP 200 (not JSON)", "source": None}
-    assert json.loads(p.stdout) == [not_json, not_json, {"ok": True, "data": {"a": 1}},
+    assert out == [not_json, not_json, {"ok": True, "data": {"a": 1}},
                                     {"ok": False, "status": 503, "error": "x", "source": "y"},
                                     {"ok": False, "status": 500, "error": "HTTP 500", "source": None},
                                     {"ok": False, "status": None, "error": ""}]
@@ -590,3 +596,22 @@ def test_make_demo_runs_npm_ci_only_for_a_new_lockfile(tmp_path: Any) -> None:
     code, calls = run(fails=True)
     assert code != 0 and calls == [ci] and not stamp.exists()
     assert run() == (0, [ci, build])
+
+
+def test_format_lr_reads_a_null_head_lr_as_na(tmp_path: Any) -> None:
+    """11-REVIEW IN-05: pilot.demo._chosen sends head_lr null for a record whose canonical config holds none, so the
+    UI type allows null and SelectionView's formatLR (run under node's type stripping) reads it n/a instead of
+    throwing; the recorded LRs keep Python's spelling."""
+    import pathlib
+    assert pd._chosen({"chosen": {"epoch": 1, "epochs_schedule": 4, "temperature": 1.0, "encoder_lr": 2e-05,
+                                  "theta": {"shipped": {"global": 0.5, "per_tag": {}},
+                                            "raw": {"global": 0.5, "per_tag": {}}}}})["head_lr"] is None
+    assert re.search(r"^\s*head_lr: number \| null;", read_ui("dashboard/types.ts"), re.M), \
+        "ui/src/dashboard/types.ts does not allow a null head_lr"
+    m = re.search(r"^function formatLR\(.*?^\}$", read_ui("dashboard/SelectionView.tsx"), re.S | re.M)
+    assert m is not None, "SelectionView.tsx has no formatLR"
+    module = tmp_path / "format_lr.mts"
+    module.write_text("export " + m.group(0) + "\n", encoding="utf-8")
+    probe = ("const { formatLR } = await import(process.argv[2]);\n"
+             "console.log(JSON.stringify([null, 2e-05, 0.0001, 0.00001, 0].map(formatLR)));\n")
+    assert run_node_ts(tmp_path, probe, pathlib.Path(module).as_uri()) == ["n/a", "2e-05", "0.0001", "1e-05", "0"]

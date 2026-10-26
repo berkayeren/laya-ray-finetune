@@ -88,7 +88,7 @@ export interface Chosen {
   theta_raw_global: number;
   n_own_theta_raw: number;
   encoder_lr: number;
-  head_lr: number;
+  head_lr: number | null; // null when the record's canonical config holds no head_lr (pilot.demo._chosen)
 }
 
 export interface SelectionSystem {

@@ -24,8 +24,12 @@ const CHOSEN_R = 6; // the filled 12px marker of the chosen epoch
 const TICK_ALL = 10; // up to this many candidates, every epoch gets an x tick
 const SUPERSEDED_DASH = "6 4";
 
-// An LR as Python prints it in the records (2e-05, 0.0001): display formatting only.
-function formatLR(x: number): string {
+// An LR as Python prints it in the records (2e-05, 0.0001): display formatting only. null (a record whose canonical
+// config holds no head_lr, e.g. a superseded-protocol record) reads n/a.
+function formatLR(x: number | null): string {
+  if (x === null) {
+    return "n/a";
+  }
   return x !== 0 && Math.abs(x) < 1e-4 ? x.toExponential().replace(/e([+-])(\d)$/, "e$10$2") : String(x);
 }
 
