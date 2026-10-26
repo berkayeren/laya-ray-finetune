@@ -2,7 +2,8 @@
 
 An event file is a sequence of TFRecord frames: an 8-byte little-endian length, the masked crc32c of those 8 bytes,
 the data (one serialized tensorboardX Event), and the masked crc32c of the data. read_events checks both crcs of every
-frame and parses the data with tensorboardX's own Event proto, so a truncated or corrupted file fails loudly.
+frame and parses the data with tensorboardX's own Event proto, so a truncated or corrupted file fails loudly. visible
+applies TensorBoard's purge rule, so a test sees what a TensorBoard viewer shows.
 """
 import glob
 import os
@@ -66,4 +67,16 @@ def scalars(events: list[tuple[str, int, str, Any]], tag: str) -> dict[int, floa
         if kind == tag:
             assert step not in out, "%s logged twice at step %d" % (tag, step)
             out[step] = value
+    return out
+
+
+def visible(events: list[tuple[str, int, str, Any]]) -> list[tuple[str, int, str, Any]]:
+    """The events a TensorBoard viewer keeps, in read order: its EventAccumulator purge rule, applied while reading the
+    files in sorted order (as read_events returns them). A session_log START (status 1) at step P discards every event
+    read before it at a step >= P, of every tag and every earlier file; the START event itself is kept."""
+    out: list[tuple[str, int, str, Any]] = []
+    for e in events:
+        if e[2] == "session_log" and e[3] == 1:
+            out = [k for k in out if k[1] < e[1]]
+        out.append(e)
     return out

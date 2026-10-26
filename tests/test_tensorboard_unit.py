@@ -439,6 +439,30 @@ def test_same_suffix_in_one_second_truncates(tmp_path: Path) -> None:
     pytest.fail("no attempt opened both writers within one second; the truncation could not be shown")
 
 
+def test_the_purge_step_hides_a_killed_epochs_partial_steps(tmp_path: Path) -> None:
+    """IN-04: segment 0 completes an epoch of u1 steps, logs two steps of the next epoch and is killed (its file is
+    flushed, never closed); segment 1 resumes after the epoch with purge step u1 + 1 and logs the epoch again. A
+    TensorBoard reader (tb_events.visible: a session_log START purges every earlier step >= it) shows steps 1..u1 from
+    segment 0 and every later step from segment 1, once each; the raw files hold the stale steps twice."""
+    logdir, u1 = str(tmp_path / "rid"), 3
+    w0 = ptb.open_writer(logdir, 1, ptb.segment_suffix(0, 1))
+    for step in range(1, u1 + 3):                           # the epoch, then 2 steps of a partial epoch
+        ptb.write(w0, step, {"train/loss": step + 0.5})
+    ptb.write(w0, u1, {"epoch/loss": 9.0})
+    ptb.flush(w0)                                           # killed: no close
+    w1 = ptb.open_writer(logdir, u1 + 1, ptb.segment_suffix(1, 2))
+    for step in range(u1 + 1, 2 * u1 + 1):
+        ptb.write(w1, step, {"train/loss": float(step)})
+    ptb.close(w1)
+    events = tb_events.read_events(logdir)
+    with pytest.raises(AssertionError, match="logged twice"):
+        tb_events.scalars(events, "train/loss")             # the stale partial steps are still in segment 0's file
+    shown = tb_events.visible(events)
+    assert tb_events.scalars(shown, "train/loss") == {1: 1.5, 2: 2.5, 3: 3.5, 4: 4.0, 5: 5.0, 6: 6.0}
+    assert tb_events.scalars(shown, "epoch/loss") == {u1: 9.0}
+    ptb.close(w0)
+
+
 def _read(rel: str) -> str:
     with open(os.path.join(REPO_ROOT, rel), encoding="utf-8") as f:
         return f.read()

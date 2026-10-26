@@ -380,6 +380,7 @@ def test_tensorboard_resume_writes_one_file_per_segment(prepared: Prepared, full
         assert sorted(tb_events.scalars(seg, "epoch/loss")) == [last], suffix
     union = sorted(step for _, step, kind, _ in events if kind == "train/loss")
     assert union == list(range(1, total + 1))
+    assert sorted(tb_events.scalars(tb_events.visible(events), "train/loss")) == list(range(1, total + 1))
     assert _sha256(d / "tb-res" / "model.safetensors") == _sha256(full / "model.safetensors")
 
 
