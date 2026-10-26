@@ -208,6 +208,93 @@ def test_noul_logits_refuses_bad_records(tiny_agent: Any, monkeypatch: pytest.Mo
             la.noul_logits(tiny_agent, ["Evet."], QUESTIONS)
 
 
+# ---- noul_margins: the training-side route a tuning trial scores with ----
+
+MARGIN_TEXTS = ["Kartım kayboldu", "Evet.", "Kartım kayboldu . Evet"]
+
+
+def _margins(model: Any, tok: Any, cfg: dict[str, Any], texts: list[str]) -> Any:
+    import torch
+    return la.noul_margins(model, tok, texts, cfg["max_len"], cfg["head_max_len"], la.uses_parallel_layout(cfg),
+                           torch.device("cpu"))
+
+
+def _scoring_route(path: str, texts: list[str]) -> Any:
+    """The margins score.py's route gives: public laya.load on cpu, autocast off (force_fp32), la.noul_logits."""
+    import laya
+    agent = laya.load(path, device="cpu")
+    la.force_fp32(agent)
+    return la.noul_logits(agent, texts, QUESTIONS)
+
+
+def test_noul_margins_equal_noul_logits(tmp_path: Path) -> None:
+    """On the same saved weights, the in-memory training model's la.noul_margins equals the laya.load route's
+    la.noul_logits exactly (no tolerance): in eval mode, with gradient checkpointing turned on (still eval), and on a
+    checkpoint whose head weights were perturbed and saved through la.save_checkpoint (both loads read that file)."""
+    import torch
+    path = tiny_checkpoint(tmp_path / "c")
+    model, tok, cfg = la.load_checkpoint(path)
+    model.eval()
+    want = _scoring_route(path, MARGIN_TEXTS)
+    m = _margins(model, tok, cfg, MARGIN_TEXTS)
+    assert m.dtype == np.float32 and m.shape == (3, 48)
+    assert np.array_equal(m, want), float(np.abs(m - want).max())
+    assert la.enable_gradient_checkpointing(model) and la.head_checkpointing_on(model)
+    m = _margins(model, tok, cfg, MARGIN_TEXTS)
+    assert np.array_equal(m, want), float(np.abs(m - want).max())
+
+    g = torch.Generator().manual_seed(7)
+    with torch.no_grad():
+        for n, p in model.named_parameters():
+            if not n.startswith("encoder."):
+                p.add_(0.5 * torch.randn(p.shape, generator=g))
+    perturbed = str(tmp_path / "perturbed")
+    la.save_checkpoint(model, tok, cfg, perturbed)
+    model, tok, cfg = la.load_checkpoint(perturbed)
+    model.eval()
+    want2 = _scoring_route(perturbed, MARGIN_TEXTS)
+    assert not np.array_equal(want2, want)                                  # the perturbation reached the margins
+    m = _margins(model, tok, cfg, MARGIN_TEXTS)
+    assert np.array_equal(m, want2), float(np.abs(m - want2).max())
+
+
+def test_noul_margins_one_forward_per_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One forward per message (never several messages in one collate), each over the 48 items of that message."""
+    model, tok, cfg = la.load_checkpoint(tiny_checkpoint(tmp_path / "c"))
+    model.eval()
+    seen = []
+    real = la.forward
+
+    def counting(model: Any, batch: Any, device: Any, amp: bool, detach_encoder: bool) -> Any:
+        seen.append((int(batch["qtype"].shape[0]), amp, detach_encoder))
+        return real(model, batch, device, amp, detach_encoder)
+    monkeypatch.setattr(la, "forward", counting)
+    _margins(model, tok, cfg, MARGIN_TEXTS)
+    assert seen == [(48, False, False)] * 3, seen
+
+
+def test_noul_margins_refuses_another_item_layout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An item layout that is not one item per intents.py question in INTENTS order is refused before any forward:
+    a dropped item, and two items swapped."""
+    model, tok, cfg = la.load_checkpoint(tiny_checkpoint(tmp_path / "c"))
+    model.eval()
+    real, calls = la.items_from_rows, []
+    monkeypatch.setattr(la, "forward", lambda *a: calls.append(a))
+    for change in (lambda items: items[:-1], lambda items: [items[1], items[0]] + items[2:]):
+        monkeypatch.setattr(la, "items_from_rows", lambda tok, rows, ml, hml, f=change: (
+            f(real(tok, rows, ml, hml)[0]), {}))
+        with pytest.raises(SystemExit, match="message 0 built 4[78] items, not one per intents.py question in "
+                                             "INTENTS order; the item builder changed"):
+            _margins(model, tok, cfg, MARGIN_TEXTS)
+    assert calls == []
+
+
+def test_noul_margins_of_no_text(tmp_path: Path) -> None:
+    model, tok, cfg = la.load_checkpoint(tiny_checkpoint(tmp_path / "c"))
+    m = _margins(model, tok, cfg, [])
+    assert m.dtype == np.float32 and m.shape == (0, 48)
+
+
 # ---- no private laya use outside the adapter (tests included, no exceptions) ----
 
 def _private(name: str) -> bool:
