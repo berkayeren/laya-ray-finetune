@@ -96,11 +96,12 @@ returns accelerate's value unchanged; a step without it refuses, naming the tran
 and the device, MPS driver, RSS and swap memory. Per epoch, at the step that closes it: the loss, the training and
 wall-clock seconds (the wall clock includes the export write), the peak memory and the swap delta. One event file per
 run (suffix .pidN), opened with purge step 1, so a from-scratch rerun into the same dir hides the old file's steps; it
-is closed in a finally block, also after a refusal. The flag is NOT_IDENTITY and never recorded (no run id, export
-byte, berturk_train.json or done.json changes), and the TrainingArguments are unchanged. DIR is refused under results/,
-data/, ui/, protocol.json, --storage or --out, before any load, fetch or run dir, also with --print-run-id; an
-unwritable DIR/RUN_ID is refused when the writer opens, after the load and before the run dir is created, so the same
-command can be rerun once the DIR is fixed.
+is closed in a finally block, also after a refusal. The flag is NOT_IDENTITY and never recorded (no run id, export byte,
+berturk_train.json or done.json key changes), and the TrainingArguments are unchanged; the record's timing fields
+(train_s) then include the logging overhead (the per-step norm and LR reads, the memory queries and the event writes),
+so timings are compared from flag-off runs. DIR is refused under results/, data/, ui/, protocol.json, --storage or
+--out, before any load, fetch or run dir, also with --print-run-id; an unwritable DIR/RUN_ID is refused when the writer
+opens, after the load and before the run dir is created, so the same command can be rerun once the DIR is fixed.
 
 Run identity: the run id is pilot.berturk.run_id of the canonical config (pilot.berturk.IDENTITY: split, data and base
 digests, transformers and accelerate versions, device, every hyperparameter and the seed; never a path or a resource),

@@ -158,7 +158,7 @@ python postfit.py --print-final-commands results/postfit/berturk.json \
 python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
     --workers 2 --freeze-encoder --max-messages 100 --epochs 2
 
-# live TensorBoard scalars of a training run (opt-in; the run id, the checkpoints and every record are unchanged)
+# live TensorBoard scalars of a training run (opt-in; the run id, the weights and every record key are unchanged)
 python ray_train.py ... --tensorboard tensorboard     # rank 0 writes tensorboard/RUN_ID/ (gitignored)
 python berturk_train.py ... --tensorboard tensorboard
 
@@ -276,7 +276,9 @@ change the run id and retrain from epoch 0. There is no calibration stage: train
 rank 0 only. Per optimizer step: the loss, the encoder and head learning rates, Laya's RLCD sigma, the pre-clip
 gradient norm, Laya items or BERTurk messages per second, and device, MPS driver, RSS and swap memory. Per epoch: the
 loss, the training and wall-clock seconds, Laya's save time, the peak memory and the swap delta. The flag is not part
-of the run id and enters no checkpoint or record. It is refused under `results/`, `data/`, `ui/` or `protocol.json`,
+of the run id and enters no checkpoint or record, but a flagged run's recorded timings include the logging overhead
+(a device sync for the gradient norm and the memory queries of every step), so compare timings with flag-off runs
+only. It is refused under `results/`, `data/`, `ui/` or `protocol.json`,
 under `--storage` or `--out`, and inside the repo unless gitignored (`tensorboard/` is). A resumed Laya run adds one
 event file per segment and hides the killed epoch's partial steps. Every epoch's events are flushed to disk at the
 epoch boundary, so a completed epoch's steps survive even a hard kill. The event files hold tag names and numbers only.
