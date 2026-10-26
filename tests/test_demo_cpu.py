@@ -676,6 +676,46 @@ def test_a_refusal_inside_a_forward_refuses_the_chat(loaded: tuple[dict[str, Any
     assert len(calls) == 1 and state["chat"] == pd.READY      # the module's own state is untouched
 
 
+def test_a_request_queued_behind_a_refusal_runs_no_forward(
+        loaded: tuple[dict[str, Any], ThreadPoolExecutor, Any]) -> None:
+    """11-REVIEW IN-08: a message accepted while the chat read ready, then queued on the one worker behind the forward
+    that refused the chat, answers 503 with the refusal's line and runs no forward of the refused model: the worker
+    re-reads the chat state (classify_if_ready), which alone also returns None without a forward."""
+    import threading
+    import types
+    state, _, _ = loaded
+    calls = []
+
+    def counted(text: str) -> Any:
+        calls.append(1)
+        raise AssertionError("a refused model ran a forward")
+    systems = {k: dict(v, seeds=[dict(s, forward=counted) for s in v["seeds"]]) for k, v in state["systems"].items()}
+    broken = dict(state, systems=systems)
+    line = demo.CHAT_BROKEN % "the model left mps for cpu mid-forward; check --device"
+    release, queued = threading.Event(), threading.Event()
+
+    def refusing_forward() -> None:                     # the request ahead in the queue, whose forward refuses
+        assert release.wait(TIMEOUT)
+        broken["message"], broken["chat"] = line, pd.REFUSED
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        ex.submit(refusing_forward)
+
+        def submit(fn: Any, *args: Any) -> Any:
+            f = ex.submit(fn, *args)
+            queued.set()
+            return f
+        with client(demo.create_app(broken, types.SimpleNamespace(submit=submit), pd.build_views(REPO))) as c:
+            out: dict[str, Any] = {}
+            t = threading.Thread(target=lambda: out.update(r=c.post("/api/classify", json={"text": TEXT})))
+            t.start()
+            assert queued.wait(TIMEOUT), "the request never reached the worker queue"
+            release.set()
+            t.join(TIMEOUT)
+            assert (out["r"].status_code, out["r"].json()) == (503, {"error": line})
+    assert calls == [] and demo.classify_if_ready(broken, TEXT) is None and calls == []
+    assert state["chat"] == pd.READY                     # the module's own state is untouched
+
+
 def test_views_route(loaded: tuple[dict[str, Any], ThreadPoolExecutor, Any]) -> None:
     """GET /api/intents serves the 48 stored questions in INTENTS order and the confidence rule; an unknown view is
     404; a refused view is 503 with its one line and source."""

@@ -32,7 +32,9 @@ or the record's chosen T beyond 1e-12 (latency.check_temperature, pilot.demo.che
 400 (not a JSON object {"text": str}, empty, longer than 500 characters), 413 (a body over 8192 bytes), 415 (not
 application/json), 503 (the chat is loading or refused), 500 (the classification failed: the exception type only,
 never the text; a refusal of score.check_agent / check_bert after a forward answers 500 with its line and sets the chat
-refused, so every later message answers 503 and /api/status reads refused). Before the server starts: a missing ui/dist/index.html (build the UI first).
+refused, so every later message answers 503 and /api/status reads refused; a message already queued behind that
+forward is answered 503 too, before any forward, since the worker re-reads the chat state: classify_if_ready). Before
+the server starts: a missing ui/dist/index.html (build the UI first).
 
 usage: python demo.py [--device mps|cpu] [--checkpoint-root DIR] [--port 8765] [--threads 4]
        make demo                                            # builds the UI, then runs python demo.py --device mps
@@ -158,6 +160,15 @@ def classify(systems: dict[str, dict[str, Any]], text: str) -> dict[str, dict[st
         logits = [s["forward"](text) for s in system["seeds"]]
         out[kind] = pd.system_answer(system["binding"], logits, [s["temperature"] for s in system["seeds"]])
     return out
+
+
+def classify_if_ready(state: dict[str, Any], text: str) -> dict[str, dict[str, Any]] | None:
+    """On the worker thread: classify(state["systems"], text), or None, running no forward, when the chat no longer
+    reads ready (a request accepted while it read ready, then queued behind the forward that refused it), so a refused
+    model never runs again."""
+    if state["chat"] != pd.READY:
+        return None
+    return classify(state["systems"], text)
 
 
 def new_state(device: str) -> dict[str, Any]:
@@ -295,13 +306,16 @@ def create_app(state: dict[str, Any], executor: ThreadPoolExecutor, views: dict[
         except SystemExit as e:
             return error(400, str(e.code))
         try:
-            return await asyncio.wrap_future(executor.submit(classify, state["systems"], text))
+            out = await asyncio.wrap_future(executor.submit(classify_if_ready, state, text))
         except SystemExit as e:                         # a device or dtype check failed after a forward: fatal
             state["message"] = CHAT_BROKEN % _line(e)
             state["chat"] = pd.REFUSED
             return error(500, state["message"])
         except Exception as e:
             return error(500, CLASSIFY_FAILED % type(e).__name__)
+        if out is None:                                 # the chat was refused while this request was queued
+            return error(503, state["message"] or pd.LOADING_TEXT)
+        return out
 
     allowed = dict(svgs or {})                          # copied once: the allow-list never changes after startup
 
