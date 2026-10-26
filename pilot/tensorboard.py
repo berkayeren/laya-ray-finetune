@@ -17,25 +17,30 @@ Design notes:
   second and the hostname, so two writers opened in one second in one dir would truncate each other's events.
 - the purge step hides the steps a killed partial epoch logged: a writer opened with purge_step P writes a session_log
   START at P, and TensorBoard hides every earlier file's event at a step >= P.
+- the writer is synchronous: tensorboardX's EventsWriter (the file writer under its SummaryWriter), called on the
+  training thread, with no logger thread and no bounded queue. SummaryWriter's daemon thread dies on an I/O error
+  (a full or unplugged volume) and every later add then blocks on its full queue, so training would hang, and its
+  close() would raise over the run's own error. Here an OSError of a write or flush turns logging off with one printed
+  line and training continues; close() never raises an OSError. An opt-in diagnostic output never fails a run.
 - event files hold only the fixed TAGS and numbers (write refuses any other tag), never message text, a uid or a label.
-- comet logging is explicitly disabled (comet_config {"disabled": True}): no telemetry leaves the machine.
+- no comet logger is ever created (SummaryWriter is not used): no telemetry leaves the machine.
 
 usage: from pilot import tensorboard
        root = tensorboard.check_logdir(a.tensorboard, {"--storage": a.storage, "--out": a.out})   # before any load
        tb = tensorboard.open_writer(os.path.join(root, run_id), purge_step, tensorboard.segment_suffix(0))
        tensorboard.write(tb, step, {"train/loss": 0.25})
-       tb.close()
+       tensorboard.close(tb)
 """
 import os
 import stat
 import subprocess
+import time
 from typing import Any
 
 from pilot.data import REPO_ROOT
 
 FORBIDDEN = ("results", "data", "ui", "protocol.json")     # repo-relative; no event file may be written under them
 FLUSH_SECS = 10                                             # the flush timer: a live view without a per-step fsync
-MAX_QUEUE = 100                                             # pending events before an add forces a flush
 GIB = 2**30
 MIB = 2**20
 # per optimizer step: the loss, the LRs, the pre-clip gradient norm, the throughput (Laya items or BERTurk messages per
@@ -168,33 +173,83 @@ def pid_suffix(pid: int) -> str:
     return ".pid%d" % pid
 
 
-def open_writer(logdir: str, purge_step: int, suffix: str) -> Any:
-    """A tensorboardX SummaryWriter on logdir (created), with the purge marker (session_log START) at purge_step, the
-    unique file suffix, FLUSH_SECS and MAX_QUEUE, and comet logging disabled; SystemExit when logdir is not writable.
+def open_writer(logdir: str, purge_step: int, suffix: str) -> dict[str, Any]:
+    """A synchronous event-file writer on logdir (created): tensorboardX's EventsWriter under the unique file suffix,
+    its file_version event, then the purge marker (a file_version and a session_log START event at purge_step, as
+    SummaryWriter(purge_step=...) writes them), flushed to disk before it returns. SystemExit when logdir is not
+    writable. The writer is a dict: "events" (the EventsWriter), "logdir", "flushed" (time.monotonic() of the last
+    flush) and "open" (False once closed or turned off by an I/O error); use it through write and close.
 
     tensorboardX imports torch, so it is imported here only, after the caller has set any device env.
     """
-    from tensorboardX import SummaryWriter
+    from tensorboardX.event_file_writer import EventsWriter
+    from tensorboardX.proto.event_pb2 import Event, SessionLog
     try:
-        return SummaryWriter(logdir=logdir, purge_step=purge_step, flush_secs=FLUSH_SECS, max_queue=MAX_QUEUE,
-                             filename_suffix=suffix, comet_config={"disabled": True})
+        os.makedirs(logdir, exist_ok=True)
+        ev = EventsWriter(os.path.join(logdir, "events"), suffix)
+        ev.write_event(Event(wall_time=time.time(), step=purge_step, file_version="brain.Event:2"))
+        ev.write_event(Event(wall_time=time.time(), step=purge_step, session_log=SessionLog(status=SessionLog.START)))
+        ev.flush()
     except OSError as e:
         raise SystemExit("--tensorboard: cannot write event files under %s (%s); pass a writable directory"
                          % (logdir, e))
+    return {"events": ev, "logdir": logdir, "flushed": time.monotonic(), "open": True}
 
 
-def write(writer: Any, step: int, scalars: dict[str, float | int | None]) -> None:
-    """add_scalar(tag, float(value), step) for every tag of `scalars` whose value is not None, in sorted tag order.
+def _off(writer: dict[str, Any], step: int | None, e: OSError) -> None:
+    """Turn the writer off after an I/O error: one printed line, the file closed best-effort, no exception."""
+    ev, writer["open"], writer["events"] = writer["events"], False, None
+    try:
+        ev.close()                                          # flush, fsync, close
+    except OSError:
+        try:                                                # the flush failed again: close the file itself, unflushed
+            ev._py_recordio_writer.close()                  # (tensorboardX 2.6.5's RecordWriter of the EventsWriter)
+        except (OSError, AttributeError):
+            pass
+    print("--tensorboard: writing the event file under %s failed%s (%s); TensorBoard logging is off for the rest "
+          "of this run, training continues" % (writer["logdir"], "" if step is None else " at step %d" % step, e),
+          flush=True)
+
+
+def write(writer: dict[str, Any], step: int, scalars: dict[str, float | int | None]) -> None:
+    """One scalar event (tag, float(value), step) for every tag of `scalars` whose value is not None, in sorted tag
+    order, written synchronously; then a flush when FLUSH_SECS have passed since the last one (a live view without a
+    per-step fsync).
 
     ValueError naming every tag outside TAGS, before anything is written (an event file holds the fixed tags only).
-    Never flushes: the writer's FLUSH_SECS timer and close() flush (a flush fsyncs).
+    A closed or turned-off writer writes nothing. An OSError turns the writer off (_off: one printed line) and is never
+    raised: the run goes on without TensorBoard.
     """
     unknown = sorted(t for t in scalars if t not in TAGS)
     if unknown:
         raise ValueError("unknown TensorBoard tag(s) %s; use pilot.tensorboard.TAGS" % ", ".join(unknown))
-    for tag in sorted(scalars):
-        if scalars[tag] is not None:
-            writer.add_scalar(tag, float(scalars[tag]), step)
+    if not writer["open"]:
+        return
+    from tensorboardX.proto.event_pb2 import Event
+    from tensorboardX.proto.summary_pb2 import Summary
+    try:
+        for tag in sorted(scalars):
+            if scalars[tag] is not None:
+                writer["events"].write_event(Event(wall_time=time.time(), step=step, summary=Summary(
+                    value=[Summary.Value(tag=tag, simple_value=float(scalars[tag]))])))
+        if time.monotonic() - writer["flushed"] >= FLUSH_SECS:
+            writer["events"].flush()
+            writer["flushed"] = time.monotonic()
+    except OSError as e:
+        _off(writer, step, e)
+
+
+def close(writer: dict[str, Any]) -> None:
+    """Flush (fsync) and close the event file; a no-op for a closed or turned-off writer. Never raises an OSError (one
+    printed line instead), so a close in a finally block never replaces the run's own error or fails a finished run."""
+    if not writer["open"]:
+        return
+    try:
+        writer["events"].close()
+    except OSError as e:
+        _off(writer, None, e)
+        return
+    writer["open"] = False
 
 
 def _gib(b: int | None) -> float | None:

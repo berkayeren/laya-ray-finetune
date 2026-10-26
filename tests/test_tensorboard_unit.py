@@ -7,6 +7,7 @@ checked against the repo's own frozen and tracked paths through symlinks, case v
 end through ray_train.py --print-run-id with a DIR/RUN_ID symlink into results/ (no Ray start, nothing created). The
 docs tests check that the README and both CLAUDE.md files name the flag.
 """
+import errno
 import os
 import subprocess
 import sys
@@ -27,14 +28,25 @@ from tiny_laya import tiny_checkpoint
 pytestmark = pytest.mark.unit
 
 
-class FakeWriter:
-    """Records every add_scalar(tag, value, step) call."""
+class FakeEvents:
+    """Records every write_event(event) call of a pilot.tensorboard writer as (tag, value, step) per summary value."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, float, int]] = []
 
-    def add_scalar(self, tag: str, value: float, step: int) -> None:
-        self.calls.append((tag, value, step))
+    def write_event(self, event: Any) -> None:
+        self.calls.extend((v.tag, v.simple_value, event.step) for v in event.summary.value)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def _fake_writer() -> dict[str, Any]:
+    """A pilot.tensorboard writer dict over FakeEvents (as open_writer returns it, without a file)."""
+    return {"events": FakeEvents(), "logdir": "fake", "flushed": time.monotonic(), "open": True}
 
 
 def test_memory_scalars_convert_bytes_and_keep_none() -> None:
@@ -69,17 +81,17 @@ def test_epoch_scalars_convert_units() -> None:
 
 
 def test_write_refuses_an_unknown_tag() -> None:
-    w = FakeWriter()
+    w = _fake_writer()
     with pytest.raises(ValueError, match="train/text"):
         ptb.write(w, 3, {"train/loss": 1.0, "train/text": 2.0})
-    assert w.calls == []                                    # nothing written before the refusal
+    assert w["events"].calls == []                          # nothing written before the refusal
 
 
 def test_write_skips_none_in_sorted_order() -> None:
-    w = FakeWriter()
+    w = _fake_writer()
     ptb.write(w, 7, {"train/loss": 1, "memory/rss_gib": 0.5, "train/sigma": None, "epoch/loss": 2.0})
-    assert w.calls == [("epoch/loss", 2.0, 7), ("memory/rss_gib", 0.5, 7), ("train/loss", 1.0, 7)]
-    assert all(type(v) is float for _, v, _ in w.calls)
+    assert w["events"].calls == [("epoch/loss", 2.0, 7), ("memory/rss_gib", 0.5, 7), ("train/loss", 1.0, 7)]
+    assert all(type(v) is float for _, v, _ in w["events"].calls)
 
 
 def test_open_writer_round_trip(tmp_path: Path) -> None:
@@ -87,7 +99,9 @@ def test_open_writer_round_trip(tmp_path: Path) -> None:
     w = ptb.open_writer(logdir, 3, ptb.segment_suffix(0))
     ptb.write(w, 3, {"train/loss": 0.5})
     ptb.write(w, 4, {"train/loss": 0.25, "epoch/loss": 0.375})
-    w.close()
+    ptb.close(w)
+    assert w["open"] is False
+    ptb.close(w)                                            # a second close is a no-op
     files = tb_events.event_files(logdir)
     assert len(files) == 1 and files[0].endswith(".segment-000"), files
     events = tb_events.read_events(logdir)
@@ -109,6 +123,68 @@ def test_open_writer_refuses_an_unwritable_dir(tmp_path: Path) -> None:
         os.chmod(parent, 0o755)
     msg: Any = e.value.code
     assert str(msg).startswith("--tensorboard: cannot write"), msg
+
+
+class FailingFile:
+    """A file object whose every write and flush raises ENOSPC (a full or unplugged volume); close closes the real
+    file it wraps."""
+
+    def __init__(self, real: Any) -> None:
+        self.real = real
+
+    def write(self, data: bytes) -> int:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def flush(self) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def fileno(self) -> int:
+        return self.real.fileno()
+
+    def close(self) -> None:
+        self.real.close()
+
+
+def _failing_writer(logdir: str) -> dict[str, Any]:
+    """A real open_writer writer whose event file then fails every write and flush with ENOSPC. Pinned to
+    tensorboardX 2.6.5: EventsWriter._py_recordio_writer is its RecordWriter, RecordWriter._writer its file."""
+    w = ptb.open_writer(logdir, 1, ptb.segment_suffix(0))
+    rec = w["events"]._py_recordio_writer
+    rec._writer = FailingFile(rec._writer)
+    return w
+
+
+@pytest.mark.timeout(60)
+def test_an_io_error_turns_logging_off_without_a_hang(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """WR-01: an event file that fails (ENOSPC) never hangs or fails the run: the first failing write prints one line
+    and turns logging off, every later write (far more than any queue would hold) returns at once, close is a no-op."""
+    w = _failing_writer(str(tmp_path / "rid"))
+    ptb.write(w, 1, {"train/loss": 0.5})
+    out = capsys.readouterr().out
+    assert out.count("\n") == 1 and out.startswith("--tensorboard: writing the event file under ") and \
+        "failed at step 1" in out and "training continues" in out, out
+    assert w["open"] is False and w["events"] is None
+    for step in range(2, 2002):                             # a dead SummaryWriter queue (100) blocked after ~10 steps
+        ptb.write(w, step, {t: 1.0 for t in ptb.STEP_TAGS})
+    ptb.close(w)
+    assert capsys.readouterr().out == ""                    # one line for the whole run
+
+
+@pytest.mark.timeout(60)
+def test_close_never_replaces_the_runs_own_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """WR-01: a close in a finally block whose flush fails keeps the run's own SystemExit (an OOM rung line, a worker
+    refusal) and prints the I/O error in one line; on the success path it raises nothing."""
+    w = _failing_writer(str(tmp_path / "a"))
+    with pytest.raises(SystemExit, match="^the run's own refusal$"):
+        try:
+            raise SystemExit("the run's own refusal")
+        finally:
+            ptb.close(w)
+    out = capsys.readouterr().out
+    assert out.count("\n") == 1 and "No space left on device" in out and "at step" not in out, out
+    ok = _failing_writer(str(tmp_path / "b"))
+    ptb.close(ok)                                           # a finished run is never failed by its event file
+    assert ok["open"] is False and "training continues" in capsys.readouterr().out
 
 
 def _refused(path: str, outputs: dict[str, str | None] | None = None) -> str:
@@ -260,7 +336,7 @@ def _one_writer(logdir: str, step: int, suffix: str) -> None:
     """Open a writer on logdir with suffix, write train/loss at step and close it."""
     w = ptb.open_writer(logdir, step, suffix)
     ptb.write(w, step, {"train/loss": float(step)})
-    w.close()
+    ptb.close(w)
 
 
 def test_distinct_suffixes_keep_both_writers(tmp_path: Path) -> None:

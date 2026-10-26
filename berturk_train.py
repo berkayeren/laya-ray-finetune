@@ -741,8 +741,9 @@ def main(argv: list[str] | None = None) -> str | None:
     try:
         trainer.train()
     finally:
-        if tb is not None:                                  # flushes the events, also after a callback's SystemExit
-            tb.close()
+        if tb is not None:                                  # flushes the events, also after a callback's SystemExit;
+            # an I/O error of the event file is one printed line, never raised over the run's own error
+            tensorboard.close(tb)
     if ep["epoch"] != stop:
         raise SystemExit("the run stopped after %d of %d epochs" % (ep["epoch"], stop))
     remove_trainer_dir(args.output_dir)

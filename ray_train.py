@@ -995,7 +995,7 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
             last = metrics
     finally:
         if tb is not None:
-            tb.close()
+            tensorboard.close(tb)                           # never raises an OSError over the run
 
 
     # Publish the final checkpoint from rank 0: uncalibrated (T = 1; postfit.py fits T on val later), or, for a

@@ -1275,7 +1275,7 @@ def test_tensorboard_refuses_a_trainer_that_skips_the_accelerator_clip(inputs: I
     rid = capsys.readouterr().out.strip()
     with pytest.raises(SystemExit, match="clip_grad_norm_ was not called.*check the transformers version"):
         berturk_train.main(argv)
-    assert len(opened) == 1 and opened[0].all_writers is None      # SummaryWriter.close() ran
+    assert len(opened) == 1 and opened[0]["open"] is False         # pilot.tensorboard.close ran
     assert len(event_files(str(tmp_path / "tb" / rid))) == 1
     ev = read_events(str(tmp_path / "tb" / rid))
     assert not [kind for _, _, kind, _ in ev if kind.startswith("train/")]

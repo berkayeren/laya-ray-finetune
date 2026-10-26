@@ -118,7 +118,7 @@ def test_tb_writer_is_rank_zero_only(tmp_path: Path) -> None:
     assert not list(tmp_path.iterdir())
     w = ray_train.tb_writer(c, 0, 1, 2, 3, 2)
     assert w is not None
-    w.close()
+    ray_train.tensorboard.close(w)
     files = tb_events.event_files(str(logdir))
     assert len(files) == 1 and files[0].endswith(".segment-002"), files
     events = tb_events.read_events(str(logdir))
