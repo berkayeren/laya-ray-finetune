@@ -29,6 +29,7 @@ import pytest
 import demo
 import intents
 import pilot.data
+from pilot import demo as pd
 from pilot import verdict
 
 pytestmark = pytest.mark.unit
@@ -318,7 +319,7 @@ DASHBOARD_COPY = (
     "Val (in-sample)",
     "Diagram unavailable",
     "Verdict unavailable",
-    "Could not read",
+    "This view is unavailable",
     "Loss values are not comparable across the two models: they train on different objectives.",
     "Local demo · stores nothing",
     "Laya vs BERTurk: Turkish banking intent demo",
@@ -428,3 +429,50 @@ def test_view_error_adds_no_fix_of_its_own() -> None:
         hits += ["%s: git checkout" % rel for _ in re.findall(r"git checkout", text)]
         hits += ["%s: %s" % (rel, m) for m in re.findall(r'source: r\.source \?\? (?!null\b)[^ ;}]+', text)]
     assert hits == [], "the UI adds a fix or a source of its own: %s" % hits
+
+
+# a repo-relative path a server line or the UI copy can name
+PATH_RE = re.compile(r"(?:results|data|ui)/[\w./-]*\w|protocol\.json|intents\.py")
+
+
+def view_error_text(error: str) -> str:
+    """The sentence ViewError (ui/src/dashboard/common.tsx) shows for a record view's refusal {error, source}: its one
+    template literal with ${error} substituted. Asserts that the template interpolates only `error`, so `source` can
+    reach the page only through the `source === null` condition (never as text)."""
+    m = re.search(r"^export function ViewError\(.*?^\}$", read_ui("dashboard/common.tsx"), re.S | re.M)
+    assert m is not None, "common.tsx has no ViewError"
+    body = m.group(0)
+    templates = re.findall(r"`([^`]*)`", body)
+    assert len(templates) == 1, "ViewError holds %d template literals, not one" % len(templates)
+    assert re.findall(r"\$\{([^}]*)\}", templates[0]) == ["error"], "ViewError interpolates more than the error"
+    jsx = body[body.index("return ("):]
+    assert re.findall(r"\bsource\b[^\n]*", jsx) == ["source === null && ("], \
+        "ViewError shows `source` as text: it is the view's primary record, not the file a refusal names"
+    return templates[0].replace("${error}", error)
+
+
+def test_view_error_names_only_the_file_the_server_names(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """11-REVIEW WR-08: a changed results/postfit/berturk-reference.json refuses the selection view, whose source
+    (VIEW_SOURCES) is results/postfit/laya.json; the page names exactly the files the server's line names
+    (berturk-reference.json), never the view's source. A VIEW_FAILED line, which names no file, shows no file (not
+    intents.py), and ends in one restart, not two."""
+    import shutil
+    root = str(tmp_path / "repo")
+    for rel in ("results/postfit", "results/superseded"):
+        shutil.copytree(os.path.join(REPO, rel), os.path.join(root, rel))
+    changed = "results/postfit/berturk-reference.json"
+    with open(os.path.join(root, changed), "ab") as f:
+        f.write(b" ")
+    monkeypatch.setitem(pd.VIEWS, "selection", lambda _root: pd.selection_view(root))
+    monkeypatch.setitem(pd.VIEWS, "intents", lambda _root: {}["missing"])
+    views = pd.build_views(REPO)
+    refused = views["selection"]
+    assert pd.view_refused(refused) and refused["source"] == pd.VIEW_SOURCES["selection"] != changed
+    assert set(PATH_RE.findall(refused["error"])) == {changed}, refused["error"]
+    shown = view_error_text(refused["error"])
+    assert set(PATH_RE.findall(shown)) == set(PATH_RE.findall(refused["error"])) == {changed}, shown
+    assert refused["source"] not in shown
+    failed = views["intents"]
+    assert failed["error"] == pd.VIEW_FAILED % ("intents", "KeyError") and failed["source"] == "intents.py"
+    shown = view_error_text(failed["error"])
+    assert PATH_RE.findall(shown) == [] and shown.count("restart") == 1, shown

@@ -7,9 +7,8 @@
 //   SourceCaption      the one-line mono caption naming the records a view reads (the view's own sources field)
 //   Card               white, hairline border, radius 8px, 16px padding; an optional h2 title
 //   LoadingCard        a grey block of the chart height, shown until an endpoint answers
-//   ViewError          "Could not read {source}: {error}. ..." in that view only: the server's line verbatim (it
-//                      ends in its own fix), with no command of the UI's; {source} is the view's primary record as
-//                      the server named it, and an error without one says "this view"
+//   ViewError          "This view is unavailable: {error}. ..." in that view only: the server's line verbatim (it
+//                      names the record it is about and ends in its own fix), with no file or command of the UI's
 //   StatusBadge        24px badge: the tone's text, fill and border colours and its icon, the status word as received
 //   FrozenRender       "View the frozen render" disclosure opening the exact render text in a preformatted block
 //   SegmentedControl   role="radiogroup"; arrow keys move the selection; the selected segment in the accent
@@ -148,15 +147,24 @@ export function LoadingCard({ height }: { height?: string }) {
   );
 }
 
-// The server's line already ends in its fix (a restore, a rebuild or a restart), so no second command is added; the
-// views are built once at startup, so a fixed record shows after `make demo` restarts.
+// The server's line names the record it is about and already ends in its fix (a restore, a rebuild or a restart), so
+// it is shown alone: the view's source field is its primary record (pilot.demo.VIEW_SOURCES), not necessarily the
+// file a refusal is about (a changed berturk-reference.json breaks the selection view, whose source is laya.json), so
+// it is never shown as the failing file. An error without a source is no record view's refusal (an HTTP error with
+// no line of the server's), so only it gets the restart hint. The views are built once at startup, and useView asks
+// again, so a fixed record shows once `make demo` restarts.
 export function ViewError({ error, source }: { error: string; source: string | null }) {
   return (
     <div className={css.notice} role="alert">
       <p className={css.noticeBody}>
-        {`Could not read ${source ?? "this view"}: ${error}. The other views are unaffected; after the fix, restart `}
-        <code className={css.code}>make demo</code>
-        {"."}
+        {`This view is unavailable: ${error}. The other views are unaffected.`}
+        {source === null && (
+          <>
+            {" If it repeats, restart "}
+            <code className={css.code}>make demo</code>
+            {"."}
+          </>
+        )}
       </p>
     </div>
   );
