@@ -221,8 +221,9 @@ IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_conf
 #   reference: the reference check, a refusal only (check_reference_for_final binds it to the record's sha256)
 #   fewshot_base, fewshot_draw, fewshot_k: the few-shot modes, represented by the fewshot binding
 #   (pilot.fewshot.binding: stage, draw, k, the draw digest and the base's run id) and mask_tags
+#   tensorboard: where the TensorBoard event files go (outputs, not training; pilot.tensorboard)
 NOT_IDENTITY = ("data", "base", "storage", "manifest", "print_run_id", "export_epochs", "cpus", "out", "postfit",
-                "reference", "fewshot_base", "fewshot_draw", "fewshot_k")
+                "reference", "fewshot_base", "fewshot_draw", "fewshot_k", "tensorboard")
 # flags that enter IDENTITY through resolved keys: --lr is the encoder LR; --head-lr is its own IDENTITY key
 RESOLVED = {"lr": ("encoder_lr",)}
 # left out when None: base_files_sha256 (None for the pinned base, whose files the pin fixes), max_messages (a smoke

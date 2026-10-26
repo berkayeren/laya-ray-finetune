@@ -122,7 +122,7 @@ import shutil
 import time
 from typing import Any
 
-from pilot import berturk, fewshot, pins, postfit, protocol, runs, spike
+from pilot import berturk, fewshot, pins, postfit, protocol, runs, spike, tensorboard
 from pilot.data import (DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, refuse_held_out, repo_relpath,
                         sha256_file, write_atomic, verify_split_file)
 from pilot import dumps
@@ -224,6 +224,9 @@ def parser() -> argparse.ArgumentParser:
                          "draw plus its replay set")
     ap.add_argument("--fewshot-k", type=int, default=None,
                     help="few-shot: the frozen k of the --fewshot-draw support set")
+    ap.add_argument("--tensorboard", default=None, metavar="DIR",
+                    help="write live TensorBoard scalars to DIR/RUN_ID/ (off by default; not part of the run id; never "
+                         "under results/, data/, ui/, protocol.json, --storage or --out)")
     return ap
 
 
@@ -370,7 +373,10 @@ def main(argv: list[str] | None = None) -> str | None:
         ap.error("--postfit and --reference go together: a final seed needs the record and its reference check")
     if a.postfit is not None and a.out is None:
         ap.error("--postfit needs --out DIR (the final checkpoint)")
-    cpus = a.cpus or (4 if a.device == "mps" else 1)
+    tb_outputs = {"--storage": a.storage, "--out": a.out}
+    # the event-file root, refused before the few-shot protocol, the split read, any fetch, load or run dir
+    tb_root = tensorboard.check_logdir(a.tensorboard, tb_outputs) if a.tensorboard is not None else None
+    cpus =a.cpus or (4 if a.device == "mps" else 1)
     proto = pin = block = mode = None
     mask = ()
     if a.fewshot_base or continued:                         # the frozen protocol first, before the split is read
@@ -500,6 +506,7 @@ def main(argv: list[str] | None = None) -> str | None:
     berturk.check_cased(_read_json(os.path.join(base_dir, "tokenizer_config.json"), "base tokenizer_config.json"),
                         "base")
     rid = berturk.run_id(canon)
+    tb_dir = tensorboard.check_logdir(os.path.join(tb_root, rid), tb_outputs) if tb_root is not None else None
     if a.print_run_id:
         print(rid)
         return
@@ -598,13 +605,19 @@ def main(argv: list[str] | None = None) -> str | None:
                 "record": record, "provenance": provenance}
 
     ep = {"epoch": 0, "loss_sum": 0.0, "loss_n": 0, "steps": 0, "t0": 0.0, "swap0": 0}
+    # --tensorboard: the step's batch loss and size (loss_fn), its pre-clip norm (the accelerator wrap below), its LRs
+    # and the start of its timing window; read and reset by the second callback
+    tbs: dict[str, Any] = {"loss": None, "n": 0, "grad_norm": None, "lrs": None, "t": 0.0}
 
     def loss_fn(outputs: Any, labels: Any, num_items_in_batch: Any = None) -> Any:
-        """masked_bce, adding each step's loss to the epoch row's running mean."""
+        """masked_bce, adding each step's loss to the epoch row's running mean (and noting it for --tensorboard)."""
         # the epoch row's loss is the mean over steps, not over items (documented, unchanged, diagnostic only)
         loss = masked_bce(outputs, labels, num_items_in_batch)
-        ep["loss_sum"] += float(loss.detach())
+        v = float(loss.detach())
+        ep["loss_sum"] += v
         ep["loss_n"] += 1
+        if tb_dir is not None:
+            tbs["loss"], tbs["n"] = v, int(labels.shape[0])
         return loss
 
     def check_model(model: Any) -> None:
@@ -644,13 +657,56 @@ def main(argv: list[str] | None = None) -> str | None:
 
     cb = transformers.TrainerCallback()                     # an instance with assigned hooks, no subclass
     cb.on_epoch_begin, cb.on_step_end, cb.on_epoch_end = on_epoch_begin, on_step_end, on_epoch_end
+    callbacks = [cb]
+    tb = None
+    if tb_dir is not None:                                  # the TensorBoard callback exists with the flag only
+
+        def tb_epoch_begin(args: Any, state: Any, control: Any, **kw: Any) -> None:
+            """Start the epoch's first timing window."""
+            tbs["t"] = time.perf_counter()
+
+        def tb_step_end(args: Any, state: Any, control: Any, **kw: Any) -> None:
+            """Write the step's scalars at state.global_step (1-based, already incremented); SystemExit when the step's
+            pre-clip gradient norm was not noted (the Trainer no longer clips through trainer.accelerator)."""
+            if tbs["grad_norm"] is None:
+                raise SystemExit("--tensorboard: the Trainer's pre-clip gradient norm was not seen at step %d "
+                                 "(trainer.accelerator.clip_grad_norm_ was not called); check the transformers "
+                                 "version" % state.global_step)
+            tensorboard.write(tb, state.global_step, {"train/loss": tbs["loss"],
+                                                      "train/grad_norm": float(tbs["grad_norm"])})
+            tbs["grad_norm"] = None
+            tbs["t"] = time.perf_counter()
+
+        def tb_epoch_end(args: Any, state: Any, control: Any, **kw: Any) -> None:
+            """Write the epoch's scalars at the step that closes it (cb ran first, so its epoch row exists)."""
+            tensorboard.write(tb, state.global_step, {"epoch/loss": record["epochs"][-1]["loss"]})
+
+        tbcb = transformers.TrainerCallback()               # a second instance with assigned hooks, after cb
+        tbcb.on_epoch_begin, tbcb.on_step_end, tbcb.on_epoch_end = tb_epoch_begin, tb_step_end, tb_epoch_end
+        callbacks = [cb, tbcb]
     os.makedirs(run_dir)
     trainer = transformers.Trainer(model=model, args=args, train_dataset=data,
                                    data_collator=transformers.DataCollatorWithPadding(tok),
-                                   compute_loss_func=loss_fn, callbacks=[cb], optimizers=(optimizer, None))
+                                   compute_loss_func=loss_fn, callbacks=callbacks, optimizers=(optimizer, None))
     check_model(trainer.model)
     record["param_device"] = a.device
-    trainer.train()
+    if tb_dir is not None:
+        clip = trainer.accelerator.clip_grad_norm_
+
+        def noting_clip(*args: Any, **kw: Any) -> Any:
+            """accelerate's clip_grad_norm_, unchanged; notes the pre-clip total norm it returns."""
+            tbs["grad_norm"] = n = clip(*args, **kw)
+            return n
+
+        trainer.accelerator.clip_grad_norm_ = noting_clip  # flag on only: the off path calls accelerate directly
+        # purge step 1: a from-scratch rerun into the same DIR/RUN_ID hides the old file's steps
+        tb = tensorboard.open_writer(tb_dir, 1, tensorboard.pid_suffix(os.getpid()))
+        print("tensorboard events -> %s" % tb_dir)
+    try:
+        trainer.train()
+    finally:
+        if tb is not None:                                  # flushes the events, also after a callback's SystemExit
+            tb.close()
     if ep["epoch"] != stop:
         raise SystemExit("the run stopped after %d of %d epochs" % (ep["epoch"], stop))
     remove_trainer_dir(args.output_dir)

@@ -20,6 +20,13 @@ encoder LR, and the refusal of a base whose head is not freshly initialised.
 The few-shot modes: every refusal of --fewshot-base and --fewshot-draw/--fewshot-k before a load, a fetch or a run
 dir, under a synthetic frozen protocol.
 
+TensorBoard (--tensorboard DIR): a third run of the identical command with the flag on must keep the run id, the
+export bytes and the canonical config of the two flag-off runs, record neither the flag nor the logdir, and write one
+event file (.pidN) under DIR/RUN_ID with every per-step and per-epoch scalar, read back with the crc-checked
+tests/tb_events.py reader. A Trainer that stops clipping through trainer.accelerator is refused (the pre-clip norm
+comes from that call), a DIR under results/, protocol.json or --storage is refused before any load, also with
+--print-run-id, and the flag-off runs write no event file.
+
 No marker: it runs in `make test` (no Ray, no weights, no data download; seconds), except the one weights-marked
 check of the pinned BERTurk base's head (HF_HUB_OFFLINE=1 reuses the local Hub cache).
 """
@@ -1133,3 +1140,74 @@ def test_fewshot_continued_k_draw_and_epochs_outside_the_frozen_values_are_refus
                     "few-shot draw 1 is not one of the frozen draws 0..0")
     fewshot_refused(fewshot_env, fewshot_env.cont(base, "--epochs", "2", "--print-run-id"),
                     "epochs is 2 here but 1 in the frozen continued_training")
+
+
+# ---- --tensorboard DIR: NOT_IDENTITY, never recorded, the event files ----
+
+TbRun = tuple[str, Path, Path]                    # the tb_run fixture: (run id, run dir, tensorboard root)
+
+
+@pytest.fixture(scope="module")
+def tb_run(inputs: Inputs, two_runs: TwoRuns, tmp_path_factory: pytest.TempPathFactory) -> TbRun:
+    """The two_runs command with --tensorboard DIR into a third storage dir: (run id, run dir, DIR). Its
+    --print-run-id is two_runs' run id and creates neither the storage nor DIR."""
+    data, manifest, base = inputs
+    rid, _ = two_runs
+    root = tmp_path_factory.mktemp("tb")
+    tb = root / "tb"
+    argv = train_argv(data, manifest, base, root / "c", "--tensorboard", tb)
+    assert run_train(argv + ["--print-run-id"]).stdout.strip() == rid
+    assert not tb.exists() and not (root / "c").exists()
+    run_train(argv)
+    return rid, root / "c" / rid, tb
+
+
+def _done_epochs(run_dir: str | Path) -> list[dict[str, Any]]:
+    """The epoch rows of a finished run's done.json."""
+    return _json(os.path.join(str(run_dir), berturk.DONE))["record"]["epochs"]
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_tensorboard_keeps_the_run_id_and_the_weights(tb_run: TbRun, two_runs: TwoRuns) -> None:
+    rid, run_dir, _ = tb_run
+    assert os.path.basename(str(run_dir)) == rid == two_runs[0]
+    for et, ea in zip(exports(run_dir), exports(two_runs[1][0])):
+        for f in SAME_BYTES:
+            assert _bytes(os.path.join(et, f)) == _bytes(os.path.join(ea, f)), \
+                "%s/%s differs with --tensorboard" % (os.path.basename(et), f)
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_tensorboard_never_enters_a_record(tb_run: TbRun, two_runs: TwoRuns) -> None:
+    _, run_dir, tb = tb_run
+    a = two_runs[1][0]
+    pairs = [(os.path.join(e, berturk.RECORD), os.path.join(f, berturk.RECORD))
+             for e, f in zip(exports(run_dir), exports(a))]
+    pairs.append((os.path.join(str(run_dir), berturk.DONE), os.path.join(str(a), berturk.DONE)))
+    for path, ref in pairs:
+        rec = _json(path)
+        assert rec["canonical"] == _json(ref)["canonical"]
+        found = [s for s in strings(rec) if str(tb) in s or s == "tensorboard"]
+        assert not found, "%s holds %s" % (path, found)
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_tensorboard_events_hold_loss_and_grad_norm_per_step(tb_run: TbRun) -> None:
+    from tb_events import event_files, read_events, scalars
+    rid, run_dir, tb = tb_run
+    files = event_files(str(tb / rid))
+    assert len(files) == 1 and re.search(r"\.pid\d+$", files[0]), files
+    ev = read_events(str(tb / rid))
+    rows = _done_epochs(run_dir)
+    total = sum(r["optimizer_steps"] for r in rows)
+    loss, gn = scalars(ev, "train/loss"), scalars(ev, "train/grad_norm")
+    assert sorted(loss) == sorted(gn) == list(range(1, total + 1))
+    assert all(math.isfinite(v) and v > 0 for v in gn.values())
+    epoch_loss = scalars(ev, "epoch/loss")
+    end = 0
+    for r in rows:
+        start, end = end, end + r["optimizer_steps"]
+        assert epoch_loss[end] == pytest.approx(r["loss"], rel=1e-6)
+        step_losses = [loss[s] for s in range(start + 1, end + 1)]
+        assert sum(step_losses) / len(step_losses) == pytest.approx(epoch_loss[end], rel=1e-5)
+    assert sorted(epoch_loss) == [sum(r["optimizer_steps"] for r in rows[:k]) for k in range(1, len(rows) + 1)]
