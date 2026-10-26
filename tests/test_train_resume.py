@@ -307,3 +307,51 @@ def test_tensorboard_events_hold_the_loss_per_step_and_epoch(tb_run: TbRun) -> N
         assert epoch_loss[step] == pytest.approx(row["loss"], rel=1e-6)
     assert (1, 1) in {(step, value) for _, step, kind, value in events if kind == "session_log"}
     assert {kind for _, _, kind, _ in events} <= set(pilot.tensorboard.TAGS) | {"file_version", "session_log"}
+
+
+@pytest.mark.timeout(600)
+def test_tensorboard_events_hold_every_scalar(tb_run: TbRun) -> None:
+    """On cpu with rlcd and a full encoder: every per-step tag at every step (no device or MPS driver memory on cpu),
+    the step's own LRs, the epoch's sigma, and every epoch tag at the step that closes the epoch, equal to the record."""
+    import math
+    from pilot import laya_adapter as la
+    rid, out, root = tb_run
+    events = tb_events.read_events(str(root / rid))
+    rows = runs.read_record(str(out))["epochs"]
+    total = sum(row["optimizer_steps"] for row in rows)
+    steps = list(range(1, total + 1))
+    kinds = {kind for _, _, kind, _ in events} - {"file_version", "session_log"}
+    step_tags = {"train/loss", "train/lr_encoder", "train/lr_head", "train/grad_norm", "train/items_per_s",
+                 "train/sigma", "memory/rss_gib", "memory/swap_used_gib"}
+    assert {k for k in kinds if not k.startswith("epoch/")} == step_tags
+    got = {tag: tb_events.scalars(events, tag) for tag in step_tags}
+    for tag in step_tags:
+        assert sorted(got[tag]) == steps, tag
+    enc, head = [got["train/lr_encoder"][s] for s in steps], [got["train/lr_head"][s] for s in steps]
+    assert enc[0] == pytest.approx(2.5e-5, rel=1e-6) and head[0] == pytest.approx(1e-4, rel=1e-6)
+    assert all(b <= a for a, b in zip(enc, enc[1:])) and all(b <= a for a, b in zip(head, head[1:]))
+    first = 1
+    for e, row in enumerate(rows):
+        for s in range(first, first + row["optimizer_steps"]):
+            assert got["train/sigma"][s] == pytest.approx(la.sigma_at(e, 2, 0.4, 0.1), rel=1e-6), s
+        first += row["optimizer_steps"]
+    for s in steps:
+        assert math.isfinite(got["train/grad_norm"][s]) and got["train/grad_norm"][s] >= 0
+        assert got["train/items_per_s"][s] > 0 and got["memory/rss_gib"][s] > 0
+        assert got["memory/swap_used_gib"][s] >= 0
+    assert {k for k in kinds if k.startswith("epoch/")} == set(pilot.tensorboard.EPOCH_TAGS)
+    ep = {tag: tb_events.scalars(events, tag) for tag in pilot.tensorboard.EPOCH_TAGS}
+    cum = 0
+    for row in rows:
+        cum += row["optimizer_steps"]
+        assert all(cum in ep[tag] for tag in ep), cum
+        assert ep["epoch/train_s"][cum] == pytest.approx(row["train_s"], rel=1e-6)
+        assert ep["epoch/save_s"][cum] == pytest.approx(row["save_s"], rel=1e-6)
+        assert ep["epoch/peak_total_gib"][cum] == pytest.approx(row["peak_total_bytes"] / pilot.tensorboard.GIB,
+                                                                rel=1e-6)
+        assert ep["epoch/swap_delta_mib"][cum] == pytest.approx(row["swap_delta_bytes"] / pilot.tensorboard.MIB,
+                                                                rel=1e-6, abs=1e-6)
+        assert ep["epoch/wall_s"][cum] >= ep["epoch/train_s"][cum]
+    ends = [sum(r["optimizer_steps"] for r in rows[:i + 1]) for i in range(len(rows))]
+    for tag in ep:
+        assert sorted(ep[tag]) == ends, tag
