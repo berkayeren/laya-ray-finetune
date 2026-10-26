@@ -589,8 +589,9 @@ def training_system(binding: dict[str, Any],
                     bound: list[tuple[dict[str, Any], str, dict[str, Any]]]) -> dict[str, Any]:
     """The training view of one system from its bound seeds [(manifest seed, checkpoint dir, identity)]
     (demo.bind_seeds, after latency.bind_seed): each seed's rows read from its checkpoint (laya_epochs or
-    berturk_epochs), refused unless they equal the manifest seed's `epochs` on SHARED_EPOCH_KEYS. The manifest's rows serve only that check and are
-    never returned: rows come only from the checkpoints (the user decision of 2026-10-25, D-09).
+    berturk_epochs), refused unless they equal the manifest seed's `epochs` on SHARED_EPOCH_KEYS. The manifest's rows
+    serve only that check and are never returned: rows come only from the checkpoints (the user decision of
+    2026-10-25, D-09).
 
     Returns {status: "ok", fields (the kind's EPOCH_FIELDS), total_train_s (the sum of train_s over every row of every
     seed), seeds [{seed, checkpoint_name, train_run_id, device, n_train_messages, rows [{field: value}]}]}; SystemExit

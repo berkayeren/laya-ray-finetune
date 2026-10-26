@@ -1903,9 +1903,9 @@ The demo reads the committed records under `results/` and `protocol.json`. The v
 few-shot views are behind the checks `report.py` uses (`require_frozen`, the verdict's `check_record`, and every postfit
 record, final manifest and latency report hashed against its pin in `protocol.json`). No pin covers the confidence
 records or their reliability SVGs: the confidence view checks only each record's schema, run id and split against its
-SVG's name, and the diagrams are served from disk as they are, unhashed. It also reads the six local final checkpoints (`ckpt-final-s0..2` and
-`ckpt-berturk-final-s0..2`), each bound to its final manifest before it loads, then loaded once in the demo's process
-through `score.py`'s loaders, in fp32 and without Ray.
+SVG's name, and the diagrams are served from disk as they are, unhashed. It also reads the six local final checkpoints
+(`ckpt-final-s0..2` and `ckpt-berturk-final-s0..2`), each bound to its final manifest before it loads, then loaded once
+in the demo's process through `score.py`'s loaders, in fp32 and without Ray.
 
 Chat answers are not evaluation results: a message typed here, even one copied from the test split, produces no record
 and changes nothing frozen. The results are the committed dumps and records described above.
