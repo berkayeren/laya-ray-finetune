@@ -762,10 +762,10 @@ def test_a_seed_binding_exception_hides_only_its_system(tiny: dict[str, Any], mo
     the type, BERTurk's still charts, and the chat is refused with the same line before any load."""
     real = demo.bind_seeds
 
-    def bind(binding: dict[str, Any], root: str) -> Any:
+    def bind(binding: dict[str, Any], root: str, stopped: Any = None) -> Any:
         if binding["kind"] == "laya":
             raise PermissionError(SENTINEL)
-        return real(binding, root)
+        return real(binding, root, stopped)
     monkeypatch.setattr(demo, "bind_seeds", bind)
     no_load(monkeypatch)
     state, body, text = training_of(tiny, tiny["root"])
