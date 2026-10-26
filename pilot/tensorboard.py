@@ -6,6 +6,9 @@ hash-locked through ray[train]; no new dependency). It never changes what a run 
 flag is NOT_IDENTITY, and the logdir is kept out of every checkpoint config and run record.
 
 Design notes:
+- the path guard (check_logdir) judges a DIR by its realpath string and by file identity (os.path.samestat on every
+  existing ancestor), so no symlink, case variant or path through a file reaches results/, data/, ui/, protocol.json
+  or the run's own output dirs; it runs on DIR and again on DIR/RUN_ID, and it never creates anything.
 - nothing here imports tensorboardX or torch at import: tensorboardX imports torch, and berturk_train.py must set the
   MPS env before torch loads (torch reads PYTORCH_ENABLE_MPS_FALLBACK once, at import). open_writer imports it.
 - every writer gets a unique filename_suffix: tensorboardX opens an event file 'wb' under a name built from a 10-digit
@@ -22,6 +25,7 @@ usage: from pilot import tensorboard
        tb.close()
 """
 import os
+import stat
 from typing import Any
 
 from pilot.data import REPO_ROOT
@@ -44,29 +48,70 @@ TAGS = STEP_TAGS + EPOCH_TAGS
 
 
 def _under(real: str, top: str) -> bool:
-    """True when the real path `real` is `top` or lies under it."""
+    """True when the real path `real` is `top` or lies under it, by the path strings."""
     return real == top or real.startswith(top.rstrip(os.sep) + os.sep)
+
+
+def _existing(real: str) -> list[tuple[str, os.stat_result]]:
+    """(path, os.stat) of every existing ancestor of `real`, `real` included, deepest first. A path that cannot be
+    stat'ed (missing, through a file, unreadable) is left out."""
+    out = []
+    p = real
+    while True:
+        try:
+            out.append((p, os.stat(p)))
+        except OSError:
+            pass
+        parent = os.path.dirname(p)
+        if parent == p:
+            return out
+        p = parent
+
+
+def _within(real: str, root: str) -> bool:
+    """True when the real path `real` is `root` or lies under it: by the realpath strings, or, for a root that exists,
+    by file identity (os.path.samestat of the root against every existing ancestor of `real`, `real` included).
+
+    The identity test catches what the strings miss: a case variant on a case-insensitive filesystem (realpath keeps
+    the typed case, so RESULTS/tb reads as another path) and a bind mount or hard link of the root.
+    """
+    top = os.path.realpath(root)
+    if _under(real, top):
+        return True
+    try:
+        st = os.stat(top)
+    except OSError:
+        return False
+    return any(os.path.samestat(s, st) for _, s in _existing(real))
 
 
 def check_logdir(path: str, outputs: dict[str, str | None]) -> str:
     """The absolute real path (symlinks resolved, os.path.realpath) of a --tensorboard DIR; creates nothing.
 
-    SystemExit, with a message starting "--tensorboard ", when the path is or lies under results/, data/, ui/ or
-    protocol.json of this repo (FORBIDDEN), when it is or lies under any non-None `outputs` value ({flag: path}: the
-    run's own output dirs, e.g. --storage and --out), or when it exists and is not a directory. The trainers call it on
-    DIR before any split read, fetch, load or ray.init, and on DIR/RUN_ID again once the run id is known.
+    SystemExit, with a message starting "--tensorboard " that names the fix, in this order, when the path:
+    1. is or lies under results/, data/, ui/ or protocol.json of this repo (FORBIDDEN), judged by _within: by the
+       realpath string and by file identity, so a symlink into them, a case variant on a case-insensitive filesystem
+       and a path through protocol.json are all refused;
+    2. is or lies under any non-None `outputs` value ({flag: path}: the run's own output dirs, e.g. --storage and
+       --out), judged the same way;
+    3. exists and is not a directory, or lies inside a file (its deepest existing ancestor is not a directory).
+    The trainers call it on DIR before any split read, fetch, load or ray.init, and on DIR/RUN_ID again once the run
+    id is known, so a DIR/RUN_ID that is itself a symlink into a guarded place is refused too.
     """
     real = os.path.realpath(path)
     for name in FORBIDDEN:
-        if _under(real, os.path.realpath(os.path.join(REPO_ROOT, name))):
+        if _within(real, os.path.join(REPO_ROOT, name)):
             raise SystemExit("--tensorboard %s is under %s of this repo, which holds frozen records or tracked files; "
                              "pass tensorboard/ (gitignored) or a dir outside the repo" % (path, name))
     for flag, value in outputs.items():
-        if value is not None and _under(real, os.path.realpath(value)):
+        if value is not None and _within(real, value):
             raise SystemExit("--tensorboard %s is %s %s or lies under it (the run's own output dir); pass tensorboard/ "
                              "(gitignored) or another dir" % (path, flag, value))
-    if os.path.exists(real) and not os.path.isdir(real):
-        raise SystemExit("--tensorboard %s exists and is not a directory; pass a directory" % path)
+    found = _existing(real)
+    if found and not stat.S_ISDIR(found[0][1].st_mode):
+        if found[0][0] == real:
+            raise SystemExit("--tensorboard %s exists and is not a directory; pass a directory" % path)
+        raise SystemExit("--tensorboard %s lies inside the file %s; pass a directory" % (path, found[0][0]))
     return real
 
 

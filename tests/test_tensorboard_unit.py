@@ -1,7 +1,10 @@
-"""pilot/tensorboard.py: the scalar builders (tags and units), the tag-checked write and the lazy writer, offline.
+"""pilot/tensorboard.py: the scalar builders (tags and units), the tag-checked write, the lazy writer and the
+--tensorboard path guard, offline.
 
 The writer round trip goes through tensorboardX and is read back with tests/tb_events.py (crc-checked, no tensorboard
-package); the builders and write are checked on a fake writer that records its add_scalar calls.
+package); the builders and write are checked on a fake writer that records its add_scalar calls. The path guard is
+checked against the repo's own frozen and tracked paths through symlinks, case variants and file locations, and end to
+end through ray_train.py --print-run-id with a DIR/RUN_ID symlink into results/ (no Ray start, nothing created).
 """
 import os
 from pathlib import Path
@@ -9,8 +12,12 @@ from typing import Any
 
 import pytest
 
+import pilot.data
 import tb_events
+from conftest import make_raw
 from pilot import tensorboard as ptb
+from pilot.data import REPO_ROOT
+from tiny_laya import tiny_checkpoint
 
 pytestmark = pytest.mark.unit
 
@@ -97,3 +104,104 @@ def test_open_writer_refuses_an_unwritable_dir(tmp_path: Path) -> None:
         os.chmod(parent, 0o755)
     msg: Any = e.value.code
     assert str(msg).startswith("--tensorboard: cannot write"), msg
+
+
+def _refused(path: str, outputs: dict[str, str | None] | None = None) -> str:
+    """The SystemExit message of check_logdir(path, outputs), asserting it refuses with the --tensorboard prefix."""
+    with pytest.raises(SystemExit) as e:
+        ptb.check_logdir(path, outputs or {})
+    msg = str(e.value.code)
+    assert msg.startswith("--tensorboard "), msg
+    return msg
+
+
+@pytest.mark.parametrize("rel", ["results", "results/new/deep", "data", "data/tb", "ui", "ui/dist/tb",
+                                 "protocol.json", "protocol.json/tb"])
+def test_check_logdir_refuses_frozen_and_guarded_paths(rel: str) -> None:
+    path = os.path.join(REPO_ROOT, rel)
+    existed = os.path.exists(path)
+    msg = _refused(path)
+    assert rel.split("/")[0] in msg, msg
+    assert os.path.exists(path) == existed                   # nothing created
+
+
+def test_check_logdir_follows_symlinks(tmp_path: Path) -> None:
+    for name in ("data", "protocol.json"):
+        link = tmp_path / ("to-" + name)
+        link.symlink_to(os.path.join(REPO_ROOT, name))
+        for p in (str(link), str(link / "tb")):
+            assert name in _refused(p)
+
+
+def test_check_logdir_refuses_a_case_variant() -> None:
+    if not os.path.exists(os.path.join(REPO_ROOT, "RESULTS")):
+        pytest.skip("case-sensitive filesystem: no case variant to refuse")
+    path = os.path.join(REPO_ROOT, "RESULTS", "tb")
+    assert "results" in _refused(path)
+    assert not os.path.exists(path)
+
+
+def test_check_logdir_refuses_a_path_inside_a_file(tmp_path: Path) -> None:
+    f = tmp_path / "file"
+    f.write_text("x", encoding="utf-8")
+    assert "lies inside the file %s" % f in _refused(str(f / "x"))
+    assert "exists and is not a directory" in _refused(str(f))
+    for name in ("README.md", "Makefile"):
+        assert "lies inside the file" in _refused(os.path.join(REPO_ROOT, name, "tb"))
+
+
+def test_check_logdir_refuses_the_run_outputs(tmp_path: Path) -> None:
+    storage, out = tmp_path / "storage", tmp_path / "out"
+    storage.mkdir()
+    outputs: dict[str, str | None] = {"--storage": str(storage), "--out": str(out), "--other": None}
+    assert "--storage" in _refused(str(storage), outputs)
+    assert "--out" in _refused(str(out / "tb"), outputs)
+    link = tmp_path / "to-storage"
+    link.symlink_to(storage)
+    assert "--storage" in _refused(str(link / "tb"), outputs)
+    assert ptb.check_logdir(str(tmp_path / "tb"), outputs) == os.path.realpath(tmp_path / "tb")   # None skipped
+    assert not (out / "tb").exists() and not (tmp_path / "tb").exists()
+
+
+def test_check_logdir_accepts_and_creates_nothing(tmp_path: Path) -> None:
+    deep = tmp_path / "a" / "b" / "c"
+    assert ptb.check_logdir(str(deep), {}) == os.path.realpath(deep)
+    assert not (tmp_path / "a").exists()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert ptb.check_logdir(str(empty), {}) == os.path.realpath(empty)
+    assert os.listdir(empty) == []
+
+
+@pytest.mark.timeout(300)
+def test_symlinked_run_dir_into_results_is_refused_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                              capsys: pytest.CaptureFixture[str]) -> None:
+    """DIR is an ordinary dir, but DIR/RUN_ID is a symlink into results/: ray_train.py refuses it once the run id is
+    known, before --print-run-id prints it and before ray.init, and results/ is left as it was."""
+    import ray_train
+    root, raw_sha256 = make_raw(str(tmp_path / "raw"))
+    out_dir = str(tmp_path / "data")
+    pilot.data.prepare(root, out_dir, raw_sha256)
+    base = tiny_checkpoint(tmp_path / "base")
+    args = ["--data", os.path.join(out_dir, "splits", "selection_train.jsonl"),
+            "--manifest", os.path.join(out_dir, "splits.json"), "--base", base, "--device", "cpu", "--workers", "1",
+            "--cpus-per-worker", "1", "--epochs", "2", "--max-messages", "12", "--neg", "2",
+            "--out", str(tmp_path / "o"), "--storage", str(tmp_path / "s")]
+
+    def no_ray(*a: Any, **kw: Any) -> None:
+        raise AssertionError("ray.init reached; the symlinked run dir must be refused first")
+    monkeypatch.setattr(ray_train.ray, "init", no_ray)
+    ray_train.main(args + ["--print-run-id"])
+    rid = capsys.readouterr().out.strip().splitlines()[-1]
+    assert rid.startswith("laya-"), rid
+    tb = tmp_path / "tb"
+    tb.mkdir()
+    (tb / rid).symlink_to(os.path.join(REPO_ROOT, "results"))
+    before = sorted(os.listdir(os.path.join(REPO_ROOT, "results")))
+    with pytest.raises(SystemExit) as e:
+        ray_train.main(args + ["--tensorboard", str(tb), "--print-run-id"])
+    msg = str(e.value.code)
+    assert msg.startswith("--tensorboard") and "results" in msg, msg
+    assert rid not in capsys.readouterr().out                # no run id printed
+    assert sorted(os.listdir(os.path.join(REPO_ROOT, "results"))) == before
+    assert not (tmp_path / "s").exists() and not (tmp_path / "o").exists()
