@@ -86,7 +86,7 @@ def test_run_id_ignores_paths_and_resources_and_follows_the_seed() -> None:
     rid = _rid(*base)
     assert rid.startswith("laya-selection_train-neg8-s0-")
     for other in (["--out", "elsewhere"], ["--storage", "/x/ray"], ["--cpus-per-worker", "3"],
-                  ["--manifest", "m.json"], ["--object-store-gb", "2"]):
+                  ["--manifest", "m.json"], ["--object-store-gb", "2"], ["--tensorboard", "/x/tb"]):
         assert _rid(*(base + other)) == rid, other
     assert _rid("--out", "o", "--data", "d.jsonl") == rid                     # flag order never matters
     assert _rid("--seed", "3", "--neg", "2", *base) == _rid(*(base + ["--neg", "2", "--seed", "3"]))
@@ -98,6 +98,53 @@ def test_run_id_ignores_paths_and_resources_and_follows_the_seed() -> None:
         assert _rid(*(base + other)) != rid, other
     assert "-full-" in _rid(*(base + ["--neg", "0"]))
     assert _rid(*(base + ["--neg-seed", "0"])) == rid                        # --neg-seed defaults to --seed
+
+
+def test_tensorboard_is_not_identity() -> None:
+    from pilot import runs
+    assert "tensorboard" in runs.NOT_IDENTITY and "tensorboard" not in runs.IDENTITY
+
+
+def test_tb_writer_is_rank_zero_only(tmp_path: Path) -> None:
+    """Only rank 0 with --tensorboard and an epoch left opens a writer: one file per segment, its purge marker at the
+    first step after the resumed epoch."""
+    import tb_events
+    logdir = tmp_path / "tb" / "rid"
+    c = {"tensorboard": str(logdir)}
+    assert ray_train.tb_writer(c, 1, 0, 2, 3, 0) is None
+    assert not list(tmp_path.iterdir())                     # rank 1 creates nothing
+    assert ray_train.tb_writer(c, 0, 2, 2, 3, 1) is None    # no epoch left: only the final save
+    assert ray_train.tb_writer({"tensorboard": None}, 0, 0, 2, 3, 0) is None
+    assert not list(tmp_path.iterdir())
+    w = ray_train.tb_writer(c, 0, 1, 2, 3, 2)
+    assert w is not None
+    w.close()
+    files = tb_events.event_files(str(logdir))
+    assert len(files) == 1 and files[0].endswith(".segment-002"), files
+    events = tb_events.read_events(str(logdir))
+    assert [(step, value) for _, step, kind, value in events if kind == "session_log"] == [(4, 1)]
+
+
+def test_tensorboard_refused_before_the_split_is_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                      capsys: pytest.CaptureFixture[str]) -> None:
+    """A --tensorboard under results/ or protocol.json of the repo, or under --storage, is refused before the split is
+    read (the split is missing here), before ray.init and before --print-run-id prints; nothing is created."""
+    from pilot.data import REPO_ROOT
+
+    def no_ray(*a: Any, **kw: Any) -> None:
+        raise AssertionError("ray.init reached; --tensorboard must be refused first")
+    monkeypatch.setattr(ray_train.ray, "init", no_ray)
+    results_tb = os.path.join(REPO_ROOT, "results", "tb")
+    cases = [(results_tb, []), (os.path.join(REPO_ROOT, "protocol.json"), []),
+             (str(tmp_path / "s"), ["--storage", str(tmp_path / "s")])]
+    for t, extra in cases:
+        with pytest.raises(SystemExit) as e:
+            ray_train.main(["--data", str(tmp_path / "missing.jsonl"), "--out", str(tmp_path / "o"),
+                            "--tensorboard", t, "--print-run-id"] + extra)
+        assert str(e.value.code).startswith("--tensorboard"), (t, e.value.code)
+        assert capsys.readouterr().out == "", t
+    assert not os.path.exists(results_tb)
+    assert not list(tmp_path.iterdir())
 
 
 def test_the_committed_probe_run_id_is_historical() -> None:

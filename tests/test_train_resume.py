@@ -355,3 +355,37 @@ def test_tensorboard_events_hold_every_scalar(tb_run: TbRun) -> None:
     ends = [sum(r["optimizer_steps"] for r in rows[:i + 1]) for i in range(len(rows))]
     for tag in ep:
         assert sorted(ep[tag]) == ends, tag
+
+
+@pytest.mark.timeout(600)
+def test_tensorboard_resume_writes_one_file_per_segment(prepared: Prepared, full_run: FullRun) -> None:
+    """Killed after epoch 1 and rerun: one event file per segment. The rerun's purge marker sits at the first step after
+    the resumed epoch, and the killed segment's file keeps its completed epoch (closed in a finally block)."""
+    d, args = prepared
+    rid, full = full_run
+    flags = ["--storage", d / "tb-b", "--out", d / "tb-res", "--tensorboard", d / "tb-r"]
+    r = _run("ray_train.py", *args, *flags, "--fail-after-epoch", "1", ok=False)
+    assert r.returncode != 0, r.stderr[-4000:]
+    _run("ray_train.py", *args, *flags)
+    rows = runs.read_record(str(d / "tb-res"))["epochs"]
+    u1, total = rows[0]["optimizer_steps"], sum(row["optimizer_steps"] for row in rows)
+    files = tb_events.event_files(str(d / "tb-r" / rid))
+    assert len(files) == 2, files
+    assert files[0].endswith(".segment-000") or files[1].endswith(".segment-000"), files
+    assert files[0].endswith(".segment-001") or files[1].endswith(".segment-001"), files
+    events = tb_events.read_events(str(d / "tb-r" / rid))
+    for suffix, first, last in ((".segment-000", 1, u1), (".segment-001", u1 + 1, total)):
+        seg = [e for e in events if e[0].endswith(suffix)]
+        assert [(step, value) for _, step, kind, value in seg if kind == "session_log"] == [(first, 1)], suffix
+        assert sorted(tb_events.scalars(seg, "train/loss")) == list(range(first, last + 1)), suffix
+        assert sorted(tb_events.scalars(seg, "epoch/loss")) == [last], suffix
+    union = sorted(step for _, step, kind, _ in events if kind == "train/loss")
+    assert union == list(range(1, total + 1))
+    assert _sha256(d / "tb-res" / "model.safetensors") == _sha256(full / "model.safetensors")
+
+
+@pytest.mark.timeout(600)
+def test_tensorboard_flag_off_writes_no_event_file(prepared: Prepared, full_run: FullRun) -> None:
+    d, _ = prepared
+    for where in (d / "a", d / "full"):
+        assert not list(where.rglob("events.out.tfevents*")), where
