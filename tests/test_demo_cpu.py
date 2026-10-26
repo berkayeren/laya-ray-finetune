@@ -788,6 +788,40 @@ def test_loopback_bind_by_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     assert largs[3:] == (REPO, "mps", pilot.latency.THREADS)
 
 
+def test_main_stops_the_load_when_the_server_returns(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Once uvicorn.run returns (Ctrl-C), main sets state["stop"] and shuts the worker down without waiting, so the
+    interpreter's exit join waits for the one seed in flight only (11-REVIEW WR-06)."""
+    calls = run_main(["--device", "cpu"], monkeypatch, tmp_path)
+    (largs, _), = calls["loading"]
+    state, executor = largs[0], largs[1]
+    assert state["stop"] is True
+    with pytest.raises(RuntimeError, match="shutdown"):
+        executor.submit(lambda: None)
+
+
+def test_load_stops_at_the_next_seed(tiny: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """load_system loads no further seed once stopped() reads true (SystemExit STOPPED), and load_job with stop set
+    binds and loads nothing and refuses the chat with STOPPED."""
+    loads = []
+
+    def fake_seed(binding: dict[str, Any], s: dict[str, Any], *a: Any) -> dict[str, Any]:
+        loads.append(s["seed"])
+        return {"temperature": 1.0, "forward": None, "check": None}
+    monkeypatch.setattr(demo, "_laya_seed", fake_seed)
+    bindings = bindings_of(tiny)
+    bound = demo.bind_seeds(bindings["laya"], tiny["root"])
+    with pytest.raises(SystemExit) as e:
+        demo.load_system(bindings["laya"], bound, "cpu", 1, lambda: len(loads) >= 1)
+    assert e.value.code == demo.STOPPED and loads == [bound[0][0]["seed"]]
+    no_load(monkeypatch)
+    monkeypatch.setattr(demo, "bind_seeds", lambda *a: pytest.fail("a seed was bound after stop"))
+    state = demo.new_state("cpu")
+    state["stop"] = True
+    demo.load_job(state, lambda: bindings, tiny["root"], "cpu", 1)
+    assert (state["chat"], state["message"], state["systems"]) == (pd.REFUSED, demo.STOPPED, None)
+    assert state["training_status"] == pd.READY
+
+
 def test_loopback_bind_with_another_port(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls = run_main(["--port", "9001", "--device", "cpu"], monkeypatch, tmp_path)
     (_, kwargs), = calls["run"]

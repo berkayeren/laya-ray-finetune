@@ -60,6 +60,7 @@ CLASSIFY_FAILED = "classification failed (%s); try again; if it repeats, restart
 # a refusal raised inside a forward (score.check_agent / check_bert: the model moved or was re-cast) ends the chat
 CHAT_BROKEN = "%s; restart `make demo`"
 LOAD_FAILED = "loading the final seeds failed (%s); restart `make demo`"
+STOPPED = "the demo is shutting down; the remaining final seeds were not loaded"
 TRAINING_FAILED = "reading the %s run records failed (%s); restore the final seeds"
 UNKNOWN_DIAGRAM = "unknown diagram"
 DIAGRAM_UNREADABLE = "diagram %s cannot be read; restore it with `git checkout -- %s`"
@@ -131,16 +132,21 @@ def _berturk_seed(binding: dict[str, Any], s: dict[str, Any], ckpt: str, ident: 
 
 
 def load_system(binding: dict[str, Any], bound: list[tuple[dict[str, Any], str, dict[str, Any]]], device: str,
-                threads: int) -> dict[str, Any]:
+                threads: int, stopped: Callable[[], bool] | None = None) -> dict[str, Any]:
     """{binding, device, seeds: [{temperature, forward, check}]} of one system: every bound seed loaded on `device`
-    through score.py's loaders; SystemExit before any load when --device mps has no MPS. forward(text) is float32
-    [1, 48]; check() is the seed's score.check_agent / check_bert state {device, dtype, amp_enabled}."""
+    through score.py's loaders; SystemExit before any load when --device mps has no MPS, and SystemExit(STOPPED)
+    before a seed's load once stopped() is true (the server is shutting down). forward(text) is float32 [1, 48];
+    check() is the seed's score.check_agent / check_bert state {device, dtype, amp_enabled}."""
     import torch
     if device == "mps" and not torch.backends.mps.is_available():
         raise SystemExit("--device mps, but MPS is not available here; use --device cpu")
     load_seed = _laya_seed if binding["kind"] == "laya" else _berturk_seed
-    return {"binding": binding, "device": device,
-            "seeds": [load_seed(binding, s, ckpt, ident, device, threads) for s, ckpt, ident in bound]}
+    seeds = []
+    for s, ckpt, ident in bound:
+        if stopped is not None and stopped():
+            raise SystemExit(STOPPED)
+        seeds.append(load_seed(binding, s, ckpt, ident, device, threads))
+    return {"binding": binding, "device": device, "seeds": seeds}
 
 
 def classify(systems: dict[str, dict[str, Any]], text: str) -> dict[str, dict[str, Any]]:
@@ -156,9 +162,10 @@ def classify(systems: dict[str, dict[str, Any]], text: str) -> dict[str, dict[st
 
 def new_state(device: str) -> dict[str, Any]:
     """The state before loading: {chat: loading, message: None, device, systems: None, training: {},
-    training_status: loading}."""
+    training_status: loading, stop: False}. main sets stop once the server has returned, so load_job loads no
+    further seed."""
     return {"chat": pd.LOADING, "message": None, "device": device, "systems": None, "training": {},
-            "training_status": pd.LOADING}
+            "training_status": pd.LOADING, "stop": False}
 
 
 def _line(e: SystemExit) -> str:
@@ -186,7 +193,8 @@ def load_job(state: dict[str, Any], bindings_fn: Callable[[], dict[str, dict[str
     refusal gives both systems its line. state["training"] is published and training_status set ready before any
     model loads, whether or not the models load. Load: only when both systems bound (else the chat is refused with
     the first failing system's line), every seed loaded, one warm-up classify of pd.WARMUP_TEXT (output discarded),
-    then the chat ready. A SystemExit sets the chat refused with its one line; any other exception refused with
+    then the chat ready. Once state["stop"] is set, no further system is bound and no further seed loads (SystemExit
+    STOPPED), so a shutdown waits for at most the one seed in flight. A SystemExit sets the chat refused with its one line; any other exception refused with
     LOAD_FAILED naming only the exception type."""
     training: dict[str, dict[str, Any]] = {}
     try:
@@ -197,6 +205,8 @@ def load_job(state: dict[str, Any], bindings_fn: Callable[[], dict[str, dict[str
             raise
         bound, failed = {}, []
         for kind in pd.KINDS:
+            if state.get("stop"):
+                raise SystemExit(STOPPED)
             try:
                 bound[kind] = bind_seeds(bindings[kind], root)
             except SystemExit as e:
@@ -212,7 +222,10 @@ def load_job(state: dict[str, Any], bindings_fn: Callable[[], dict[str, dict[str
         state["training_status"] = pd.READY             # the binding stage is over: before any model loads
         if failed:
             raise SystemExit(failed[0])
-        systems = {kind: load_system(bindings[kind], bound[kind], device, threads) for kind in pd.KINDS}
+        stopped = functools.partial(state.get, "stop", False)
+        systems = {kind: load_system(bindings[kind], bound[kind], device, threads, stopped) for kind in pd.KINDS}
+        if stopped():
+            raise SystemExit(STOPPED)
         classify(systems, pd.WARMUP_TEXT)
         state["systems"] = systems
         state["chat"] = pd.READY
@@ -320,7 +333,7 @@ def create_app(state: dict[str, Any], executor: ThreadPoolExecutor, views: dict[
 
 def main(argv: list[str] | None = None) -> None:
     """CLI entry: refuse a bad argument or a missing UI build, start loading the seeds on the worker thread, serve
-    the app on 127.0.0.1 until interrupted."""
+    the app on 127.0.0.1 until interrupted, then set state["stop"] and shut the worker down without waiting."""
     ap = parser()
     a = ap.parse_args(argv)
     if not 1 <= a.port <= 65535:
@@ -343,7 +356,13 @@ def main(argv: list[str] | None = None) -> None:
                   a.threads)
     print("demo on http://127.0.0.1:%d (local only; stores nothing); the chat opens when the six final checkpoints "
           "are loaded" % a.port, flush=True)
-    uvicorn.run(app, host=pd.HOST, port=a.port, access_log=False, log_level="warning")
+    try:
+        uvicorn.run(app, host=pd.HOST, port=a.port, access_log=False, log_level="warning")
+    finally:
+        # the worker thread is joined at interpreter exit: stop the load at the next seed and drop queued work, so
+        # Ctrl-C waits for the one seed (or forward) in flight, never for all six seeds and the warm-up
+        state["stop"] = True
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 if __name__ == "__main__":
