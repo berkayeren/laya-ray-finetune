@@ -364,3 +364,30 @@ def test_dashboard_routes() -> None:
             "VIEW_COMPONENTS maps %s to %s, which has no ui/src/dashboard/%s.tsx" % (key, component, component)
         assert re.search(r'^import %s from "\./%s";$' % (component, component), dash, re.M), \
             "Dashboard.tsx does not import %s" % component
+
+
+# --- the status polls: a failed poll is retried, never terminal (11-REVIEW WR-01) --------------------------------
+
+def hook_body(rel: str, name: str) -> str:
+    """The text of `function name(` in ui/src/<rel> up to the next line holding only "}" (the hook's closing brace)."""
+    with open(os.path.join(UI, "src", rel), encoding="utf-8") as f:
+        text = f.read()
+    m = re.search(r"^function %s\(.*?^\}$" % name, text, re.S | re.M)
+    assert m is not None, "ui/src/%s has no function %s" % (rel, name)
+    return m.group(0)
+
+
+def test_status_polls_retry_after_a_failure() -> None:
+    """useChatMode reschedules its poll on a failed /api/status answer (unreachable or an HTTP error) with a capped
+    backoff, and useTraining reschedules its status poll on an unanswered request: neither ends in a state only a
+    reload leaves."""
+    chat = hook_body("chat/ChatView.tsx", "useChatMode")
+    failed = re.search(r"if \(!r\.ok\) \{(.*?)\n      \}", chat, re.S)
+    assert failed is not None, "useChatMode has no failed-poll branch"
+    assert "window.setTimeout(() => void poll(), retry)" in failed.group(1), "a failed status poll is not retried"
+    assert "RETRY_MAX_MS" in failed.group(1), "the status retry has no backoff cap"
+    training = hook_body("dashboard/TrainingView.tsx", "useTraining")
+    unanswered = re.search(r"if \(r\.status === null\) \{(.*?)\n      \}", training, re.S)
+    assert unanswered is not None, "useTraining has no unanswered-request branch"
+    assert "window.setTimeout(() => void pollStatus(), retry)" in unanswered.group(1), \
+        "an unanswered training request is not retried"

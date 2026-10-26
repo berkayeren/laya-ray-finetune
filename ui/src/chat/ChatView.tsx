@@ -7,11 +7,14 @@
 // info icon. While the response is missing these are omitted, never invented. Every server string is rendered as a
 // React text node.
 //
-// ChatView owns the chat area's states. It polls GET /api/status every second while the status reads loading:
+// ChatView owns the chat area's states. It polls GET /api/status every second while the status reads loading, and
+// keeps polling with a capped backoff (RETRY_MS doubling up to RETRY_MAX_MS) while the server does not answer, so a
+// restarted or briefly unreachable server is picked up without a reload:
 //   loading      the empty state and the examples stay visible, the input is disabled and says the six final
-//                checkpoints are loading (the dashboard already works);
+//                checkpoints are loading (the dashboard already works); an HTTP error from /api/status reads loading
+//                too and is retried;
 //   refused      "Chat unavailable", the server's one line verbatim in mono, and a link to the dashboard;
-//   unreachable  the server-unreachable copy;
+//   unreachable  the server-unreachable copy, until the server answers again;
 //   ready        the chat.
 // A pending turn shows the loading reply card (two column skeletons); a failed request keeps the user bubble and shows
 // the request-error copy (or the unreachable copy when the server did not answer) in place of the reply card. The
@@ -28,6 +31,8 @@ import type { ClassifyResponse, Intents, Status } from "./types";
 import css from "./chat.module.css";
 
 const POLL_MS = 1000;
+const RETRY_MS = 1000; // the first retry after an unanswered or failed status poll
+const RETRY_MAX_MS = 5000; // the backoff cap
 const BOTTOM_SLACK_PX = 24;
 const EMPTY_HEADING = "Classify a Turkish banking message";
 const EMPTY_BODY =
@@ -70,21 +75,26 @@ function toMode(s: Status): ChatMode {
   return { kind: "loading" };
 }
 
-// GET /api/status, polled every second while it reads loading; an unanswered poll ends in unreachable
+// GET /api/status, polled every second while it reads loading; a failed poll (unanswered: unreachable, an HTTP
+// error: loading) is retried after RETRY_MS, doubling up to RETRY_MAX_MS, and the first answer ends the backoff
 function useChatMode(): ChatMode {
   const [mode, setMode] = useState<ChatMode>({ kind: "loading" });
   useEffect(() => {
     let cancelled = false;
     let timer: number | undefined;
+    let retry = RETRY_MS;
     const poll = async (): Promise<void> => {
       const r = await getJSON<Status>("/api/status");
       if (cancelled) {
         return;
       }
       if (!r.ok) {
-        setMode({ kind: "unreachable" });
+        setMode(r.status === null ? { kind: "unreachable" } : { kind: "loading" });
+        timer = window.setTimeout(() => void poll(), retry);
+        retry = Math.min(retry * 2, RETRY_MAX_MS);
         return;
       }
+      retry = RETRY_MS;
       const next = toMode(r.data);
       setMode(next);
       if (next.kind === "loading") {

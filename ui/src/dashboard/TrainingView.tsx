@@ -23,6 +23,8 @@ import type { EpochRow, EpochValue, TrainingData, TrainingOk, TrainingReady, Tra
 import css from "./dashboard.module.css";
 
 const POLL_MS = 1000;
+const RETRY_MS = 1000; // the first retry after an unanswered request
+const RETRY_MAX_MS = 5000; // the backoff cap
 const INTRO =
   "Per-epoch rows recorded by Ray Train (Laya, one MPS worker) and the HF Trainer (BERTurk) in each final seed's run record.";
 const LOSS_CAPTION = "Loss values are not comparable across the two models: they train on different objectives.";
@@ -41,14 +43,23 @@ const PLOT_H = CHART_H - MARGIN_TOP - MARGIN_BOTTOM - X_AXIS_H;
 // --- data -----------------------------------------------------------------------------------------------------------
 
 // GET /api/training; while it reads loading, GET /api/status every POLL_MS until training reads ready, then
-// GET /api/training once more. Any HTTP error is that view's error; an unanswered request is unreachable.
+// GET /api/training once more. Any HTTP error is that view's error; an unanswered request reads unreachable and
+// retries GET /api/status after RETRY_MS, doubling up to RETRY_MAX_MS, so a restarted server is picked up without a
+// reload.
 function useTraining(): ViewState<TrainingReady> {
   const [state, setState] = useState<ViewState<TrainingReady>>({ kind: "loading" });
   useEffect(() => {
     let cancelled = false;
     let timer: number | undefined;
+    let retry = RETRY_MS;
     const fail = (r: { status: number | null; error: string; source?: string | null }, path: string): void => {
-      setState(r.status === null ? { kind: "unreachable" } : { kind: "error", error: r.error, source: r.source ?? path });
+      if (r.status === null) {
+        setState({ kind: "unreachable" });
+        timer = window.setTimeout(() => void pollStatus(), retry);
+        retry = Math.min(retry * 2, RETRY_MAX_MS);
+      } else {
+        setState({ kind: "error", error: r.error, source: r.source ?? path });
+      }
     };
     const pollStatus = async (): Promise<void> => {
       const r = await getJSON<TrainingStatus>("/api/status");
@@ -57,9 +68,13 @@ function useTraining(): ViewState<TrainingReady> {
       }
       if (!r.ok) {
         fail(r, "/api/status");
-      } else if (r.data.training === "ready") {
+        return;
+      }
+      retry = RETRY_MS;
+      if (r.data.training === "ready") {
         void fetchTraining();
       } else {
+        setState((prev) => (prev.kind === "loading" ? prev : { kind: "loading" }));
         timer = window.setTimeout(() => void pollStatus(), POLL_MS);
       }
     };
