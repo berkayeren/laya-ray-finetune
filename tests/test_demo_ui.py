@@ -247,6 +247,11 @@ CHAT_COPY = (
     "Keep messages",
     "Remove every message from this tab? Nothing is stored, so they cannot be restored.",
     "Show all 48 tags",
+    # the request-error and unreachable rows as revised after the code-review fixes (the source splits these lines)
+    "The demo server is not responding.",
+    "when it answers again.",
+    "Classification failed (",
+    "if it repeats, restart",
 )
 
 
@@ -324,6 +329,7 @@ DASHBOARD_COPY = (
     "Diagram unavailable",
     "Verdict unavailable",
     "This view is unavailable",
+    "The other views are unaffected.",
     "Loss values are not comparable across the two models: they train on different objectives.",
     "Local demo · stores nothing",
     "Laya vs BERTurk: Turkish banking intent demo",
@@ -626,3 +632,20 @@ def test_chat_request_error_is_the_server_line_verbatim() -> None:
     assert "const error = r.status === null ? null : r.served ? r.error : unexplained(r.error);" in chat
     assert "Try again" not in chat and "requestError" not in chat
     assert demo.CLASSIFY_FAILED.startswith("classification failed (") and demo.CHAT_BROKEN.endswith("`make demo`")
+
+
+def test_narrow_layout_keeps_the_cta_and_the_latency_bars() -> None:
+    """11-UI-REVIEW (375px): below 720px the CTA moves under the textarea and its label never wraps, and the latency
+    chart drops its y-axis column and 240px right label margin, so its bars keep the card width (both were checked
+    under headless Chrome at 375px; this guards the source)."""
+    with open(os.path.join(REPO, "ui", "src", "chat", "chat.module.css"), encoding="utf-8") as f:
+        chat = " ".join(f.read().split())
+    cta = re.search(r"\.cta \{([^}]*)\}", chat)
+    assert cta and "white-space: nowrap" in cta.group(1) and "flex-shrink: 0" in cta.group(1), "the CTA label can wrap"
+    narrow = re.findall(r"@media \(max-width: 719px\) \{ \.inputRow \{([^}]*)\}", chat)
+    assert narrow and "flex-direction: column" in narrow[0], "below 720px the CTA stays beside the textarea"
+    with open(os.path.join(REPO, "ui", "src", "dashboard", "ConfidenceView.tsx"), encoding="utf-8") as f:
+        conf = f.read()
+    assert '"(max-width: 719px)"' in conf, "the latency chart does not follow the 720px breakpoint"
+    assert "right: narrow ? 28 : 240" in conf and "hide={narrow}" in conf, "the latency chart keeps its wide margins"
+    assert "shape={narrow ? LatencyBarNarrow : LatencyBar}" in conf, "the narrow latency labels are not drawn"

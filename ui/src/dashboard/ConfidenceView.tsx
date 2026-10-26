@@ -16,7 +16,7 @@
 // Every number is a field of a view and every sentence (caveats, notes, renders) is shown as received; the UI only
 // formats values (ms, 3-decimal metrics).
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -137,6 +137,26 @@ function ReliabilitySection() {
 const BAR_ROW = 48; // the height of one bar's band, in px
 const BAR_LABEL_WIDTH = 140;
 const TICK_HALF = 4; // the p95 tick reaches this far beyond the bar, in px
+const BAR_ROW_NARROW = 88; // below 720px: the band holds the two label lines above a thinner bar
+const BAR_SIZE_NARROW = 16;
+const NARROW = "(max-width: 719px)"; // the CSS breakpoint every module uses
+
+// true below 720px, following the viewport; the right label column and the y axis do not fit a 375px card
+function useNarrow(): boolean {
+  const mq = typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia(NARROW)
+    : null;
+  const [narrow, setNarrow] = useState(mq?.matches ?? false);
+  useEffect(() => {
+    if (mq === null) {
+      return;
+    }
+    const on = (e: MediaQueryListEvent) => setNarrow(e.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, [mq?.media]);
+  return narrow;
+}
 
 interface LatencyRow {
   label: string;
@@ -214,12 +234,40 @@ function msTicks(max: number): number[] {
   return Array.from({ length: n + 1 }, (_, k) => Number((k * step).toFixed(6)));
 }
 
+// below 720px: no y axis and no right label column (a 28px right margin keeps the last tick label whole); the system
+// name and both values sit above the bar, from its start
+function LatencyBarNarrow({ x, y, width, height, payload }: BarArgs) {
+  if (x === undefined || y === undefined || width === undefined || height === undefined || payload === undefined) {
+    return <g />;
+  }
+  const tick = payload.p50 > 0 ? x + (width * payload.p95) / payload.p50 : x;
+  return (
+    <g>
+      <text x={x} y={y - 26} fill={COLORS.inkSecondary} fontSize={14} fontWeight={600}>
+        {payload.label}
+      </text>
+      <text x={x} y={y - 8} fill={COLORS.inkSecondary} fontSize={14}>
+        {`p50 ${payload.p50Text} ms · p95 ${payload.p95Text} ms`}
+      </text>
+      <rect x={x} y={y} width={Math.max(width, 1)} height={height} fill={colorOf(payload.system)} />
+      <line x1={tick} y1={y - TICK_HALF} x2={tick} y2={y + height + TICK_HALF} stroke={COLORS.ink} strokeWidth={2} />
+    </g>
+  );
+}
+
 function LatencyChart({ rows }: { rows: LatencyRow[] }) {
   const ticks = msTicks(Math.max(...rows.map((r) => r.p95)));
+  const narrow = useNarrow();
   return (
-    <div className={css.chart} style={{ height: rows.length * BAR_ROW + 40 }}>
+    <div className={css.chart} style={{ height: rows.length * (narrow ? BAR_ROW_NARROW : BAR_ROW) + 40 }}>
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={rows} layout="vertical" margin={{ top: 8, right: 240, bottom: 8, left: 8 }} barCategoryGap={12}>
+        <BarChart
+          data={rows}
+          layout="vertical"
+          margin={{ top: 8, right: narrow ? 28 : 240, bottom: 8, left: 8 }}
+          barCategoryGap={12}
+          barSize={narrow ? BAR_SIZE_NARROW : undefined}
+        >
           <CartesianGrid horizontal={false} stroke={COLORS.grid} />
           <XAxis
             type="number"
@@ -236,12 +284,13 @@ function LatencyChart({ rows }: { rows: LatencyRow[] }) {
             type="category"
             dataKey="label"
             width={BAR_LABEL_WIDTH}
+            hide={narrow}
             tick={{ fill: COLORS.inkSecondary, fontSize: 14 }}
             stroke={COLORS.axis}
             tickLine={false}
           />
           <Tooltip content={LatencyTip} cursor={{ fill: "#f0efec" }} isAnimationActive={false} />
-          <Bar dataKey="p50" shape={LatencyBar} isAnimationActive={false} />
+          <Bar dataKey="p50" shape={narrow ? LatencyBarNarrow : LatencyBar} isAnimationActive={false} />
         </BarChart>
       </ResponsiveContainer>
     </div>

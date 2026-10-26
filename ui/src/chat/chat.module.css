@@ -536,7 +536,18 @@
   font-family: var(--font-sans);
   font-size: var(--text-body);
   font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  flex-shrink: 0;
+  justify-content: center;
   cursor: pointer;
+}
+
+/* below 720px the textarea takes the full width and the CTA sits under it, on one line */
+@media (max-width: 719px) {
+  .inputRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 
 .cta:hover:not(:disabled) {
