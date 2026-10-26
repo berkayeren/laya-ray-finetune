@@ -392,7 +392,7 @@ def main(argv: list[str] | None = None) -> str | None:
     tb_outputs = {"--storage": a.storage, "--out": a.out}
     # the event-file root, refused before the few-shot protocol, the split read, any fetch, load or run dir
     tb_root = tensorboard.check_logdir(a.tensorboard, tb_outputs) if a.tensorboard is not None else None
-    cpus =a.cpus or (4 if a.device == "mps" else 1)
+    cpus = a.cpus or (4 if a.device == "mps" else 1)
     proto = pin = block = mode = None
     mask = ()
     if a.fewshot_base or continued:                         # the frozen protocol first, before the split is read
