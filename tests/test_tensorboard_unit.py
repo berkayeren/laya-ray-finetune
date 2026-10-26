@@ -349,6 +349,47 @@ def test_without_git_an_in_repo_logdir_is_accepted(monkeypatch: pytest.MonkeyPat
     assert not os.path.exists(path)
 
 
+def test_the_gitignore_probe_is_the_real_event_file_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """IN-02: the probe names are the real event-file names directly under the DIR (no extra component, no fixed probe
+    name a .gitignore rule could match alone), and every one must be listed as ignored."""
+    seen: list[bytes] = []
+    real = subprocess.run
+
+    def noting(argv: list[str], **kw: Any) -> Any:
+        seen.append(kw.get("input") or b"")
+        return real(argv, **kw)
+    monkeypatch.setattr("pilot.tensorboard.subprocess.run", noting)
+    ptb.check_logdir(os.path.join(REPO_ROOT, "tensorboard", "rid"), {})
+    names = [os.path.join("tensorboard", "rid", "events.out.tfevents.0000000000.host" + sfx)
+             for sfx in (ptb.segment_suffix(0, 0), ptb.pid_suffix(0))]
+    assert seen == [b"".join(os.fsencode(n) + b"\0" for n in names)]
+
+    def one_listed(argv: list[str], **kw: Any) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(argv, 0, kw["input"].split(b"\0")[0] + b"\0", b"")
+    monkeypatch.setattr("pilot.tensorboard.subprocess.run", one_listed)
+    assert "not gitignored" in _refused(os.path.join(REPO_ROOT, "tbx"))      # a probe git did not list refuses
+
+
+def test_a_git_error_inside_a_work_tree_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """IN-02: check-ignore exit 128 (dubious ownership, a broken config) is accepted only when git rev-parse
+    --is-inside-work-tree fails too; inside a work tree it is refused, and so is a git that never answers."""
+    path = os.path.join(REPO_ROOT, "tbx")
+
+    def dubious(argv: list[str], **kw: Any) -> subprocess.CompletedProcess:
+        if argv[1] == "check-ignore":
+            return subprocess.CompletedProcess(argv, 128, b"", b"fatal: detected dubious ownership in repository\n")
+        return subprocess.CompletedProcess(argv, 0, b"true\n", b"")
+    monkeypatch.setattr("pilot.tensorboard.subprocess.run", dubious)
+    msg = _refused(path)
+    assert "check-ignore failed (exit 128: fatal: detected dubious ownership" in msg, msg
+
+    def hung(argv: list[str], **kw: Any) -> Any:
+        raise subprocess.TimeoutExpired(argv, 60)
+    monkeypatch.setattr("pilot.tensorboard.subprocess.run", hung)
+    assert "did not answer" in _refused(path)
+    assert not os.path.exists(path)
+
+
 @pytest.mark.parametrize("entry", pilot.reproduce.CHECKED)
 def test_every_reproduce_checked_path_is_refused(entry: str) -> None:
     # every path `make report` checks against git, and the same path with /tb appended

@@ -132,11 +132,9 @@ def check_logdir(path: str, outputs: dict[str, str | None]) -> str:
     2. is or lies under any non-None `outputs` value ({flag: path}: the run's own output dirs, e.g. --storage and
        --out), judged the same way;
     3. exists and is not a directory, or lies inside a file (its deepest existing ancestor is not a directory);
-    4. lies inside this repo (an ancestor is REPO_ROOT by file identity) where git does not ignore it: `git
-       check-ignore -q --no-index` on DIR/run/events.out.tfevents.probe exits 1. An event file's name carries the host
-       name, so inside the repo it may only land where `git add` never picks it up (tensorboard/ is gitignored). Exit 0
-       accepts; any other exit (no git work tree), a missing git binary or a timeout accepts too: nothing can be
-       committed then.
+    4. lies inside this repo (an ancestor is REPO_ROOT by file identity) where git does not ignore it (_check_ignored):
+       an event file's name carries the host name, so inside the repo it may only land where `git add` never picks it
+       up (tensorboard/ is gitignored).
     The trainers call it on DIR before any split read, fetch, load or ray.init, and on DIR/RUN_ID again once the run
     id is known, so a DIR/RUN_ID that is itself a symlink into a guarded place is refused too.
     """
@@ -156,17 +154,51 @@ def check_logdir(path: str, outputs: dict[str, str | None]) -> str:
         raise SystemExit("--tensorboard %s lies inside the file %s; pass a directory" % (path, found[0][0]))
     rel = _repo_rel(real)
     if rel is not None:
-        probe = os.path.join(rel, "run", "events.out.tfevents.probe")
-        try:
-            r = subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", probe], cwd=REPO_ROOT,
-                               capture_output=True, timeout=60)
-        except (OSError, subprocess.SubprocessError):
-            r = None                                        # no git binary: nothing can be committed
-        if r is not None and r.returncode == 1:
+        _check_ignored(path, rel)
+    return real
+
+
+def _git(path: str, argv: list[str], stdin: bytes | None = None) -> subprocess.CompletedProcess[bytes] | None:
+    """git argv in REPO_ROOT (60 s timeout) for the --tensorboard `path`; None when there is no git binary.
+    SystemExit on a timeout (fail closed: whether the logdir is gitignored is unknown)."""
+    try:
+        return subprocess.run(["git"] + argv, cwd=REPO_ROOT, input=stdin, capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise SystemExit("--tensorboard %s is inside the repo and git %s did not answer within 60 s; pass a dir "
+                         "outside the repo" % (path, argv[0]))
+    except OSError:
+        return None
+
+
+def _check_ignored(path: str, rel: str) -> None:
+    """SystemExit unless git ignores the event files a writer on `path` (repo-relative `rel`) would create, probed in
+    their real shape (_probes: a Laya segment's and a BERTurk process's name, directly under rel; on DIR the files
+    land one level deeper, under RUN_ID, so a rule that ignores only DIR's subdirectories is refused, fail closed).
+    `git check-ignore -z --stdin --no-index` must exit 0 and list every probe; exit 1 or a partial list refuses.
+    Any other exit (128) is accepted only when `git rev-parse --is-inside-work-tree` fails too (no work tree: nothing
+    can be committed), and refused otherwise (dubious ownership, a broken config); no git binary accepts."""
+    probes = _probes(rel)
+    r = _git(path, ["check-ignore", "-z", "--stdin", "--no-index"], b"".join(os.fsencode(p) + b"\0" for p in probes))
+    if r is None:
+        return                                              # no git binary: nothing can be committed
+    if r.returncode in (0, 1):
+        listed = set(r.stdout.split(b"\0"))
+        if r.returncode == 1 or not all(os.fsencode(p) in listed for p in probes):
             raise SystemExit("--tensorboard %s is inside the repo but not gitignored, so git add would pick up its "
                              "event files (their names carry the host name); pass tensorboard/ (gitignored) or a dir "
                              "outside the repo" % path)
-    return real
+        return
+    w = _git(path, ["rev-parse", "--is-inside-work-tree"])
+    if w is not None and w.returncode == 0:
+        err = (r.stderr.decode("utf-8", "replace").strip().splitlines() or [""])[0]
+        raise SystemExit("--tensorboard %s is inside the repo and git check-ignore failed (exit %d: %s); fix git "
+                         "or pass a dir outside the repo" % (path, r.returncode, err))
+
+
+def _probes(rel: str) -> list[str]:
+    """The repo-relative names of the event files a writer would create directly under `rel`: a Laya segment's and a
+    BERTurk process's (events.out.tfevents.<10-digit second>.<host><suffix>)."""
+    return [os.path.join(rel, "events.out.tfevents.0000000000.host" + s) for s in (segment_suffix(0, 0), pid_suffix(0))]
 
 
 def segment_suffix(segment: int, pid: int) -> str:
