@@ -8,7 +8,9 @@ flag is NOT_IDENTITY, and the logdir is kept out of every checkpoint config and 
 Design notes:
 - the path guard (check_logdir) judges a DIR by its realpath string and by file identity (os.path.samestat on every
   existing ancestor), so no symlink, case variant or path through a file reaches results/, data/, ui/, protocol.json
-  or the run's own output dirs; it runs on DIR and again on DIR/RUN_ID, and it never creates anything.
+  or the run's own output dirs; it runs on DIR and again on DIR/RUN_ID, and it never creates anything. Inside the
+  repo a DIR is accepted only where git ignores it (git check-ignore; tensorboard/ is gitignored), because an event
+  file's name carries the host name; without git, nothing can be committed and an in-repo DIR is accepted.
 - nothing here imports tensorboardX or torch at import: tensorboardX imports torch, and berturk_train.py must set the
   MPS env before torch loads (torch reads PYTORCH_ENABLE_MPS_FALLBACK once, at import). open_writer imports it.
 - every writer gets a unique filename_suffix: tensorboardX opens an event file 'wb' under a name built from a 10-digit
@@ -26,6 +28,7 @@ usage: from pilot import tensorboard
 """
 import os
 import stat
+import subprocess
 from typing import Any
 
 from pilot.data import REPO_ROOT
@@ -85,6 +88,29 @@ def _within(real: str, root: str) -> bool:
     return any(os.path.samestat(s, st) for _, s in _existing(real))
 
 
+def _repo_rel(real: str) -> str | None:
+    """The path of the real path `real` relative to REPO_ROOT ("" for the root itself), found by walking up from `real`
+    to the first ancestor that is REPO_ROOT by file identity (os.path.samestat), so a case variant is found too; None
+    when no ancestor is (outside the repo)."""
+    try:
+        top = os.stat(REPO_ROOT)
+    except OSError:
+        return None
+    parts: list[str] = []
+    p = real
+    while True:
+        try:
+            if os.path.samestat(os.stat(p), top):
+                return os.path.join(*reversed(parts)) if parts else ""
+        except OSError:
+            pass
+        parent = os.path.dirname(p)
+        if parent == p:
+            return None
+        parts.append(os.path.basename(p))
+        p = parent
+
+
 def check_logdir(path: str, outputs: dict[str, str | None]) -> str:
     """The absolute real path (symlinks resolved, os.path.realpath) of a --tensorboard DIR; creates nothing.
 
@@ -94,7 +120,12 @@ def check_logdir(path: str, outputs: dict[str, str | None]) -> str:
        and a path through protocol.json are all refused;
     2. is or lies under any non-None `outputs` value ({flag: path}: the run's own output dirs, e.g. --storage and
        --out), judged the same way;
-    3. exists and is not a directory, or lies inside a file (its deepest existing ancestor is not a directory).
+    3. exists and is not a directory, or lies inside a file (its deepest existing ancestor is not a directory);
+    4. lies inside this repo (an ancestor is REPO_ROOT by file identity) where git does not ignore it: `git
+       check-ignore -q --no-index` on DIR/run/events.out.tfevents.probe exits 1. An event file's name carries the host
+       name, so inside the repo it may only land where `git add` never picks it up (tensorboard/ is gitignored). Exit 0
+       accepts; any other exit (no git work tree), a missing git binary or a timeout accepts too: nothing can be
+       committed then.
     The trainers call it on DIR before any split read, fetch, load or ray.init, and on DIR/RUN_ID again once the run
     id is known, so a DIR/RUN_ID that is itself a symlink into a guarded place is refused too.
     """
@@ -112,6 +143,18 @@ def check_logdir(path: str, outputs: dict[str, str | None]) -> str:
         if found[0][0] == real:
             raise SystemExit("--tensorboard %s exists and is not a directory; pass a directory" % path)
         raise SystemExit("--tensorboard %s lies inside the file %s; pass a directory" % (path, found[0][0]))
+    rel = _repo_rel(real)
+    if rel is not None:
+        probe = os.path.join(rel, "run", "events.out.tfevents.probe")
+        try:
+            r = subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", probe], cwd=REPO_ROOT,
+                               capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            r = None                                        # no git binary: nothing can be committed
+        if r is not None and r.returncode == 1:
+            raise SystemExit("--tensorboard %s is inside the repo but not gitignored, so git add would pick up its "
+                             "event files (their names carry the host name); pass tensorboard/ (gitignored) or a dir "
+                             "outside the repo" % path)
     return real
 
 
