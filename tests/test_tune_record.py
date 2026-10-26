@@ -1,12 +1,14 @@
 """tune.py's guards and modes, in-process with ray.init replaced by a refusal: the results/ guard (only the committed
 search writes there), the search file's spec check, the unrestorable experiment dir, the MPS preflight in the segment,
---check, --status and the mode exclusivity.
+--check, --status, the mode exclusivity, and the rendered summary (pilot.tune.render_markdown, --render, the
+results/tune/tune.md guard).
 
 The synthetic snapshot (tests/conftest.py) and a tiny Laya checkpoint (tests/tiny_laya.py); nothing is ever written
 under the repo's results/, data/ or protocol.json.
 """
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -245,10 +247,114 @@ def test_status_mode(tmp_path: Path, capsys: pytest.CaptureFixture[str], no_ray:
 
 @pytest.mark.parametrize("argv", [["--check", "x.json", "--system", "laya"], ["--render", "x.json", "--status"],
                                   ["--check", "x.json", "--status"], ["--status"], []],
-                         ids=["check-system", "render-status", "check-status", "status-no-system", "no-system"])
+                         ids=["check-system", "markdown-status", "check-status", "status-no-system", "no-system"])
 def test_modes_are_exclusive(argv: list[str], capsys: pytest.CaptureFixture[str]) -> None:
     """--check, --status and --render exclude each other; --check and --render take no --system; --status and a
     search need one: each is an argument error (exit 2)."""
     with pytest.raises(SystemExit) as e:
         tune.main(argv)
     assert e.value.code == 2
+
+
+# ---- the rendered summary (results/tune/tune.md) ----
+
+BERTURK_POINT = {"encoder_lr": 5e-06, "head_lr": 3e-05, "batch": 32, "warmup_ratio": 0.06, "weight_decay": 0.0,
+                 "epochs": 10}
+
+
+def _berturk_canonical() -> dict[str, Any]:
+    """A synthetic canonical berturk record: two trials of 10-epoch schedules, both attempted once."""
+    c = _canonical()
+    c["system"] = "berturk"
+    c["search"]["space"] = json.loads(json.dumps(pt.SPACES["berturk"]))
+    c["search"]["scheduler"] = dict(pt.ASHA, max_t=30)
+    c["fixed"] = dict(pt.FIXED["berturk"])
+    c["base"] = {"name": "berturk", "model_sha256": "1" * 64, "config_sha256": "2" * 64}
+    c["versions"] = {"ray": "2.59.0", "torch": "2.14.1", "transformers": "5.19.0", "accelerate": "1.15.0"}
+    c["trials"] = [{"index": 0, "config": dict(BERTURK_POINT), "attempts": 1,
+                    "curve": [_result(e, 1 + e, 2, 2) for e in range(1, 11)]},
+                   {"index": 1, "config": dict(BERTURK_POINT, batch=16, epochs=20), "attempts": 1,
+                    "curve": [_result(1, 1, 3, 3)]}]
+    return c
+
+
+def _records() -> list[dict[str, Any]]:
+    return [pt.build_record(_canonical()), pt.build_record(_berturk_canonical())]
+
+
+def _cell(system: str, key: str, v: Any) -> str:
+    return "%.1e" % v if pt.SPACES[system][key][0] == "loguniform" else str(v)
+
+
+def test_render_markdown_of_two_records() -> None:
+    """The title and the exploratory paragraph, one section per record in order, one table row per trial in index
+    order, the best line equal to the record's best, the restarted-trial count and every NOTES sentence; no path, no
+    timestamp, no uid; deterministic."""
+    records = _records()
+    text = pt.render_markdown(records)
+    assert text == pt.render_markdown(_records()) and text.endswith("\n")
+    head, intro = text.split("\n\n")[:2]
+    assert head == pt.RENDER_TITLE
+    for phrase in ("exploratory", "not a decision input", "does not change the frozen verdict", "protocol.json",
+                   "folds 0-11", "folds 12-13", "never val, test or HOTELS", pt.OBJECTIVE):
+        assert phrase in intro, phrase
+    sections = [text.index("\n## %s\n" % name) for name in ("Laya", "BERTurk")]
+    assert sections == sorted(sections)
+    for r, start, end in zip(records, sections, sections[1:] + [text.index("\n## Notes\n")]):
+        part = text[start:end]
+        rows = [line for line in part.splitlines() if line.startswith("| ") and line[2].isdigit()]
+        assert [int(line.split("|")[1]) for line in rows] == [t["index"] for t in r["trials"]]
+        for line, t in zip(rows, r["trials"]):
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            assert cells[1:1 + len(t["config"])] == [_cell(r["system"], k, v) for k, v in t["config"].items()]
+            assert cells[-2] == "%.2f" % t["curve"][t["best_epoch"] - 1]["dev_theta"]
+            assert cells[-1] == ("yes" if t["asha_stopped"] else "no")
+        b = r["best"]
+        row = r["trials"][b["index"]]["curve"][b["epoch"] - 1]
+        best = ("Highest tuning-dev score: trial %d, epoch %d, dev micro-F1 %.4f (TP %d, FP %d, FN %d); %s"
+                % (b["index"], b["epoch"], b["dev_micro_f1"], row["dev_tp"], row["dev_fp"], row["dev_fn"],
+                   ", ".join("%s %s" % (k, _cell(r["system"], k, v)) for k, v in b["config"].items())))
+        assert best in part.splitlines(), best
+        restarted = sum(1 for t in r["trials"] if t["attempts"] > 1)
+        assert "- Restarted trials (attempts above 1): %d of %d" % (restarted, len(r["trials"])) in part
+    assert "- Restarted trials (attempts above 1): 1 of 2" in text   # the laya record's trial 1
+    for note in pt.NOTES:
+        assert "- %s" % note in text
+    assert "recommend" not in text.lower()
+    assert REPO not in text and "/Users/" not in text and "/tmp" not in text and "bank_" not in text
+    assert not re.search(r"\d{4}-\d{2}-\d{2}|\d{2}:\d{2}:\d{2}", text)
+
+
+def test_render_refuses_an_unchecked_record(tmp_path: Path) -> None:
+    """--render reads each record through read_record: an edited best is refused."""
+    rec = pt.build_record(_canonical())
+    rec["best"] = dict(rec["best"], dev_micro_f1=0.75)
+    path = tmp_path / "laya.json"
+    path.write_bytes(pt.record_bytes(rec))
+    with pytest.raises(SystemExit, match="does not rebuild"):
+        tune.main(["--render", str(path)])
+
+
+def test_render_out(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """--render A B prints the markdown; with --out it writes exactly those bytes atomically. Under results/ the only
+    --out is results/tune/tune.md (render_out_ok), refused before anything is written."""
+    a, b = (pt.write_record(r, str(tmp_path / ("%s.json" % r["system"]))) for r in _records())
+    tune.main(["--render", a, b])
+    printed = capsys.readouterr().out
+    assert printed == pt.render_markdown(_records())
+    out = tmp_path / "tune.md"
+    tune.main(["--render", a, b, "--out", str(out)])
+    assert out.read_text(encoding="utf-8") == printed
+    assert str(out) in capsys.readouterr().out
+    before = _guarded_status()
+    for bad in (os.path.join(REPO, "results", "x.md"), os.path.join(REPO, "results", "tune", "other.md"),
+                os.path.join(REPO, "results", "tune", "laya.json")):
+        with pytest.raises(SystemExit, match="results/tune/tune.md"):
+            tune.main(["--render", a, b, "--out", bad])
+        assert _guarded_status() == before
+    assert not os.path.exists(os.path.join(REPO, "results", "x.md"))
+    assert not os.path.exists(os.path.join(REPO, "results", "tune", "other.md"))
+    assert tune.render_out_ok(os.path.join(REPO, "results", "tune", "tune.md"))
+    assert tune.render_out_ok(str(tmp_path / "x.md"))
+    assert not tune.render_out_ok(os.path.join(REPO, "results", "tune.md"))
+    assert _guarded_status() == before == ""
