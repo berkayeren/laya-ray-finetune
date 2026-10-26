@@ -27,6 +27,10 @@ tests/tb_events.py reader. A Trainer that stops clipping through trainer.acceler
 comes from that call), a DIR under results/, protocol.json or --storage is refused before any load, also with
 --print-run-id, and the flag-off runs write no event file.
 
+fit and its on_epoch hook (tune.py's per-epoch dev scoring): an in-process fit whose hook scores the training texts
+through score.bert_logits (eval, then train mode again) writes a final checkpoint byte-identical to the same fit
+without a hook, and the hook sees every epoch row; main's only training path is its one fit call.
+
 No marker: it runs in `make test` (no Ray, no weights, no data download; seconds), except the one weights-marked
 check of the pinned BERTurk base's head (HF_HUB_OFFLINE=1 reuses the local Hub cache).
 """
@@ -1342,3 +1346,102 @@ def test_tensorboard_refused_before_any_load(inputs: Inputs, tmp_path: Path, no_
 def test_tensorboard_flag_off_writes_no_event_file(two_runs: TwoRuns) -> None:
     root = two_runs[1][0].parent.parent                             # the storage dirs a and b
     assert not list(root.rglob("events.out.tfevents*"))
+
+
+
+def _fit_once(inputs: Inputs, storage: Path, out: Path, on_epoch: Callable[..., None] | None) -> str:
+    """berturk_train.fit of the smoke recipe with --out, in-process, built as main builds it; returns the run dir."""
+    import berturk_train
+    data, manifest, base = inputs
+    a = berturk_train.parser().parse_args([str(x) for x in train_argv(data, manifest, base, storage, "--out", out)])
+    with open(data, "rb") as f:
+        raw = f.read()
+    entry = pilot.data.verify_split_file(data, manifest_path=manifest, roles=("train",), data=raw)
+    rows = pilot.data.parse_jsonl(raw)
+    labels = [berturk.label_vector(r) for r in rows]
+    base_dir = os.path.abspath(base)
+    digests = {f: sha256_file(os.path.join(base_dir, f)) for f in berturk.BASE_FILES}
+    canon = berturk.canonical(berturk_train.identity_values(a, entry, digests, (), None, None))
+    rid = berturk.run_id(canon)
+    return berturk_train.fit(a, rows, labels, base_dir, digests, entry, canon, rid, os.path.join(str(storage), rid),
+                             cpus=1, on_epoch=on_epoch)
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_fit_scoring_hook_leaves_the_weights_unchanged(inputs: Inputs, tmp_path: Path) -> None:
+    """A fit whose on_epoch hook scores every training text through score.bert_logits (eval mode, then train mode
+    again, as tune.py's trial does) writes model.safetensors byte-identical to the same fit without a hook on CPU; the
+    hook runs once per epoch, after the epoch row, with the model in train mode and the record's row."""
+    import torch
+
+    import score
+    data = inputs[0]
+    with open(data, "rb") as f:
+        texts = [r["state"] for r in pilot.data.parse_jsonl(f.read())]
+    seen: list[dict[str, Any]] = []
+
+    def hook(model: Any, tok: Any, epoch: int, row: dict[str, Any]) -> None:
+        assert model.training, "the hook gets the model in train mode"
+        model.eval()
+        try:
+            logits, _ = score.bert_logits(tok, model, texts, MAX_LEN, "cpu")
+        finally:
+            model.train()
+        assert logits.shape == (len(texts), len(INTENTS))
+        seen.append(dict(row, hook_epoch=epoch))
+
+    threads = torch.get_num_threads()
+    try:
+        scored = _fit_once(inputs, tmp_path / "s1", tmp_path / "out1", hook)
+        plain = _fit_once(inputs, tmp_path / "s2", tmp_path / "out2", None)
+    finally:
+        torch.set_num_threads(threads)
+    assert os.path.basename(scored) == os.path.basename(plain)             # the hook is not part of the run id
+    for f in SAME_BYTES:
+        assert _bytes(str(tmp_path / "out1" / f)) == _bytes(str(tmp_path / "out2" / f)), f
+    rows = _json(os.path.join(scored, berturk.DONE))["record"]["epochs"]
+    assert [r.pop("hook_epoch") for r in seen] == [1, 2] == [r["epoch"] for r in rows]
+    assert seen == rows                                                   # the record's own epoch rows
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_main_passes_through_fit(two_runs: TwoRuns, inputs: Inputs, tmp_path: Path,
+                                 monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """main's only training path is one fit call, its last statement, with no on_epoch hook: main names neither
+    transformers nor the Trainer, and a spy fit receives the run dir, run id and canonical config main computed. The
+    two CPU runs of the identical command through main still write byte-identical exports."""
+    import ast
+    import inspect
+
+    import berturk_train
+    rid, (a_dir, b_dir) = two_runs
+    for ea, eb in zip(exports(a_dir), exports(b_dir)):
+        for f in SAME_BYTES:
+            assert _bytes(os.path.join(ea, f)) == _bytes(os.path.join(eb, f)), f
+    tree = ast.parse(inspect.getsource(berturk_train.main))
+    body = tree.body[0].body
+    last = body[-1]
+    assert isinstance(last, ast.Return) and isinstance(last.value, ast.Call) and last.value.func.id == "fit"
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "fit"]
+    assert len(calls) == 1 and "on_epoch" not in {k.arg for k in last.value.keywords}
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {n.attr for n in ast.walk(tree)
+                                                                          if isinstance(n, ast.Attribute)}
+    assert not names & {"transformers", "Trainer", "TrainingArguments", "torch"}, names & {"transformers", "torch"}
+
+    got = []
+
+    def spy(*args: Any, **kw: Any) -> str:
+        got.append((args, kw))
+        return args[8]
+    monkeypatch.setattr(berturk_train, "fit", spy)
+    data, manifest, base = inputs
+    storage = tmp_path / "runs"
+    assert berturk_train.main([str(x) for x in train_argv(data, manifest, base, storage)]) \
+        == os.path.join(str(storage), rid)
+    assert len(got) == 1
+    (a, rows, labels, base_dir, digests, entry, canon, run_id, run_dir), kw = got[0]
+    assert run_id == rid and run_dir == os.path.join(str(storage), rid) and kw.get("on_epoch") is None
+    assert canon == berturk.canonical(berturk_train.identity_values(a, entry, digests, (), None, None))
+    assert len(rows) == len(labels) == _json(os.path.join(str(a_dir), berturk.DONE))["record"]["n_messages"]
+    assert not storage.exists()                                           # the spy trained nothing

@@ -365,6 +365,112 @@ def test_identity_committed_final_seed_run_ids_are_unchanged() -> None:
                                                            "berturk-final_train-s2-44f81396"]
 
 
+def test_identity_tune_key_dropped_when_none_and_named_when_set() -> None:
+    """tune (the tuning partition of a tune.py search trial) is an IDENTITY key left out when None: a plain command's
+    canonical config and run id are as before, and a trial with a partition block gets its own run id."""
+    assert "tune" in berturk.IDENTITY and "tune" in berturk.DROPPED_WHEN_NONE
+    plain = berturk.canonical(_values())
+    assert "tune" not in plain
+    before = {k: v for k, v in _values().items() if k != "tune" and not (k in berturk.DROPPED_WHEN_NONE and v is None)}
+    assert plain == before and berturk.run_id(plain) == berturk.run_id(before)
+    block = {"source": "selection_train", "train_folds": list(range(12)), "dev_folds": [12, 13],
+             "train_uids_sha256": "e" * 64, "dev_uids_sha256": "f" * 64}
+    tuned = berturk.canonical(_values(tune=block))
+    assert tuned["tune"] == block and berturk.run_id(tuned) != berturk.run_id(plain)
+
+
+def _committed_berturk_canonicals() -> list[tuple[str, dict[str, Any], str]]:
+    """(tracked path, canonical config, recorded train run id) of every BERTurk canonical config under results/: each
+    dump sidecar's training block and each postfit record's chosen run."""
+    tracked = subprocess.run(["git", "ls-files", "--", "results"], cwd=REPO_ROOT, capture_output=True, text=True,
+                             check=True).stdout.split()
+    out = []
+    for path in tracked:
+        if not path.endswith(".json"):
+            continue
+        with open(os.path.join(REPO_ROOT, path), encoding="utf-8") as f:
+            doc = json.load(f)
+        if not isinstance(doc, dict):
+            continue
+        tr = doc.get("training")
+        if (isinstance(doc.get("system"), dict) and doc["system"].get("kind") == "berturk" and isinstance(tr, dict)
+                and isinstance(tr.get("canonical"), dict)):
+            out.append((path, tr["canonical"], tr["run_id"]))
+        chosen = doc.get("chosen")
+        if doc.get("system_kind") == "berturk" and isinstance(chosen, dict) and isinstance(chosen.get("canonical"),
+                                                                                             dict):
+            out.append((path, chosen["canonical"], chosen["train_run_id"]))
+    return out
+
+
+def test_committed_berturk_run_ids_are_unchanged_by_the_tune_key() -> None:
+    """Every committed BERTurk canonical config whose keys are all current IDENTITY keys rebuilds unchanged through
+    pilot.berturk.canonical with every DROPPED_WHEN_NONE key (tune included) given as None, so its recorded run id
+    recomputes: the selection runs, the three final seeds and the few-shot runs among them."""
+    found = _committed_berturk_canonicals()
+    checked = {}
+    for path, canon, rid in found:
+        if not set(canon) <= set(berturk.IDENTITY):
+            continue
+        assert "tune" not in canon, path
+        assert berturk.canonical(dict({k: None for k in berturk.DROPPED_WHEN_NONE}, **canon)) == canon, path
+        assert berturk.run_id(canon) == rid, path
+        checked[rid] = canon
+    selection = [r for r, c in checked.items() if c["split"] == "selection_train"
+                 and not {"fewshot", "stop_after_epoch", "postfit_sha256"} & set(c)]
+    finals = sorted(r for r, c in checked.items() if "postfit_sha256" in c)
+    few = [r for r, c in checked.items() if "fewshot" in c]
+    assert "berturk-selection_train-s0-4f36ae05" in selection
+    assert finals == ["berturk-final_train-s0-8a167355", "berturk-final_train-s1-3c44e7ff",
+                      "berturk-final_train-s2-44f81396"]
+    assert len(few) == 9                                    # three masked bases and six continued runs
+
+
+def _parsed(*extra: str) -> Any:
+    """berturk_train.py's parsed default selection command on the pinned base, `extra` appended."""
+    return berturk_train.parser().parse_args(["--data", "data/splits/selection_train.jsonl", *extra])
+
+
+def _identity(a: Any) -> dict[str, Any]:
+    """identity_values of a parsed command with placeholder entry and digests, no mask, postfit or few-shot."""
+    entry = {"path": "data/splits/selection_train.jsonl", "sha256": "a" * 64, "role": "train"}
+    digests = {f: "%x" % i * 64 for i, f in enumerate(berturk.BASE_FILES, start=1)}
+    return berturk_train.identity_values(a, entry, digests, (), None, None)
+
+
+def test_warmup_ratio_and_weight_decay_flags_default_to_the_recipe(capsys: pytest.CaptureFixture[str]) -> None:
+    """--warmup-ratio and --weight-decay default to the recipe's WARMUP_RATIO and WEIGHT_DECAY, so the default
+    command's identity values are the former literal's (the recipe constants); another value is another run id; a
+    ratio outside [0, 1) or a negative weight decay is an argument error."""
+    dests = {act.dest: act for act in berturk_train.parser()._actions}
+    assert dests["warmup_ratio"].default == berturk.WARMUP_RATIO == 0.1
+    assert dests["weight_decay"].default == berturk.WEIGHT_DECAY == 0.01
+    a = _parsed()
+    v = _identity(a)
+    assert list(v) == list(berturk.IDENTITY)
+    digests = {f: "%x" % i * 64 for i, f in enumerate(berturk.BASE_FILES, start=1)}
+    old = {"split": "selection_train", "data_sha256": "a" * 64, "data_role": "train",
+           "base_model_sha256": digests["model.safetensors"], "base_config_sha256": digests["config.json"],
+           "base_files_sha256": None, "transformers_version": v["transformers_version"],
+           "accelerate_version": v["accelerate_version"], "device": "cpu", "epochs": berturk.EPOCHS,
+           "batch": berturk.BATCH, "encoder_lr": berturk.LR, "head_lr": berturk.HEAD_LR,
+           "weight_decay": berturk.WEIGHT_DECAY, "warmup_ratio": berturk.WARMUP_RATIO,
+           "lr_scheduler": berturk.LR_SCHEDULER, "max_grad_norm": berturk.MAX_GRAD_NORM, "optim": berturk.OPTIM,
+           "loss": berturk.LOSS, "max_len": berturk.MAX_LEN, "max_messages": None, "mask_tags": None, "seed": 0,
+           "stop_after_epoch": None, "postfit_sha256": None, "fewshot": None, "tune": None}
+    assert v == old
+    rid = berturk.run_id(berturk.canonical(v))
+    for extra in (("--warmup-ratio", "0.06"), ("--weight-decay", "0.0")):
+        assert berturk.run_id(berturk.canonical(_identity(_parsed(*extra)))) != rid, extra
+    assert berturk.run_id(berturk.canonical(_identity(_parsed("--warmup-ratio", "0.1", "--weight-decay", "0.01")))) \
+        == rid                                              # the recipe's values spelled out: the same run
+    for extra, flag in ((("--warmup-ratio", "1.0"), "--warmup-ratio"), (("--warmup-ratio", "-0.1"), "--warmup-ratio"),
+                        (("--weight-decay", "-0.1"), "--weight-decay")):
+        with pytest.raises(SystemExit) as e:
+            berturk_train.main(["--data", "data/splits/selection_train.jsonl", *extra])
+        assert e.value.code == 2 and flag in capsys.readouterr().err, extra
+
+
 OG_NAMES = ["bert.embeddings.word_embeddings.weight", "bert.embeddings.LayerNorm.weight",
             "bert.encoder.layer.0.attention.self.query.weight", "bert.encoder.layer.0.attention.self.query.bias",
             "classifier.weight", "classifier.bias"]

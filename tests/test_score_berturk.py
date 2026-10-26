@@ -6,7 +6,8 @@ protocol gate, before the checkpoint is hashed), a split holding the committed t
 config.json that does not score INTENTS in order as a multi-label classifier, a checkpoint missing any of the five
 files, a berturk_train.json changed after its identity was taken, an existing dump without --force, and the argument
 errors (--workers other than 0, no --checkpoint, --checkpoint multilingual). check_bert refuses a float16 model, a model on another device and autocast, after the load and after
-every batch. report.binds_every_file accepts a complete BERTurk identity, so a moved checkpoint dir stays the same
+every batch. score.bert_logits (the forward tune.py's search trial shares) gives exactly the dump's logits.
+report.binds_every_file accepts a complete BERTurk identity, so a moved checkpoint dir stays the same
 source.
 
 The tiny export comes from berturk_train.py on CPU (1 epoch), built once per module; each test works on its own copy.
@@ -315,6 +316,37 @@ def test_check_bert_runs_after_the_load_and_every_batch(built: tuple[str, str, s
     run_dir, _ = _score(built, ckpt, tmp_path / "dumps")
     n = dumps.load_dump(run_dir, "val", built[1])[0].shape[0]
     assert n >= 2 and calls == ["cpu"] * (1 + n)
+
+
+def test_bert_logits_is_the_dump_forward(built: tuple[str, str, str], ckpt: str, tmp_path: Path,
+                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """score.bert_logits is the forward score.py's dumps come from: on the same checkpoint and texts its logits equal
+    the val dump's exactly; no text gives a (0, 48) float32 array; check_bert runs after every batch of BATCH."""
+    import math
+    run_dir, _ = _score(built, ckpt, tmp_path / "dumps")
+    dumped, uids, _, _ = dumps.load_dump(run_dir, "val", built[1])
+    with open(os.path.join(built[0], "val.jsonl"), "rb") as f:
+        cases = pilot.data.parse_jsonl(f.read())
+    assert [c["uid"] for c in cases] == list(uids)
+    ident = berturk.identity(ckpt)
+    max_len = berturk.read_record(ckpt, ident)["canonical"]["max_len"]
+    tok, model, _ = score.load_bert(ckpt, ident, "cpu", 1)
+    texts = [c["state"] for c in cases]
+    logits, seconds = score.bert_logits(tok, model, texts, max_len, "cpu")
+    assert logits.dtype == np.float32 and np.array_equal(logits, dumped) and seconds > 0
+    empty, _ = score.bert_logits(tok, model, [], max_len, "cpu")
+    assert empty.shape == (0, len(INTENTS)) and empty.dtype == np.float32
+    calls = []
+    real = score.check_bert
+
+    def counted(model: Any, device: str) -> Any:
+        calls.append(device)
+        return real(model, device)
+    monkeypatch.setattr(score, "check_bert", counted)
+    many = (texts * (score.BATCH + 1))[:score.BATCH + 3]       # two batches: a full one and a partial one
+    out, _ = score.bert_logits(tok, model, many, max_len, "cpu")
+    assert out.shape == (len(many), len(INTENTS))
+    assert calls == ["cpu"] * math.ceil(len(many) / score.BATCH) == ["cpu"] * 2
 
 
 # ---- the sidecar postfit and report read ----
