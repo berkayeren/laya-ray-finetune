@@ -40,6 +40,9 @@ runs.json and fewshot.json may be tracked there (FEWSHOT_PATH_RE), and no string
 (uid_problems): the frozen support-set uid lists live in protocol.json only. A few-shot checkpoint's dumps sit under
 results/dumps/<run_id>/ like every other dump (tests/test_results.py checks them against the runs manifest); none of
 them is a HOTELS dump, so the HOTELS rule still allows HOTELS dumps only in the final seeds' dirs and the zero-shot dir.
+The exploratory search records under results/tune/ (ids, digests, counts and numbers only) get the sidecar, home-path
+and uid checks, only results/tune/(laya|berturk).json and results/tune/tune.md may be tracked there (TUNE_PATH_RE), and
+tune_runs/ (the Ray Tune and Train storage of tune.py) is proven gitignored.
 """
 import io
 import json
@@ -76,6 +79,8 @@ FINAL_PATH_RE = re.compile(r"^results/final/(verdict\.json|memo\.md|reports/[^/]
                            r"confidence/[^/]+-(test\.(json|svg)|hotels_probe\.json))$")
 # the few-shot compute decision record, the few-shot runs manifest and the few-shot results record
 FEWSHOT_PATH_RE = re.compile(r"^results/fewshot/(projection|runs|fewshot)\.json$")
+# the exploratory search records (one tune/1 record per system) and their markdown
+TUNE_PATH_RE = re.compile(r"^results/tune/((laya|berturk)\.json|tune\.md)$")
 # Coarse backstop only: the longest legitimate manifest value is a 64-char sha256, but message text is often far
 # shorter ("Evet.", "cari hesap"), so length cannot detect it. The key-name check and, when the split files exist
 # locally, the exact-text check below are the real guards.
@@ -292,7 +297,10 @@ BERTURK_RUN = "berturk_runs/berturk-selection_train-s0-0123abcd/"
                                  "ckpt-berturk-final-s0/model.safetensors", "ckpt-berturk-final-s0/berturk_train.json",
                                  "tensorboard/laya-selection_train-neg8-s0-0123abcd/"
                                  "events.out.tfevents.1.host.segment-000.pid1",
-                                 "tensorboard/berturk-selection_train-s0-0123abcd/events.out.tfevents.1.host.pid1"])
+                                 "tensorboard/berturk-selection_train-s0-0123abcd/events.out.tfevents.1.host.pid1",
+                                 "tune_runs/laya/trial_00000/result.json", "tune_runs/laya/trial_00000/attempts.json",
+                                 "tune_runs/laya-train/trial_00000-a1/checkpoint_manager_snapshot.json",
+                                 "tune_runs/berturk-search.json", "tune_runs/laya.log"])
 def test_training_outputs_are_gitignored(rel: str) -> None:
     # documented commands write Ray storage and checkpoints into the repo root; `git add .` must not pick them up
     r = subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", rel], cwd=REPO_ROOT)
@@ -310,7 +318,7 @@ def test_tracked_sidecars_and_reports_hold_no_text_or_paths() -> None:
     home, texts = home_dir(), local_split_texts()
     rels = [f for f in tracked("results/dumps/", "results/reports/", "results/compute/", "results/postfit/",
                                "results/superseded/", "results/confidence/", "results/latency/", "results/final/",
-                               "results/fewshot/")
+                               "results/fewshot/", "results/tune/")
             if f.endswith(".json")]
     bad = {rel: p for rel in _existing(rels) for p in [sidecar_problems(os.path.join(REPO_ROOT, rel), home, texts)]
            if p}
@@ -385,6 +393,35 @@ def test_no_uid_strings_under_results_fewshot() -> None:
         if found:
             bad[rel] = found
     assert bad == {}, "tracked results/fewshot/ records hold uid strings: %s" % bad
+
+
+def test_only_tune_files_under_results_tune() -> None:
+    bad = [f for f in tracked("results/tune/") if not TUNE_PATH_RE.match(f)]
+    assert bad == [], "only results/tune/(laya|berturk).json and tune.md may be tracked: %s" % bad
+
+
+@pytest.mark.parametrize("rel,ok", [
+    ("results/tune/laya.json", True),
+    ("results/tune/berturk.json", True),
+    ("results/tune/tune.md", True),
+    ("results/tune/x.json", False),
+    ("results/tune/laya.md", False),
+    ("results/tune/sub/laya.json", False),
+    ("results/tune/laya.json.bak", False),
+])
+def test_tune_path_pin_flags_planted_paths(rel: str, ok: bool) -> None:
+    assert bool(TUNE_PATH_RE.match(rel)) is ok, rel
+
+
+def test_no_uid_strings_under_results_tune() -> None:
+    # a search record names partitions by digest and count, never by uid
+    bad = {}
+    for rel in _existing(f for f in tracked("results/tune/") if f.endswith(".json")):
+        with open(os.path.join(REPO_ROOT, rel), encoding="utf-8") as f:
+            found = uid_problems(json.load(f))
+        if found:
+            bad[rel] = found
+    assert bad == {}, "tracked results/tune/ records hold uid strings: %s" % bad
 
 
 @pytest.mark.parametrize("obj,n", [
