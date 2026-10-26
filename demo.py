@@ -31,7 +31,8 @@ manifest's (latency.bind_seed, before any load); --device mps without MPS; a ser
 or the record's chosen T beyond 1e-12 (latency.check_temperature, pilot.demo.check_record_temperature). Per request:
 400 (not a JSON object {"text": str}, empty, longer than 500 characters), 413 (a body over 8192 bytes), 415 (not
 application/json), 503 (the chat is loading or refused), 500 (the classification failed: the exception type only,
-never the text). Before the server starts: a missing ui/dist/index.html (build the UI first).
+never the text; a refusal of score.check_agent / check_bert after a forward answers 500 with its line and sets the chat
+refused, so every later message answers 503 and /api/status reads refused). Before the server starts: a missing ui/dist/index.html (build the UI first).
 
 usage: python demo.py [--device mps|cpu] [--checkpoint-root DIR] [--port 8765] [--threads 4]
        make demo                                            # builds the UI, then runs python demo.py --device mps
@@ -56,6 +57,8 @@ from pilot.data import REPO_ROOT
 UI_DIST = os.path.join(REPO_ROOT, "ui", "dist")
 TELEMETRY = {"tracing": False, "metrics": False, "logs": False, "operation_spans": False, "auto_configure": False}
 CLASSIFY_FAILED = "classification failed (%s); try again; if it repeats, restart `make demo`"
+# a refusal raised inside a forward (score.check_agent / check_bert: the model moved or was re-cast) ends the chat
+CHAT_BROKEN = "%s; restart `make demo`"
 LOAD_FAILED = "loading the final seeds failed (%s); restart `make demo`"
 TRAINING_FAILED = "reading the %s run records failed (%s); restore the final seeds"
 UNKNOWN_DIAGRAM = "unknown diagram"
@@ -280,8 +283,10 @@ def create_app(state: dict[str, Any], executor: ThreadPoolExecutor, views: dict[
             return error(400, str(e.code))
         try:
             return await asyncio.wrap_future(executor.submit(classify, state["systems"], text))
-        except SystemExit as e:
-            return error(500, str(e.code).replace("\n", " "))
+        except SystemExit as e:                         # a device or dtype check failed after a forward: fatal
+            state["message"] = CHAT_BROKEN % _line(e)
+            state["chat"] = pd.REFUSED
+            return error(500, state["message"])
         except Exception as e:
             return error(500, CLASSIFY_FAILED % type(e).__name__)
 

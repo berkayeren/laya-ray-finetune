@@ -15,7 +15,8 @@
 //                too and is retried;
 //   refused      "Chat unavailable", the server's one line verbatim in mono, and a link to the dashboard;
 //   unreachable  the server-unreachable copy, until the server answers again;
-//   ready        the chat.
+//   ready        the chat. A failed request re-reads /api/status once, so a chat the server refused after a forward
+//                (a device or dtype check) shows "Chat unavailable" with its line instead of staying open.
 // A pending turn shows the loading reply card (two column skeletons); a failed request keeps the user bubble and shows
 // the request-error copy (or the unreachable copy when the server did not answer) in place of the reply card. The
 // backend answers with both systems or neither, so a reply card never shows one column alone. The thread is a
@@ -76,9 +77,11 @@ function toMode(s: Status): ChatMode {
 }
 
 // GET /api/status, polled every second while it reads loading; a failed poll (unanswered: unreachable, an HTTP
-// error: loading) is retried after RETRY_MS, doubling up to RETRY_MAX_MS, and the first answer ends the backoff
-function useChatMode(): ChatMode {
+// error: loading) is retried after RETRY_MS, doubling up to RETRY_MAX_MS, and the first answer ends the backoff.
+// recheck() polls once more now (after a failed request), cancelling any scheduled poll.
+function useChatMode(): [ChatMode, () => void] {
   const [mode, setMode] = useState<ChatMode>({ kind: "loading" });
+  const again = useRef<() => void>(() => undefined);
   useEffect(() => {
     let cancelled = false;
     let timer: number | undefined;
@@ -101,15 +104,24 @@ function useChatMode(): ChatMode {
         timer = window.setTimeout(() => void poll(), POLL_MS);
       }
     };
+    again.current = () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+      void poll();
+    };
     void poll();
     return () => {
       cancelled = true;
+      again.current = () => undefined;
       if (timer !== undefined) {
         window.clearTimeout(timer);
       }
     };
   }, []);
-  return mode;
+  const recheck = useCallback((): void => again.current(), []);
+  return [mode, recheck];
 }
 
 function useIntents(): Intents | null {
@@ -192,7 +204,7 @@ function Unavailable({ message }: { message: string }) {
 }
 
 export default function ChatView() {
-  const mode = useChatMode();
+  const [mode, recheck] = useChatMode();
   const [turns, setTurns] = useState<Turn[]>([]);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -251,8 +263,11 @@ export default function ChatView() {
           return { id, text: message, state: "error", error: r.status === null ? null : r.error };
         }),
       );
+      if (!r.ok) {
+        recheck(); // the server may have refused the chat (a 500 from a device or dtype check)
+      }
     },
-    [ready],
+    [ready, recheck],
   );
 
   const clear = useCallback((): void => {

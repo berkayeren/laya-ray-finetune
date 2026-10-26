@@ -652,6 +652,30 @@ def test_classification_failure_names_only_the_type(loaded: tuple[dict[str, Any]
             assert c.get("/api/status").json()["chat"] == "ready"
 
 
+def test_a_refusal_inside_a_forward_refuses_the_chat(loaded: tuple[dict[str, Any], ThreadPoolExecutor, Any]) -> None:
+    """A forward whose device or dtype check raises SystemExit (the model moved or was re-cast mid-forward) answers
+    500 with its line and `restart make demo`, then the chat reads refused with that line and every later message
+    answers 503 with it: the refused model never runs again."""
+    state, _, _ = loaded
+    calls = []
+
+    def moved(text: str) -> Any:
+        calls.append(1)
+        raise SystemExit("the model left mps for cpu\nmid-forward; check --device")
+    systems = {k: dict(v, seeds=[dict(s, forward=moved) for s in v["seeds"]]) for k, v in state["systems"].items()}
+    broken = dict(state, systems=systems)
+    line = demo.CHAT_BROKEN % "the model left mps for cpu mid-forward; check --device"
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        with client(demo.create_app(broken, ex, pd.build_views(REPO))) as c:
+            r = c.post("/api/classify", json={"text": TEXT})
+            assert (r.status_code, r.json()) == (500, {"error": line}) and TEXT not in r.text
+            assert c.get("/api/status").json() == {"chat": "refused", "message": line, "device": state["device"],
+                                                   "training": "ready"}
+            r = c.post("/api/classify", json={"text": TEXT})
+            assert (r.status_code, r.json()) == (503, {"error": line})
+    assert len(calls) == 1 and state["chat"] == pd.READY      # the module's own state is untouched
+
+
 def test_views_route(loaded: tuple[dict[str, Any], ThreadPoolExecutor, Any]) -> None:
     """GET /api/intents serves the 48 stored questions in INTENTS order and the confidence rule; an unknown view is
     404; a refused view is 503 with its one line and source."""
