@@ -480,3 +480,19 @@ def test_view_error_names_only_the_file_the_server_names(tmp_path: Any, monkeypa
     assert failed["error"] == pd.VIEW_FAILED % ("intents", "KeyError") and failed["source"] == "intents.py"
     shown = view_error_text(failed["error"])
     assert PATH_RE.findall(shown) == [] and shown.count("restart") == 1, shown
+
+
+def test_status_type_declares_every_key_the_server_sends() -> None:
+    """11-REVIEW IN-02: ui/src/chat/types.ts Status declares exactly the keys of demo.py's GET /api/status (chat,
+    message, device, training), and no other ui/src file declares a type of its own for that endpoint."""
+    from starlette.testclient import TestClient
+    m = re.search(r"^export interface Status \{(.*?)^\}", read_ui("chat/types.ts"), re.S | re.M)
+    assert m is not None, "ui/src/chat/types.ts has no Status interface"
+    declared = re.findall(r"^\s*(\w+):", m.group(1), re.M)
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        with TestClient(demo.create_app(demo.new_state("cpu"), ex, {}), base_url="http://127.0.0.1") as c:
+            sent = list(c.get("/api/status").json())
+    assert sorted(declared) == sorted(sent), "Status declares %s, the server sends %s" % (declared, sent)
+    others = [rel for rel in ui_sources() if re.search(r'getJSON<(?!Status>)\w+>\("/api/status"\)',
+                                                       read_ui(os.path.relpath(rel, "ui/src")))]
+    assert others == [], "GET /api/status read with another type than Status: %s" % others

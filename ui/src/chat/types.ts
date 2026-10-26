@@ -5,12 +5,16 @@
 // Every array of length 48 in an Answer (probabilities, theta, own_theta) is in INTENTS order, the order of
 // Intents.tags; ranked and predicted are tag names in the server's order.
 
+import type { TrainingReadiness } from "../dashboard/types";
+
 export type ChatState = "loading" | "ready" | "refused";
 
+// every key demo.py's GET /api/status sends: the chat reads chat and message, the training view reads training
 export interface Status {
   chat: ChatState;
   message: string | null;
   device: string;
+  training: TrainingReadiness;
 }
 
 export interface IntentTag {

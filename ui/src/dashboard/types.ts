@@ -146,12 +146,8 @@ export interface SelectionData {
 // The rows come only from each final seed's checkpoint run record (Ray Train for Laya, the HF Trainer for BERTurk);
 // a system whose checkpoints are missing or changed reads unavailable with the server's one line (D-09).
 
+// the training key of GET /api/status (chat/types.ts Status, the one type of that endpoint)
 export type TrainingReadiness = "loading" | "ready";
-
-// the one key of GET /api/status this view reads
-export interface TrainingStatus {
-  training: TrainingReadiness;
-}
 
 // one epoch row: {field: value} in the system's fields order; a value may be null (peak_driver_bytes off MPS)
 export type EpochValue = number | string | boolean | null;

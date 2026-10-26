@@ -19,7 +19,8 @@ import { formatGiB, formatMiB, formatSeconds } from "../format";
 import { getJSON } from "../http";
 import { COLORS, Card, DataTable, SegmentedControl, ShowTable, SourceCaption, Tile, ViewGate } from "./common";
 import type { ViewState } from "./common";
-import type { EpochRow, EpochValue, TrainingData, TrainingOk, TrainingReady, TrainingStatus, TrainingSystem } from "./types";
+import type { Status } from "../chat/types";
+import type { EpochRow, EpochValue, TrainingData, TrainingOk, TrainingReady, TrainingSystem } from "./types";
 import css from "./dashboard.module.css";
 
 const POLL_MS = 1000;
@@ -64,7 +65,7 @@ function useTraining(): ViewState<TrainingReady> {
       }
     };
     const pollStatus = async (): Promise<void> => {
-      const r = await getJSON<TrainingStatus>("/api/status");
+      const r = await getJSON<Status>("/api/status");
       if (cancelled) {
         return;
       }
