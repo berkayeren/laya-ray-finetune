@@ -1249,22 +1249,33 @@ def test_tensorboard_refuses_a_trainer_that_skips_the_accelerator_clip(inputs: I
                                                                        capsys: pytest.CaptureFixture[str],
                                                                        keep_threads: None) -> None:
     """The pre-clip norm comes from trainer.accelerator.clip_grad_norm_: a Trainer that clips without it is refused at
-    the first step, and the event file is still closed (it reads back, crc-checked) with no train/ scalar in it."""
+    the first step, and the event file is still closed (the writer's close ran; the file reads back, crc-checked) with
+    no train/ scalar in it."""
     import berturk_train
     import torch
     import transformers
+    from pilot import tensorboard
     from tb_events import event_files, read_events
     data, manifest, base = inputs
+    opened = []
+    open_writer = tensorboard.open_writer
+
+    def noting_open_writer(logdir: str, purge_step: int, suffix: str) -> Any:
+        """pilot.tensorboard.open_writer, noting the writer it returns."""
+        opened.append(open_writer(logdir, purge_step, suffix))
+        return opened[-1]
 
     def clip_without_the_accelerator(self: Any, model: Any) -> Any:
         """The Trainer's clip, bypassing trainer.accelerator."""
         return torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
     monkeypatch.setattr(transformers.Trainer, "_clip_grad_norm", clip_without_the_accelerator)
+    monkeypatch.setattr(tensorboard, "open_writer", noting_open_writer)
     argv = [str(x) for x in train_argv(data, manifest, base, tmp_path / "s", "--tensorboard", tmp_path / "tb")]
     berturk_train.main(argv + ["--print-run-id"])
     rid = capsys.readouterr().out.strip()
-    with pytest.raises(SystemExit, match="check the transformers version"):
+    with pytest.raises(SystemExit, match="clip_grad_norm_ was not called.*check the transformers version"):
         berturk_train.main(argv)
+    assert len(opened) == 1 and opened[0].all_writers is None      # SummaryWriter.close() ran
     assert len(event_files(str(tmp_path / "tb" / rid))) == 1
     ev = read_events(str(tmp_path / "tb" / rid))
     assert not [kind for _, _, kind, _ in ev if kind.startswith("train/")]

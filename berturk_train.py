@@ -88,6 +88,18 @@ a uid: a base {protocol_sha256, stage base, tags, unmasked_held_out_labels (all 
 stage continued, draw, k, digest, tags, support_rows, replay_rows, new_tag_labels (one label per support row),
 replay_unmasked_held_out_labels (0), base {run_id, canonical}}; None for every other run.
 
+TensorBoard (--tensorboard DIR, off by default): a second TrainerCallback writes live scalars (pilot.tensorboard,
+through the hash-locked tensorboardX) into DIR/RUN_ID/. Per optimizer step, at the Trainer's global step: the batch
+loss, the encoder and head LRs (read in on_optimizer_step, before the scheduler steps, so the LRs the step used), the
+pre-clip gradient norm (noted from trainer.accelerator.clip_grad_norm_, which is wrapped only when the flag is on and
+returns accelerate's value unchanged; a step without it refuses, naming the transformers version), messages per second,
+and the device, MPS driver, RSS and swap memory. Per epoch, at the step that closes it: the loss, the training and
+wall-clock seconds (the wall clock includes the export write), the peak memory and the swap delta. One event file per
+run (suffix .pidN), opened with purge step 1, so a from-scratch rerun into the same dir hides the old file's steps; it
+is closed in a finally block, also after a refusal. The flag is NOT_IDENTITY and never recorded (no run id, export
+byte, berturk_train.json or done.json changes), and the TrainingArguments are unchanged. DIR is refused under results/,
+data/, ui/, protocol.json, --storage or --out, before any load, fetch or run dir, also with --print-run-id.
+
 Run identity: the run id is pilot.berturk.run_id of the canonical config (pilot.berturk.IDENTITY: split, data and base
 digests, transformers and accelerate versions, device, every hyperparameter and the seed; never a path or a resource),
 e.g. berturk-selection_train-s0-1a2b3c4d. --print-run-id prints it after the split and base checks and exits without
@@ -104,6 +116,8 @@ PYTORCH_ENABLE_MPS_FALLBACK once, at import).
 usage:
   python berturk_train.py --data data/splits/selection_train.jsonl --device mps        # the selection run (30 epochs)
   python berturk_train.py --data data/splits/selection_train.jsonl --print-run-id      # its run id, nothing created
+  python berturk_train.py --data data/splits/selection_train.jsonl --device mps --tensorboard tensorboard
+                                                    # the same run, live scalars in tensorboard/RUN_ID/
   python berturk_train.py --data ... --base DIR --device cpu --epochs 2 --batch 4 --max-len 32 --storage DIR  # smoke
   python berturk_train.py --data data/splits/final_train.jsonl --device mps --stop-after-epoch K --seed S \
       --postfit results/postfit/berturk.json --reference results/postfit/berturk-reference.json --no-export-epochs \
@@ -525,10 +539,11 @@ def main(argv: list[str] | None = None) -> str | None:
 
     if a.device == "mps":
         os.environ.update(spike.spike_env("0", cpus))       # strict MPS before torch is imported
+    import psutil
     import torch
     import transformers
 
-    from ray_train import code_state, memory_sampler, require_param_device
+    from ray_train import code_state, memory_now, memory_sampler, require_param_device
 
     if a.device == "mps" and not torch.backends.mps.is_available():
         raise SystemExit("--device mps, but MPS is not available here; use --device cpu")
@@ -660,29 +675,50 @@ def main(argv: list[str] | None = None) -> str | None:
     callbacks = [cb]
     tb = None
     if tb_dir is not None:                                  # the TensorBoard callback exists with the flag only
+        proc = psutil.Process()
+        names = [g["group"] for g in groups]                # pilot.berturk.optimizer_groups order: encoder, then head
+        i_enc, i_head = names.index("encoder"), names.index("head")
 
         def tb_epoch_begin(args: Any, state: Any, control: Any, **kw: Any) -> None:
             """Start the epoch's first timing window."""
             tbs["t"] = time.perf_counter()
 
+        def tb_optimizer_step(args: Any, state: Any, control: Any, optimizer: Any = None, **kw: Any) -> None:
+            """Note the LRs of every param group: called after optimizer.step() and before the scheduler steps, so
+            they are the LRs this step used (AcceleratedOptimizer delegates param_groups)."""
+            tbs["lrs"] = [g["lr"] for g in optimizer.param_groups]
+
         def tb_step_end(args: Any, state: Any, control: Any, **kw: Any) -> None:
-            """Write the step's scalars at state.global_step (1-based, already incremented); SystemExit when the step's
-            pre-clip gradient norm was not noted (the Trainer no longer clips through trainer.accelerator)."""
+            """Write the step's scalars at state.global_step (1-based, already incremented): the batch loss, the
+            encoder and head LRs, the pre-clip gradient norm, messages per second since the last write and the memory
+            gauges; SystemExit when the step's pre-clip norm or LRs were not noted (the Trainer no longer clips
+            through trainer.accelerator, or no longer calls on_optimizer_step)."""
             if tbs["grad_norm"] is None:
                 raise SystemExit("--tensorboard: the Trainer's pre-clip gradient norm was not seen at step %d "
                                  "(trainer.accelerator.clip_grad_norm_ was not called); check the transformers "
                                  "version" % state.global_step)
-            tensorboard.write(tb, state.global_step, {"train/loss": tbs["loss"],
-                                                      "train/grad_norm": float(tbs["grad_norm"])})
-            tbs["grad_norm"] = None
+            if tbs["lrs"] is None:
+                raise SystemExit("--tensorboard: the step's learning rates were not seen at step %d (the Trainer did "
+                                 "not call on_optimizer_step); check the transformers version" % state.global_step)
+            now = time.perf_counter()
+            tensorboard.write(tb, state.global_step, tensorboard.step_scalars(
+                tbs["loss"], tbs["lrs"][i_enc], tbs["lrs"][i_head], float(tbs["grad_norm"]), None,
+                "train/messages_per_s", tbs["n"], now - tbs["t"],
+                tensorboard.memory_scalars(**memory_now(device, proc))))
+            tbs["grad_norm"] = tbs["lrs"] = None
             tbs["t"] = time.perf_counter()
 
         def tb_epoch_end(args: Any, state: Any, control: Any, **kw: Any) -> None:
-            """Write the epoch's scalars at the step that closes it (cb ran first, so its epoch row exists)."""
-            tensorboard.write(tb, state.global_step, {"epoch/loss": record["epochs"][-1]["loss"]})
+            """Write the epoch's scalars at the step that closes it. cb ran first, so its epoch row exists and the
+            wall clock includes the export write; BERTurk has no separate save time (epoch/save_s None)."""
+            row = record["epochs"][-1]
+            tensorboard.write(tb, state.global_step, tensorboard.epoch_scalars(
+                row["loss"], row["train_s"], time.perf_counter() - ep["t0"], None, row["peak_total_bytes"],
+                row["swap_delta_bytes"]))
 
         tbcb = transformers.TrainerCallback()               # a second instance with assigned hooks, after cb
-        tbcb.on_epoch_begin, tbcb.on_step_end, tbcb.on_epoch_end = tb_epoch_begin, tb_step_end, tb_epoch_end
+        tbcb.on_epoch_begin, tbcb.on_optimizer_step = tb_epoch_begin, tb_optimizer_step
+        tbcb.on_step_end, tbcb.on_epoch_end = tb_step_end, tb_epoch_end
         callbacks = [cb, tbcb]
     os.makedirs(run_dir)
     trainer = transformers.Trainer(model=model, args=args, train_dataset=data,
