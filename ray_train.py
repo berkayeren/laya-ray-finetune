@@ -112,7 +112,7 @@ Per optimizer step: the loss (the step's mean micro-batch loss), the encoder and
 steps), the RLCD sigma, the pre-clip gradient norm (the value clip_grad_norm_ already returns), items per second over
 all ranks, and device, MPS driver, RSS and swap memory. Per epoch, at the step that closes the epoch: the loss, the
 training, wall-clock and save seconds, the peak memory and the swap delta. The global step is the 1-based
-optimizer-step count. Each run segment writes its own event file (.segment-NNN) with a purge marker at the first step
+optimizer-step count. Each run segment writes its own event file (.segment-NNN.pidN) with a purge marker at the first step
 after the resumed epoch, so a killed partial epoch's steps are hidden and every completed epoch's steps survive: an
 epoch's steps are flushed to disk (fsync) before its checkpoint is reported, and its epoch scalars right after their
 write, so a SIGKILL, which runs no finally block, loses at most the epoch scalars of an epoch killed between its
@@ -682,14 +682,15 @@ def tb_writer(c: dict[str, Any], rank: int, start_epoch: int, stop: int, per_epo
     """The TensorBoard writer of this run segment, or None: rank 0 only, with --tensorboard set (c["tensorboard"], the
     absolute DIR/RUN_ID) and an epoch left to train (a rerun that only writes the final checkpoint opens none).
 
-    One event file per run segment (pilot.tensorboard.segment_suffix(segment)). Its purge step is the first optimizer
+    One event file per run segment (pilot.tensorboard.segment_suffix(segment, pid)). Its purge step is the first optimizer
     step after the resumed epoch, start_epoch * per_epoch + 1, so TensorBoard hides the stale steps a killed partial
     epoch logged, while every completed epoch's steps (at or below start_epoch * per_epoch) survive: the loop flushes
     them before the epoch's checkpoint is reported, since a SIGKILL runs no finally block.
     """
     if rank != 0 or not c.get("tensorboard") or start_epoch >= stop:
         return None
-    return tensorboard.open_writer(c["tensorboard"], start_epoch * per_epoch + 1, tensorboard.segment_suffix(segment))
+    return tensorboard.open_writer(c["tensorboard"], start_epoch * per_epoch + 1,
+                                   tensorboard.segment_suffix(segment, os.getpid()))
 
 
 def train_loop_per_worker(c: dict[str, Any]) -> None:

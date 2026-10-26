@@ -96,14 +96,14 @@ def test_write_skips_none_in_sorted_order() -> None:
 
 def test_open_writer_round_trip(tmp_path: Path) -> None:
     logdir = str(tmp_path / "tb" / "rid")
-    w = ptb.open_writer(logdir, 3, ptb.segment_suffix(0))
+    w = ptb.open_writer(logdir, 3, ptb.segment_suffix(0, 1))
     ptb.write(w, 3, {"train/loss": 0.5})
     ptb.write(w, 4, {"train/loss": 0.25, "epoch/loss": 0.375})
     ptb.close(w)
     assert w["open"] is False
     ptb.close(w)                                            # a second close is a no-op
     files = tb_events.event_files(logdir)
-    assert len(files) == 1 and files[0].endswith(".segment-000"), files
+    assert len(files) == 1 and files[0].endswith(".segment-000.pid1"), files
     events = tb_events.read_events(logdir)
     assert {kind for _, _, kind, _ in events} == {"file_version", "session_log", "train/loss", "epoch/loss"}
     assert [(step, value) for _, step, kind, value in events if kind == "session_log"] == [(3, 1)]
@@ -118,7 +118,7 @@ def test_open_writer_refuses_an_unwritable_dir(tmp_path: Path) -> None:
     os.chmod(parent, 0o555)
     try:
         with pytest.raises(SystemExit) as e:
-            ptb.open_writer(str(parent / "tb"), 1, ptb.segment_suffix(0))
+            ptb.open_writer(str(parent / "tb"), 1, ptb.segment_suffix(0, 1))
     finally:
         os.chmod(parent, 0o755)
     msg: Any = e.value.code
@@ -148,7 +148,7 @@ class FailingFile:
 def _failing_writer(logdir: str) -> dict[str, Any]:
     """A real open_writer writer whose event file then fails every write and flush with ENOSPC. Pinned to
     tensorboardX 2.6.5: EventsWriter._py_recordio_writer is its RecordWriter, RecordWriter._writer its file."""
-    w = ptb.open_writer(logdir, 1, ptb.segment_suffix(0))
+    w = ptb.open_writer(logdir, 1, ptb.segment_suffix(0, 1))
     rec = w["events"]._py_recordio_writer
     rec._writer = FailingFile(rec._writer)
     return w
@@ -190,7 +190,7 @@ def test_close_never_replaces_the_runs_own_error(tmp_path: Path, capsys: pytest.
 KILLED_CHILD = """
 import os, signal, sys
 from pilot import tensorboard as ptb
-w = ptb.open_writer(sys.argv[1], 1, ptb.segment_suffix(0))
+w = ptb.open_writer(sys.argv[1], 1, ptb.segment_suffix(0, 1))
 for step in (1, 2, 3):
     ptb.write(w, step, {"train/loss": float(step)})
 ptb.flush(w)
@@ -213,7 +213,7 @@ def test_flush_survives_a_sigkill(tmp_path: Path) -> None:
 
 
 def test_flush_and_close_of_a_closed_writer_do_nothing(tmp_path: Path) -> None:
-    w = ptb.open_writer(str(tmp_path / "rid"), 1, ptb.segment_suffix(0))
+    w = ptb.open_writer(str(tmp_path / "rid"), 1, ptb.segment_suffix(0, 1))
     ptb.close(w)
     ptb.flush(w)
     ptb.write(w, 2, {"train/loss": 1.0})
@@ -375,8 +375,8 @@ def _one_writer(logdir: str, step: int, suffix: str) -> None:
 
 def test_distinct_suffixes_keep_both_writers(tmp_path: Path) -> None:
     logdir = str(tmp_path / "rid")
-    _one_writer(logdir, 1, ptb.segment_suffix(0))
-    _one_writer(logdir, 2, ptb.segment_suffix(1))
+    _one_writer(logdir, 1, ptb.segment_suffix(0, 1))
+    _one_writer(logdir, 2, ptb.segment_suffix(1, 1))
     files = tb_events.event_files(logdir)
     assert len(files) == 2, files
     assert tb_events.scalars(tb_events.read_events(logdir), "train/loss") == {1: 1.0, 2: 2.0}

@@ -292,7 +292,7 @@ def test_tensorboard_never_enters_a_checkpoint_config(prepared: Prepared, full_r
 def test_tensorboard_events_hold_the_loss_per_step_and_epoch(tb_run: TbRun) -> None:
     rid, out, root = tb_run
     files = tb_events.event_files(str(root / rid))
-    assert len(files) == 1 and files[0].endswith(".segment-000"), files
+    assert len(files) == 1 and re.search(r"\.segment-000\.pid\d+$", files[0]), files
     events = tb_events.read_events(str(root / rid))
     rows = runs.read_record(str(out))["epochs"]
     total = sum(row["optimizer_steps"] for row in rows)
@@ -371,11 +371,10 @@ def test_tensorboard_resume_writes_one_file_per_segment(prepared: Prepared, full
     u1, total = rows[0]["optimizer_steps"], sum(row["optimizer_steps"] for row in rows)
     files = tb_events.event_files(str(d / "tb-r" / rid))
     assert len(files) == 2, files
-    assert files[0].endswith(".segment-000") or files[1].endswith(".segment-000"), files
-    assert files[0].endswith(".segment-001") or files[1].endswith(".segment-001"), files
+    assert sorted(re.search(r"\.segment-(\d{3})\.pid\d+$", f).group(1) for f in files) == ["000", "001"], files
     events = tb_events.read_events(str(d / "tb-r" / rid))
     for suffix, first, last in ((".segment-000", 1, u1), (".segment-001", u1 + 1, total)):
-        seg = [e for e in events if e[0].endswith(suffix)]
+        seg = [e for e in events if suffix + ".pid" in e[0]]
         assert [(step, value) for _, step, kind, value in seg if kind == "session_log"] == [(first, 1)], suffix
         assert sorted(tb_events.scalars(seg, "train/loss")) == list(range(first, last + 1)), suffix
         assert sorted(tb_events.scalars(seg, "epoch/loss")) == [last], suffix

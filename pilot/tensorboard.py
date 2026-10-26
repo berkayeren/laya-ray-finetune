@@ -14,7 +14,9 @@ Design notes:
 - nothing here imports tensorboardX or torch at import: tensorboardX imports torch, and berturk_train.py must set the
   MPS env before torch loads (torch reads PYTORCH_ENABLE_MPS_FALLBACK once, at import). open_writer imports it.
 - every writer gets a unique filename_suffix: tensorboardX opens an event file 'wb' under a name built from a 10-digit
-  second and the hostname, so two writers opened in one second in one dir would truncate each other's events.
+  second and the hostname, so two writers opened in one second in one dir would truncate each other's events. Both
+  suffixes carry the process id: a Laya segment killed before its first checkpoint and its rerun share a segment
+  index, and only the pid tells their files apart within one second.
 - the purge step hides the steps a killed partial epoch logged: a writer opened with purge_step P writes a session_log
   START at P, and TensorBoard hides every earlier file's event at a step >= P.
 - the writer is synchronous: tensorboardX's EventsWriter (the file writer under its SummaryWriter), called on the
@@ -31,7 +33,7 @@ Design notes:
 
 usage: from pilot import tensorboard
        root = tensorboard.check_logdir(a.tensorboard, {"--storage": a.storage, "--out": a.out})   # before any load
-       tb = tensorboard.open_writer(os.path.join(root, run_id), purge_step, tensorboard.segment_suffix(0))
+       tb = tensorboard.open_writer(os.path.join(root, run_id), purge_step, tensorboard.segment_suffix(0, os.getpid()))
        tensorboard.write(tb, step, {"train/loss": 0.25})
        tensorboard.close(tb)
 """
@@ -167,9 +169,11 @@ def check_logdir(path: str, outputs: dict[str, str | None]) -> str:
     return real
 
 
-def segment_suffix(segment: int) -> str:
-    """The event-file suffix of a ray_train.py run segment (one file per segment: a rerun never truncates the last)."""
-    return ".segment-%03d" % segment
+def segment_suffix(segment: int, pid: int) -> str:
+    """The event-file suffix of a ray_train.py run segment written by process pid, ".segment-NNN.pidN": one file per
+    segment, and a rerun never truncates the last, also when a segment killed before its first checkpoint left a file
+    under the same segment index (the train state, so the index, is that of the last checkpoint)."""
+    return ".segment-%03d.pid%d" % (segment, pid)
 
 
 def pid_suffix(pid: int) -> str:
