@@ -1,9 +1,11 @@
 """Offline CPU searches through tune.py on the tiny models and the synthetic snapshot (in `make test`, ray marker).
 
-The synthetic snapshot (tests/conftest.py) gains 10 rows in each of folds 0-11, so the tiny Laya model learns on
-tuning-train while tuning-dev stays the two fold-12 and fold-13 rows. Three pinned search points (the hidden --points):
-a strong neg-8 config, a weak one at the space's lowest LRs and a strong 6-epoch config. On CPU the runs are
-bit-reproducible, so ASHA stops the weak trial at a rung every time, on a real score gap.
+The synthetic snapshot (tests/conftest.py) gains 10 rows in each of folds 0-11, so the tiny models learn on
+tuning-train while tuning-dev stays the two fold-12 and fold-13 rows. Laya: three pinned search points (the hidden
+--points): a strong neg-8 config, a weak one at the space's lowest LRs and a strong 6-epoch config. BERTurk (the tiny
+BERT base of tests/tiny_berturk.py): three 10-epoch points, a strong one, a weak one at the space's lowest LRs and a
+strong batch-32 one; each trial is one process running berturk_train.fit. On CPU the runs are bit-reproducible, so ASHA
+stops the weak trial at a rung every time, on a real score gap.
 """
 import glob
 import json
@@ -18,6 +20,7 @@ import pytest
 import pilot.data
 from conftest import add_raw_row, make_raw
 from pilot import tune as pt
+from tiny_berturk import tiny_base
 from tiny_laya import tiny_checkpoint
 
 pytestmark = pytest.mark.ray
@@ -27,6 +30,12 @@ TIMEOUT = 900
 LAYA_POINTS = [{"encoder_lr": 0.0001, "head_lr": 0.001, "neg": 8, "epochs": 4},
                {"encoder_lr": 5e-06, "head_lr": 3e-05, "neg": 4, "epochs": 4},
                {"encoder_lr": 0.0001, "head_lr": 0.001, "neg": 8, "epochs": 6}]
+BERTURK_POINTS = [{"encoder_lr": 0.0001, "head_lr": 0.001, "batch": 16, "warmup_ratio": 0.06, "weight_decay": 0.0,
+                   "epochs": 10},
+                  {"encoder_lr": 5e-06, "head_lr": 3e-05, "batch": 32, "warmup_ratio": 0.1, "weight_decay": 0.01,
+                   "epochs": 10},
+                  {"encoder_lr": 0.0001, "head_lr": 0.001, "batch": 32, "warmup_ratio": 0.1, "weight_decay": 0.0,
+                   "epochs": 10}]
 GUARDED = ("results", "data", "protocol.json")
 
 
@@ -45,9 +54,13 @@ def _guarded_status() -> str:
                           capture_output=True, text=True, check=True).stdout
 
 
+Snapshot = tuple[Path, str, str, str, str]       # (work dir, selection_train, manifest, tiny Laya base, tiny BERT base)
+
+
 @pytest.fixture(scope="module")
-def snapshot(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str, str, str]:
-    """(work dir, selection_train path, manifest, tiny Laya base) of the enlarged synthetic snapshot."""
+def snapshot(tmp_path_factory: pytest.TempPathFactory) -> Snapshot:
+    """(work dir, selection_train path, manifest, tiny Laya base, tiny BERT base) of the enlarged synthetic
+    snapshot."""
     d = tmp_path_factory.mktemp("tune")
     root, raw_sha256 = make_raw(str(d / "raw"))
     for fold in range(12):                                  # tuning-train rows the tiny model can learn from
@@ -58,14 +71,14 @@ def snapshot(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str, str, 
     out_dir = str(d / "data")
     pilot.data.prepare(root, out_dir, raw_sha256)
     return (d, os.path.join(out_dir, "splits", "selection_train.jsonl"), os.path.join(out_dir, "splits.json"),
-            tiny_checkpoint(d / "base"))
+            tiny_checkpoint(d / "base"), tiny_base(d / "bert_base"))
 
 
 @pytest.mark.timeout(TIMEOUT)
-def test_laya_search_on_cpu(snapshot: tuple[Path, str, str, str]) -> None:
+def test_laya_search_on_cpu(snapshot: Snapshot) -> None:
     """tune.py --system laya runs every trial through ray_train.py's own loop, one at a time, scores tuning-dev after
     every epoch, lets ASHA stop the weak trial, keeps no weights and writes a tune/1 record read_record accepts."""
-    d, data, manifest, base = snapshot
+    d, data, manifest, base, _ = snapshot
     storage, out = d / "s", d / "laya.json"
     before = _guarded_status()
     _run("tune.py", "--system", "laya", "--device", "cpu", "--cpus", "1", "--trials", "3", "--seed", "0",
@@ -99,4 +112,63 @@ def test_laya_search_on_cpu(snapshot: tuple[Path, str, str, str]) -> None:
         assert "exports" not in dirs and not [n for n in dirs if n.startswith("epoch-")], root
         assert os.path.basename(root) != "out", root
     assert not glob.glob(os.path.join(str(storage), "laya-train", "*", "out"))
+    assert _guarded_status() == before                      # nothing under results/, data/ or protocol.json changed
+
+
+def _check_record(record: dict[str, Any], storage: Path, system: str, data: str) -> None:
+    """The partition counts and digests, the notes, and n_train_messages / n_dev_messages in every result.json line."""
+    with open(data, "rb") as f:
+        train_rows, dev_rows, block = pt.partition(pilot.data.parse_jsonl(f.read()))
+    assert record["data"]["n_train"] == len(train_rows) and record["data"]["n_dev"] == len(dev_rows) == 2
+    assert record["data"]["train_uids_sha256"] == block["train_uids_sha256"]
+    assert record["data"]["dev_uids_sha256"] == block["dev_uids_sha256"]
+    assert record["notes"] == list(pt.NOTES)
+    lines = 0
+    for path in glob.glob(os.path.join(str(storage), system, "trial_*", "result.json")):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    res = json.loads(line)
+                    assert res["n_train_messages"] == record["data"]["n_train"], path
+                    assert res["n_dev_messages"] == record["data"]["n_dev"], path
+                    lines += 1
+    assert lines == sum(len(t["curve"]) for t in record["trials"])
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_berturk_search_on_cpu(snapshot: Snapshot) -> None:
+    """tune.py --system berturk runs every trial as one process through berturk_train.fit (berturk_train.py's own HF
+    Trainer recipe with the trial's LRs, batch, warm-up, weight decay and epochs), one at a time, scores tuning-dev
+    through score.bert_logits after every epoch, lets ASHA stop the weak trial, keeps no weights and writes a tune/1
+    record read_record accepts; every finished trial's done.json names the tuning partition as its tune key."""
+    d, data, manifest, _, bert = snapshot
+    storage, out = d / "sb", d / "berturk.json"
+    before = _guarded_status()
+    _run("tune.py", "--system", "berturk", "--device", "cpu", "--cpus", "1", "--trials", "3", "--seed", "0",
+         "--base", bert, "--data", data, "--manifest", manifest, "--storage", storage, "--out", out,
+         "--points", json.dumps(BERTURK_POINTS))
+    record, _sha = pt.read_record(str(out))
+    assert record["system"] == "berturk" and record["schema"] == pt.SCHEMA
+    assert [t["config"] for t in record["trials"]] == BERTURK_POINTS
+    assert record["search"]["points_to_evaluate"] == BERTURK_POINTS
+    assert record["search"]["scheduler"]["max_t"] == 30
+    assert record["fixed"] == pt.FIXED["berturk"]
+    assert record["n_asha_stopped"] >= 1 and any(t["asha_stopped"] for t in record["trials"])
+    assert all(t["attempts"] == 1 for t in record["trials"])
+    assert set(record["versions"]) == {"ray", "torch", "transformers", "accelerate"}
+    _check_record(record, storage, "berturk", data)
+    with open(data, "rb") as f:
+        _, _, block = pt.partition(pilot.data.parse_jsonl(f.read()))
+    done = glob.glob(os.path.join(str(storage), "berturk-train", "trial_*-a1", "*", "done.json"))
+    assert done                                             # at least one trial ran to its last epoch
+    for path in done:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+        assert doc["record"]["n_messages"] == record["data"]["n_train"], path
+        assert doc["canonical"]["tune"] == block, path
+        assert doc["record"]["epochs"][-1]["epoch"] == doc["epochs_schedule"] == 10, path
+    # no weights: no safetensors, no export, and no trial wrote a final checkpoint
+    for root, dirs, files in os.walk(str(storage)):
+        assert not [n for n in files if n.endswith(".safetensors")], root
+        assert "exports" not in dirs and not [n for n in dirs if n.startswith("epoch-")], root
     assert _guarded_status() == before                      # nothing under results/, data/ or protocol.json changed

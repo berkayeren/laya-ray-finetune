@@ -27,6 +27,16 @@ checkpoint, export or final save. Each attempt of a trial runs under a fresh inn
 The fixed recipe is pilot.tune.FIXED["laya"]: one worker, the MPS spike's start config (micro-batch 8, grad-accum 4,
 max_len 128, full encoder with gradient checkpointing), rlcd, seed 0, fp32.
 
+BERTurk trials (berturk_trial): each trial is one process with no Ray Train (BERTurk trains with the HF Trainer in one
+process). It parses berturk_train.py's own argv for the trial's point (encoder LR, head LR, batch, warm-up ratio,
+weight decay, epochs) and calls berturk_train.fit, the recipe berturk_train.py runs, with the partition block as the
+identity key tune, no export and no --out. fit's on_epoch hook scores tuning-dev after every epoch with the live model
+through score.bert_logits (score.py's own batched forward: eval mode, no_grad, fp32, logits at T = 1), puts the model
+back in train mode and calls tune.report. Each attempt trains under a fresh run storage
+(<storage>/berturk-train/trial_NNNNN-aK). The trial reserves --cpus CPUs and ray.init gets --cpus + 1, so trials run
+one at a time; the fixed recipe is pilot.tune.FIXED["berturk"]: max_len 128, seed 0, the masked BCE, adamw_torch, the
+linear schedule, max grad norm 1.0, fp32. --base defaults to the system's pinned weights (multilingual, berturk).
+
 Ray 2.59 behaviour this design handles:
 - concurrency: max_concurrent=1 on the generator (above);
 - leaked placement groups: an ASHA-stopped Laya trial leaves its Train placement group behind (Ray's cleaner needs the
@@ -49,12 +59,14 @@ usage:
   python tune.py --system laya                     # the real search: 20 trials on MPS -> results/tune/laya.json
   python tune.py --system laya --device cpu --cpus 1 --trials 3 --base DIR --data SPLIT --manifest M \\
                  --storage STORAGE --out OUT.json   # a CPU smoke search on a local base
+  python tune.py --system berturk                  # the real search: 20 trials on MPS -> results/tune/berturk.json
 """
 import argparse
 import copy
 import json
 import os
 import re
+import time
 from importlib.metadata import version
 from typing import Any
 
@@ -62,11 +74,12 @@ from pilot import pins, runs, spike
 from pilot import laya_adapter as la
 from pilot import tune as pt
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, refuse_held_out,
-                        repo_relpath, sha256_bytes, verify_split_file)
+                        repo_relpath, sha256_bytes, sha256_file, verify_split_file)
 from pilot.weights import check_tokenizer_config_rewritable, checkpoint_digests, fetch, identity
 
 DEFAULT_DATA = os.path.join(REPO_ROOT, "data", "splits", "selection_train.jsonl")
 TRIAL_DIR_RE = re.compile(r"^trial_\d{5}$")
+PINNED_BASE = {"laya": "multilingual", "berturk": "berturk"}   # --base default per system: the pinned weights
 
 
 def parser() -> argparse.ArgumentParser:
@@ -82,7 +95,9 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--data", default=DEFAULT_DATA, help="the selection_train split (default the committed one)")
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST,
                     help="splits.json to verify --data against (default: the committed data/splits.json)")
-    ap.add_argument("--base", default="multilingual", help="'multilingual' (pinned) or a local Laya checkpoint dir")
+    ap.add_argument("--base", default=None,
+                    help="laya: 'multilingual' (pinned; default) or a local Laya checkpoint dir; berturk: 'berturk' "
+                         "(pinned; default) or a local BERT base dir")
     ap.add_argument("--cpus", type=int, default=None, help="CPUs and torch threads per trial (default 4 on mps, else 1)")
     ap.add_argument("--points", default=None, help=argparse.SUPPRESS)   # JSON configs evaluated first; tests only
     return ap
@@ -94,6 +109,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     a = ap.parse_args(argv)
     if a.cpus is None:
         a.cpus = 4 if a.device == "mps" else 1
+    if a.base is None:
+        a.base = PINNED_BASE[a.system]
     for flag, v in (("--trials", a.trials), ("--cpus", a.cpus)):
         if v < 1:
             ap.error("%s must be at least 1" % flag)
@@ -118,13 +135,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def bind(a: argparse.Namespace) -> dict[str, Any]:
     """The picklable binding of a search, built on the driver before ray.init: the verified selection_train (path,
-    sha256, manifest entry), the tuning partition block and counts, the base (resolved dir, identity, verified
-    digests), the device, CPUs and worker env, the storage dirs and the versions. Every path is absolute (a trial's
-    cwd is under Ray's session dir). SystemExit on a split that is not selection_train, committed held-out content, a
-    partition refusal, another laya, a base that is neither the pin nor a local checkpoint, MPS unavailable, or less
-    free disk under --storage than pilot.tune.DISK_FLOOR_BYTES (trials write no checkpoints)."""
-    if a.system != "laya":
-        raise SystemExit("tune.py --system %s: this tune.py runs Laya searches only; run --system laya" % a.system)
+    sha256, manifest entry), the tuning partition block and counts, the base (bind_laya or bind_berturk), the device,
+    CPUs and worker env, the storage dirs and the versions. Every path is absolute (a trial's cwd is under Ray's session
+    dir). SystemExit on a split that is not selection_train, committed held-out content, a partition refusal, a base
+    the system's binder refuses, MPS unavailable, or less free disk under --storage than pilot.tune.DISK_FLOOR_BYTES
+    (trials write no checkpoints)."""
     if not os.path.isfile(a.data):
         raise SystemExit("%s not found; run `make data`" % a.data)
     with open(a.data, "rb") as f:
@@ -137,6 +152,27 @@ def bind(a: argparse.Namespace) -> dict[str, Any]:
     rows = parse_jsonl(raw)
     refuse_held_out(a.data, entry, rows)                    # keyed on the content, under any manifest
     train_rows, dev_rows, block = pt.partition(rows)
+    base = bind_laya(a) if a.system == "laya" else bind_berturk(a)
+    if a.device == "mps":
+        import torch
+        if not torch.backends.mps.is_available():
+            raise SystemExit("--device mps, but MPS is not available here; use --device cpu, or run on Apple silicon "
+                             "with the locked torch build")
+    free = runs.free_bytes(a.storage)
+    if free < pt.DISK_FLOOR_BYTES:
+        raise SystemExit("%.1f GiB free under --storage; a search needs at least %.1f GiB (trial logs and Ray state); "
+                         "free disk or pass another --storage" % (free / 2**30, pt.DISK_FLOOR_BYTES / 2**30))
+    return dict({"system": a.system, "data": a.data, "data_sha256": entry["sha256"], "manifest": a.manifest,
+                 "manifest_is_committed": manifest_is_committed(a.manifest), "entry": entry, "block": block,
+                 "n_train": len(train_rows), "n_dev": len(dev_rows),
+                 "dev_rows_with_train_text": pt.shared_texts(train_rows, dev_rows),
+                 "device": a.device, "cpus": a.cpus, "env": spike.spike_env("0", a.cpus) if a.device == "mps" else {},
+                 "storage": a.storage, "train_storage": os.path.join(a.storage, "%s-train" % a.system)}, **base)
+
+
+def bind_laya(a: argparse.Namespace) -> dict[str, Any]:
+    """The Laya half of bind: the base (resolved dir, identity, verified digests, its record entry) and the versions;
+    SystemExit on another laya or a base that is neither the pin nor a local checkpoint."""
     la.check_version()
     if a.base == "multilingual":                            # download once on the driver, pinned + verified
         base_dir = fetch(pins.LAYA)
@@ -148,28 +184,43 @@ def bind(a: argparse.Namespace) -> dict[str, Any]:
     base_ident = identity(base_name)
     base_sha256 = checkpoint_digests(base_name, base_ident)   # workers verify these bytes before loading
     check_tokenizer_config_rewritable(base_dir, "base checkpoint")
-    if a.device == "mps":
-        import torch
-        if not torch.backends.mps.is_available():
-            raise SystemExit("--device mps, but MPS is not available here; use --device cpu, or run on Apple silicon "
-                             "with the locked torch build")
-    free = runs.free_bytes(a.storage)
-    if free < pt.DISK_FLOOR_BYTES:
-        raise SystemExit("%.1f GiB free under --storage; a search needs at least %.1f GiB (trial logs and Ray state); "
-                         "free disk or pass another --storage" % (free / 2**30, pt.DISK_FLOOR_BYTES / 2**30))
-    return {"system": a.system, "data": a.data, "data_sha256": entry["sha256"], "manifest": a.manifest,
-            "manifest_is_committed": manifest_is_committed(a.manifest), "entry": entry, "block": block,
-            "n_train": len(train_rows), "n_dev": len(dev_rows),
-            "dev_rows_with_train_text": pt.shared_texts(train_rows, dev_rows),
-            "base": a.base, "base_dir": base_dir, "base_name": base_name, "base_ident": base_ident,
+    return {"base": a.base, "base_dir": base_dir, "base_name": base_name, "base_ident": base_ident,
             "base_sha256": base_sha256,
             "base_record": {"name": "multilingual" if a.base == "multilingual" else repo_relpath(base_dir),
                             "model_sha256": base_ident["model_sha256"],
                             "config_sha256": (pins.LAYA["sha256"]["rl_agent_config.json"] if a.base == "multilingual"
                                               else base_ident["config_sha256"])},
-            "device": a.device, "cpus": a.cpus, "env": spike.spike_env("0", a.cpus) if a.device == "mps" else {},
-            "storage": a.storage, "train_storage": os.path.join(a.storage, "%s-train" % a.system),
             "versions": {"ray": version("ray"), "torch": version("torch"), "laya": version("laya")}}
+
+
+def bind_berturk(a: argparse.Namespace) -> dict[str, Any]:
+    """The BERTurk half of bind, as berturk_train.py binds its base: 'berturk' names the pin's digests and is fetched
+    (pinned, sha256-verified) on the driver; a local dir must hold pilot.berturk.BASE_FILES and is digested file by
+    file (berturk_train.fit verifies those bytes right before the load); the tokenizer must be cased. Returns the base
+    (the name berturk_train.py takes, the resolved dir, the digests, its record entry) and the versions."""
+    from pilot import berturk
+    if a.base == "berturk":
+        digests = dict(pins.BERTURK["sha256"])
+        base_dir = fetch(pins.BERTURK)
+        base = "berturk"
+    else:
+        base_dir = base = os.path.abspath(a.base)
+        missing = [f for f in berturk.BASE_FILES if not os.path.isfile(os.path.join(base_dir, f))]
+        if missing:
+            raise SystemExit("--base must be 'berturk' (pinned) or a local BERT base dir holding %s; %s lacks %s"
+                             % (", ".join(berturk.BASE_FILES), a.base, ", ".join(missing)))
+        digests = {f: sha256_file(os.path.join(base_dir, f)) for f in berturk.BASE_FILES}
+    try:
+        with open(os.path.join(base_dir, "tokenizer_config.json"), encoding="utf-8") as f:
+            tcfg = json.load(f)
+    except ValueError as e:
+        raise SystemExit("base tokenizer_config.json is not valid JSON (%s)" % e)
+    berturk.check_cased(tcfg, "base")
+    return {"base": base, "base_dir": base_dir, "digests": digests,
+            "base_record": {"name": "berturk" if a.base == "berturk" else repo_relpath(base_dir),
+                            "model_sha256": digests["model.safetensors"], "config_sha256": digests["config.json"]},
+            "versions": {"ray": version("ray"), "torch": version("torch"), "transformers": version("transformers"),
+                         "accelerate": version("accelerate")}}
 
 
 def param_space(system: str) -> dict[str, Any]:
@@ -254,6 +305,68 @@ def laya_trial(config: dict[str, Any], bound: dict[str, Any]) -> None:
                                                                               controller_failure_limit=0))).fit()
 
 
+def berturk_trial(config: dict[str, Any], bound: dict[str, Any]) -> None:
+    """One BERTurk trial, in this process with no Ray Train: count the start in attempts.json, read the tuning
+    partition from the driver-verified selection_train bytes only, parse berturk_train.py's own argv for the trial's
+    point (encoder LR, head LR, batch, warm-up ratio, weight decay, epochs; the fixed recipe otherwise; no export, no
+    --out) with the partition block as tune, and run berturk_train.fit under a fresh run storage per attempt
+    (<storage>/berturk-train/trial_NNNNN-aK), so a restarted trial never meets its killed run dir. After every epoch
+    the hook scores tuning-dev through score.bert_logits (eval mode, no_grad, fp32 on the trial's device, logits at
+    T = 1), puts the model back in train mode and reports pilot.tune.dev_objective with the epoch row to Tune."""
+    from ray import tune
+
+    import berturk_train
+    import ray_train
+    import score
+    from pilot import berturk
+    ctx = tune.get_context()
+    index = pt.trial_index(ctx.get_trial_id())
+    attempt = pt.bump_attempts(ctx.get_trial_dir())
+    if bound["env"]:
+        ray_train.check_env(bound["env"])                   # the spike's MPS env reached this trial's process
+    point = pt.check_point("berturk", {k: config.get(k) for k in pt.SPACES["berturk"]})
+    fixed = pt.FIXED["berturk"]
+    train_rows, dev_rows = pt.read_partition(bound["data"], bound["data_sha256"], bound["block"])
+    labels = [berturk.label_vector(r) for r in train_rows]
+    Y = pt.labels(dev_rows)
+    texts = [r["state"] for r in dev_rows]
+    storage = os.path.join(bound["train_storage"], "%s-a%d" % (pt.trial_dirname_of(index), attempt))
+    argv = ["--data", bound["data"], "--manifest", bound["manifest"], "--base", bound["base"],
+            "--device", bound["device"], "--cpus", str(bound["cpus"]), "--epochs", str(point["epochs"]),
+            "--lr", repr(point["encoder_lr"]), "--head-lr", repr(point["head_lr"]), "--batch", str(point["batch"]),
+            "--warmup-ratio", repr(point["warmup_ratio"]), "--weight-decay", repr(point["weight_decay"]),
+            "--max-len", str(fixed["max_len"]), "--seed", str(fixed["seed"]), "--no-export-epochs",
+            "--storage", storage]
+    a = berturk_train.parser().parse_args(argv)
+    have = {"max_len": a.max_len, "seed": a.seed, "loss": berturk.LOSS, "optim": berturk.OPTIM,
+            "lr_scheduler": berturk.LR_SCHEDULER, "max_grad_norm": berturk.MAX_GRAD_NORM, "precision": "fp32"}
+    off = [k for k in have if have[k] != fixed[k]]
+    if off:
+        raise SystemExit("the trial's %s differs from pilot.tune.FIXED; fix tune.py's argv or pilot.tune.FIXED"
+                         % off[0])
+    canon = berturk.canonical(berturk_train.identity_values(a, bound["entry"], bound["digests"], (), None, None,
+                                                            tune=bound["block"]))
+    rid = berturk.run_id(canon)
+
+    def hook(model: Any, tok: Any, epoch: int, row: dict[str, Any]) -> None:
+        """Score tuning-dev with the live model (eval, then train mode again) and report the epoch to Tune."""
+        model.eval()
+        try:
+            t = time.perf_counter()
+            logits, _ = score.bert_logits(tok, model, texts, fixed["max_len"], bound["device"])
+            dev_s = time.perf_counter() - t
+        finally:
+            model.train()
+        tune.report(dict(pt.dev_objective(Y, logits), epoch=epoch, loss=float(row["loss"]),
+                         train_s=float(row["train_s"]), dev_s=dev_s, peak_total_bytes=row["peak_total_bytes"],
+                         swap_delta_bytes=row["swap_delta_bytes"], n_train_messages=len(train_rows),
+                         n_dev_messages=len(dev_rows)))
+
+    print("trial %d attempt %d: %s (run %s)" % (index, attempt, json.dumps(point), rid), flush=True)
+    berturk_train.fit(a, train_rows, labels, bound["base_dir"], bound["digests"], bound["entry"], canon, rid,
+                      os.path.join(storage, rid), cpus=bound["cpus"], on_epoch=hook)
+
+
 def collect(experiment_dir: str, n_trials: int) -> list[dict[str, Any]]:
     """The record's trials, read from each trial dir trial_00000.. in index order: the config from params.json (exactly
     the space's keys), the curve from the CURVE_KEYS of each result.json line (pilot.tune.curve_row: Tune's own
@@ -317,12 +430,16 @@ def main(argv: list[str] | None = None) -> None:
     from ray import tune
 
     import ray_train
-    init = {"num_cpus": 1 + a.cpus * (a.trials + 1), "include_dashboard": False}   # leaked placement-group headroom
+    if a.system == "laya":                                  # leaked placement-group headroom (Ray Train trials)
+        init = {"num_cpus": 1 + a.cpus * (a.trials + 1), "include_dashboard": False}
+        trainable = tune.with_resources(tune.with_parameters(laya_trial, bound=bound), {"CPU": 1})
+    else:                                                   # one process per trial, no Ray Train: no placement group
+        init = {"num_cpus": a.cpus + 1, "include_dashboard": False}
+        trainable = tune.with_resources(tune.with_parameters(berturk_trial, bound=bound), {"CPU": a.cpus})
     if bound["env"]:
         init["runtime_env"] = {"env_vars": bound["env"]}   # the spike's MPS worker env reaches every trial worker
     ray.init(**init)
     ray_train.require_single_node(ray.nodes())
-    trainable = tune.with_resources(tune.with_parameters(laya_trial, bound=bound), {"CPU": 1})
     path = os.path.join(a.storage, a.system)
     if tune.Tuner.can_restore(path):
         print("continuing the search in %s" % path, flush=True)

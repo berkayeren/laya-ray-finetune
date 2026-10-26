@@ -75,7 +75,8 @@ otherwise (no fresh head and no weight imprinting, which this pilot does not try
 
 Few-shot experiment: fewshot is an IDENTITY key left out when None (the pilot.fewshot.binding of a masked base or a
 continued run), so every committed BERTurk run id is unchanged; the --fewshot-base, --fewshot-draw and --fewshot-k
-flags are NOT_IDENTITY (represented by fewshot and mask_tags).
+flags are NOT_IDENTITY (represented by fewshot and mask_tags). tune is an IDENTITY key left out when None too: the
+tuning partition block of an exploratory tune.py search trial, None for every berturk_train.py command.
 
 README block: load_superseded() reads every SUPERSEDED entry's history record and reference check, refused unless both
 are bound to its postfit_sha256; render_markdown(record, reference, final, superseded) renders the README's BERTurk
@@ -212,7 +213,7 @@ LOGIT_NOTE = "classifier logit per tag; P(tag) = sigmoid(logit / T)"
 IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_config_sha256", "base_files_sha256",
             "transformers_version", "accelerate_version", "device", "epochs", "batch", "encoder_lr", "head_lr",
             "weight_decay", "warmup_ratio", "lr_scheduler", "max_grad_norm", "optim", "loss", "max_len",
-            "max_messages", "mask_tags", "seed", "stop_after_epoch", "postfit_sha256", "fewshot")
+            "max_messages", "mask_tags", "seed", "stop_after_epoch", "postfit_sha256", "fewshot", "tune")
 # berturk_train.py flags that never change training, so never the run id:
 #   data, base, manifest: paths, represented in IDENTITY by the verified sha256s (data_sha256, base_*_sha256)
 #   storage: where the run dir goes; print_run_id: prints the run id and exits
@@ -228,8 +229,10 @@ NOT_IDENTITY = ("data", "base", "storage", "manifest", "print_run_id", "export_e
 RESOLVED = {"lr": ("encoder_lr",)}
 # left out when None: base_files_sha256 (None for the pinned base, whose files the pin fixes), max_messages (a smoke
 # subsample), mask_tags (only a few-shot masked base masks), stop_after_epoch and postfit_sha256 (a final seed), and
-# fewshot (a few-shot run), so every selection and final-seed run id stays as it was before those keys existed
-DROPPED_WHEN_NONE = ("base_files_sha256", "max_messages", "mask_tags", "stop_after_epoch", "postfit_sha256", "fewshot")
+# fewshot (a few-shot run), and tune (the tuning partition of an exploratory search trial, tune.py), absent outside a
+# search, so every selection, final-seed and few-shot run id stays as it was before those keys existed
+DROPPED_WHEN_NONE = ("base_files_sha256", "max_messages", "mask_tags", "stop_after_epoch", "postfit_sha256", "fewshot",
+                     "tune")
 
 
 def canonical(values: dict[str, Any]) -> dict[str, Any]:

@@ -690,27 +690,37 @@ def load_bert(checkpoint: str, ident: dict[str, Any], device: str, threads: int)
     return tok, model, check_bert(model, device)
 
 
-def score_berturk(a: argparse.Namespace, checkpoint: str, cases: list[dict[str, Any]], device: str,
-                  ident: dict[str, Any], rec: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
-    """(float32 [n, 48] logits in `cases` order, sidecar fields) of a BERTurk checkpoint, in-process on `device`.
-    Every file is verified against ident right before the load (load_bert); batches of BATCH messages in split-file
-    order, padded to the longest, truncated at the record's max_len."""
+def bert_logits(tok: Any, model: Any, texts: list[str], max_len: int, device: str) -> tuple[np.ndarray, float]:
+    """(float32 [len(texts), 48] classifier logits in `texts` order, the summed forward seconds) of a BERTurk model on
+    `device`: the one batched BERTurk forward of score.py (score_berturk) and of tune.py's search trial. Batches of BATCH
+    messages, padded to the longest, truncated at max_len, under torch.no_grad(); check_bert after every batch. The
+    caller puts the model in eval mode. No text gives a (0, 48) array."""
     import torch
-    import transformers
-    tok, model, state = load_bert(checkpoint, ident, device, a.cpus_per_worker)
-    max_len = rec["canonical"]["max_len"]
     out, infer = [], 0.0
-    t0 = time.time()
     with torch.no_grad():
-        for i in range(0, len(cases), BATCH):
-            texts = [c["state"] for c in cases[i:i + BATCH]]
-            enc = tok(texts, truncation=True, max_length=max_len, padding="longest", return_tensors="pt")
+        for i in range(0, len(texts), BATCH):
+            enc = tok(texts[i:i + BATCH], truncation=True, max_length=max_len, padding="longest", return_tensors="pt")
             t = time.perf_counter()
             logits = model(**{k: v.to(device) for k, v in enc.items()}).logits.float().cpu().numpy()
             infer += time.perf_counter() - t
             check_bert(model, device)
             out.append(logits)
-    logits = np.concatenate(out).astype(np.float32, copy=False)
+    if not out:
+        return np.zeros((0, len(INTENTS)), dtype=np.float32), infer
+    return np.concatenate(out).astype(np.float32, copy=False), infer
+
+
+def score_berturk(a: argparse.Namespace, checkpoint: str, cases: list[dict[str, Any]], device: str,
+                  ident: dict[str, Any], rec: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
+    """(float32 [n, 48] logits in `cases` order, sidecar fields) of a BERTurk checkpoint, in-process on `device`.
+    Every file is verified against ident right before the load (load_bert); bert_logits runs the batches of BATCH
+    messages in split-file order, padded to the longest, truncated at the record's max_len."""
+    import torch
+    import transformers
+    tok, model, state = load_bert(checkpoint, ident, device, a.cpus_per_worker)
+    max_len = rec["canonical"]["max_len"]
+    t0 = time.time()
+    logits, infer = bert_logits(tok, model, [c["state"] for c in cases], max_len, device)
     fields = {"run_id": berturk.dump_run_id(ident),
               "system": {"kind": "berturk", "checkpoint": repo_relpath(checkpoint), "checkpoint_identity": ident,
                          "baseline_source": None, "clip_eps": None},

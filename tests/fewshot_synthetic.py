@@ -122,7 +122,7 @@ def chosen_berturk(data_sha256: str) -> dict[str, Any]:
         "encoder_lr": r["encoder_lr"], "head_lr": r["head_lr"], "weight_decay": 0.01, "warmup_ratio": 0.1,
         "lr_scheduler": "linear", "max_grad_norm": 1.0, "optim": "adamw_torch", "loss": "masked_bce",
         "max_len": r["max_len"], "max_messages": None, "mask_tags": None, "seed": 0, "stop_after_epoch": None,
-        "postfit_sha256": None, "fewshot": None})
+        "postfit_sha256": None, "fewshot": None, "tune": None})
 
 
 def bench(tmp_path: Path, synthetic_raw: SyntheticRaw, monkeypatch: pytest.MonkeyPatch, mode: str = "primary",

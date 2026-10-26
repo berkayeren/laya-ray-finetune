@@ -103,6 +103,16 @@ so timings are compared from flag-off runs. DIR is refused under results/, data/
 --out, before any load, fetch or run dir, also with --print-run-id; an unwritable DIR/RUN_ID is refused when the writer
 opens, after the load and before the run dir is created, so the same command can be rerun once the DIR is fixed.
 
+--warmup-ratio and --weight-decay default to the recipe's values (pilot.berturk.WARMUP_RATIO 0.1 and WEIGHT_DECAY
+0.01); they reach the TrainingArguments (warmup_steps below 1 is read as a ratio of the training steps) and the
+optimizer's decaying groups. Both were IDENTITY keys before the flags existed (warmup_ratio, weight_decay), so every
+committed run id is unchanged; tune.py's search varies them.
+
+main runs every refusal, then calls fit(...), the training itself (the TrainingArguments, the optimizer, the callbacks,
+the Trainer, the exports, --out and done.json). fit's on_epoch hook, called with the live model and tokenizer after
+each epoch's row is appended and before any export, is tune.py's per-epoch dev scoring; it is None for every
+berturk_train.py command, so nothing else runs.
+
 Run identity: the run id is pilot.berturk.run_id of the canonical config (pilot.berturk.IDENTITY: split, data and base
 digests, transformers and accelerate versions, device, every hyperparameter and the seed; never a path or a resource),
 e.g. berturk-selection_train-s0-1a2b3c4d. --print-run-id prints it after the split and base checks and exits without
@@ -137,6 +147,7 @@ import json
 import os
 import shutil
 import time
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from pilot import berturk, fewshot, pins, postfit, protocol, runs, spike, tensorboard
@@ -205,6 +216,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--head-lr", type=float, default=berturk.HEAD_LR,
                     help="the classifier head's LR (Laya's head LR, the first reference-check fix)")
     ap.add_argument("--batch", type=int, default=berturk.BATCH, help="messages per optimizer step")
+    ap.add_argument("--warmup-ratio", type=float, default=berturk.WARMUP_RATIO,
+                    help="the linear schedule's warm-up as a fraction of the training steps (default 0.1, the recipe)")
+    ap.add_argument("--weight-decay", type=float, default=berturk.WEIGHT_DECAY,
+                    help="AdamW weight decay of the decaying param groups (default 0.01, the recipe)")
     ap.add_argument("--max-len", type=int, default=berturk.MAX_LEN,
                     help="WordPiece tokens per message with [CLS] and [SEP]; longer ones are truncated and counted")
     ap.add_argument("--seed", type=int, default=0)
@@ -350,6 +365,267 @@ def remove_trainer_dir(path: str) -> None:
     os.rmdir(path)
 
 
+def identity_values(a: argparse.Namespace, entry: dict[str, Any], digests: dict[str, str], mask: Sequence[str],
+                    record_sha: str | None, fs_binding: dict[str, Any] | None,
+                    tune: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Every pilot.berturk.IDENTITY value of a parsed berturk_train.py command (pilot.berturk.canonical keeps them and
+    drops a DROPPED_WHEN_NONE key whose value is None): entry is --data's manifest entry, digests the base files' sha256s,
+    mask the masked tags, record_sha the --postfit record's sha256, fs_binding the few-shot binding and tune the tuning
+    partition block of a tune.py search trial (None for every berturk_train.py command, so its run id is unchanged)."""
+    return {
+        "split": os.path.splitext(os.path.basename(entry["path"]))[0], "data_sha256": entry["sha256"],
+        "data_role": entry["role"], "base_model_sha256": digests["model.safetensors"],
+        "base_config_sha256": digests["config.json"],
+        "base_files_sha256": (None if a.base == "berturk"
+                              else dumps.files_digest({f: digests[f] for f in berturk.TOKENIZER_FILES})),
+        "transformers_version": _version("transformers"), "accelerate_version": _version("accelerate"),
+        "device": a.device, "epochs": a.epochs, "batch": a.batch, "encoder_lr": a.lr, "head_lr": a.head_lr,
+        "weight_decay": a.weight_decay, "warmup_ratio": a.warmup_ratio,
+        "lr_scheduler": berturk.LR_SCHEDULER, "max_grad_norm": berturk.MAX_GRAD_NORM, "optim": berturk.OPTIM,
+        "loss": berturk.LOSS, "max_len": a.max_len, "max_messages": a.max_messages,
+        "mask_tags": list(mask) or None, "seed": a.seed, "stop_after_epoch": a.stop_after_epoch,
+        "postfit_sha256": record_sha, "fewshot": fs_binding, "tune": tune}
+
+
+def fit(a: argparse.Namespace, rows: list[dict[str, Any]], labels: list[list[float]], base_dir: str,
+        digests: dict[str, str], entry: dict[str, Any], canon: dict[str, Any], rid: str, run_dir: str, *, cpus: int,
+        fs_proof: dict[str, Any] | None = None, pf_block: dict[str, Any] | None = None, continued: bool = False,
+        tb_dir: str | None = None, on_epoch: Callable[[Any, Any, int, dict[str, Any]], None] | None = None) -> str:
+    """Train one BERTurk run of the parsed command `a` on `rows` and their label vectors (INTENTS order) from the
+    verified base_dir (digests: its files' sha256s, checked right before the load) into run_dir, which must not exist
+    yet: the HF Trainer recipe of the module docstring, the epoch exports, the --out final checkpoint and done.json.
+    main calls it once its refusals passed; canon and rid are the run's canonical config and run id, fs_proof the
+    few-shot masking proof, pf_block the --postfit final block, continued a continued few-shot run, tb_dir the
+    --tensorboard event dir. on_epoch(model, tok, epoch, row) runs after each epoch's row is appended and before any
+    export (tune.py's per-epoch dev scoring; it must leave the model in train mode); None for every berturk_train.py
+    command, so nothing else runs. Returns run_dir."""
+    stop = a.stop_after_epoch or a.epochs                    # the last epoch this run trains
+    if a.device == "mps":
+        os.environ.update(spike.spike_env("0", cpus))       # strict MPS before torch is imported
+    import psutil
+    import torch
+    import transformers
+
+    from ray_train import code_state, memory_now, memory_sampler, require_param_device
+
+    if a.device == "mps" and not torch.backends.mps.is_available():
+        raise SystemExit("--device mps, but MPS is not available here; use --device cpu")
+    if a.device == "cuda" and not torch.cuda.is_available():
+        raise SystemExit("--device cuda, but CUDA is not available here; use --device cpu or mps")
+    torch.set_num_threads(cpus)
+    from pilot.weights import verify_files
+    verify_files(base_dir, digests, "BERTurk base")          # the bytes the identity names, right before the load
+
+    t0 = time.time()
+    tok = transformers.AutoTokenizer.from_pretrained(base_dir, local_files_only=True)
+    data, n_truncated = [], 0
+    for r, lab in zip(rows, labels):
+        n_truncated += len(tok(r["state"])["input_ids"]) > a.max_len
+        enc = tok(r["state"], truncation=True, max_length=a.max_len)
+        data.append({"input_ids": enc["input_ids"], "token_type_ids": enc["token_type_ids"],
+                     "attention_mask": enc["attention_mask"], "labels": lab})
+    transformers.set_seed(a.seed)                           # right before the head is created, so it is seeded
+    model, info = transformers.BertForSequenceClassification.from_pretrained(
+        base_dir, num_labels=len(berturk.TAGS), problem_type=berturk.PROBLEM_TYPE, id2label=berturk.id2label(),
+        label2id=berturk.label2id(), dtype=torch.float32, local_files_only=True, output_loading_info=True)
+    new_names = info["missing_keys"]                         # the newly initialised parameters: the fresh head
+    if continued:                                           # the masked base's whole model, its head included
+        off = {k: sorted(str(x) for x in info.get(k) or ()) for k in ("missing_keys", "unexpected_keys",
+                                                                        "mismatched_keys")}
+        if any(off.values()):
+            raise SystemExit("--base %s: from_pretrained reports %s; a continued run loads the masked base's whole "
+                             "model, its fine-tuned classifier head included (no fresh head, no weight imprinting): "
+                             "pass an unedited berturk_train.py --fewshot-base checkpoint"
+                             % (repo_relpath(base_dir), "; ".join("%s %s" % (k, v) for k, v in off.items() if v)))
+    load_s = time.time() - t0
+    args = transformers.TrainingArguments(
+        output_dir=os.path.join(run_dir, "trainer"), per_device_train_batch_size=a.batch,
+        gradient_accumulation_steps=1, num_train_epochs=a.epochs, learning_rate=a.lr,
+        weight_decay=a.weight_decay, warmup_steps=a.warmup_ratio, lr_scheduler_type=berturk.LR_SCHEDULER,
+        max_grad_norm=berturk.MAX_GRAD_NORM, optim=berturk.OPTIM, seed=a.seed, data_seed=a.seed,
+        use_cpu=(a.device == "cpu"), fp16=False, bf16=False, save_strategy="no", eval_strategy="no",
+        logging_strategy="epoch", report_to="none", disable_tqdm=True, dataloader_num_workers=0,
+        dataloader_pin_memory=False)
+    if args.device.type != a.device:
+        raise SystemExit("the Trainer picked device %s, requested %s; check the visible devices"
+                         % (args.device.type, a.device))
+    device = args.device
+    model = model.to(device)                                 # before the optimizer holds its parameters
+    if continued:                                           # the loaded head of the masked base, nothing new
+        optimizer, groups = build_optimizer(model, args, a.head_lr, new_names, continued=True)
+    else:
+        optimizer, groups = build_optimizer(model, args, a.head_lr, new_names)   # refuses a head that is not fresh
+    reset, sync, sample, _, peak = memory_sampler(device)
+    record = {"device": a.device, "param_device": None, "dtype": "torch.float32", "amp": False,
+              "torch_version": torch.__version__, "transformers_version": transformers.__version__,
+              "accelerate_version": canon["accelerate_version"], "optim": berturk.OPTIM,
+              "optimizer_groups": [{"group": g["group"], "decay": g["decay"], "lr": g["lr"],
+                                    "weight_decay": g["weight_decay"], "n_tensors": len(g["params"])} for g in groups],
+              "n_messages": len(rows),
+              "n_truncated": n_truncated, "max_len": a.max_len, "bit_reproducible": a.device == "cpu",
+              "torch_threads": torch.get_num_threads(), "load_s": load_s, "epochs": [], "code": code_state(),
+              "fewshot": fs_proof}
+    provenance = {"split": {"name": canon["split"], "path": entry["path"], "sha256": entry["sha256"],
+                            "role": entry["role"]},
+                  "manifest": {"path": repo_relpath(a.manifest), "sha256": sha256_file(a.manifest),
+                               "is_committed": manifest_is_committed(a.manifest)},
+                  "base": {"name": "berturk" if a.base == "berturk" else repo_relpath(base_dir),
+                           "revision": pins.BERTURK["revision"] if a.base == "berturk" else None,
+                           "model_sha256": digests["model.safetensors"]}}
+
+    def doc(epoch: int, final: bool = False) -> dict[str, Any]:
+        """berturk_train.json: an export (and done.json) is uncalibrated (T = 1); a --postfit final checkpoint serves
+        the record's val-fitted T, copied from final_block without arithmetic (a JSON float round trip)."""
+        served = final and pf_block is not None
+        return {"schema": berturk.RECORD_SCHEMA, "run_id": rid, "canonical": canon, "epoch": epoch,
+                "epochs_schedule": a.epochs, "stop_after_epoch": a.stop_after_epoch, "calibrated": served,
+                "temperature": pf_block["temperature"] if served else 1.0, "postfit": pf_block if served else None,
+                "record": record, "provenance": provenance}
+
+    ep = {"epoch": 0, "loss_sum": 0.0, "loss_n": 0, "steps": 0, "t0": 0.0, "swap0": 0}
+    # --tensorboard: the step's batch loss and size (loss_fn), its pre-clip norm (the accelerator wrap below), its LRs
+    # and the start of its timing window; read and reset by the second callback
+    tbs: dict[str, Any] = {"loss": None, "n": 0, "grad_norm": None, "lrs": None, "t": 0.0}
+
+    def loss_fn(outputs: Any, labels: Any, num_items_in_batch: Any = None) -> Any:
+        """masked_bce, adding each step's loss to the epoch row's running mean (and noting it for --tensorboard)."""
+        # the epoch row's loss is the mean over steps, not over items (documented, unchanged, diagnostic only)
+        loss = masked_bce(outputs, labels, num_items_in_batch)
+        v = float(loss.detach())
+        ep["loss_sum"] += v
+        ep["loss_n"] += 1
+        if tb_dir is not None:
+            tbs["loss"], tbs["n"] = v, int(labels.shape[0])
+        return loss
+
+    def check_model(model: Any) -> None:
+        """The requested device and fp32 for every parameter."""
+        require_param_device(model, a.device)
+        check_float32(model)
+
+    def on_epoch_begin(args: Any, state: Any, control: Any, **kw: Any) -> None:
+        """Reset the epoch counters, the memory peaks and the clock."""
+        ep.update(epoch=ep["epoch"] + 1, loss_sum=0.0, loss_n=0, steps=0, swap0=spike.swap_used())
+        reset()
+        sync()
+        ep["t0"] = time.perf_counter()
+
+    def on_step_end(args: Any, state: Any, control: Any, **kw: Any) -> None:
+        """Count one optimizer step and sample memory."""
+        ep["steps"] += 1                                    # called once per optimizer step
+        sample()
+
+    def on_epoch_end(args: Any, state: Any, control: Any, model: Any = None, **kw: Any) -> Any:
+        """The epoch row, the on_epoch hook, the export and the stop after the last epoch this run trains; returns
+        control."""
+        sync()
+        train_s = time.perf_counter() - ep["t0"]
+        sample()
+        if round(state.epoch) != ep["epoch"]:
+            raise SystemExit("the Trainer reports epoch %s, this callback counted %d" % (state.epoch, ep["epoch"]))
+        check_model(model)
+        record["epochs"].append({"epoch": ep["epoch"], "loss": ep["loss_sum"] / max(ep["loss_n"], 1),
+                                 "train_s": train_s, "optimizer_steps": ep["steps"], "n_messages": len(rows),
+                                 "peak_total_bytes": peak["total"], "peak_driver_bytes": peak["driver"],
+                                 "peak_rss_bytes": peak["rss"], "swap_delta_bytes": spike.swap_used() - ep["swap0"]})
+        if on_epoch is not None:                            # tune.py's dev scoring, before any export
+            on_epoch(model, tok, ep["epoch"], record["epochs"][-1])
+        if a.export_epochs:
+            write_export(model, base_dir, run_dir, ep["epoch"], doc(ep["epoch"]))
+        if ep["epoch"] >= stop:                             # the schedule stays sized by --epochs
+            control.should_training_stop = True
+        return control
+
+    cb = transformers.TrainerCallback()                     # an instance with assigned hooks, no subclass
+    cb.on_epoch_begin, cb.on_step_end, cb.on_epoch_end = on_epoch_begin, on_step_end, on_epoch_end
+    callbacks = [cb]
+    tb = None
+    if tb_dir is not None:                                  # the TensorBoard callback exists with the flag only
+        proc = psutil.Process()
+        names = [g["group"] for g in groups]                # pilot.berturk.optimizer_groups order: encoder, then head
+        i_enc, i_head = names.index("encoder"), names.index("head")
+
+        def tb_epoch_begin(args: Any, state: Any, control: Any, **kw: Any) -> None:
+            """Start the epoch's first timing window."""
+            tbs["t"] = time.perf_counter()
+
+        def tb_optimizer_step(args: Any, state: Any, control: Any, optimizer: Any = None, **kw: Any) -> None:
+            """Note the LRs of every param group: called after optimizer.step() and before the scheduler steps, so
+            they are the LRs this step used (AcceleratedOptimizer delegates param_groups)."""
+            tbs["lrs"] = [g["lr"] for g in optimizer.param_groups]
+
+        def tb_step_end(args: Any, state: Any, control: Any, **kw: Any) -> None:
+            """Write the step's scalars at state.global_step (1-based, already incremented): the batch loss, the
+            encoder and head LRs, the pre-clip gradient norm, messages per second since the last write and the memory
+            gauges; SystemExit when the step's pre-clip norm or LRs were not noted (the Trainer no longer clips
+            through trainer.accelerator, or no longer calls on_optimizer_step)."""
+            if tbs["grad_norm"] is None:
+                raise SystemExit("--tensorboard: the Trainer's pre-clip gradient norm was not seen at step %d "
+                                 "(trainer.accelerator.clip_grad_norm_ was not called); check the transformers "
+                                 "version" % state.global_step)
+            if tbs["lrs"] is None:
+                raise SystemExit("--tensorboard: the step's learning rates were not seen at step %d (the Trainer did "
+                                 "not call on_optimizer_step); check the transformers version" % state.global_step)
+            now = time.perf_counter()
+            tensorboard.write(tb, state.global_step, tensorboard.step_scalars(
+                tbs["loss"], tbs["lrs"][i_enc], tbs["lrs"][i_head], float(tbs["grad_norm"]), None,
+                "train/messages_per_s", tbs["n"], now - tbs["t"],
+                tensorboard.memory_scalars(**memory_now(device, proc))))
+            tbs["grad_norm"] = tbs["lrs"] = None
+            tbs["t"] = time.perf_counter()
+
+        def tb_epoch_end(args: Any, state: Any, control: Any, **kw: Any) -> None:
+            """Write the epoch's scalars at the step that closes it, then flush the file to disk. cb ran first, so its
+            epoch row exists and the wall clock includes the export write; BERTurk has no separate save time
+            (epoch/save_s None)."""
+            row = record["epochs"][-1]
+            tensorboard.write(tb, state.global_step, tensorboard.epoch_scalars(
+                row["loss"], row["train_s"], time.perf_counter() - ep["t0"], None, row["peak_total_bytes"],
+                row["swap_delta_bytes"]))
+            tensorboard.flush(tb)                           # a completed epoch's events on disk (fsync)
+
+        tbcb = transformers.TrainerCallback()               # a second instance with assigned hooks, after cb
+        tbcb.on_epoch_begin, tbcb.on_optimizer_step = tb_epoch_begin, tb_optimizer_step
+        tbcb.on_step_end, tbcb.on_epoch_end = tb_step_end, tb_epoch_end
+        callbacks = [cb, tbcb]
+    if tb_dir is not None:
+        # opened before the run dir exists: an unwritable DIR is refused while a rerun of the same command is still
+        # allowed (a run dir is never resumed). Purge step 1: a from-scratch rerun into the same DIR/RUN_ID hides the
+        # old file's steps
+        tb = tensorboard.open_writer(tb_dir, 1, tensorboard.pid_suffix(os.getpid()))
+        print("tensorboard events -> %s" % tb_dir)
+    try:
+        os.makedirs(run_dir)
+        trainer = transformers.Trainer(model=model, args=args, train_dataset=data,
+                                       data_collator=transformers.DataCollatorWithPadding(tok),
+                                       compute_loss_func=loss_fn, callbacks=callbacks, optimizers=(optimizer, None))
+        check_model(trainer.model)
+        record["param_device"] = a.device
+        if tb_dir is not None:
+            clip = trainer.accelerator.clip_grad_norm_
+
+            def noting_clip(*args: Any, **kw: Any) -> Any:
+                """accelerate's clip_grad_norm_, unchanged; notes the pre-clip total norm it returns."""
+                tbs["grad_norm"] = n = clip(*args, **kw)
+                return n
+
+            trainer.accelerator.clip_grad_norm_ = noting_clip   # flag on only: the off path calls accelerate directly
+        trainer.train()
+    finally:
+        if tb is not None:                                  # flushes the events, also after a callback's SystemExit;
+            # an I/O error of the event file is one printed line, never raised over the run's own error
+            tensorboard.close(tb)
+    if ep["epoch"] != stop:
+        raise SystemExit("the run stopped after %d of %d epochs" % (ep["epoch"], stop))
+    remove_trainer_dir(args.output_dir)
+    if a.out is not None:
+        write_final(trainer.model, base_dir, a.out, doc(stop, final=True))
+    write_atomic(os.path.join(run_dir, berturk.DONE), berturk.record_bytes(doc(stop)))
+    print("%s: %d of %d epochs -> %s" % (rid, stop, a.epochs, a.out if a.out is not None
+                                         else os.path.join(run_dir, "exports")))
+    return run_dir
+
+
 def main(argv: list[str] | None = None) -> str | None:
     """Train one BERTurk run (see the module docstring); returns its run dir, or None after --print-run-id."""
     ap = parser()
@@ -362,6 +638,10 @@ def main(argv: list[str] | None = None) -> str | None:
         ap.error("--lr must be positive")
     if not a.head_lr > 0:
         ap.error("--head-lr must be positive")
+    if not 0 <= a.warmup_ratio < 1:
+        ap.error("--warmup-ratio must be at least 0 and below 1 (a fraction of the training steps)")
+    if not a.weight_decay >= 0:
+        ap.error("--weight-decay must be at least 0")
     # K = --epochs has one spelling, the omitted flag (one run id per trajectory)
     if a.stop_after_epoch is not None and not 1 <= a.stop_after_epoch < a.epochs:
         ap.error("--stop-after-epoch must be at least 1 and below --epochs (%d); omit it to train every epoch"
@@ -495,19 +775,7 @@ def main(argv: list[str] | None = None) -> str | None:
         fs_binding = fewshot.binding(pin, "continued", a.fewshot_draw, a.fewshot_k,
                                      block["draws"][a.fewshot_draw].get("digest"), base_info["run_id"])
         fs_proof["base"] = base_info
-    canon = berturk.canonical({
-        "split": os.path.splitext(os.path.basename(entry["path"]))[0], "data_sha256": entry["sha256"],
-        "data_role": entry["role"], "base_model_sha256": digests["model.safetensors"],
-        "base_config_sha256": digests["config.json"],
-        "base_files_sha256": (None if a.base == "berturk"
-                              else dumps.files_digest({f: digests[f] for f in berturk.TOKENIZER_FILES})),
-        "transformers_version": _version("transformers"), "accelerate_version": _version("accelerate"),
-        "device": a.device, "epochs": a.epochs, "batch": a.batch, "encoder_lr": a.lr, "head_lr": a.head_lr,
-        "weight_decay": berturk.WEIGHT_DECAY, "warmup_ratio": berturk.WARMUP_RATIO,
-        "lr_scheduler": berturk.LR_SCHEDULER, "max_grad_norm": berturk.MAX_GRAD_NORM, "optim": berturk.OPTIM,
-        "loss": berturk.LOSS, "max_len": a.max_len, "max_messages": a.max_messages,
-        "mask_tags": list(mask) or None, "seed": a.seed, "stop_after_epoch": a.stop_after_epoch,
-        "postfit_sha256": record_sha, "fewshot": fs_binding})
+    canon = berturk.canonical(identity_values(a, entry, digests, mask, record_sha, fs_binding))
     pf_block = None
     if pf_record is not None:                               # bound by refusal, never by transcription
         postfit.check_final(pf_record, canon)
@@ -540,227 +808,8 @@ def main(argv: list[str] | None = None) -> str | None:
         raise SystemExit("%.1f GiB free under --storage; this run needs about %.1f GiB (one export per epoch); free "
                          "disk or pass another --storage" % (free / 2**30, need / 2**30))
 
-    if a.device == "mps":
-        os.environ.update(spike.spike_env("0", cpus))       # strict MPS before torch is imported
-    import psutil
-    import torch
-    import transformers
-
-    from ray_train import code_state, memory_now, memory_sampler, require_param_device
-
-    if a.device == "mps" and not torch.backends.mps.is_available():
-        raise SystemExit("--device mps, but MPS is not available here; use --device cpu")
-    if a.device == "cuda" and not torch.cuda.is_available():
-        raise SystemExit("--device cuda, but CUDA is not available here; use --device cpu or mps")
-    torch.set_num_threads(cpus)
-    from pilot.weights import verify_files
-    verify_files(base_dir, digests, "BERTurk base")          # the bytes the identity names, right before the load
-
-    t0 = time.time()
-    tok = transformers.AutoTokenizer.from_pretrained(base_dir, local_files_only=True)
-    data, n_truncated = [], 0
-    for r, lab in zip(rows, labels):
-        n_truncated += len(tok(r["state"])["input_ids"]) > a.max_len
-        enc = tok(r["state"], truncation=True, max_length=a.max_len)
-        data.append({"input_ids": enc["input_ids"], "token_type_ids": enc["token_type_ids"],
-                     "attention_mask": enc["attention_mask"], "labels": lab})
-    transformers.set_seed(a.seed)                           # right before the head is created, so it is seeded
-    model, info = transformers.BertForSequenceClassification.from_pretrained(
-        base_dir, num_labels=len(berturk.TAGS), problem_type=berturk.PROBLEM_TYPE, id2label=berturk.id2label(),
-        label2id=berturk.label2id(), dtype=torch.float32, local_files_only=True, output_loading_info=True)
-    new_names = info["missing_keys"]                         # the newly initialised parameters: the fresh head
-    if continued:                                           # the masked base's whole model, its head included
-        off = {k: sorted(str(x) for x in info.get(k) or ()) for k in ("missing_keys", "unexpected_keys",
-                                                                        "mismatched_keys")}
-        if any(off.values()):
-            raise SystemExit("--base %s: from_pretrained reports %s; a continued run loads the masked base's whole "
-                             "model, its fine-tuned classifier head included (no fresh head, no weight imprinting): "
-                             "pass an unedited berturk_train.py --fewshot-base checkpoint"
-                             % (repo_relpath(base_dir), "; ".join("%s %s" % (k, v) for k, v in off.items() if v)))
-    load_s = time.time() - t0
-    args = transformers.TrainingArguments(
-        output_dir=os.path.join(run_dir, "trainer"), per_device_train_batch_size=a.batch,
-        gradient_accumulation_steps=1, num_train_epochs=a.epochs, learning_rate=a.lr,
-        weight_decay=berturk.WEIGHT_DECAY, warmup_steps=berturk.WARMUP_RATIO, lr_scheduler_type=berturk.LR_SCHEDULER,
-        max_grad_norm=berturk.MAX_GRAD_NORM, optim=berturk.OPTIM, seed=a.seed, data_seed=a.seed,
-        use_cpu=(a.device == "cpu"), fp16=False, bf16=False, save_strategy="no", eval_strategy="no",
-        logging_strategy="epoch", report_to="none", disable_tqdm=True, dataloader_num_workers=0,
-        dataloader_pin_memory=False)
-    if args.device.type != a.device:
-        raise SystemExit("the Trainer picked device %s, requested %s; check the visible devices"
-                         % (args.device.type, a.device))
-    device = args.device
-    model = model.to(device)                                 # before the optimizer holds its parameters
-    if continued:                                           # the loaded head of the masked base, nothing new
-        optimizer, groups = build_optimizer(model, args, a.head_lr, new_names, continued=True)
-    else:
-        optimizer, groups = build_optimizer(model, args, a.head_lr, new_names)   # refuses a head that is not fresh
-    reset, sync, sample, _, peak = memory_sampler(device)
-    record = {"device": a.device, "param_device": None, "dtype": "torch.float32", "amp": False,
-              "torch_version": torch.__version__, "transformers_version": transformers.__version__,
-              "accelerate_version": canon["accelerate_version"], "optim": berturk.OPTIM,
-              "optimizer_groups": [{"group": g["group"], "decay": g["decay"], "lr": g["lr"],
-                                    "weight_decay": g["weight_decay"], "n_tensors": len(g["params"])} for g in groups],
-              "n_messages": len(rows),
-              "n_truncated": n_truncated, "max_len": a.max_len, "bit_reproducible": a.device == "cpu",
-              "torch_threads": torch.get_num_threads(), "load_s": load_s, "epochs": [], "code": code_state(),
-              "fewshot": fs_proof}
-    provenance = {"split": {"name": canon["split"], "path": entry["path"], "sha256": entry["sha256"],
-                            "role": entry["role"]},
-                  "manifest": {"path": repo_relpath(a.manifest), "sha256": sha256_file(a.manifest),
-                               "is_committed": manifest_is_committed(a.manifest)},
-                  "base": {"name": "berturk" if a.base == "berturk" else repo_relpath(base_dir),
-                           "revision": pins.BERTURK["revision"] if a.base == "berturk" else None,
-                           "model_sha256": digests["model.safetensors"]}}
-
-    def doc(epoch: int, final: bool = False) -> dict[str, Any]:
-        """berturk_train.json: an export (and done.json) is uncalibrated (T = 1); a --postfit final checkpoint serves
-        the record's val-fitted T, copied from final_block without arithmetic (a JSON float round trip)."""
-        served = final and pf_block is not None
-        return {"schema": berturk.RECORD_SCHEMA, "run_id": rid, "canonical": canon, "epoch": epoch,
-                "epochs_schedule": a.epochs, "stop_after_epoch": a.stop_after_epoch, "calibrated": served,
-                "temperature": pf_block["temperature"] if served else 1.0, "postfit": pf_block if served else None,
-                "record": record, "provenance": provenance}
-
-    ep = {"epoch": 0, "loss_sum": 0.0, "loss_n": 0, "steps": 0, "t0": 0.0, "swap0": 0}
-    # --tensorboard: the step's batch loss and size (loss_fn), its pre-clip norm (the accelerator wrap below), its LRs
-    # and the start of its timing window; read and reset by the second callback
-    tbs: dict[str, Any] = {"loss": None, "n": 0, "grad_norm": None, "lrs": None, "t": 0.0}
-
-    def loss_fn(outputs: Any, labels: Any, num_items_in_batch: Any = None) -> Any:
-        """masked_bce, adding each step's loss to the epoch row's running mean (and noting it for --tensorboard)."""
-        # the epoch row's loss is the mean over steps, not over items (documented, unchanged, diagnostic only)
-        loss = masked_bce(outputs, labels, num_items_in_batch)
-        v = float(loss.detach())
-        ep["loss_sum"] += v
-        ep["loss_n"] += 1
-        if tb_dir is not None:
-            tbs["loss"], tbs["n"] = v, int(labels.shape[0])
-        return loss
-
-    def check_model(model: Any) -> None:
-        """The requested device and fp32 for every parameter."""
-        require_param_device(model, a.device)
-        check_float32(model)
-
-    def on_epoch_begin(args: Any, state: Any, control: Any, **kw: Any) -> None:
-        """Reset the epoch counters, the memory peaks and the clock."""
-        ep.update(epoch=ep["epoch"] + 1, loss_sum=0.0, loss_n=0, steps=0, swap0=spike.swap_used())
-        reset()
-        sync()
-        ep["t0"] = time.perf_counter()
-
-    def on_step_end(args: Any, state: Any, control: Any, **kw: Any) -> None:
-        """Count one optimizer step and sample memory."""
-        ep["steps"] += 1                                    # called once per optimizer step
-        sample()
-
-    def on_epoch_end(args: Any, state: Any, control: Any, model: Any = None, **kw: Any) -> Any:
-        """The epoch row, the export and the stop after the last epoch this run trains; returns control."""
-        sync()
-        train_s = time.perf_counter() - ep["t0"]
-        sample()
-        if round(state.epoch) != ep["epoch"]:
-            raise SystemExit("the Trainer reports epoch %s, this callback counted %d" % (state.epoch, ep["epoch"]))
-        check_model(model)
-        record["epochs"].append({"epoch": ep["epoch"], "loss": ep["loss_sum"] / max(ep["loss_n"], 1),
-                                 "train_s": train_s, "optimizer_steps": ep["steps"], "n_messages": len(rows),
-                                 "peak_total_bytes": peak["total"], "peak_driver_bytes": peak["driver"],
-                                 "peak_rss_bytes": peak["rss"], "swap_delta_bytes": spike.swap_used() - ep["swap0"]})
-        if a.export_epochs:
-            write_export(model, base_dir, run_dir, ep["epoch"], doc(ep["epoch"]))
-        if ep["epoch"] >= stop:                             # the schedule stays sized by --epochs
-            control.should_training_stop = True
-        return control
-
-    cb = transformers.TrainerCallback()                     # an instance with assigned hooks, no subclass
-    cb.on_epoch_begin, cb.on_step_end, cb.on_epoch_end = on_epoch_begin, on_step_end, on_epoch_end
-    callbacks = [cb]
-    tb = None
-    if tb_dir is not None:                                  # the TensorBoard callback exists with the flag only
-        proc = psutil.Process()
-        names = [g["group"] for g in groups]                # pilot.berturk.optimizer_groups order: encoder, then head
-        i_enc, i_head = names.index("encoder"), names.index("head")
-
-        def tb_epoch_begin(args: Any, state: Any, control: Any, **kw: Any) -> None:
-            """Start the epoch's first timing window."""
-            tbs["t"] = time.perf_counter()
-
-        def tb_optimizer_step(args: Any, state: Any, control: Any, optimizer: Any = None, **kw: Any) -> None:
-            """Note the LRs of every param group: called after optimizer.step() and before the scheduler steps, so
-            they are the LRs this step used (AcceleratedOptimizer delegates param_groups)."""
-            tbs["lrs"] = [g["lr"] for g in optimizer.param_groups]
-
-        def tb_step_end(args: Any, state: Any, control: Any, **kw: Any) -> None:
-            """Write the step's scalars at state.global_step (1-based, already incremented): the batch loss, the
-            encoder and head LRs, the pre-clip gradient norm, messages per second since the last write and the memory
-            gauges; SystemExit when the step's pre-clip norm or LRs were not noted (the Trainer no longer clips
-            through trainer.accelerator, or no longer calls on_optimizer_step)."""
-            if tbs["grad_norm"] is None:
-                raise SystemExit("--tensorboard: the Trainer's pre-clip gradient norm was not seen at step %d "
-                                 "(trainer.accelerator.clip_grad_norm_ was not called); check the transformers "
-                                 "version" % state.global_step)
-            if tbs["lrs"] is None:
-                raise SystemExit("--tensorboard: the step's learning rates were not seen at step %d (the Trainer did "
-                                 "not call on_optimizer_step); check the transformers version" % state.global_step)
-            now = time.perf_counter()
-            tensorboard.write(tb, state.global_step, tensorboard.step_scalars(
-                tbs["loss"], tbs["lrs"][i_enc], tbs["lrs"][i_head], float(tbs["grad_norm"]), None,
-                "train/messages_per_s", tbs["n"], now - tbs["t"],
-                tensorboard.memory_scalars(**memory_now(device, proc))))
-            tbs["grad_norm"] = tbs["lrs"] = None
-            tbs["t"] = time.perf_counter()
-
-        def tb_epoch_end(args: Any, state: Any, control: Any, **kw: Any) -> None:
-            """Write the epoch's scalars at the step that closes it, then flush the file to disk. cb ran first, so its
-            epoch row exists and the wall clock includes the export write; BERTurk has no separate save time
-            (epoch/save_s None)."""
-            row = record["epochs"][-1]
-            tensorboard.write(tb, state.global_step, tensorboard.epoch_scalars(
-                row["loss"], row["train_s"], time.perf_counter() - ep["t0"], None, row["peak_total_bytes"],
-                row["swap_delta_bytes"]))
-            tensorboard.flush(tb)                           # a completed epoch's events on disk (fsync)
-
-        tbcb = transformers.TrainerCallback()               # a second instance with assigned hooks, after cb
-        tbcb.on_epoch_begin, tbcb.on_optimizer_step = tb_epoch_begin, tb_optimizer_step
-        tbcb.on_step_end, tbcb.on_epoch_end = tb_step_end, tb_epoch_end
-        callbacks = [cb, tbcb]
-    if tb_dir is not None:
-        # opened before the run dir exists: an unwritable DIR is refused while a rerun of the same command is still
-        # allowed (a run dir is never resumed). Purge step 1: a from-scratch rerun into the same DIR/RUN_ID hides the
-        # old file's steps
-        tb = tensorboard.open_writer(tb_dir, 1, tensorboard.pid_suffix(os.getpid()))
-        print("tensorboard events -> %s" % tb_dir)
-    try:
-        os.makedirs(run_dir)
-        trainer = transformers.Trainer(model=model, args=args, train_dataset=data,
-                                       data_collator=transformers.DataCollatorWithPadding(tok),
-                                       compute_loss_func=loss_fn, callbacks=callbacks, optimizers=(optimizer, None))
-        check_model(trainer.model)
-        record["param_device"] = a.device
-        if tb_dir is not None:
-            clip = trainer.accelerator.clip_grad_norm_
-
-            def noting_clip(*args: Any, **kw: Any) -> Any:
-                """accelerate's clip_grad_norm_, unchanged; notes the pre-clip total norm it returns."""
-                tbs["grad_norm"] = n = clip(*args, **kw)
-                return n
-
-            trainer.accelerator.clip_grad_norm_ = noting_clip   # flag on only: the off path calls accelerate directly
-        trainer.train()
-    finally:
-        if tb is not None:                                  # flushes the events, also after a callback's SystemExit;
-            # an I/O error of the event file is one printed line, never raised over the run's own error
-            tensorboard.close(tb)
-    if ep["epoch"] != stop:
-        raise SystemExit("the run stopped after %d of %d epochs" % (ep["epoch"], stop))
-    remove_trainer_dir(args.output_dir)
-    if a.out is not None:
-        write_final(trainer.model, base_dir, a.out, doc(stop, final=True))
-    write_atomic(os.path.join(run_dir, berturk.DONE), berturk.record_bytes(doc(stop)))
-    print("%s: %d of %d epochs -> %s" % (rid, stop, a.epochs, a.out if a.out is not None
-                                         else os.path.join(run_dir, "exports")))
-    return run_dir
+    return fit(a, rows, labels, base_dir, digests, entry, canon, rid, run_dir, cpus=cpus, fs_proof=fs_proof,
+               pf_block=pf_block, continued=continued, tb_dir=tb_dir)
 
 
 if __name__ == "__main__":
