@@ -1,8 +1,10 @@
 // Same-origin JSON requests to the demo backend (demo.py on 127.0.0.1). Every call resolves to a discriminated
 // result and never throws:
-//   {ok: true, data}                        the server answered 2xx with JSON;
+//   {ok: true, data}                        the server answered 2xx with a JSON body other than null;
 //   {ok: false, status: number, error, source}  the server answered an HTTP error; error is its one-line "error"
 //                                           field and source its "source" field (the record a view read), or null;
+//                                           a 2xx whose body is not JSON (or is null) is this too, with error
+//                                           "HTTP <status> (not JSON)" and source null, so data is never null;
 //   {ok: false, status: null, error: ""}    the server did not answer (unreachable).
 // Paths are same-origin only ("/api/..."), so the page never reaches another host.
 
@@ -21,6 +23,9 @@ async function toResult<T>(response: Response): Promise<Result<T>> {
     body = null;
   }
   if (response.ok) {
+    if (body === null) {
+      return { ok: false, status: response.status, error: "HTTP " + response.status + " (not JSON)", source: null };
+    }
     return { ok: true, data: body as T };
   }
   const fields = body !== null && typeof body === "object" ? (body as { error?: unknown; source?: unknown }) : {};

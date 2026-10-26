@@ -496,3 +496,42 @@ def test_status_type_declares_every_key_the_server_sends() -> None:
     others = [rel for rel in ui_sources() if re.search(r'getJSON<(?!Status>)\w+>\("/api/status"\)',
                                                        read_ui(os.path.relpath(rel, "ui/src")))]
     assert others == [], "GET /api/status read with another type than Status: %s" % others
+
+
+HTTP_PROBE = """const { getJSON } = await import(process.argv[2]);
+const cases = [[200, "<html>"], [200, "null"], [200, '{"a": 1}'], [503, '{"error": "x", "source": "y"}'], [500, "oops"]];
+const out = [];
+for (const [status, body] of cases) {
+  globalThis.fetch = async () => new Response(body, { status });
+  out.push(await getJSON("/api/x"));
+}
+globalThis.fetch = async () => { throw new TypeError("down"); };
+out.push(await getJSON("/api/x"));
+console.log(JSON.stringify(out));
+"""
+
+
+def test_http_result_never_carries_null_data(tmp_path: Any) -> None:
+    """11-REVIEW IN-03: ui/src/http.ts run under node's type stripping with a stubbed fetch: a 2xx whose body is not
+    JSON (or is JSON null) is {ok: false, status, error: "HTTP <status> (not JSON)", source: null}, never {ok: true,
+    data: null}, which would throw inside a polling chain; JSON, an HTTP error and an unanswered request keep their
+    results. Skips without node 22.6 or newer."""
+    import pathlib
+    import shutil
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    probe = os.path.join(str(tmp_path), "probe.mjs")
+    with open(probe, "w", encoding="utf-8") as f:
+        f.write(HTTP_PROBE)
+    http_ts = pathlib.Path(UI, "src", "http.ts").as_uri()
+    p = subprocess.run([node, "--experimental-strip-types", "--no-warnings", probe, http_ts], capture_output=True,
+                       text=True, encoding="utf-8", timeout=60)
+    if p.returncode != 0 and ("strip-types" in p.stderr or "Unknown file extension" in p.stderr):
+        pytest.skip("this node cannot strip TypeScript types (needs 22.6 or newer)")
+    assert p.returncode == 0, p.stderr
+    not_json = {"ok": False, "status": 200, "error": "HTTP 200 (not JSON)", "source": None}
+    assert json.loads(p.stdout) == [not_json, not_json, {"ok": True, "data": {"a": 1}},
+                                    {"ok": False, "status": 503, "error": "x", "source": "y"},
+                                    {"ok": False, "status": 500, "error": "HTTP 500", "source": None},
+                                    {"ok": False, "status": None, "error": ""}]
