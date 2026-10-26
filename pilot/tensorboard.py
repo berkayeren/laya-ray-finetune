@@ -107,3 +107,42 @@ def write(writer: Any, step: int, scalars: dict[str, float | int | None]) -> Non
     for tag in sorted(scalars):
         if scalars[tag] is not None:
             writer.add_scalar(tag, float(scalars[tag]), step)
+
+
+def _gib(b: int | None) -> float | None:
+    """Bytes in GiB, None for None."""
+    return None if b is None else b / GIB
+
+
+def memory_scalars(current: int | None, driver: int | None, rss: int | None,
+                   swap: int | None) -> dict[str, float | None]:
+    """The memory/* gauges of one optimizer step, in GiB (bytes / GIB), None where a value is None (skipped by write):
+    memory/device_current_gib (the device's current allocation: mps current_allocated_memory, cuda memory_allocated;
+    None on cpu), memory/mps_driver_gib (mps driver_allocated_memory; None elsewhere), memory/rss_gib (the process's
+    resident set) and memory/swap_used_gib (the system's used swap)."""
+    return {"memory/device_current_gib": _gib(current), "memory/mps_driver_gib": _gib(driver),
+            "memory/rss_gib": _gib(rss), "memory/swap_used_gib": _gib(swap)}
+
+
+def step_scalars(loss: float, lr_encoder: float | None, lr_head: float, grad_norm: float, sigma: float | None,
+                 rate_tag: str, items: int, seconds: float, memory: dict[str, float | None]) -> dict[str, float | None]:
+    """The per-optimizer-step scalars: train/loss (the mean micro-batch loss of the step), train/lr_encoder (None with
+    a frozen encoder) and train/lr_head (the LRs the step used), train/grad_norm (the pre-clip total norm), train/sigma
+    (the RLCD sigma; None for another loss), the rate under rate_tag (one of RATE_TAGS: Laya items or BERTurk messages
+    per second, items / seconds, None unless seconds > 0; the other rate tag is never set) and the memory gauges
+    (memory_scalars). ValueError for a rate_tag outside RATE_TAGS."""
+    if rate_tag not in RATE_TAGS:
+        raise ValueError("rate tag %s is not one of %s" % (rate_tag, ", ".join(RATE_TAGS)))
+    return dict({"train/loss": loss, "train/lr_encoder": lr_encoder, "train/lr_head": lr_head,
+                 "train/grad_norm": grad_norm, "train/sigma": sigma,
+                 rate_tag: items / seconds if seconds > 0 else None}, **memory)
+
+
+def epoch_scalars(loss: float, train_s: float, wall_s: float, save_s: float | None, peak_total_bytes: int,
+                  swap_delta_bytes: int) -> dict[str, float | None]:
+    """The per-epoch scalars (exactly EPOCH_TAGS): epoch/loss (the epoch's mean loss), epoch/train_s (seconds of the
+    training steps), epoch/wall_s (the epoch's wall clock up to the write), epoch/save_s (the checkpoint save time;
+    None when unknown), epoch/peak_total_gib (the peak memory, bytes / GIB) and epoch/swap_delta_mib (the system swap
+    change over the epoch, bytes / MIB)."""
+    return {"epoch/loss": loss, "epoch/train_s": train_s, "epoch/wall_s": wall_s, "epoch/save_s": save_s,
+            "epoch/peak_total_gib": peak_total_bytes / GIB, "epoch/swap_delta_mib": swap_delta_bytes / MIB}

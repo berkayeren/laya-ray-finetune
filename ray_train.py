@@ -525,6 +525,18 @@ def memory_sampler(device: torch.device) -> tuple[Callable[[], None], Callable[[
     return reset, sync, sample, current, peak
 
 
+def memory_now(device: torch.device, proc: psutil.Process) -> dict[str, int | None]:
+    """The memory gauges of one TensorBoard step, in bytes, as host queries with no device sync: "current" (mps
+    current_allocated_memory, cuda memory_allocated(device), None on cpu), "driver" (mps driver_allocated_memory, None
+    elsewhere), "rss" (proc's resident set) and "swap" (the system's used swap); pilot.tensorboard.memory_scalars(**it)
+    turns them into the memory/* tags."""
+    kind = device.type
+    return {"current": (torch.mps.current_allocated_memory() if kind == "mps"
+                        else torch.cuda.memory_allocated(device) if kind == "cuda" else None),
+            "driver": torch.mps.driver_allocated_memory() if kind == "mps" else None,
+            "rss": proc.memory_info().rss, "swap": spike.swap_used()}
+
+
 def _rewrite_config(path: str, cfg: dict[str, Any]) -> None:
     """Rewrite a just-saved checkpoint's config in laya's own layout (json indent 2), e.g. to add its save time."""
     tmp = os.path.join(path, "rl_agent_config.json.tmp")
@@ -853,6 +865,7 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
     # epoch * per_epoch + steps
     tb = tb_writer(c, rank, start_epoch, stop, per_epoch, segment["segment"])
     if tb is not None:
+        proc = psutil.Process()                             # the memory/rss_gib gauge
         print("tensorboard events -> %s (segment %d, purge step %d)"
               % (c["tensorboard"], segment["segment"], start_epoch * per_epoch + 1), flush=True)
     last = {"epoch": start_epoch, "loss": rows_out[-1]["loss"] if rows_out else None}
@@ -866,8 +879,8 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
             mem_reset()
             mem_sync()
             swap0, t0 = spike.swap_used(), time.perf_counter()
-            if tb is not None:                              # the micro-batch losses of the step being accumulated
-                window = {"loss": 0.0, "n": 0}
+            if tb is not None:                              # the micro-batches of the step being accumulated
+                window = {"loss": 0.0, "n": 0, "items": 0, "t": t0}
             opt.zero_grad(set_to_none=True)
             for s in range(0, len(order), mb):
                 batch = la.collate_items([[la.encode_item(tok, it, max_len, head_max_len,
@@ -890,8 +903,11 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
                     with mps_oom_exit(epoch + 1, n, c["rung"]):   # the step closes micro-batch n
                         if scaler:
                             scaler.unscale_(opt)
-                        torch.nn.utils.clip_grad_norm_(params, CLIP_GRAD_NORM)
+                        # the pre-clip total norm (after unscale_ on cuda); read only with --tensorboard
+                        gn = torch.nn.utils.clip_grad_norm_(params, CLIP_GRAD_NORM)
                         (scaler.step(opt), scaler.update()) if scaler else opt.step()
+                        if tb is not None:                  # the LRs this step used: before the scheduler steps
+                            lrs = [g["lr"] for g in opt.param_groups]
                         sched.step()
                         opt.zero_grad(set_to_none=True)
                     steps += 1
@@ -901,9 +917,16 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
                 if tb is not None:
                     window["loss"] += lv
                     window["n"] += 1
+                    window["items"] += len(order[s:s + mb])
                     if step_now:                            # after the closing micro-batch's loss
-                        tensorboard.write(tb, epoch * per_epoch + steps, {"train/loss": window["loss"] / window["n"]})
-                        window = {"loss": 0.0, "n": 0}
+                        now = time.perf_counter()
+                        # head group built first, the encoder group inserted at 0 unless frozen; items x world: every
+                        # rank trains an equal shard in lockstep
+                        tensorboard.write(tb, epoch * per_epoch + steps, tensorboard.step_scalars(
+                            window["loss"] / window["n"], None if c["freeze_encoder"] else lrs[0], lrs[-1], gn.item(),
+                            sigma if c["loss"] == "rlcd" else None, "train/items_per_s", window["items"] * world,
+                            now - window["t"], tensorboard.memory_scalars(**memory_now(device, proc))))
+                        window = {"loss": 0.0, "n": 0, "items": 0, "t": now}
             mem_sync()
             train_s, swap_delta = time.perf_counter() - t0, spike.swap_used() - swap0
             row = dict(zip(runs.EPOCH_FIELDS, (epoch + 1, total / max(1, n), train_s, 0.0, steps, len(shard),
@@ -951,7 +974,9 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
                 # save.json (the resumed epoch's row) only the time up to the report
                 row["save_s"] = time.perf_counter() - t_save
             if tb is not None:                              # at the step that closes the epoch, below any later purge
-                tensorboard.write(tb, (epoch + 1) * per_epoch, {"epoch/loss": row["loss"]})
+                tensorboard.write(tb, (epoch + 1) * per_epoch, tensorboard.epoch_scalars(
+                    row["loss"], row["train_s"], time.time() - t_epoch, row["save_s"], row["peak_total_bytes"],
+                    row["swap_delta_bytes"]))
             if c["fail_after_epoch"] == epoch + 1:              # test hook: every rank fails after the checkpoint
                 raise RuntimeError("simulated failure after epoch %d (--fail-after-epoch)" % (epoch + 1))
             last = metrics
