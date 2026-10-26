@@ -4,9 +4,10 @@ tarballs with sha512 integrity, no install script), ui/.npmrc's install policy, 
 no verdict word, question text, browser storage, cookie, inner HTML, case-changing CSS or external URL in ui/src or
 ui/index.html (comments included), and no ui/src path the root .gitignore would swallow.
 
-The chat contracts: the six example messages of ui/src/examples.ts are demo-authored and never the message text of a
-split file (test_examples_are_not_dataset_text, data marker: it compares them with every local data/splits/*.jsonl
-after normalization and never prints a split text), together they cover the Turkish letters, and the chat copy of the
+The chat contracts: the six example messages of ui/src/examples.ts and the server's warm-up message
+(pilot.demo.WARMUP_TEXT) are demo-authored and never the message text of a split file
+(test_examples_are_not_dataset_text, data marker: it compares them with every local data/splits/*.jsonl after
+normalization and never prints a split text), the examples together cover the Turkish letters, and the chat copy of the
 UI-SPEC appears in ui/src exactly. The dashboard contracts: the dashboard copy of the UI-SPEC appears in ui/src exactly
 (test_dashboard_copy_contract), and the routes are #/chat and the four #/dashboard/ views in the UI-SPEC's order, each
 with a component in Dashboard.tsx's VIEW_COMPONENTS (test_dashboard_routes).
@@ -272,16 +273,19 @@ def test_examples_are_not_dataset_text() -> None:
     names = sorted(n for n in os.listdir(split_dir) if n.endswith(".jsonl")) if os.path.isdir(split_dir) else []
     if not names:
         pytest.skip("data/splits holds no *.jsonl to compare the examples against; run `make data`")
-    wanted = {normalize(e): i for i, e in enumerate(examples)}
+    # the six examples and the server's warm-up message (pilot.demo.WARMUP_TEXT, demo-authored, in no split)
+    wanted = {normalize(e): "example %d" % i for i, e in enumerate(examples)}
+    wanted[normalize(pd.WARMUP_TEXT)] = "pilot.demo.WARMUP_TEXT"
+    assert len(wanted) == 7, "the examples and WARMUP_TEXT are not seven distinct messages"
     hits = []
     for name in names:
         with open(os.path.join(split_dir, name), "rb") as f:
             rows = pilot.data.parse_jsonl(f.read())
         assert rows, "%s holds no row" % name
         found = {wanted[k] for k in {normalize(r["state"]) for r in rows} if k in wanted}
-        # only the example's index and the split file name: never a split text
-        hits += ["example %d in %s" % (i, name) for i in sorted(found)]
-    assert hits == [], "examples equal to a split message: %s" % hits
+        # only the example's label and the split file name: never a split text
+        hits += ["%s in %s" % (label, name) for label in sorted(found)]
+    assert hits == [], "demo-authored messages equal to a split message: %s" % hits
 
 
 def test_examples_cover_turkish_letters() -> None:
