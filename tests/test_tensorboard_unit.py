@@ -4,7 +4,8 @@
 The writer round trip goes through tensorboardX and is read back with tests/tb_events.py (crc-checked, no tensorboard
 package); the builders and write are checked on a fake writer that records its add_scalar calls. The path guard is
 checked against the repo's own frozen and tracked paths through symlinks, case variants and file locations, and end to
-end through ray_train.py --print-run-id with a DIR/RUN_ID symlink into results/ (no Ray start, nothing created).
+end through ray_train.py --print-run-id with a DIR/RUN_ID symlink into results/ (no Ray start, nothing created). The
+docs tests check that the README and both CLAUDE.md files name the flag.
 """
 import os
 import subprocess
@@ -285,3 +286,22 @@ def test_same_suffix_in_one_second_truncates(tmp_path: Path) -> None:
             assert tb_events.scalars(tb_events.read_events(logdir), "train/loss") == {2: 2.0}
             return
     pytest.fail("no attempt opened both writers within one second; the truncation could not be shown")
+
+
+def _read(rel: str) -> str:
+    with open(os.path.join(REPO_ROOT, rel), encoding="utf-8") as f:
+        return f.read()
+
+
+def test_docs_name_the_tensorboard_flag() -> None:
+    """The README names pilot/tensorboard.py in its Files table, runs both trainers with --tensorboard tensorboard in
+    its Run block, and states the flag's rules in the Run section's prose (outside the fenced block)."""
+    text = _read("README.md")
+    assert any(ln.startswith("| `pilot/tensorboard.py` |") for ln in text.splitlines())
+    run = text.split("\n## Run\n", 1)[1].split("\n## Scoring path\n", 1)[0]
+    lines = run.splitlines()
+    for script in ("python ray_train.py", "python berturk_train.py"):
+        assert any(script in ln and "--tensorboard tensorboard" in ln for ln in lines), script
+    prose = " ".join(" ".join(part.split()) for part in run.split("```")[::2])
+    for phrase in ("not part of the run id", "rank 0", "gitignored", "one event file per segment"):
+        assert phrase in prose, phrase

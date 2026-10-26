@@ -101,8 +101,9 @@ are hash-registered too, so later stages can trust the flag list.
 | `pilot/dumps.py` | the logit dump format: writer, the one hard-failing reader, gold labels, run ids |
 | `pilot/metrics.py` | torch-free metrics, the val θ rule and the paired bootstrap, the same for every system; the confidence metrics: Brier, NLL, classwise ECE and reliability bins, the message-confidence rule, coverage and AURC, the false-positive rate and its Wilson interval |
 | `pilot/runs.py` | torch-free run-record schema of `ray_train.py`, the run id, the neg-K item count, the MPS fallback ladder |
+| `pilot/tensorboard.py` | torch-free TensorBoard helpers of both trainers: the `--tensorboard DIR` guard (`check_logdir`), the fixed tag names (`TAGS`), the lazy tensorboardX writer (`open_writer`, one file per writer, a purge step after a resume) and the scalar builders |
 | `pilot/compute.py` | torch-free compute-checkpoint logic: projection, what-if table, disk budget, report and markdown; for the few-shot experiment: the few-shot projection on the committed rates and the frozen compute-fallback decision (`fewshot_projection`, `fewshot_decision`) |
-| `ray_train.py` | Ray Train `TorchTrainer` (DDP) fine-tune using Laya's own loss and checkpoint format, uncalibrated (T = 1) checkpoints; cpu, cuda or one MPS worker; resumes by rerunning; few-shot: `--fewshot-base` trains a label-masked base (the held-out tags deleted from every row before negative sampling; `--mask-tags` only names them) and `--fewshot-draw D --fewshot-k K` continues a masked base on a frozen support set plus its replay set, both bound to the frozen protocol by refusal |
+| `ray_train.py` | Ray Train `TorchTrainer` (DDP) fine-tune using Laya's own loss and checkpoint format, uncalibrated (T = 1) checkpoints; cpu, cuda or one MPS worker; resumes by rerunning; few-shot: `--fewshot-base` trains a label-masked base (the held-out tags deleted from every row before negative sampling; `--mask-tags` only names them) and `--fewshot-draw D --fewshot-k K` continues a masked base on a frozen support set plus its replay set, both bound to the frozen protocol by refusal; `--tensorboard DIR` writes live TensorBoard scalars from rank 0 (not part of the run id) |
 | `score.py` | the only place a model runs: one system on one val, test or hotels_probe split → a logit dump (in-process or Ray Data actors); a fine-tuned checkpoint reaches test or HOTELS only through the protocol gate (one of the frozen protocol's final seeds, once); a few-shot checkpoint listed in `results/fewshot/runs.json` reaches test only, once, its sidecar bound to that manifest (`fewshot_runs_sha256`) |
 | `report.py` | dumps → metrics (numpy only, no model); `--compare` paired bootstrap; `--table` results table; `--confidence` the confidence record (calibration, abstention, no-intent and, on `--split hotels_probe`, out-of-domain false positives) with its reliability diagram; `--confidence-table` its markdown; `RUN_DIR --split test --postfit RECORD` reports a final seed at its postfit record's θ, `--verdict` writes the verdict record of the frozen protocol, `--final-table` and `--go-block` print the results table and the GO block; `--verdict --fewshot RECORD` decides criterion (d)'s few-shot path from the few-shot results record, recomputed from the dumps; `--recommendation` prints the README recommendation block, `--memo` writes the decision memo |
 | `evaluate.py` | one-step wrapper: `score.py --model laya`, then `report.py`'s report of that dump |
@@ -110,7 +111,7 @@ are hash-registered too, so later stages can trust the flag list.
 | `compute_checkpoint.py` | the compute checkpoint: a measured MPS fine-tune probe and the projected experiment-matrix runtime (`results/compute/`) |
 | `pilot/postfit.py` | torch-free postfit: the val-fitted T, θ and the chosen epoch in one byte-reproducible record; the final-seed binding and manifest; the README Laya val selection block |
 | `postfit.py` | the postfit CLI of both models: val dumps → `results/postfit/laya.json` or `berturk.json` (the protocol by system kind), `--prune`, `--print-final-commands`, `--final-manifest`, `--render`, `--reference-check` and `--render-berturk` (BERTurk) |
-| `berturk_train.py` | the BERTurk trainer: the HF Trainer, masked BCE, encoder LR `--lr` and head LR `--head-lr` in their own param groups, `--epochs` (default 30), a per-epoch export, `--stop-after-epoch`, `--postfit` and `--reference` for the final seeds; one process, no Ray; few-shot: `--fewshot-base` trains a label-masked base (the held-out label columns masked, so they get no gradient) and `--fewshot-draw D --fewshot-k K` continues a masked base from its own fine-tuned head on a frozen support set plus its replay set |
+| `berturk_train.py` | the BERTurk trainer: the HF Trainer, masked BCE, encoder LR `--lr` and head LR `--head-lr` in their own param groups, `--epochs` (default 30), a per-epoch export, `--stop-after-epoch`, `--postfit` and `--reference` for the final seeds; one process, no Ray; few-shot: `--fewshot-base` trains a label-masked base (the held-out label columns masked, so they get no gradient) and `--fewshot-draw D --fewshot-k K` continues a masked base from its own fine-tuned head on a frozen support set plus its replay set; `--tensorboard DIR` writes live TensorBoard scalars through a second Trainer callback (not part of the run id) |
 | `pilot/berturk.py` | torch-free BERTurk bookkeeping: the recipe and run id, labels in `INTENTS` order, the checkpoint identity, the postfit protocol, the published reference check, the final commands and manifest, the superseded chain (`SUPERSEDED`, `load_superseded`) and the README BERTurk baseline block |
 | `latency.py` | the latency harness: times every final seed of one system per message on one device, in-process at batch 1, fp32, through the load path that scored the dumps; `--render` the markdown; reported, not gated |
 | `pilot/latency.py` | torch-free latency logic: the timing contract and loop, nearest-rank percentiles, the final-manifest reader, the `latency/1` report and its markdown |
@@ -156,6 +157,10 @@ python postfit.py --print-final-commands results/postfit/berturk.json \
 # CPU smoke fine-tune (CUDA: drop --freeze-encoder/--max-messages, add --device cuda; --gpu is the same)
 python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
     --workers 2 --freeze-encoder --max-messages 100 --epochs 2
+
+# live TensorBoard scalars of a training run (opt-in; the run id, the checkpoints and every record are unchanged)
+python ray_train.py ... --tensorboard tensorboard     # rank 0 writes tensorboard/RUN_ID/ (gitignored)
+python berturk_train.py ... --tensorboard tensorboard
 
 # score one system on one split into a logit dump (--workers 0 runs in-process without Ray)
 python score.py data/splits/val.jsonl --model laya --checkpoint multilingual --workers 2 --cpus-per-worker 4
@@ -266,6 +271,15 @@ flags of the next rung. After the last epoch (the final save, or the model move 
 checkpoint) every epoch is already saved, so that error says to rerun the same command instead: a rung flag would
 change the run id and retrain from epoch 0. There is no calibration stage: training writes uncalibrated checkpoints
 (T = 1), and `postfit.py` fits T on val afterwards.
+
+`--tensorboard DIR` (both trainers, off by default) writes live TensorBoard scalars into `DIR/RUN_ID/`, for Laya from
+rank 0 only. Per optimizer step: the loss, the encoder and head learning rates, Laya's RLCD sigma, the pre-clip
+gradient norm, Laya items or BERTurk messages per second, and device, MPS driver, RSS and swap memory. Per epoch: the
+loss, the training and wall-clock seconds, Laya's save time, the peak memory and the swap delta. The flag is not part
+of the run id and enters no checkpoint or record. It is refused under `results/`, `data/`, `ui/` or `protocol.json`,
+under `--storage` or `--out`, and inside the repo unless gitignored (`tensorboard/` is). A resumed Laya run adds one
+event file per segment and hides the killed epoch's partial steps. The event files hold tag names and numbers only.
+Any TensorBoard can read them (`tensorboard --logdir tensorboard`); the viewer is not part of this environment.
 
 ## Scoring path
 
