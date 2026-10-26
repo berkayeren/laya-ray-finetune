@@ -305,3 +305,12 @@ def test_docs_name_the_tensorboard_flag() -> None:
     prose = " ".join(" ".join(part.split()) for part in run.split("```")[::2])
     for phrase in ("not part of the run id", "rank 0", "gitignored", "one event file per segment"):
         assert phrase in prose, phrase
+
+
+def test_claude_docs_name_the_tensorboard_flag() -> None:
+    """Both CLAUDE.md files name the flag and its helper module; .claude/CLAUDE.md names the locked tensorboardX."""
+    for rel in ("CLAUDE.md", os.path.join(".claude", "CLAUDE.md")):
+        text = _read(rel)
+        for want in ("--tensorboard", "pilot/tensorboard.py"):
+            assert want in text, (rel, want)
+    assert "tensorboardX==2.6.5" in _read(os.path.join(".claude", "CLAUDE.md"))
