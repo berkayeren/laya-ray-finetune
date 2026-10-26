@@ -602,3 +602,21 @@ def test_views_hold_no_uid_or_message_text() -> None:
         uids = [s for s in strings_of(v) if UID_RE.match(s) or HOTEL_UID_RE.match(s)]
         assert not uids, (name, uids[:3])
         assert not keys_of(v) & {"state", "text", "times_s"}, (name, keys_of(v) & {"state", "text", "times_s"})
+
+
+UNPINNED_PHRASES = ("no pin covers the confidence records", "no pin covers them or their confidence records")
+
+
+def test_docs_state_the_confidence_group_is_unpinned() -> None:
+    """No protocol.json input covers a confidence record or a reliability SVG (11-REVIEW WR-04), so the README demo
+    prose and both CLAUDE.md files say the confidence view is unpinned instead of claiming every view is bound."""
+    with open(os.path.join(REPO, "protocol.json"), encoding="utf-8") as f:
+        inputs = json.load(f)["inputs"]
+    pinned = [r for r in inputs if "/confidence/" in r or r.endswith(".svg")]
+    assert pinned == [], "a confidence record is pinned now (%s): bind it in confidence_view, update the docs" % pinned
+    for rel in ("README.md", "CLAUDE.md", os.path.join(".claude", "CLAUDE.md")):
+        with open(os.path.join(REPO, rel), encoding="utf-8") as f:
+            text = " ".join(f.read().split())
+        assert "every view behind" not in text, "%s claims every demo view is pinned" % rel
+        said = [p for p in UNPINNED_PHRASES if p in text.lower()]
+        assert said, "%s does not say the confidence view is unpinned" % rel

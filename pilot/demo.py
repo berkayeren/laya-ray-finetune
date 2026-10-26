@@ -40,12 +40,16 @@ Design notes:
   (training_unavailable), never filled from the manifests (the user decision of 2026-10-25, D-09).
 - The confidence, latency and few-shot group (D-10): the reliability diagrams are the committed SVG files, served by
   exact name from the startup allow-list (svg_allow_list) and never redrawn, each with the run id of the confidence/1
-  record beside it and the val records' caveat verbatim (confidence_view); the latency/1 reports are protocol.json
-  inputs, hashed against their pins before load_reports (latency_view), and their per-message times stay on the
-  server; the few-shot results record is the one the checked verdict binds by sha256 (fewshot_view), every mean
-  shown a cell of pilot.fewshot_report.render_markdown's text. No view builder writes a file.
+  record beside it and the val records' caveat verbatim (confidence_view). No protocol.json input or verdict sha256
+  covers the confidence records or the SVGs, so this group is unpinned: confidence_view checks each record's schema,
+  run id and split against its SVG's name only, and the SVG route serves the file's bytes unhashed. The latency/1
+  reports are protocol.json inputs, hashed against their pins before load_reports (latency_view), and their
+  per-message times stay on the server; the few-shot results record is the one the checked verdict binds by sha256
+  (fewshot_view), every mean shown a cell of pilot.fewshot_report.render_markdown's text. No view builder writes a
+  file.
 
-This module never imports torch, transformers, laya, Ray, fastapi, starlette or uvicorn (a subprocess test guards it).
+This module never imports torch, transformers, laya, Ray, fastapi, starlette or uvicorn (a subprocess test guards it);
+scipy loads through pilot.postfit.
 
 usage: from pilot import demo
        bindings = demo.protocol_bindings()                   # {kind: binding}, refused in one line on any mismatch
