@@ -137,7 +137,7 @@ def test_tensorboard_flushes_at_the_epoch_boundary() -> None:
     last_step_write = src.rindex("tensorboard.step_scalars(")
     assert len(flushes) == 2, flushes
     assert last_step_write < flushes[0] < report < epoch_write < flushes[1]
-    bsrc = inspect.getsource(berturk_train.main)
+    bsrc = inspect.getsource(berturk_train.fit)                # main's training section, the BERTurk epoch callback
     assert bsrc.index("tensorboard.epoch_scalars(") < bsrc.index("tensorboard.flush(tb)")
 
 
