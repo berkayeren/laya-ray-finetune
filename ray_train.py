@@ -107,6 +107,18 @@ unchanged. The frozen uid lists reach the worker in the config key fewshot_rows,
 checkpoint config leave out; the record's fewshot entry holds only counts, tags, the protocol sha256, the draw digest
 and the base's run id and canonical config (the masking proof).
 
+TensorBoard (--tensorboard DIR, off by default): rank 0 writes live scalars into DIR/RUN_ID/ through pilot.tensorboard.
+Per optimizer step: the loss (the step's mean micro-batch loss), the encoder and head LR (read before the scheduler
+steps), the RLCD sigma, the pre-clip gradient norm (the value clip_grad_norm_ already returns), items per second over
+all ranks, and device, MPS driver, RSS and swap memory. Per epoch, at the step that closes the epoch: the loss, the
+training, wall-clock and save seconds, the peak memory and the swap delta. The global step is the 1-based
+optimizer-step count. Each run segment writes its own event file (.segment-NNN) with a purge marker at the first step
+after the resumed epoch, so a killed partial epoch's steps are hidden and every completed epoch's steps survive; the
+writer is closed in a finally block, so a failure still flushes it. The flag is NOT_IDENTITY and kept out of every
+checkpoint config, so the run id, the weights and the records are unchanged. DIR is refused under results/, data/, ui/,
+protocol.json, --storage or --out, before the split is read and before ray.init, also with --print-run-id.
+tensorboardX (locked through ray[train]) is imported only when the writer opens.
+
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
 (tampered, unregistered, val/test/probe) is refused before Ray starts, and so is a train split under any manifest that
 holds committed held-out content (pilot.data.refuse_held_out: committed test content, or committed val content in
@@ -127,6 +139,7 @@ usage:
   python ray_train.py ... --device mps --workers 1 --freeze-embeddings   # fallback rung 1 after an MPS OOM
   python ray_train.py ... --workers 2 --freeze-encoder --max-messages 100   # CPU smoke test
   python ray_train.py ... --print-run-id            # the run id (storage/<run_id>/); rerun a killed command to resume
+  python ray_train.py ... --tensorboard tensorboard   # live TensorBoard scalars from rank 0 into tensorboard/RUN_ID/
   python ray_train.py --data data/splits/final_train.jsonl ... --epochs 4 --stop-after-epoch 2 --seed 1 \
                       --postfit results/postfit/laya.json --no-export-epochs   # a final seed (postfit.py prints it)
   python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt-fewshot-base-s0 \
