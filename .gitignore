@@ -233,6 +233,8 @@ __marimo__/
 /berturk_runs/
 /tensorboard/
 /ckpt*/
+# Ray Tune and Train storage of tune.py searches (trial logs, params, results); only results/tune/ is committed
+/tune_runs/
 *.safetensors
 .DS_Store
 

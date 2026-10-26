@@ -20,7 +20,8 @@ resumes, another seed or config gets another dir. Every ray_train.py flag is in 
 through its resolved value) and NOT_IDENTITY (a test enforces it), so a new flag cannot silently drop out of the key.
 A local --base also enters by the digest of its tokenizer/ and encoder/ files (base_files_sha256): the tokenizer
 builds every training item. canonical() leaves that key out when it is None (the pinned base, whose files the
-pin fixes), so a pinned run keeps the id it had before the key existed.
+pin fixes), so a pinned run keeps the id it had before the key existed. The same holds for tune, the tuning
+partition of a tune.py search trial (pilot.tune): None, so left out, in every ray_train.py command.
 check_state refuses a resume from another run's train state; disk_need_bytes is the driver's free-disk floor.
 
 usage: from pilot import runs; record = runs.read_record(ckpt_dir); [row["train_s"] for row in record["epochs"]]
@@ -43,7 +44,7 @@ IDENTITY = ("split", "data_sha256", "data_role", "base_model_sha256", "base_conf
             "laya_version", "device", "workers", "epochs", "micro_batch", "grad_accum", "encoder_lr", "head_lr",
             "weight_decay", "clip_grad_norm", "loss", "neg", "neg_seed", "freeze_encoder", "freeze_embeddings",
             "grad_checkpointing", "amp", "max_len", "head_max_len", "max_messages", "shuffle_options", "seed",
-            "adamw_foreach", "adamw_fused", "stop_after_epoch", "postfit_sha256", "mask_tags", "fewshot")
+            "adamw_foreach", "adamw_fused", "stop_after_epoch", "postfit_sha256", "mask_tags", "fewshot", "tune")
 # ray_train.py flags that never change training, so never the run_id:
 #   data, base, manifest: paths, represented in IDENTITY by the verified sha256s (data_sha256, base_*_sha256)
 #   out, storage: where the result and the Ray run dir go
@@ -71,7 +72,9 @@ NOT_IDENTITY = ("data", "base", "out", "storage", "manifest", "cpus_per_worker",
 # pilot.fewshot.binding: {protocol_sha256, stage} plus draw, k, digest and base_run_id for a continued run) are absent
 # outside the few-shot experiment, so every committed run id is unchanged (laya-selection_train-neg8-s0-d92447f4
 # recomputes)
-DROPPED_WHEN_NONE = ("base_files_sha256", "stop_after_epoch", "postfit_sha256", "mask_tags", "fewshot")
+# tune (the tuning partition of an exploratory search trial, pilot.tune's block: the source split, the train and dev
+# folds and both uid-list digests) is absent outside a search, so every committed run id is unchanged
+DROPPED_WHEN_NONE = ("base_files_sha256", "stop_after_epoch", "postfit_sha256", "mask_tags", "fewshot", "tune")
 
 
 def canonical(values: dict[str, Any]) -> dict[str, Any]:

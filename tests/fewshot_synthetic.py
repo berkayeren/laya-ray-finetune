@@ -108,7 +108,7 @@ def chosen_laya(data_sha256: str) -> dict[str, Any]:
         "loss": "rlcd", "neg": r["neg"], "neg_seed": 0, "freeze_encoder": False, "freeze_embeddings": False,
         "grad_checkpointing": True, "amp": False, "max_len": r["max_len"], "head_max_len": 32, "max_messages": None,
         "shuffle_options": True, "seed": 0, "adamw_foreach": None, "adamw_fused": None, "stop_after_epoch": None,
-        "postfit_sha256": None, "mask_tags": None, "fewshot": None})
+        "postfit_sha256": None, "mask_tags": None, "fewshot": None, "tune": None})
 
 
 def chosen_berturk(data_sha256: str) -> dict[str, Any]:

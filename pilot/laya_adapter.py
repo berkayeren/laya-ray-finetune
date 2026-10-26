@@ -267,6 +267,48 @@ def noul_logits(agent: Any, texts: list[str], questions: dict[str, Any]) -> Any:
     return out
 
 
+def noul_margins(model: Any, tok: Any, texts: list[str], max_len: int, head_max_len: int, parallel: bool,
+                 device: Any) -> Any:
+    """float32 [len(texts), 48] noul margins z_true - z_false of an in-memory training model (DecisionModel, not a
+    laya.load agent), columns in INTENTS order: the training-side route, for scoring a model mid-training without an
+    export or a reload (tune.py's per-epoch tuning-dev score).
+
+    One message per forward, as score.BATCHING requires (packing several messages into one collate drifts by about
+    1e-4): one row asking all 48 intents.QUESTIONS (placeholder targets, never read) -> items_from_rows -> encode_item
+    in the canonical option order (no option shuffle, so no RNG is drawn) -> collate_items -> forward under
+    torch.no_grad() with amp off. On the same weights it equals noul_logits on a laya.load agent (max |difference| 0.0
+    on the tiny model, fp32). The caller sets eval mode (and restores train mode) and owns the dtype and device checks.
+    SystemExit when laya builds the items of other questions or in another order (the item layout changed; the same
+    item["q"]["ins"] mapping as items_per_question), or a forward returns other than [48, 2] logits."""
+    import numpy as np
+    import torch
+    from intents import INTENTS, QUESTIONS
+    tags = list(INTENTS)
+    by_text = {text: tag for tag, text in INTENTS.items()}
+    out = np.empty((len(texts), len(tags)), dtype=np.float32)
+    for i, text in enumerate(texts):
+        row = {"state": text, "questions": QUESTIONS, "expected": {t: False for t in tags}}
+        items, _skipped = items_from_rows(tok, [row], max_len, head_max_len)
+        got = []
+        for item in items:
+            q = item.get("q") if isinstance(item, dict) else None
+            got.append(by_text.get(q.get("ins")) if isinstance(q, dict) else None)
+        if got != tags:
+            raise SystemExit("message %d built %d items, not one per intents.py question in INTENTS order; the item "
+                             "builder changed (run `make env`, or fix pilot/laya_adapter.py for the new laya)"
+                             % (i, len(items)))
+        batch = collate_items([[encode_item(tok, item, max_len, head_max_len, None, parallel) for item in items]],
+                              tok.pad_token_id)
+        with torch.no_grad():
+            z = forward(model, batch, device, False, False)
+        if tuple(z.shape) != (len(tags), 2):
+            raise SystemExit("message %d gave logits of shape %s, expected (%d, 2) for the 2-option noul questions"
+                             % (i, tuple(z.shape), len(tags)))
+        z = z.detach().float().cpu()
+        out[i] = (z[:, 1] - z[:, 0]).numpy()
+    return out
+
+
 def noul_temperature(agent: Any) -> float:
     """The temperature laya.load applies to a 2-option noul (already clamped by laya); one scalar for all 48 tags."""
     lc = _lc()

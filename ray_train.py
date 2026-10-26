@@ -124,6 +124,15 @@ flag-off runs. DIR is refused under results/, data/, ui/, protocol.json, --stora
 and before ray.init, also with --print-run-id.
 tensorboardX (locked through ray[train]) is imported only when the writer opens.
 
+Exploratory search (tune.py): a Ray Tune trial builds this script's own train config (train_config, shared with main)
+plus the key tune, the tuning partition block of pilot.tune (source, train and dev folds, both uid-list digests). With
+it the worker splits the verified selection_train rows into tuning-train (folds 0-11) and tuning-dev (folds 12-13)
+right after reading them (pilot.tune.split_rows, refused unless the block matches), before --max-messages, masking
+and negative sampling, so a tuning-dev row never becomes a training item. After every epoch rank 0 scores tuning-dev
+in-process at fp32 on the unwrapped model (tune_score through la.noul_margins, T = 1, pilot.tune.dev_objective), and
+every rank reports the metrics only: no epoch checkpoint, no export and no final save, so a trial keeps no weights.
+tune is a run-identity key left out when None, so every ray_train.py command keeps its run id.
+
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
 (tampered, unregistered, val/test/probe) is refused before Ray starts, and so is a train split under any manifest that
 holds committed held-out content (pilot.data.refuse_held_out: committed test content, or committed val content in
@@ -175,6 +184,7 @@ import torch
 from ray.train import Checkpoint, CheckpointConfig, FailureConfig, RunConfig, ScalingConfig
 from ray.train.torch import TorchTrainer
 
+import pilot.tune
 from pilot import laya_adapter as la
 from pilot import dumps, fewshot, pins, postfit, protocol, runs, spike, tensorboard
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, refuse_held_out,
@@ -397,14 +407,15 @@ def epoch_config(cfg: dict[str, Any], max_len: int, head_max_len: int, ray_cfg: 
 
 def identity_values(a: argparse.Namespace, r: dict[str, Any], entry: dict[str, Any], base_name: str,
                     base_ident: dict[str, Any], postfit_sha256: str | None = None, mask_tags: list[str] | None = None,
-                    fewshot: dict[str, Any] | None = None) -> dict[str, Any]:
+                    fewshot: dict[str, Any] | None = None, tune: dict[str, Any] | None = None) -> dict[str, Any]:
     """The pilot.runs.IDENTITY values of a command: parsed args `a`, resolve(a) `r`, the verified split `entry` and the
     base identity. Paths enter only as their verified digests, aliases (--gpu) only as their resolved value. A local
     base also enters by the digest of its tokenizer/ and encoder/ files (the tokenizer builds every training item);
     the pinned base's are fixed by the pin, so base_files_sha256 is None there and
     pilot.runs.canonical leaves it out, which keeps every pinned run id unchanged. stop_after_epoch and postfit_sha256
     (the sha256 of the --postfit record) are None and left out the same way unless a final seed sets them; mask_tags
-    (a masked base's sorted held-out tags) and fewshot (the pilot.fewshot.binding of a few-shot run) likewise."""
+    (a masked base's sorted held-out tags) and fewshot (the pilot.fewshot.binding of a few-shot run) likewise, and so
+    is tune (the tuning partition block of a tune.py search trial, pilot.tune.partition), which only a search passes."""
     return {"split": os.path.splitext(os.path.basename(entry["path"]))[0],
             "data_sha256": entry["sha256"], "data_role": entry["role"],
             "base_model_sha256": base_ident["model_sha256"],
@@ -422,7 +433,7 @@ def identity_values(a: argparse.Namespace, r: dict[str, Any], entry: dict[str, A
             "head_max_len": a.head_max_len, "max_messages": a.max_messages,
             "shuffle_options": a.shuffle_options, "seed": a.seed,
             "stop_after_epoch": a.stop_after_epoch, "postfit_sha256": postfit_sha256,
-            "mask_tags": mask_tags, "fewshot": fewshot}
+            "mask_tags": mask_tags, "fewshot": fewshot, "tune": tune}
 
 
 def fewshot_base_of(base_dir: str, base_ident: dict[str, Any]) -> dict[str, Any]:
@@ -695,6 +706,36 @@ def tb_writer(c: dict[str, Any], rank: int, start_epoch: int, stop: int, per_epo
                                    tensorboard.segment_suffix(segment, os.getpid()))
 
 
+def tune_score(inner: torch.nn.Module, tok: Any, dev_rows: list[dict[str, Any]], max_len: int, head_max_len: int,
+               parallel: bool, device: torch.device, freeze_encoder: bool) -> dict[str, Any]:
+    """The per-epoch tuning-dev score of a tune.py search trial: pilot.tune.dev_objective of the in-memory model's noul
+    margins (la.noul_margins, one message per forward, T = 1) plus dev_s, the scoring seconds.
+
+    Rank 0 only, always on the unwrapped `inner` model (a DDP forward on one rank would wait for the others). Refuses,
+    before scoring, a parameter that is not float32 on the training device or autocast on for that device (fp32
+    scoring). eval mode while scoring, then train mode restored (and the frozen encoder's eval mode with
+    --freeze-encoder); no RNG is drawn, so training continues as if unscored."""
+    t = time.perf_counter()
+    bad = sorted({"%s %s" % (p.device.type, p.dtype) for p in inner.parameters()
+                  if p.device.type != device.type or p.dtype != torch.float32})
+    if bad:
+        raise SystemExit("tuning-dev scoring is fp32 on %s, but parameters are %s; the trial trains in fp32 (no --amp)"
+                         % (device.type, ", ".join(bad)))
+    if torch.is_autocast_enabled(device.type):
+        raise SystemExit("autocast is on for %s while scoring tuning-dev; the trial scores in fp32" % device.type)
+    inner.eval()
+    try:
+        margins = la.noul_margins(inner, tok, [row["state"] for row in dev_rows], max_len, head_max_len, parallel,
+                                  device)
+    finally:
+        inner.train()
+        if freeze_encoder:
+            inner.encoder.eval()
+    out = pilot.tune.dev_objective(pilot.tune.labels(dev_rows), margins)
+    out["dev_s"] = time.perf_counter() - t
+    return out
+
+
 def train_loop_per_worker(c: dict[str, Any]) -> None:
     """One Ray Train worker: load (or resume) the base, build and shard the items, train the epochs DDP, report each
     epoch's checkpoint, and on rank 0 report the final laya checkpoint. `c` is the driver's train config (main)."""
@@ -730,6 +771,8 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
     # Every rank builds the same items (fixed seed), then takes its own shard of the training items. Every selected
     # message trains: there is no calibration holdout (T is fitted on message-level val data by postfit.py).
     rows = read_verified_rows(c["data"], c["data_sha256"])
+    if c.get("tune") is not None:                           # a search trial: tuning-dev never becomes a training item
+        rows, dev_rows = pilot.tune.split_rows(rows, c["tune"])
     if c["max_messages"]:
         random.Random(c["seed"]).shuffle(rows)
         rows = rows[:c["max_messages"]]
@@ -962,39 +1005,50 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
             if tb is not None:                              # the epoch's steps on disk before its checkpoint exists,
                 tensorboard.flush(tb)                       # so a SIGKILL never leaves a completed epoch unlogged
 
-            # Epoch checkpoint: rank 0's fp32 train state + every rank's RNG; never the fp16 laya export
-            if device.type == "mps":
-                torch.mps.empty_cache()                         # the allocator cache before the state copies to CPU
-            gc.collect()
-            name = "epoch-%03d" % (epoch + 1)
-            with tempfile.TemporaryDirectory() as d:
-                t_save = time.perf_counter()
+            if c.get("tune") is not None:                   # a search trial: score tuning-dev, report metrics only
                 if rank == 0:
-                    with mps_oom_exit(epoch + 1, None, c["rung"], "while saving the checkpoint"):
-                        if c["export_epochs"]:
-                            ecfg = epoch_config(cfg, max_len, head_max_len,
-                                                dict(ray_cfg, record=export_record(record, name)), epoch + 1)
-                            write_export(inner, tok, ecfg, run_dir, name)
-                            note_exports()
-                        path = os.path.join(d, "train_state.pt")
-                        torch.save({"kind": "train_state", "run_id": c["run_id"], "canonical": c["canonical"],
-                                    "epoch": epoch + 1, "model": inner.state_dict(), "opt": opt.state_dict(),
-                                    "sched": sched.state_dict(), "scaler": scaler.state_dict() if scaler else None,
-                                    "history": rows_out, "segments": segments}, path)
-                    record["train_state_bytes"] = os.path.getsize(path)
-                torch.save({"torch": torch.get_rng_state(), "device": device_rng_state(device),
-                            "option": rng.getstate()},
-                           os.path.join(d, "rng-rank%d.pt" % rank))
-                row["save_s"] = time.perf_counter() - t_save    # the state above holds 0.0; save.json carries the time
-                if rank == 0:
-                    with open(os.path.join(d, SAVE_META), "w", encoding="utf-8") as f:
-                        json.dump({"epoch": epoch + 1, "save_s": row["save_s"]}, f)
-                ray.train.report(metrics, checkpoint=Checkpoint.from_directory(d),
-                                 checkpoint_dir_name="epoch-%03d" % (epoch + 1))
-                # plus Ray's persist (the train-state copy into storage, the rotation): a per-epoch cost the compute
-                # projection charges per epoch; the next epoch's state and the final record carry it,
-                # save.json (the resumed epoch's row) only the time up to the report
-                row["save_s"] = time.perf_counter() - t_save
+                    with mps_oom_exit(epoch + 1, None, c["rung"], "while scoring the tuning-dev rows"):
+                        metrics.update(tune_score(inner, tok, dev_rows, max_len, head_max_len, parallel, device,
+                                                  c["freeze_encoder"]))
+                    metrics.update(peak_total_bytes=row["peak_total_bytes"], swap_delta_bytes=row["swap_delta_bytes"],
+                                   n_train_messages=len(train_rows), n_dev_messages=len(dev_rows))
+                    print("epoch %d tuning-dev micro-F1 %.4f at θ %.2f (scored in %.1fs)"
+                          % (epoch + 1, metrics["dev_micro_f1"], metrics["dev_theta"], metrics["dev_s"]), flush=True)
+                ray.train.report(metrics)                   # no checkpoint: a trial keeps no weights
+            else:
+                # Epoch checkpoint: rank 0's fp32 train state + every rank's RNG; never the fp16 laya export
+                if device.type == "mps":
+                    torch.mps.empty_cache()                         # the allocator cache before the state copies to CPU
+                gc.collect()
+                name = "epoch-%03d" % (epoch + 1)
+                with tempfile.TemporaryDirectory() as d:
+                    t_save = time.perf_counter()
+                    if rank == 0:
+                        with mps_oom_exit(epoch + 1, None, c["rung"], "while saving the checkpoint"):
+                            if c["export_epochs"]:
+                                ecfg = epoch_config(cfg, max_len, head_max_len,
+                                                    dict(ray_cfg, record=export_record(record, name)), epoch + 1)
+                                write_export(inner, tok, ecfg, run_dir, name)
+                                note_exports()
+                            path = os.path.join(d, "train_state.pt")
+                            torch.save({"kind": "train_state", "run_id": c["run_id"], "canonical": c["canonical"],
+                                        "epoch": epoch + 1, "model": inner.state_dict(), "opt": opt.state_dict(),
+                                        "sched": sched.state_dict(), "scaler": scaler.state_dict() if scaler else None,
+                                        "history": rows_out, "segments": segments}, path)
+                        record["train_state_bytes"] = os.path.getsize(path)
+                    torch.save({"torch": torch.get_rng_state(), "device": device_rng_state(device),
+                                "option": rng.getstate()},
+                               os.path.join(d, "rng-rank%d.pt" % rank))
+                    row["save_s"] = time.perf_counter() - t_save  # the state above holds 0.0; save.json carries the time
+                    if rank == 0:
+                        with open(os.path.join(d, SAVE_META), "w", encoding="utf-8") as f:
+                            json.dump({"epoch": epoch + 1, "save_s": row["save_s"]}, f)
+                    ray.train.report(metrics, checkpoint=Checkpoint.from_directory(d),
+                                     checkpoint_dir_name="epoch-%03d" % (epoch + 1))
+                    # plus Ray's persist (the train-state copy into storage, the rotation): a per-epoch cost the compute
+                    # projection charges per epoch; the next epoch's state and the final record carry it,
+                    # save.json (the resumed epoch's row) only the time up to the report
+                    row["save_s"] = time.perf_counter() - t_save
             if tb is not None:                              # at the step that closes the epoch, below any later purge
                 tensorboard.write(tb, (epoch + 1) * per_epoch, tensorboard.epoch_scalars(
                     row["loss"], row["train_s"], time.time() - t_epoch, row["save_s"], row["peak_total_bytes"],
@@ -1006,7 +1060,8 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
     finally:
         if tb is not None:
             tensorboard.close(tb)                           # never raises an OSError over the run
-
+    if c.get("tune") is not None:                           # a search trial keeps no weights: no final save
+        return
 
     # Publish the final checkpoint from rank 0: uncalibrated (T = 1; postfit.py fits T on val later), or, for a
     # --postfit final seed, serving the record's val-fitted T bit for bit (a JSON float round trip, never rounded), which
@@ -1035,6 +1090,47 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
             ray.train.report(last, checkpoint=Checkpoint.from_directory(d), checkpoint_dir_name="final")
     else:
         ray.train.report(last)
+
+
+def train_config(a: argparse.Namespace, r: dict[str, Any], entry: dict[str, Any], base_dir: str,
+                 base_ident: dict[str, Any], base_sha256: dict[str, str], env: dict[str, str], driver_node_id: str,
+                 rid: str, canon: dict[str, Any], *, pf_block: dict[str, Any] | None = None,
+                 mask: list[str] | None = None, fs_binding: dict[str, Any] | None = None,
+                 sel: dict[str, Any] | None = None, block: dict[str, Any] | None = None,
+                 base_info: dict[str, Any] | None = None, tb_dir: str | None = None,
+                 tune: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The train config train_loop_per_worker receives (Ray's train_loop_config): parsed args `a`, resolve(a) `r` (its
+    keys after the literal ones), the verified split `entry`, the base dir, identity and verified digests, the worker
+    env, the driver's node id, the run id and canonical config, then the optional bindings main passes (a final seed's
+    postfit block, a few-shot mask, binding, frozen selection and block, a continued run's base, the TensorBoard dir);
+    "rung" (pilot.runs.rung_label) comes last. The one builder main and tune.py's Laya trial share: `tune` (the
+    tuning partition block of a search trial) is added after "rung" only when it is given, so main's config has no
+    tune key."""
+    cfg = dict({"data": os.path.abspath(a.data), "data_sha256": entry["sha256"], "base_dir": base_dir,
+                "driver_node_id": driver_node_id,
+                "base_sha256": base_sha256, "epochs": a.epochs,
+                "micro_batch": a.micro_batch, "grad_accum": a.grad_accum, "encoder_lr": a.encoder_lr,
+                "head_lr": a.head_lr, "loss": a.loss, "freeze_encoder": a.freeze_encoder,
+                "freeze_embeddings": a.freeze_embeddings,
+                "shuffle_options": a.shuffle_options, "max_len": a.max_len, "head_max_len": a.head_max_len,
+                "max_messages": a.max_messages, "neg": a.neg,
+                "seed": a.seed, "expect_env": env, "run_id": rid, "canonical": canon, "code": code_state(),
+                "storage": os.path.abspath(a.storage), "export_epochs": a.export_epochs,
+                "fail_after_epoch": a.fail_after_epoch, "stop_after_epoch": a.stop_after_epoch,
+                "postfit": pf_block,
+                # few-shot: the binding and mask (recorded), the frozen uid lists (never recorded: the worker leaves
+                # fewshot_rows out of ray_cfg) and a continued run's base (run id and canonical config)
+                "mask_tags": mask, "fewshot": fs_binding,
+                "fewshot_rows": ({"support": sorted(sel["support"]), "replay": sorted(sel["replay"]),
+                                  "tags": list(block["tags"])} if sel is not None else None),
+                "fewshot_base": base_info,
+                # the absolute DIR/RUN_ID of the event files (or None): the worker leaves it out of ray_cfg
+                "tensorboard": tb_dir,
+                "provenance": provenance(entry, a.manifest, a.base, base_dir, base_ident)}, **r)
+    cfg["rung"] = runs.rung_label(cfg)                      # derived from the flags, into the record and the config
+    if tune is not None:                                    # a search trial only: digests and folds, never a path
+        cfg["tune"] = tune
+    return cfg
 
 
 def parser() -> argparse.ArgumentParser:
@@ -1252,28 +1348,9 @@ def main(argv: list[str] | None = None) -> None:
     else:
         ray.init(ignore_reinit_error=True, include_dashboard=False, object_store_memory=object_store)
     require_single_node(ray.nodes())
-    cfg = dict({"data": os.path.abspath(a.data), "data_sha256": entry["sha256"], "base_dir": base_dir,
-                "driver_node_id": ray.get_runtime_context().get_node_id(),
-                "base_sha256": base_sha256, "epochs": a.epochs,
-                "micro_batch": a.micro_batch, "grad_accum": a.grad_accum, "encoder_lr": a.encoder_lr,
-                "head_lr": a.head_lr, "loss": a.loss, "freeze_encoder": a.freeze_encoder,
-                "freeze_embeddings": a.freeze_embeddings,
-                "shuffle_options": a.shuffle_options, "max_len": a.max_len, "head_max_len": a.head_max_len,
-                "max_messages": a.max_messages, "neg": a.neg,
-                "seed": a.seed, "expect_env": env, "run_id": rid, "canonical": canon, "code": code_state(),
-                "storage": os.path.abspath(a.storage), "export_epochs": a.export_epochs,
-                "fail_after_epoch": a.fail_after_epoch, "stop_after_epoch": a.stop_after_epoch,
-                "postfit": pf_block,
-                # few-shot: the binding and mask (recorded), the frozen uid lists (never recorded: the worker leaves
-                # fewshot_rows out of ray_cfg) and a continued run's base (run id and canonical config)
-                "mask_tags": mask, "fewshot": fs_binding,
-                "fewshot_rows": ({"support": sorted(sel["support"]), "replay": sorted(sel["replay"]),
-                                  "tags": list(block["tags"])} if sel is not None else None),
-                "fewshot_base": base_info,
-                # the absolute DIR/RUN_ID of the event files (or None): the worker leaves it out of ray_cfg
-                "tensorboard": tb_dir,
-                "provenance": provenance(entry, a.manifest, a.base, base_dir, base_ident)}, **r)
-    cfg["rung"] = runs.rung_label(cfg)                      # derived from the flags, into the record and the config
+    cfg = train_config(a, r, entry, base_dir, base_ident, base_sha256, env, ray.get_runtime_context().get_node_id(),
+                       rid, canon, pf_block=pf_block, mask=mask, fs_binding=fs_binding, sel=sel, block=block,
+                       base_info=base_info, tb_dir=tb_dir)
     trainer = TorchTrainer(
         train_loop_per_worker, train_loop_config=cfg,
         scaling_config=ScalingConfig(num_workers=a.workers, use_gpu=(device == "cuda"),
