@@ -631,3 +631,10 @@ def test_docs_state_the_confidence_group_is_unpinned() -> None:
     assert len(claims) >= 2, "README.md no longer says which demo views are behind the checks (row and prose)"
     overstated = [u[:80] for u in claims if "confidence" not in u]
     assert overstated == [], "README.md claims the views are pinned without the confidence exception: %s" % overstated
+    # the same for both CLAUDE.md files, where every table row and bullet is one line
+    for rel in ("CLAUDE.md", os.path.join(".claude", "CLAUDE.md")):
+        with open(os.path.join(REPO, rel), encoding="utf-8") as f:
+            claims = [ln for ln in f.read().splitlines() if re.search(r"views? (?:are )?behind|`build_views`", ln)]
+        assert claims, "%s no longer says which demo views are behind the checks" % rel
+        overstated = [ln[:80] for ln in claims if "confidence" not in ln]
+        assert overstated == [], "%s claims the views are pinned without the confidence exception: %s" % (rel, overstated)

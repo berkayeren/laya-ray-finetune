@@ -135,7 +135,8 @@ python report.py --recommendation results/final/verdict.json   # the README reco
 python mps_spike.py --out results/spike
 
 # Local demo UI (chat with both fine-tuned systems + the results dashboard; 127.0.0.1 only, stores nothing, never trains or scores)
-make demo                                      # npm --prefix ui ci, npm --prefix ui run build, python demo.py --device mps -> http://127.0.0.1:8765
+make demo                                      # npm --prefix ui ci (skipped while ui/node_modules matches the lockfile), npm --prefix ui run build,
+                                               # python demo.py --device mps -> http://127.0.0.1:8765
 make demo DEMO_DEVICE=cpu                      # the same with the models on the CPU
 python demo.py --device mps --checkpoint-root DIR --port 8765   # the server alone (needs ui/dist); DIR holds the six final seed dirs
 ```
