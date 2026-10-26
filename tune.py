@@ -66,11 +66,22 @@ it (Ray snapshots at most about every 10 s, so one that ended seconds before the
 runs from epoch 1 under a fresh inner run, its attempts count showing the restart. A finished search starts no Ray: its
 rerun rebuilds the record from the trial dirs and the search file, and must reproduce the sha256 it wrote.
 
+Guards: under results/ a search writes only results/tune/<system>.json, and only as the committed search (--trials 20,
+--seed 0, --device mps, the pinned --base, the committed --manifest, no --points, no test hook), refused before any
+fetch or ray.init; any other run needs another --out. On MPS the quiet-machine preflight (compute_checkpoint.preflight,
+--min-available-gib, default 7.0; 0 records a busy-machine run) runs before ray.init and is the segment's preflight.
+
+Modes: --check RECORD verifies a tune/1 record (pilot.tune.read_record) and prints its sha256; --status prints a
+search's progress from --storage alone (no Ray, no write).
+
 usage:
   python tune.py --system laya                     # the real search: 20 trials on MPS -> results/tune/laya.json
   python tune.py --system laya --device cpu --cpus 1 --trials 3 --base DIR --data SPLIT --manifest M \\
                  --storage STORAGE --out OUT.json   # a CPU smoke search on a local base
   python tune.py --system berturk                  # the real search: 20 trials on MPS -> results/tune/berturk.json
+  python tune.py --system laya --min-available-gib 0   # the real search on a busy machine (recorded as such)
+  python tune.py --status --system laya            # a running search's progress from tune_runs/, without Ray
+  python tune.py --check results/tune/laya.json    # verify a record: ok PATH SHA256
 """
 import argparse
 import copy
@@ -79,6 +90,7 @@ import os
 import re
 import signal
 import time
+from fractions import Fraction
 from importlib.metadata import version
 from typing import Any
 
@@ -93,12 +105,14 @@ DEFAULT_DATA = os.path.join(REPO_ROOT, "data", "splits", "selection_train.jsonl"
 TRIAL_DIR_RE = re.compile(r"^trial_\d{5}$")
 PINNED_BASE = {"laya": "multilingual", "berturk": "berturk"}   # --base default per system: the pinned weights
 SEARCH_FILE_KEYS = ("spec", "segments", "finished", "record_sha256")
+MIN_AVAILABLE_GIB = 7.0                                     # the spike's and latency's quiet-machine threshold
 
 
 def parser() -> argparse.ArgumentParser:
     """The tune.py argument parser."""
     ap = argparse.ArgumentParser(description="Exploratory Ray Tune search of one system (not a decision input).")
-    ap.add_argument("--system", choices=pt.SYSTEMS, required=True)
+    ap.add_argument("--system", choices=pt.SYSTEMS, default=None, help="the system to search (or, with --status, "
+                                                                        "to report on)")
     ap.add_argument("--trials", type=int, default=pt.TRIALS, help="trials of the search (default %d)" % pt.TRIALS)
     ap.add_argument("--seed", type=int, default=pt.SEED, help="the search seed (default %d)" % pt.SEED)
     ap.add_argument("--device", choices=("mps", "cpu"), default="mps", help="training device (default mps)")
@@ -112,6 +126,12 @@ def parser() -> argparse.ArgumentParser:
                     help="laya: 'multilingual' (pinned; default) or a local Laya checkpoint dir; berturk: 'berturk' "
                          "(pinned; default) or a local BERT base dir")
     ap.add_argument("--cpus", type=int, default=None, help="CPUs and torch threads per trial (default 4 on mps, else 1)")
+    ap.add_argument("--min-available-gib", type=float, default=MIN_AVAILABLE_GIB,
+                    help="MPS quiet-machine preflight threshold (default %.1f); 0 records a busy-machine run"
+                         % MIN_AVAILABLE_GIB)
+    ap.add_argument("--check", default=None, metavar="RECORD", help="verify a tune/1 record and print its sha256")
+    ap.add_argument("--status", action="store_true",
+                    help="print a search's progress from --storage (with --system), without Ray")
     ap.add_argument("--points", default=None, help=argparse.SUPPRESS)   # JSON configs evaluated first; tests only
     # test hook: trial N's first attempt SIGKILLs the driver (the resume test); never in the spec or the record
     ap.add_argument("--kill-at-trial", type=int, default=None, help=argparse.SUPPRESS)
@@ -119,9 +139,23 @@ def parser() -> argparse.ArgumentParser:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parsed and checked args: --out and --cpus resolved, --points parsed into checked search points (or None)."""
+    """Parsed and checked args: the mode (--check, --status or a search; one at most), --out and --cpus resolved,
+    --points parsed into checked search points (or None)."""
     ap = parser()
     a = ap.parse_args(argv)
+    modes = [m for m, on in (("--check", a.check is not None), ("--status", a.status)) if on]
+    if len(modes) > 1:
+        ap.error("%s exclude each other" % " and ".join(modes))
+    if a.check is not None:
+        if a.system is not None:
+            ap.error("--check reads the system from the record; drop --system")
+        a.check = os.path.abspath(a.check)
+        return a
+    if a.system is None:
+        ap.error("--system is required (laya or berturk)%s" % (" with --status" if a.status else ""))
+    a.storage = os.path.abspath(a.storage)
+    if a.status:
+        return a
     if a.cpus is None:
         a.cpus = 4 if a.device == "mps" else 1
     if a.base is None:
@@ -131,6 +165,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             ap.error("%s must be at least 1" % flag)
     if a.seed < 0:
         ap.error("--seed must be at least 0")
+    if a.min_available_gib < 0:
+        ap.error("--min-available-gib must be at least 0 (0 records a busy-machine run)")
     if a.kill_at_trial is not None and not 0 <= a.kill_at_trial < a.trials:
         ap.error("--kill-at-trial must be a trial index 0..%d" % (a.trials - 1))
     if a.points is not None:
@@ -144,10 +180,73 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             ap.error("--points holds %d points, more than --trials %d" % (len(points), a.trials))
         a.points = [pt.check_point(a.system, p) for p in points]
     a.out = os.path.abspath(a.out or os.path.join(REPO_ROOT, "results", "tune", "%s.json" % a.system))
-    a.storage = os.path.abspath(a.storage)
     a.data = os.path.abspath(a.data)
     a.manifest = os.path.abspath(a.manifest)
     return a
+
+
+def within(path: str, root: str) -> bool:
+    """True when `path` is `root` or lies under it: by the realpath strings, or by file identity (os.path.samestat of
+    the root against every existing ancestor of the path), so a symlink or a case variant on a case-insensitive
+    filesystem is caught too."""
+    real, top = os.path.realpath(path), os.path.realpath(root)
+    if real == top or real.startswith(top.rstrip(os.sep) + os.sep):
+        return True
+    try:
+        st = os.stat(top)
+    except OSError:
+        return False
+    p = real
+    while True:
+        try:
+            if os.path.samestat(os.stat(p), st):
+                return True
+        except OSError:
+            pass
+        parent = os.path.dirname(p)
+        if parent == p:
+            return False
+        p = parent
+
+
+def same_path(path: str, target: str) -> bool:
+    """True when `path` names `target`: the same base name (exact) in the same directory (by realpath or by file
+    identity of both existing directories)."""
+    if os.path.basename(path) != os.path.basename(target):
+        return False
+    d, t = os.path.realpath(os.path.dirname(path)), os.path.realpath(os.path.dirname(target))
+    if d == t:
+        return True
+    try:
+        return os.path.samestat(os.stat(d), os.stat(t))
+    except OSError:
+        return False
+
+
+def check_results_out(a: argparse.Namespace) -> None:
+    """Refuse, before bind (no fetch, no split read) and ray.init, a search --out under results/ unless it is
+    results/tune/SYS.json and the run is the committed search: --trials pilot.tune.TRIALS, --seed pilot.tune.SEED,
+    --device mps, the pinned --base, the committed --manifest, no --points and no test hook. Names the first
+    departure."""
+    results = os.path.join(REPO_ROOT, "results")
+    if not within(a.out, results):
+        return
+    target = os.path.join(results, "tune", "%s.json" % a.system)
+    if not same_path(a.out, target):
+        raise SystemExit("--out %s: under results/ a %s search writes only results/tune/%s.json (the committed "
+                         "search); pass another --out" % (repo_relpath(a.out), a.system, a.system))
+    committed = os.path.isfile(a.manifest) and manifest_is_committed(a.manifest)
+    for departs, flag in ((a.trials != pt.TRIALS, "--trials %d" % a.trials), (a.seed != pt.SEED, "--seed %d" % a.seed),
+                          (a.device != "mps", "--device %s" % a.device),
+                          (a.base != PINNED_BASE[a.system],
+                           "another --base than the pinned %s" % PINNED_BASE[a.system]),
+                          (not committed, "another --manifest than the committed data/splits.json"),
+                          (a.points is not None, "--points"),
+                          (a.kill_at_trial is not None, "--kill-at-trial %s" % a.kill_at_trial)):
+        if departs:
+            raise SystemExit("--out results/tune/%s.json with %s: a record under results/tune/ is the committed search "
+                             "(%d trials, seed %d, MPS, the pinned base, the committed manifest); pass another --out "
+                             "for this run" % (a.system, flag, pt.TRIALS, pt.SEED))
 
 
 def bind(a: argparse.Namespace) -> dict[str, Any]:
@@ -535,11 +634,69 @@ def finish(a: argparse.Namespace, bound: dict[str, Any], doc: dict[str, Any]) ->
     return record, write_out(record, a.out)
 
 
+def preflight(a: argparse.Namespace) -> dict[str, Any]:
+    """The quiet-machine preflight of an MPS search (compute_checkpoint.preflight at --min-available-gib: refuse below
+    it, sample swap twice 5 s apart while idle; 0 records a busy-machine run), recorded as this start's segment's
+    preflight."""
+    import compute_checkpoint
+    return compute_checkpoint.preflight(a.min_available_gib)
+
+
+def check_mode(path: str) -> None:
+    """--check RECORD: read_record (the layout, the rebuild from its canonical part, the bytes) and print
+    "ok RECORD SHA256"; its refusal exits non-zero."""
+    _, sha = pt.read_record(path)
+    print("ok %s %s" % (path, sha), flush=True)
+
+
+def status_mode(storage: str, system: str) -> None:
+    """--status: the progress of the search under `storage` from its search file and trial dirs alone (no Ray, no
+    write): one summary line, then per started trial its attempts, last reported epoch of its schedule and best dev
+    micro-F1 so far."""
+    doc = read_search(spec_path(storage, system))
+    if doc is None:
+        raise SystemExit("no search under %s (no %s); start one with tune.py --system %s"
+                         % (storage, os.path.basename(spec_path(storage, system)), system))
+    exp = os.path.join(storage, system)
+    names = sorted(n for n in os.listdir(exp) if TRIAL_DIR_RE.fullmatch(n)) if os.path.isdir(exp) else []
+    n_trials = doc["spec"].get("n_trials")
+    print("search %s: %d of %s trials started, %d driver starts, finished %s"
+          % (system, len(names), n_trials, len(doc["segments"]), "yes" if doc["finished"] else "no"), flush=True)
+    for name in names:
+        d = os.path.join(exp, name)
+        attempts = pt.read_attempts(d) if os.path.exists(os.path.join(d, pt.ATTEMPTS_FILE)) else 0
+        schedule = None
+        if os.path.isfile(os.path.join(d, "params.json")):
+            with open(os.path.join(d, "params.json"), encoding="utf-8") as f:
+                schedule = json.load(f).get("epochs")
+        rows = []
+        if os.path.isfile(os.path.join(d, "result.json")):
+            with open(os.path.join(d, "result.json"), encoding="utf-8") as f:
+                rows = [pt.curve_row(json.loads(line)) for line in f if line.strip()]
+        index = int(name.split("_")[1])
+        if not rows:
+            print("trial %d: attempts %d, no epoch reported yet" % (index, attempts), flush=True)
+            continue
+        f1 = [(Fraction(2 * r["dev_tp"], 2 * r["dev_tp"] + r["dev_fp"] + r["dev_fn"]) if r["dev_tp"] else Fraction(0),
+               -r["epoch"]) for r in rows]
+        top, neg_epoch = max(f1)                            # the earliest epoch of the best score
+        print("trial %d: attempts %d, epoch %d of %s, best dev micro-F1 %.4f (epoch %d)"
+              % (index, attempts, rows[-1]["epoch"], schedule if schedule is not None else "?", float(top),
+                 -neg_epoch), flush=True)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Parse, bind on the driver, compare the search file's spec, rebuild a finished search without Ray, or append
     this start's segment, start Ray with headroom, run (or restore) the search, write the record and mark the search
     finished."""
     a = parse_args(argv)
+    if a.check is not None:
+        check_mode(a.check)
+        return
+    if a.status:
+        status_mode(a.storage, a.system)
+        return
+    check_results_out(a)
     bound = bind(a)
     spec = search_spec(a, bound)
     sp = spec_path(a.storage, a.system)
@@ -569,7 +726,7 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit("%s holds a Tune experiment Ray Tune cannot restore (killed before its first snapshot); "
                              "delete %s, then rerun" % (path, stale_paths(a.storage, a.system)))
     import ray_train
-    segment = dict(ray_train.code_state(), preflight=None)
+    segment = dict(ray_train.code_state(), preflight=preflight(a) if a.device == "mps" else None)
     doc = {"spec": spec, "segments": (doc["segments"] if doc else []) + [segment], "finished": False,
            "record_sha256": None}
     write_search(sp, doc)                                   # this start's segment, before ray.init

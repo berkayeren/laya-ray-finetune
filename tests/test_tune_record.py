@@ -77,7 +77,10 @@ def test_results_out_is_the_committed_search_only(extra: Any, flag: str, snap: t
     trials, seed 0, MPS, the pinned base, the committed manifest, no --points, no test hook), before bind (no fetch,
     no split read) and before ray.init."""
     data, manifest, base = snap
-    extra = {"BASE": ["--base", base], "MANIFEST": ["--manifest", manifest]}.get(extra, extra)
+    if extra == "BASE":
+        extra = ["--base", base]
+    elif extra == "MANIFEST":
+        extra = ["--manifest", manifest]
 
     def no_bind(*a: Any, **kw: Any) -> None:
         raise AssertionError("bind reached; the results/ guard must refuse first")
