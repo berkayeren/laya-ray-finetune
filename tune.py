@@ -72,7 +72,8 @@ fetch or ray.init; any other run needs another --out. On MPS the quiet-machine p
 --min-available-gib, default 7.0; 0 records a busy-machine run) runs before ray.init and is the segment's preflight.
 
 Modes: --check RECORD verifies a tune/1 record (pilot.tune.read_record) and prints its sha256; --status prints a
-search's progress from --storage alone (no Ray, no write).
+search's progress from --storage alone (no Ray, no write); --render RECORD... prints pilot.tune.render_markdown of
+the checked records, or writes it with --out (under results/ only results/tune/tune.md). make report never runs it.
 
 usage:
   python tune.py --system laya                     # the real search: 20 trials on MPS -> results/tune/laya.json
@@ -82,6 +83,7 @@ usage:
   python tune.py --system laya --min-available-gib 0   # the real search on a busy machine (recorded as such)
   python tune.py --status --system laya            # a running search's progress from tune_runs/, without Ray
   python tune.py --check results/tune/laya.json    # verify a record: ok PATH SHA256
+  python tune.py --render results/tune/laya.json results/tune/berturk.json --out results/tune/tune.md
 """
 import argparse
 import copy
@@ -132,6 +134,8 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--check", default=None, metavar="RECORD", help="verify a tune/1 record and print its sha256")
     ap.add_argument("--status", action="store_true",
                     help="print a search's progress from --storage (with --system), without Ray")
+    ap.add_argument("--render", nargs="+", default=None, metavar="RECORD",
+                    help="print the markdown of checked records (with --out: write it, e.g. results/tune/tune.md)")
     ap.add_argument("--points", default=None, help=argparse.SUPPRESS)   # JSON configs evaluated first; tests only
     # test hook: trial N's first attempt SIGKILLs the driver (the resume test); never in the spec or the record
     ap.add_argument("--kill-at-trial", type=int, default=None, help=argparse.SUPPRESS)
@@ -143,13 +147,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     --points parsed into checked search points (or None)."""
     ap = parser()
     a = ap.parse_args(argv)
-    modes = [m for m, on in (("--check", a.check is not None), ("--status", a.status)) if on]
+    modes = [m for m, on in (("--check", a.check is not None), ("--status", a.status),
+                             ("--render", a.render is not None)) if on]
     if len(modes) > 1:
         ap.error("%s exclude each other" % " and ".join(modes))
-    if a.check is not None:
+    if a.check is not None or a.render is not None:
         if a.system is not None:
-            ap.error("--check reads the system from the record; drop --system")
-        a.check = os.path.abspath(a.check)
+            ap.error("%s reads the system from the record; drop --system" % modes[0])
+        a.check = os.path.abspath(a.check) if a.check is not None else None
+        a.render = [os.path.abspath(r) for r in a.render] if a.render is not None else None
+        a.out = os.path.abspath(a.out) if a.out is not None else None
         return a
     if a.system is None:
         ap.error("--system is required (laya or berturk)%s" % (" with --status" if a.status else ""))
@@ -649,6 +656,28 @@ def check_mode(path: str) -> None:
     print("ok %s %s" % (path, sha), flush=True)
 
 
+def render_out_ok(path: str) -> bool:
+    """Whether --render may write `path`: anywhere outside results/, and under results/ only results/tune/tune.md."""
+    results = os.path.join(REPO_ROOT, "results")
+    return not within(path, results) or same_path(path, os.path.join(results, "tune", "tune.md"))
+
+
+def render_mode(paths: list[str], out: str | None) -> None:
+    """--render RECORD... [--out PATH]: pilot.tune.render_markdown of the records read through read_record (checked),
+    printed, or written atomically to --out (refused, before any record is read, unless render_out_ok)."""
+    if out is not None and not render_out_ok(out):
+        raise SystemExit("--out %s: under results/ the rendered summary is results/tune/tune.md only; pass another "
+                         "--out" % repo_relpath(out))
+    text = pt.render_markdown([pt.read_record(p)[0] for p in paths])
+    if out is None:
+        print(text, end="", flush=True)
+        return
+    data = text.encode("utf-8")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    write_atomic(out, data)
+    print("summary -> %s (sha256 %s)" % (out, sha256_bytes(data)), flush=True)
+
+
 def status_mode(storage: str, system: str) -> None:
     """--status: the progress of the search under `storage` from its search file and trial dirs alone (no Ray, no
     write): one summary line, then per started trial its attempts, last reported epoch of its schedule and best dev
@@ -695,6 +724,9 @@ def main(argv: list[str] | None = None) -> None:
         return
     if a.status:
         status_mode(a.storage, a.system)
+        return
+    if a.render is not None:
+        render_mode(a.render, a.out)
         return
     check_results_out(a)
     bound = bind(a)

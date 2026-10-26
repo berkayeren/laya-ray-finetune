@@ -26,11 +26,16 @@ epoch, stop epoch and whether ASHA stopped it, the best trial overall and the nu
 read_record refuse a record that does not rebuild byte for byte from its own canonical part. A record holds no path,
 hostname, timestamp, uid or message text.
 
+Render (render_markdown): the deterministic markdown of checked records, results/tune/tune.md: the exploratory
+paragraph (RENDER_INTRO), then per record its settings, its highest tuning-dev score and a table of every trial, then
+NOTES. It holds no path, timestamp or uid, and never calls a configuration a decision input.
+
 usage: from pilot import tune as pt
        train_rows, dev_rows, block = pt.partition(rows); pt.split_rows(rows, block)
        pt.dev_objective(pt.labels(dev_rows), margins)
        record = pt.build_record(canonical); pt.write_record(record, "results/tune/laya.json")
        record, sha256 = pt.read_record("results/tune/laya.json")
+       text = pt.render_markdown([laya_record, berturk_record])   # results/tune/tune.md (tune.py --render)
 """
 import copy
 import json
@@ -99,6 +104,16 @@ NOTES = (
     "peak_total_bytes and swap_delta_bytes cover the epoch's training steps only.",
     "The pipeline's single encoder LR 2e-05 stays fixed, not tuned; this search reopens it for exploration only.",
 )
+RENDER_TITLE = "# Exploratory hyperparameter search (Ray Tune)"
+RENDER_NAMES = {"laya": "Laya", "berturk": "BERTurk"}
+RENDER_INTRO = (
+    "This search is exploratory and not a decision input: it does not change the frozen verdict, protocol.json or any "
+    "committed record. Every trial trains on tuning-train, %s folds %d-%d, and is scored on tuning-dev, %s folds "
+    "%d-%d, never val, test or HOTELS. It is a seeded random search (Ray Tune's BasicVariantGenerator, one trial at a "
+    "time; each system's seed and trial count are given below) with %s early stopping (time attribute %s, grace period "
+    "%d, reduction factor %d, max_t the longest epoch schedule). Objective: %s."
+    % (SOURCE, TRAIN_FOLDS[0], TRAIN_FOLDS[-1], SOURCE, DEV_FOLDS[0], DEV_FOLDS[-1], ASHA["name"], ASHA["time_attr"],
+       ASHA["grace_period"], ASHA["reduction_factor"], OBJECTIVE))
 ATTEMPTS_FILE = "attempts.json"
 DISK_FLOOR_BYTES = 2 * 2**30                                # trials write no checkpoints: small files only
 
@@ -599,3 +614,69 @@ def read_record(path: str) -> tuple[dict[str, Any], str]:
         raise SystemExit("%s is not in the record's own byte layout (indent 2, UTF-8, one trailing newline); rebuild "
                          "it with tune.py, never by hand" % path)
     return record, sha256_bytes(raw)
+
+
+# ---- the rendered summary ----
+
+def _value(system: str, key: str, v: Any) -> str:
+    """A search value as rendered: a log-uniform value as %.1e, a choice as written."""
+    return "%.1e" % v if SPACES[system][key][0] == "loguniform" else str(v)
+
+
+def _segment(seg: dict[str, Any]) -> str:
+    """One driver start: its short git sha and dirty flag, and its preflight (none off MPS)."""
+    code = "no git" if seg["git_sha"] is None else "git %s, %s" % (seg["git_sha"][:8],
+                                                                    "dirty" if seg["git_dirty"] else "clean")
+    pf = seg["preflight"]
+    if pf is None:
+        return "%s; preflight none" % code
+    gib = pf.get("available_gib")
+    return "%s; preflight %s GiB available%s" % (code, "%.1f" % gib if isinstance(gib, (int, float)) else "?",
+                                                   ", overridden (busy machine)" if pf.get("override") else "")
+
+
+def render_markdown(records: list[dict[str, Any]]) -> str:
+    """The markdown of checked tune/1 records, in the given order (results/tune/tune.md): RENDER_TITLE, RENDER_INTRO,
+    per record a section with its settings (trials, search seed, device, CPUs, partition counts, the shared-text count,
+    base, versions, driver starts with each one's short git sha and preflight, restarted and ASHA-stopped trials), the
+    highest tuning-dev score (trial, epoch, dev micro-F1 to 4 decimals, TP/FP/FN, config) and a table of every trial
+    (its space values, log-uniform ones as %.1e, attempts, epochs run of its schedule, best epoch, best dev micro-F1,
+    θ at the best epoch, ASHA stopped), then NOTES as bullets. Deterministic; no path, timestamp or uid."""
+    for r in records:
+        check_record(r)
+    out = [RENDER_TITLE, "", RENDER_INTRO]
+    for r in records:
+        system, s, d, trials = r["system"], r["search"], r["data"], r["trials"]
+        keys = list(SPACES[system])
+        restarted = sum(1 for t in trials if t["attempts"] > 1)
+        base = r["base"]["name"] if r["base"]["name"] in ("multilingual", "berturk") else "a local base"
+        out += ["", "## %s" % RENDER_NAMES[system], "",
+                "- Search: %d trials, search seed %d, %s, rungs at epochs %s, max_t %d; device %s, %d CPUs per trial"
+                % (s["n_trials"], s["seed"], s["search_alg"], ", ".join(str(e) for e in rungs(system)),
+                   s["scheduler"]["max_t"], r["device"], r["cpus"]),
+                "- Data: tuning-train %d messages (folds %d-%d), tuning-dev %d messages (folds %d-%d); %d tuning-dev "
+                "rows share their exact text with a tuning-train row; committed manifest: %s"
+                % (d["n_train"], d["train_folds"][0], d["train_folds"][-1], d["n_dev"], d["dev_folds"][0],
+                   d["dev_folds"][-1], d["dev_rows_with_train_text"], "yes" if d["manifest_is_committed"] else "no"),
+                "- Base: %s (model sha256 %s)" % (base, r["base"]["model_sha256"][:12]),
+                "- Versions: %s" % ", ".join("%s %s" % kv for kv in r["versions"].items()),
+                "- Driver starts: %d (%s)" % (len(r["segments"]), "; ".join("%d: %s" % (i + 1, _segment(g))
+                                                                            for i, g in enumerate(r["segments"]))),
+                "- Restarted trials (attempts above 1): %d of %d" % (restarted, len(trials)),
+                "- ASHA-stopped trials: %d of %d" % (r["n_asha_stopped"], len(trials))]
+        b = r["best"]
+        row = trials[b["index"]]["curve"][b["epoch"] - 1]
+        out += ["", "Highest tuning-dev score: trial %d, epoch %d, dev micro-F1 %.4f (TP %d, FP %d, FN %d); %s"
+                % (b["index"], b["epoch"], b["dev_micro_f1"], row["dev_tp"], row["dev_fp"], row["dev_fn"],
+                   ", ".join("%s %s" % (k, _value(system, k, v)) for k, v in b["config"].items())), ""]
+        head = ["trial"] + keys + ["attempts", "epochs run", "best epoch", "best dev micro-F1", "θ at best",
+                                   "ASHA stopped"]
+        out += ["| %s |" % " | ".join(head), "|%s|" % "|".join("---" for _ in head)]
+        for t in trials:
+            cells = ([str(t["index"])] + [_value(system, k, t["config"][k]) for k in keys]
+                     + [str(t["attempts"]), "%d of %d" % (t["stop_epoch"], t["config"]["epochs"]),
+                        str(t["best_epoch"]), "%.4f" % t["best_dev_micro_f1"],
+                        "%.2f" % t["curve"][t["best_epoch"] - 1]["dev_theta"], "yes" if t["asha_stopped"] else "no"])
+            out.append("| %s |" % " | ".join(cells))
+    out += ["", "## Notes", ""] + ["- %s" % n for n in NOTES]
+    return "\n".join(out) + "\n"
