@@ -711,12 +711,14 @@ def main(argv: list[str] | None = None) -> str | None:
             tbs["t"] = time.perf_counter()
 
         def tb_epoch_end(args: Any, state: Any, control: Any, **kw: Any) -> None:
-            """Write the epoch's scalars at the step that closes it. cb ran first, so its epoch row exists and the
-            wall clock includes the export write; BERTurk has no separate save time (epoch/save_s None)."""
+            """Write the epoch's scalars at the step that closes it, then flush the file to disk. cb ran first, so its
+            epoch row exists and the wall clock includes the export write; BERTurk has no separate save time
+            (epoch/save_s None)."""
             row = record["epochs"][-1]
             tensorboard.write(tb, state.global_step, tensorboard.epoch_scalars(
                 row["loss"], row["train_s"], time.perf_counter() - ep["t0"], None, row["peak_total_bytes"],
                 row["swap_delta_bytes"]))
+            tensorboard.flush(tb)                           # a completed epoch's events on disk (fsync)
 
         tbcb = transformers.TrainerCallback()               # a second instance with assigned hooks, after cb
         tbcb.on_epoch_begin, tbcb.on_optimizer_step = tb_epoch_begin, tb_optimizer_step

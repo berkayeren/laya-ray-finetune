@@ -113,10 +113,13 @@ steps), the RLCD sigma, the pre-clip gradient norm (the value clip_grad_norm_ al
 all ranks, and device, MPS driver, RSS and swap memory. Per epoch, at the step that closes the epoch: the loss, the
 training, wall-clock and save seconds, the peak memory and the swap delta. The global step is the 1-based
 optimizer-step count. Each run segment writes its own event file (.segment-NNN) with a purge marker at the first step
-after the resumed epoch, so a killed partial epoch's steps are hidden and every completed epoch's steps survive; the
-writer is closed in a finally block, so a failure still flushes it. The flag is NOT_IDENTITY and kept out of every
-checkpoint config, so the run id, the weights and the records are unchanged. DIR is refused under results/, data/, ui/,
-protocol.json, --storage or --out, before the split is read and before ray.init, also with --print-run-id.
+after the resumed epoch, so a killed partial epoch's steps are hidden and every completed epoch's steps survive: an
+epoch's steps are flushed to disk (fsync) before its checkpoint is reported, and its epoch scalars right after their
+write, so a SIGKILL, which runs no finally block, loses at most the epoch scalars of an epoch killed between its
+checkpoint and their write. The writer is closed in a finally block, so a failure still flushes it. The flag is
+NOT_IDENTITY and kept out of every checkpoint config, so the run id, the weights and the records are unchanged. DIR is
+refused under results/, data/, ui/, protocol.json, --storage or --out, before the split is read and before ray.init,
+also with --print-run-id.
 tensorboardX (locked through ray[train]) is imported only when the writer opens.
 
 --data must be a split registered in data/splits.json with role train and a matching sha256; anything else
@@ -681,7 +684,8 @@ def tb_writer(c: dict[str, Any], rank: int, start_epoch: int, stop: int, per_epo
 
     One event file per run segment (pilot.tensorboard.segment_suffix(segment)). Its purge step is the first optimizer
     step after the resumed epoch, start_epoch * per_epoch + 1, so TensorBoard hides the stale steps a killed partial
-    epoch logged, while every completed epoch's steps (at or below start_epoch * per_epoch) survive.
+    epoch logged, while every completed epoch's steps (at or below start_epoch * per_epoch) survive: the loop flushes
+    them before the epoch's checkpoint is reported, since a SIGKILL runs no finally block.
     """
     if rank != 0 or not c.get("tensorboard") or start_epoch >= stop:
         return None
@@ -952,6 +956,8 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
                 print("epoch %d/%d%s loss %.4f train %.1fs peak %.2f GiB swap %+.0f MiB"
                       % (epoch + 1, c["epochs"], " (stop after %d)" % stop if stop != c["epochs"] else "", row["loss"],
                          train_s, row["peak_total_bytes"] / 2**30, swap_delta / 2**20), flush=True)
+            if tb is not None:                              # the epoch's steps on disk before its checkpoint exists,
+                tensorboard.flush(tb)                       # so a SIGKILL never leaves a completed epoch unlogged
 
             # Epoch checkpoint: rank 0's fp32 train state + every rank's RNG; never the fp16 laya export
             if device.type == "mps":
@@ -990,6 +996,7 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
                 tensorboard.write(tb, (epoch + 1) * per_epoch, tensorboard.epoch_scalars(
                     row["loss"], row["train_s"], time.time() - t_epoch, row["save_s"], row["peak_total_bytes"],
                     row["swap_delta_bytes"]))
+                tensorboard.flush(tb)                       # only a kill inside the report -> write window loses them
             if c["fail_after_epoch"] == epoch + 1:              # test hook: every rank fails after the checkpoint
                 raise RuntimeError("simulated failure after epoch %d (--fail-after-epoch)" % (epoch + 1))
             last = metrics

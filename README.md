@@ -278,7 +278,8 @@ gradient norm, Laya items or BERTurk messages per second, and device, MPS driver
 loss, the training and wall-clock seconds, Laya's save time, the peak memory and the swap delta. The flag is not part
 of the run id and enters no checkpoint or record. It is refused under `results/`, `data/`, `ui/` or `protocol.json`,
 under `--storage` or `--out`, and inside the repo unless gitignored (`tensorboard/` is). A resumed Laya run adds one
-event file per segment and hides the killed epoch's partial steps. The event files hold tag names and numbers only.
+event file per segment and hides the killed epoch's partial steps. Every epoch's events are flushed to disk at the
+epoch boundary, so a completed epoch's steps survive even a hard kill. The event files hold tag names and numbers only.
 Any TensorBoard can read them (`tensorboard --logdir tensorboard`); the viewer is not part of this environment.
 
 ## Scoring path

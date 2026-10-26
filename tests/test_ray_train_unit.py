@@ -125,6 +125,22 @@ def test_tb_writer_is_rank_zero_only(tmp_path: Path) -> None:
     assert [(step, value) for _, step, kind, value in events if kind == "session_log"] == [(4, 1)]
 
 
+def test_tensorboard_flushes_at_the_epoch_boundary() -> None:
+    """WR-03: a SIGKILL runs no finally block, so the Laya loop flushes an epoch's step scalars before the epoch's
+    checkpoint is reported (the resumed segment's purge step hides nothing at or below it, and it never retrains it),
+    and its epoch scalars right after their write; the BERTurk epoch callback flushes after its epoch scalars."""
+    import inspect
+    import berturk_train
+    src = inspect.getsource(ray_train.train_loop_per_worker)
+    flushes = [i for i in range(len(src)) if src.startswith("tensorboard.flush(tb)", i)]
+    report, epoch_write = src.index("ray.train.report(metrics"), src.index("tensorboard.epoch_scalars(")
+    last_step_write = src.rindex("tensorboard.step_scalars(")
+    assert len(flushes) == 2, flushes
+    assert last_step_write < flushes[0] < report < epoch_write < flushes[1]
+    bsrc = inspect.getsource(berturk_train.main)
+    assert bsrc.index("tensorboard.epoch_scalars(") < bsrc.index("tensorboard.flush(tb)")
+
+
 def test_tensorboard_refused_before_the_split_is_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
                                                       capsys: pytest.CaptureFixture[str]) -> None:
     """A --tensorboard under results/ or protocol.json of the repo, or under --storage, is refused before the split is

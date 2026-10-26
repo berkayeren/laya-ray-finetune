@@ -22,6 +22,10 @@ Design notes:
   (a full or unplugged volume) and every later add then blocks on its full queue, so training would hang, and its
   close() would raise over the run's own error. Here an OSError of a write or flush turns logging off with one printed
   line and training continues; close() never raises an OSError. An opt-in diagnostic output never fails a run.
+- a SIGKILL (the documented kill-and-resume path, the OS memory killer) runs no finally block, so the trainers flush
+  at the epoch boundary: ray_train.py flushes an epoch's step scalars before its checkpoint is reported and its epoch
+  scalars right after their write, so a resumed run, whose purge step hides everything after the resumed epoch, never
+  has a gap where an epoch's record row exists.
 - event files hold only the fixed TAGS and numbers (write refuses any other tag), never message text, a uid or a label.
 - no comet logger is ever created (SummaryWriter is not used): no telemetry leaves the machine.
 
@@ -178,7 +182,7 @@ def open_writer(logdir: str, purge_step: int, suffix: str) -> dict[str, Any]:
     its file_version event, then the purge marker (a file_version and a session_log START event at purge_step, as
     SummaryWriter(purge_step=...) writes them), flushed to disk before it returns. SystemExit when logdir is not
     writable. The writer is a dict: "events" (the EventsWriter), "logdir", "flushed" (time.monotonic() of the last
-    flush) and "open" (False once closed or turned off by an I/O error); use it through write and close.
+    flush) and "open" (False once closed or turned off by an I/O error); use it through write, flush and close.
 
     tensorboardX imports torch, so it is imported here only, after the caller has set any device env.
     """
@@ -237,6 +241,19 @@ def write(writer: dict[str, Any], step: int, scalars: dict[str, float | int | No
             writer["flushed"] = time.monotonic()
     except OSError as e:
         _off(writer, step, e)
+
+
+def flush(writer: dict[str, Any]) -> None:
+    """Flush the event file to disk now (fsync): every event written so far survives a SIGKILL from here on, which
+    neither the FLUSH_SECS timer nor a close in a finally block (never run on a kill) guarantees. A no-op for a closed
+    or turned-off writer; an OSError turns the writer off (_off) and is never raised."""
+    if not writer["open"]:
+        return
+    try:
+        writer["events"].flush()
+        writer["flushed"] = time.monotonic()
+    except OSError as e:
+        _off(writer, None, e)
 
 
 def close(writer: dict[str, Any]) -> None:

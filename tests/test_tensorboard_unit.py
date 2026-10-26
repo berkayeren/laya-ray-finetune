@@ -187,6 +187,40 @@ def test_close_never_replaces_the_runs_own_error(tmp_path: Path, capsys: pytest.
     assert ok["open"] is False and "training continues" in capsys.readouterr().out
 
 
+KILLED_CHILD = """
+import os, signal, sys
+from pilot import tensorboard as ptb
+w = ptb.open_writer(sys.argv[1], 1, ptb.segment_suffix(0))
+for step in (1, 2, 3):
+    ptb.write(w, step, {"train/loss": float(step)})
+ptb.flush(w)
+ptb.write(w, 4, {"train/loss": 4.0})
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs SIGKILL")
+@pytest.mark.timeout(300)
+def test_flush_survives_a_sigkill(tmp_path: Path) -> None:
+    """WR-03: a SIGKILL runs no finally block (no close). Every event written before a flush is on disk, crc-checked;
+    the control: step 4, written after the flush and before FLUSH_SECS passed, is lost with the kill, which is why the
+    trainers flush at the epoch boundary."""
+    logdir = str(tmp_path / "rid")
+    r = subprocess.run([sys.executable, "-c", KILLED_CHILD, logdir], cwd=REPO_ROOT, capture_output=True, text=True,
+                       timeout=300)
+    assert r.returncode == -9, (r.returncode, r.stderr[-2000:])
+    assert tb_events.scalars(tb_events.read_events(logdir), "train/loss") == {1: 1.0, 2: 2.0, 3: 3.0}
+
+
+def test_flush_and_close_of_a_closed_writer_do_nothing(tmp_path: Path) -> None:
+    w = ptb.open_writer(str(tmp_path / "rid"), 1, ptb.segment_suffix(0))
+    ptb.close(w)
+    ptb.flush(w)
+    ptb.write(w, 2, {"train/loss": 1.0})
+    ptb.close(w)
+    assert "train/loss" not in {kind for _, _, kind, _ in tb_events.read_events(str(tmp_path / "rid"))}
+
+
 def _refused(path: str, outputs: dict[str, str | None] | None = None) -> str:
     """The SystemExit message of check_logdir(path, outputs), asserting it refuses with the --tensorboard prefix."""
     with pytest.raises(SystemExit) as e:
