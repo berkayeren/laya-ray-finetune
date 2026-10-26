@@ -391,3 +391,17 @@ def test_status_polls_retry_after_a_failure() -> None:
     assert unanswered is not None, "useTraining has no unanswered-request branch"
     assert "window.setTimeout(() => void pollStatus(), retry)" in unanswered.group(1), \
         "an unanswered training request is not retried"
+
+
+# --- the per-view error: the server's line verbatim, no fix of the UI's (11-REVIEW WR-03) -------------------------
+
+def test_view_error_adds_no_fix_of_its_own() -> None:
+    """The server's one line ends in its own fix, and VIEW_SOURCES names only a view's primary record, so no ui/src
+    file adds a `git checkout` command, and no error state invents a source from the endpoint path."""
+    hits = []
+    for rel in ui_sources():
+        with open(os.path.join(REPO, rel), encoding="utf-8") as f:
+            text = f.read()
+        hits += ["%s: git checkout" % rel for _ in re.findall(r"git checkout", text)]
+        hits += ["%s: %s" % (rel, m) for m in re.findall(r'source: r\.source \?\? (?!null\b)[^ ;}]+', text)]
+    assert hits == [], "the UI adds a fix or a source of its own: %s" % hits

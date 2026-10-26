@@ -52,13 +52,13 @@ function useTraining(): ViewState<TrainingReady> {
     let cancelled = false;
     let timer: number | undefined;
     let retry = RETRY_MS;
-    const fail = (r: { status: number | null; error: string; source?: string | null }, path: string): void => {
+    const fail = (r: { status: number | null; error: string; source?: string | null }): void => {
       if (r.status === null) {
         setState({ kind: "unreachable" });
         timer = window.setTimeout(() => void pollStatus(), retry);
         retry = Math.min(retry * 2, RETRY_MAX_MS);
       } else {
-        setState({ kind: "error", error: r.error, source: r.source ?? path });
+        setState({ kind: "error", error: r.error, source: r.source ?? null });
       }
     };
     const pollStatus = async (): Promise<void> => {
@@ -67,7 +67,7 @@ function useTraining(): ViewState<TrainingReady> {
         return;
       }
       if (!r.ok) {
-        fail(r, "/api/status");
+        fail(r);
         return;
       }
       retry = RETRY_MS;
@@ -84,7 +84,7 @@ function useTraining(): ViewState<TrainingReady> {
         return;
       }
       if (!r.ok) {
-        fail(r, "/api/training");
+        fail(r);
       } else if (r.data.status === "ready") {
         setState({ kind: "ok", data: r.data });
       } else {

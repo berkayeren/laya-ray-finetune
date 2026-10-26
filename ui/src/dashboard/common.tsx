@@ -7,7 +7,9 @@
 //   SourceCaption      the one-line mono caption naming the records a view reads (the view's own sources field)
 //   Card               white, hairline border, radius 8px, 16px padding; an optional h2 title
 //   LoadingCard        a grey block of the chart height, shown until an endpoint answers
-//   ViewError          "Could not read {source}: {error}. ..." in that view only
+//   ViewError          "Could not read {source}: {error}. ..." in that view only: the server's line verbatim (it
+//                      ends in its own fix), with no command of the UI's; {source} is the view's primary record as
+//                      the server named it, and an error without one says "this view"
 //   StatusBadge        24px badge: the tone's text, fill and border colours and its icon, the status word as received
 //   FrozenRender       "View the frozen render" disclosure opening the exact render text in a preformatted block
 //   SegmentedControl   role="radiogroup"; arrow keys move the selection; the selected segment in the accent
@@ -44,11 +46,11 @@ const UNREACHABLE_COPY =
 export type ViewState<T> =
   | { kind: "loading" }
   | { kind: "ok"; data: T }
-  | { kind: "error"; error: string; source: string }
+  | { kind: "error"; error: string; source: string | null }
   | { kind: "unreachable" };
 
 // GET /api/{name}, fetched once per mount, typed by ViewMap. A 503 carries the record view's {error, source}; any
-// other HTTP error without a source names the endpoint instead.
+// other HTTP error has no source (null), never an invented one.
 export function useView<K extends keyof ViewMap>(name: K): ViewState<ViewMap[K]> {
   const [state, setState] = useState<ViewState<ViewMap[K]>>({ kind: "loading" });
   useEffect(() => {
@@ -63,7 +65,7 @@ export function useView<K extends keyof ViewMap>(name: K): ViewState<ViewMap[K]>
       } else if (r.status === null) {
         setState({ kind: "unreachable" });
       } else {
-        setState({ kind: "error", error: r.error, source: r.source ?? "/api/" + name });
+        setState({ kind: "error", error: r.error, source: r.source });
       }
     });
     return () => {
@@ -129,13 +131,15 @@ export function LoadingCard({ height }: { height?: string }) {
   );
 }
 
-export function ViewError({ error, source }: { error: string; source: string }) {
+// The server's line already ends in its fix (a restore, a rebuild or a restart), so no second command is added; the
+// views are built once at startup, so a fixed record shows after `make demo` restarts.
+export function ViewError({ error, source }: { error: string; source: string | null }) {
   return (
     <div className={css.notice} role="alert">
       <p className={css.noticeBody}>
-        {`Could not read ${source}: ${error}. The other views are unaffected; fix the record (`}
-        <code className={css.code}>{`git checkout -- ${source}`}</code>
-        {") and reload."}
+        {`Could not read ${source ?? "this view"}: ${error}. The other views are unaffected; after the fix, restart `}
+        <code className={css.code}>make demo</code>
+        {"."}
       </p>
     </div>
   );
