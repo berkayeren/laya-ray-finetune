@@ -98,7 +98,9 @@ wall-clock seconds (the wall clock includes the export write), the peak memory a
 run (suffix .pidN), opened with purge step 1, so a from-scratch rerun into the same dir hides the old file's steps; it
 is closed in a finally block, also after a refusal. The flag is NOT_IDENTITY and never recorded (no run id, export
 byte, berturk_train.json or done.json changes), and the TrainingArguments are unchanged. DIR is refused under results/,
-data/, ui/, protocol.json, --storage or --out, before any load, fetch or run dir, also with --print-run-id.
+data/, ui/, protocol.json, --storage or --out, before any load, fetch or run dir, also with --print-run-id; an
+unwritable DIR/RUN_ID is refused when the writer opens, after the load and before the run dir is created, so the same
+command can be rerun once the DIR is fixed.
 
 Run identity: the run id is pilot.berturk.run_id of the canonical config (pilot.berturk.IDENTITY: split, data and base
 digests, transformers and accelerate versions, device, every hyperparameter and the seed; never a path or a resource),
@@ -720,25 +722,28 @@ def main(argv: list[str] | None = None) -> str | None:
         tbcb.on_epoch_begin, tbcb.on_optimizer_step = tb_epoch_begin, tb_optimizer_step
         tbcb.on_step_end, tbcb.on_epoch_end = tb_step_end, tb_epoch_end
         callbacks = [cb, tbcb]
-    os.makedirs(run_dir)
-    trainer = transformers.Trainer(model=model, args=args, train_dataset=data,
-                                   data_collator=transformers.DataCollatorWithPadding(tok),
-                                   compute_loss_func=loss_fn, callbacks=callbacks, optimizers=(optimizer, None))
-    check_model(trainer.model)
-    record["param_device"] = a.device
     if tb_dir is not None:
-        clip = trainer.accelerator.clip_grad_norm_
-
-        def noting_clip(*args: Any, **kw: Any) -> Any:
-            """accelerate's clip_grad_norm_, unchanged; notes the pre-clip total norm it returns."""
-            tbs["grad_norm"] = n = clip(*args, **kw)
-            return n
-
-        trainer.accelerator.clip_grad_norm_ = noting_clip  # flag on only: the off path calls accelerate directly
-        # purge step 1: a from-scratch rerun into the same DIR/RUN_ID hides the old file's steps
+        # opened before the run dir exists: an unwritable DIR is refused while a rerun of the same command is still
+        # allowed (a run dir is never resumed). Purge step 1: a from-scratch rerun into the same DIR/RUN_ID hides the
+        # old file's steps
         tb = tensorboard.open_writer(tb_dir, 1, tensorboard.pid_suffix(os.getpid()))
         print("tensorboard events -> %s" % tb_dir)
     try:
+        os.makedirs(run_dir)
+        trainer = transformers.Trainer(model=model, args=args, train_dataset=data,
+                                       data_collator=transformers.DataCollatorWithPadding(tok),
+                                       compute_loss_func=loss_fn, callbacks=callbacks, optimizers=(optimizer, None))
+        check_model(trainer.model)
+        record["param_device"] = a.device
+        if tb_dir is not None:
+            clip = trainer.accelerator.clip_grad_norm_
+
+            def noting_clip(*args: Any, **kw: Any) -> Any:
+                """accelerate's clip_grad_norm_, unchanged; notes the pre-clip total norm it returns."""
+                tbs["grad_norm"] = n = clip(*args, **kw)
+                return n
+
+            trainer.accelerator.clip_grad_norm_ = noting_clip   # flag on only: the off path calls accelerate directly
         trainer.train()
     finally:
         if tb is not None:                                  # flushes the events, also after a callback's SystemExit;

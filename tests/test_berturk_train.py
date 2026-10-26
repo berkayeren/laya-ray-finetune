@@ -1281,6 +1281,32 @@ def test_tensorboard_refuses_a_trainer_that_skips_the_accelerator_clip(inputs: I
     assert not [kind for _, _, kind, _ in ev if kind.startswith("train/")]
 
 
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="needs a dir the user cannot write")
+@pytest.mark.timeout(TIMEOUT)
+def test_tensorboard_unwritable_dir_leaves_no_run_dir(inputs: Inputs, tmp_path: Path,
+                                                      capsys: pytest.CaptureFixture[str], keep_threads: None) -> None:
+    """WR-02: an unwritable --tensorboard DIR passes the path guard and is refused when the writer opens, before the run
+    dir exists (a BERTurk run dir is never resumed and refuses a rerun), so once the DIR is writable the same command
+    trains."""
+    import berturk_train
+    data, manifest, base = inputs
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    argv = [str(x) for x in train_argv(data, manifest, base, tmp_path / "s", "--tensorboard", ro / "tb")]
+    berturk_train.main(argv + ["--print-run-id"])
+    rid = capsys.readouterr().out.strip()
+    os.chmod(ro, 0o555)
+    try:
+        with pytest.raises(SystemExit, match="^--tensorboard: cannot write event files under "):
+            berturk_train.main(argv)
+    finally:
+        os.chmod(ro, 0o755)
+    assert not (tmp_path / "s" / rid).exists() and not (ro / "tb").exists()
+    run_dir = berturk_train.main(argv)                      # the same command, now that DIR is writable
+    assert os.path.basename(run_dir) == rid and os.path.isfile(os.path.join(run_dir, berturk.DONE))
+    assert len(list((ro / "tb" / rid).glob("events.out.tfevents.*"))) == 1
+
+
 def test_tensorboard_print_run_id_creates_nothing(inputs: Inputs, tmp_path: Path, capsys: pytest.CaptureFixture[str],
                                                   no_load: None) -> None:
     import berturk_train
