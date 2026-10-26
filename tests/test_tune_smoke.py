@@ -74,16 +74,27 @@ def snapshot(tmp_path_factory: pytest.TempPathFactory) -> Snapshot:
             tiny_checkpoint(d / "base"), tiny_base(d / "bert_base"))
 
 
-@pytest.mark.timeout(TIMEOUT)
-def test_laya_search_on_cpu(snapshot: Snapshot) -> None:
-    """tune.py --system laya runs every trial through ray_train.py's own loop, one at a time, scores tuning-dev after
-    every epoch, lets ASHA stop the weak trial, keeps no weights and writes a tune/1 record read_record accepts."""
+LayaSearch = tuple[Path, Path, str]                 # (storage, out, guarded status before the search)
+
+
+@pytest.fixture(scope="module")
+def laya_search(snapshot: Snapshot) -> LayaSearch:
+    """The CPU Laya smoke search over LAYA_POINTS, run once for the tests that read its record or storage."""
     d, data, manifest, base, _ = snapshot
     storage, out = d / "s", d / "laya.json"
     before = _guarded_status()
     _run("tune.py", "--system", "laya", "--device", "cpu", "--cpus", "1", "--trials", "3", "--seed", "0",
          "--base", base, "--data", data, "--manifest", manifest, "--storage", storage, "--out", out,
          "--points", json.dumps(LAYA_POINTS))
+    return storage, out, before
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_laya_search_on_cpu(snapshot: Snapshot, laya_search: LayaSearch) -> None:
+    """tune.py --system laya runs every trial through ray_train.py's own loop, one at a time, scores tuning-dev after
+    every epoch, lets ASHA stop the weak trial, keeps no weights and writes a tune/1 record read_record accepts."""
+    _, data, _, _, _ = snapshot
+    storage, out, before = laya_search
     record, _sha = pt.read_record(str(out))
     assert record["system"] == "laya" and record["schema"] == pt.SCHEMA
     assert [t["config"] for t in record["trials"]] == LAYA_POINTS
@@ -112,7 +123,79 @@ def test_laya_search_on_cpu(snapshot: Snapshot) -> None:
         assert "exports" not in dirs and not [n for n in dirs if n.startswith("epoch-")], root
         assert os.path.basename(root) != "out", root
     assert not glob.glob(os.path.join(str(storage), "laya-train", "*", "out"))
+    # the search file: one driver start, finished, bound to the record's bytes
+    with open(os.path.join(str(storage), "laya-search.json"), encoding="utf-8") as f:
+        doc = json.load(f)
+    assert list(doc) == ["spec", "segments", "finished", "record_sha256"]
+    assert doc["finished"] is True and doc["record_sha256"] == _sha and doc["segments"] == record["segments"]
+    assert len(doc["segments"]) == 1 and doc["segments"][0]["preflight"] is None
     assert _guarded_status() == before                      # nothing under results/, data/ or protocol.json changed
+
+
+def test_trials_never_overlap(laya_search: LayaSearch) -> None:
+    """One trial at a time (the generator's max_concurrent=1): every trial's first start is later than the last epoch
+    report (Tune's integer-second timestamp) of the trial before it."""
+    storage, _, _ = laya_search
+    exp = os.path.join(str(storage), "laya")
+    for k in range(1, len(LAYA_POINTS)):
+        with open(os.path.join(exp, pt.trial_dirname_of(k), pt.ATTEMPTS_FILE), encoding="utf-8") as f:
+            started = json.load(f)["started"][0]
+        with open(os.path.join(exp, pt.trial_dirname_of(k - 1), "result.json"), encoding="utf-8") as f:
+            last = max(json.loads(line)["timestamp"] for line in f if line.strip())
+        assert started > last, (k, started, last)
+
+
+def _run_logged(args: list[Any], log: Path, env_extra: dict[str, str]) -> tuple[int, str]:
+    """(exit code, stdout + stderr) of a repo script run with the test interpreter, its output in a file (a killed
+    driver's Ray children never hold a pipe open)."""
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env.update(env_extra)
+    with open(log, "w", encoding="utf-8") as f:
+        r = subprocess.run([sys.executable] + [str(x) for x in args], cwd=REPO, env=env, stdout=f,
+                           stderr=subprocess.STDOUT, timeout=TIMEOUT)
+    return r.returncode, log.read_text(encoding="utf-8")
+
+
+def _search_file(storage: Path) -> dict[str, Any]:
+    with open(storage / "laya-search.json", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@pytest.mark.timeout(1200)
+def test_laya_search_resumes_after_a_kill(snapshot: Snapshot) -> None:
+    """Trial 1's first attempt SIGKILLs the driver (the hidden --kill-at-trial). Rerunning the identical command
+    continues the search through Tuner.restore: trial 0 is not rerun, trial 1 restarts from scratch (attempts 2) and
+    the record holds two segments. A third run of the same command starts no Ray and finds the record unchanged."""
+    d, data, manifest, base, _ = snapshot
+    storage, out = d / "kill", d / "kill.json"
+    before = _guarded_status()
+    argv = ["tune.py", "--system", "laya", "--device", "cpu", "--cpus", "1", "--trials", "3", "--seed", "0",
+            "--base", base, "--data", data, "--manifest", manifest, "--storage", storage, "--out", out,
+            "--points", json.dumps(LAYA_POINTS), "--kill-at-trial", "1"]
+    # Ray reads TUNE_GLOBAL_CHECKPOINT_S (tune.py reads no environment variable): 0 snapshots the experiment every
+    # controller step, so trial 0's finished state is on disk before trial 1 starts and the kill point is fixed
+    env = {"TUNE_GLOBAL_CHECKPOINT_S": "0"}
+    code, text = _run_logged(argv, d / "kill-1.log", env)
+    assert code != 0, text[-4000:]
+    assert not out.exists()
+    doc = _search_file(storage)
+    assert len(doc["segments"]) == 1 and doc["finished"] is False and doc["record_sha256"] is None
+    code, text = _run_logged(argv, d / "kill-2.log", env)
+    assert code == 0, text[-4000:]
+    assert "continuing the search" in text
+    record, sha = pt.read_record(str(out))
+    assert [t["attempts"] for t in record["trials"]] == [1, 2, 1]
+    assert [t["config"] for t in record["trials"]] == LAYA_POINTS
+    assert len(record["segments"]) == 2
+    doc = _search_file(storage)
+    assert doc["finished"] is True and doc["record_sha256"] == sha and doc["segments"] == record["segments"]
+    code, text = _run_logged(argv, d / "kill-3.log", env)
+    assert code == 0, text[-4000:]
+    assert "search finished; record unchanged -> %s (sha256 %s)" % (out, sha) in text
+    assert "Started a local Ray instance" not in text
+    assert pt.read_record(str(out))[1] == sha
+    assert len(_search_file(storage)["segments"]) == 2
+    assert _guarded_status() == before
 
 
 def _check_record(record: dict[str, Any], storage: Path, system: str, data: str) -> None:

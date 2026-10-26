@@ -44,16 +44,27 @@ Ray 2.59 behaviour this design handles:
   1), and the inner trainer's FailureConfig(max_failures=0, controller_failure_limit=0) turns a starved start into a
   trial error instead of an endless retry;
 - a restore can let a restarted trial pass an ASHA rung it had been judged at, so every trial counts its starts in
-  attempts.json in its trial dir (pilot.tune.bump_attempts) and the record carries the count (never repaired);
+  attempts.json in its storage trial dir (pilot.tune.bump_attempts, trial_store_dir; never Tune's get_trial_dir(), a
+  session working dir synced only at a report) and the record carries the count (never repaired);
 - a function trial runs with its cwd under Ray's session dir, so every path a trial receives is absolute.
 
 Storage (default tune_runs/, gitignored): <storage>/<system>/ is the Tune experiment (trial dirs trial_NNNNN, each with
-Tune's params.json and result.json and our attempts.json), <storage>/<system>-train/ the inner Train runs. Rerunning the
-identical command after a kill continues the search (Tuner.can_restore, then Tuner.restore with unfinished and errored
-trials restarted from scratch), never rerunning a finished trial. Once every trial ended without an error the record is
-built only from each trial dir's params.json, the CURVE_KEYS of its result.json lines and its attempts count (never
-Tune's own fields: hostname, pid, timestamps, trial-id prefixes), written atomically to --out, and refused over an
+Tune's params.json and result.json and our attempts.json), <storage>/<system>-train/ the inner Train runs and
+<storage>/<system>-search.json the search file: the search spec (search_spec: seed, trials, points, space, scheduler,
+device, CPUs, the data and partition digests and counts, the base, the fixed recipe, the versions; never a path), one
+segment per driver start (the git code state and, on MPS, the quiet-machine preflight), finished, and the record's
+sha256 once written. Once every trial ended without an error the record is built only from each trial dir's
+params.json, the CURVE_KEYS of its result.json lines and its attempts count (never Tune's own fields: hostname, pid,
+timestamps, trial-id prefixes) and the search file's segments, written atomically to --out, and refused over an
 existing --out of other content.
+
+Resume: rerun the identical command. A search file of another spec is refused (naming the first differing key) before
+ray.init, and so is an experiment dir Ray Tune cannot restore (a kill before its first snapshot) or one without a
+search file. Otherwise this start appends its segment and Tuner.restore continues the search with unfinished and errored
+trials restarted from scratch: a trial that finished before the kill is not rerun once Ray's experiment snapshot holds
+it (Ray snapshots at most about every 10 s, so one that ended seconds before the kill can rerun), and a restarted trial
+runs from epoch 1 under a fresh inner run, its attempts count showing the restart. A finished search starts no Ray: its
+rerun rebuilds the record from the trial dirs and the search file, and must reproduce the sha256 it wrote.
 
 usage:
   python tune.py --system laya                     # the real search: 20 trials on MPS -> results/tune/laya.json
@@ -66,6 +77,7 @@ import copy
 import json
 import os
 import re
+import signal
 import time
 from importlib.metadata import version
 from typing import Any
@@ -74,12 +86,13 @@ from pilot import pins, runs, spike
 from pilot import laya_adapter as la
 from pilot import tune as pt
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, refuse_held_out,
-                        repo_relpath, sha256_bytes, sha256_file, verify_split_file)
+                        repo_relpath, sha256_bytes, sha256_file, verify_split_file, write_atomic)
 from pilot.weights import check_tokenizer_config_rewritable, checkpoint_digests, fetch, identity
 
 DEFAULT_DATA = os.path.join(REPO_ROOT, "data", "splits", "selection_train.jsonl")
 TRIAL_DIR_RE = re.compile(r"^trial_\d{5}$")
 PINNED_BASE = {"laya": "multilingual", "berturk": "berturk"}   # --base default per system: the pinned weights
+SEARCH_FILE_KEYS = ("spec", "segments", "finished", "record_sha256")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -100,6 +113,8 @@ def parser() -> argparse.ArgumentParser:
                          "(pinned; default) or a local BERT base dir")
     ap.add_argument("--cpus", type=int, default=None, help="CPUs and torch threads per trial (default 4 on mps, else 1)")
     ap.add_argument("--points", default=None, help=argparse.SUPPRESS)   # JSON configs evaluated first; tests only
+    # test hook: trial N's first attempt SIGKILLs the driver (the resume test); never in the spec or the record
+    ap.add_argument("--kill-at-trial", type=int, default=None, help=argparse.SUPPRESS)
     return ap
 
 
@@ -116,6 +131,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             ap.error("%s must be at least 1" % flag)
     if a.seed < 0:
         ap.error("--seed must be at least 0")
+    if a.kill_at_trial is not None and not 0 <= a.kill_at_trial < a.trials:
+        ap.error("--kill-at-trial must be a trial index 0..%d" % (a.trials - 1))
     if a.points is not None:
         try:
             points = json.loads(a.points)
@@ -167,7 +184,8 @@ def bind(a: argparse.Namespace) -> dict[str, Any]:
                  "n_train": len(train_rows), "n_dev": len(dev_rows),
                  "dev_rows_with_train_text": pt.shared_texts(train_rows, dev_rows),
                  "device": a.device, "cpus": a.cpus, "env": spike.spike_env("0", a.cpus) if a.device == "mps" else {},
-                 "storage": a.storage, "train_storage": os.path.join(a.storage, "%s-train" % a.system)}, **base)
+                 "storage": a.storage, "train_storage": os.path.join(a.storage, "%s-train" % a.system),
+                 "kill_at_trial": a.kill_at_trial, "driver_pid": os.getpid()}, **base)
 
 
 def bind_laya(a: argparse.Namespace) -> dict[str, Any]:
@@ -254,6 +272,24 @@ def tune_config(system: str, seed: int, trials: int, points: list[dict[str, Any]
         trial_dirname_creator=trial_dirname)
 
 
+def trial_store_dir(bound: dict[str, Any], index: int) -> str:
+    """The storage trial dir STORAGE/SYS/trial_NNNNN of trial `index`, where attempts.json lives. Never Tune's
+    get_trial_dir(): that is the trial's working dir under Ray's session dir, synced to storage only at a report, so a
+    count written there is lost when the driver dies before the trial's first report, and a restored trial starts in
+    a new session's empty working dir."""
+    return os.path.join(bound["storage"], bound["system"], pt.trial_dirname_of(index))
+
+
+def kill_hook(bound: dict[str, Any], index: int, attempt: int) -> bool:
+    """The hidden --kill-at-trial test hook: on trial `index`'s first attempt, SIGKILL the driver (Tune's controller
+    runs there) and return True; the trial then returns without training. False otherwise."""
+    if bound.get("kill_at_trial") != index or attempt != 1:
+        return False
+    print("trial %d attempt 1: --kill-at-trial kills the driver (pid %d)" % (index, bound["driver_pid"]), flush=True)
+    os.kill(bound["driver_pid"], signal.SIGKILL)
+    return True
+
+
 def laya_trial(config: dict[str, Any], bound: dict[str, Any]) -> None:
     """One Laya trial: count the start in attempts.json, build ray_train.py's train config for the trial's point (the
     fixed recipe plus encoder LR, head LR, neg K and epochs) with the partition block as tune, and run one TorchTrainer
@@ -268,7 +304,9 @@ def laya_trial(config: dict[str, Any], bound: dict[str, Any]) -> None:
     import ray_train
     ctx = tune.get_context()
     index = pt.trial_index(ctx.get_trial_id())
-    attempt = pt.bump_attempts(ctx.get_trial_dir())
+    attempt = pt.bump_attempts(trial_store_dir(bound, index))
+    if kill_hook(bound, index, attempt):
+        return
     point = pt.check_point("laya", {k: config.get(k) for k in pt.SPACES["laya"]})
     fixed = pt.FIXED["laya"]
     name = "%s-a%d" % (pt.trial_dirname_of(index), attempt)
@@ -321,7 +359,9 @@ def berturk_trial(config: dict[str, Any], bound: dict[str, Any]) -> None:
     from pilot import berturk
     ctx = tune.get_context()
     index = pt.trial_index(ctx.get_trial_id())
-    attempt = pt.bump_attempts(ctx.get_trial_dir())
+    attempt = pt.bump_attempts(trial_store_dir(bound, index))
+    if kill_hook(bound, index, attempt):
+        return
     if bound["env"]:
         ray_train.check_env(bound["env"])                   # the spike's MPS env reached this trial's process
     point = pt.check_point("berturk", {k: config.get(k) for k in pt.SPACES["berturk"]})
@@ -407,9 +447,74 @@ def canonical_of(a: argparse.Namespace, bound: dict[str, Any], trials: list[dict
             "trials": trials}
 
 
-def write_out(record: dict[str, Any], out: str) -> str:
-    """Check the record and write it atomically to `out` (an existing `out` of the same bytes is left as is); SystemExit
-    over an existing `out` of other bytes (a committed search record is never overwritten). Returns out."""
+def search_spec(a: argparse.Namespace, bound: dict[str, Any]) -> dict[str, Any]:
+    """What makes two driver starts the same search, as JSON values: the system, seed, trial count, pinned points,
+    space, scheduler, device, CPUs, the data block (the split sha256, whether the manifest is the committed one, the
+    partition block and counts), the base record, the fixed recipe and the versions. Never a path, never the test
+    hook: a rerun from another checkout or storage location is the same search."""
+    data = {"sha256": bound["data_sha256"], "manifest_is_committed": bound["manifest_is_committed"],
+            "block": bound["block"], "n_train": bound["n_train"], "n_dev": bound["n_dev"],
+            "dev_rows_with_train_text": bound["dev_rows_with_train_text"]}
+    spec = {"system": a.system, "seed": a.seed, "n_trials": a.trials, "points": a.points,
+            "space": pt.SPACES[a.system], "scheduler": dict(pt.ASHA, max_t=pt.max_t(a.system)), "device": a.device,
+            "cpus": a.cpus, "data": data, "base": bound["base_record"], "fixed": pt.FIXED[a.system],
+            "versions": bound["versions"]}
+    return json.loads(json.dumps(spec, ensure_ascii=False))   # tuples become lists, as the spec file reads back
+
+
+def spec_path(storage: str, system: str) -> str:
+    """STORAGE/SYS-search.json: the search's spec, one segment per driver start, finished and the record sha256."""
+    return os.path.join(storage, "%s-search.json" % system)
+
+
+def read_search(path: str) -> dict[str, Any] | None:
+    """The search file at `path` ({"spec", "segments", "finished", "record_sha256"}), None when it does not exist;
+    SystemExit when it is not that layout."""
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as e:
+        raise SystemExit("%s is not readable JSON (%s); delete the search's storage to start over" % (path, e)) \
+            from None
+    if (not isinstance(doc, dict) or list(doc) != list(SEARCH_FILE_KEYS) or not isinstance(doc["spec"], dict)
+            or not isinstance(doc["segments"], list) or type(doc["finished"]) is not bool):
+        raise SystemExit("%s is not a search file of this tune.py (keys %s); delete the search's storage to start "
+                         "over" % (path, ", ".join(SEARCH_FILE_KEYS)))
+    return doc
+
+
+def write_search(path: str, doc: dict[str, Any]) -> None:
+    """Write the search file atomically (UTF-8, indent 2, one trailing newline)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    write_atomic(path, (json.dumps(doc, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+
+
+def first_difference(have: Any, want: Any, where: str = "") -> str | None:
+    """The dotted path of the first key at which two JSON values differ (None when equal): keys in `want`'s order,
+    then any key only `have` holds; a value of another type or a differing list is named as a whole."""
+    if isinstance(have, dict) and isinstance(want, dict):
+        for k in list(want) + [k for k in have if k not in want]:
+            key = "%s.%s" % (where, k) if where else str(k)
+            if k not in have or k not in want:
+                return key
+            d = first_difference(have[k], want[k], key)
+            if d is not None:
+                return d
+        return None
+    return None if have == want and type(have) is type(want) else (where or "spec")
+
+
+def stale_paths(storage: str, system: str) -> str:
+    """The three paths a refused search's storage asks to delete, comma-separated."""
+    return ", ".join(os.path.join(storage, n) for n in (system, "%s-train" % system, "%s-search.json" % system))
+
+
+def write_out(record: dict[str, Any], out: str) -> bool:
+    """Check the record and write it atomically to `out`; an existing `out` of the same bytes is left as is. Returns
+    True when it wrote `out`, False when `out` already held these bytes; SystemExit over an existing `out` of other
+    bytes (a committed search record is never overwritten)."""
     pt.check_record(record)
     data = pt.record_bytes(record)
     if os.path.exists(out):
@@ -417,19 +522,59 @@ def write_out(record: dict[str, Any], out: str) -> str:
             if f.read() != data:
                 raise SystemExit("%s exists with other content; a committed search record is never overwritten; pass "
                                  "another --out" % out)
-    else:
-        pt.write_record(record, out)
-    return out
+        return False
+    pt.write_record(record, out)
+    return True
+
+
+def finish(a: argparse.Namespace, bound: dict[str, Any], doc: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """(record, written) of a search whose trials all ended: the record built from the trial dirs under STORAGE/SYS
+    and every segment of the search file, written to --out by write_out."""
+    trials = collect(os.path.join(a.storage, a.system), a.trials)
+    record = pt.build_record(canonical_of(a, bound, trials, copy.deepcopy(doc["segments"])))
+    return record, write_out(record, a.out)
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Parse, bind on the driver, start Ray with headroom, run (or restore) the search, then write the record."""
+    """Parse, bind on the driver, compare the search file's spec, rebuild a finished search without Ray, or append
+    this start's segment, start Ray with headroom, run (or restore) the search, write the record and mark the search
+    finished."""
     a = parse_args(argv)
     bound = bind(a)
+    spec = search_spec(a, bound)
+    sp = spec_path(a.storage, a.system)
+    path = os.path.join(a.storage, a.system)
+    doc = read_search(sp)
+    if doc is not None:
+        key = first_difference(doc["spec"], spec)
+        if key is not None:
+            raise SystemExit("%s holds a search with another spec (key %s); rerun the command that started it, or "
+                             "delete %s to start over" % (a.storage, key, stale_paths(a.storage, a.system)))
+    if doc is not None and doc["finished"]:                 # no Ray: the trial dirs and the segments rebuild it
+        record, written = finish(a, bound, doc)
+        sha = sha256_bytes(pt.record_bytes(record))
+        if sha != doc["record_sha256"]:
+            raise SystemExit("the finished search in %s rebuilds a record of sha256 %s, not the %s it wrote; its trial "
+                             "dirs changed; delete %s to start over" % (a.storage, sha, doc["record_sha256"],
+                                                                         stale_paths(a.storage, a.system)))
+        print("search finished; record %s -> %s (sha256 %s)" % ("written" if written else "unchanged", a.out, sha),
+              flush=True)
+        return
+    if os.path.isdir(path) and os.listdir(path):
+        from ray import tune
+        if doc is None:
+            raise SystemExit("%s holds a Tune experiment without its search file %s; delete %s, then rerun"
+                             % (path, sp, stale_paths(a.storage, a.system)))
+        if not tune.Tuner.can_restore(path):
+            raise SystemExit("%s holds a Tune experiment Ray Tune cannot restore (killed before its first snapshot); "
+                             "delete %s, then rerun" % (path, stale_paths(a.storage, a.system)))
+    import ray_train
+    segment = dict(ray_train.code_state(), preflight=None)
+    doc = {"spec": spec, "segments": (doc["segments"] if doc else []) + [segment], "finished": False,
+           "record_sha256": None}
+    write_search(sp, doc)                                   # this start's segment, before ray.init
     import ray
     from ray import tune
-
-    import ray_train
     if a.system == "laya":                                  # leaked placement-group headroom (Ray Train trials)
         init = {"num_cpus": 1 + a.cpus * (a.trials + 1), "include_dashboard": False}
         trainable = tune.with_resources(tune.with_parameters(laya_trial, bound=bound), {"CPU": 1})
@@ -440,9 +585,8 @@ def main(argv: list[str] | None = None) -> None:
         init["runtime_env"] = {"env_vars": bound["env"]}   # the spike's MPS worker env reaches every trial worker
     ray.init(**init)
     ray_train.require_single_node(ray.nodes())
-    path = os.path.join(a.storage, a.system)
     if tune.Tuner.can_restore(path):
-        print("continuing the search in %s" % path, flush=True)
+        print("continuing the search in %s (driver start %d)" % (path, len(doc["segments"])), flush=True)
         tuner = tune.Tuner.restore(path, trainable=trainable, resume_unfinished=True, restart_errored=True)
     else:
         tuner = tune.Tuner(trainable, param_space=param_space(a.system),
@@ -455,11 +599,10 @@ def main(argv: list[str] | None = None) -> None:
     if len(grid) != a.trials or errored:
         raise SystemExit("the search ended with %d of %d trials, errored: %s; rerun the same command: errored trials "
                          "restart from scratch" % (len(grid), a.trials, ", ".join(errored) or "none"))
-    trials = collect(path, a.trials)
-    segments = [dict(ray_train.code_state(), preflight=None)]
-    record = pt.build_record(canonical_of(a, bound, trials, segments))
-    write_out(record, a.out)
-    print("record -> %s (sha256 %s)" % (a.out, sha256_bytes(pt.record_bytes(record))), flush=True)
+    record, _ = finish(a, bound, doc)
+    sha = sha256_bytes(pt.record_bytes(record))
+    write_search(sp, dict(doc, finished=True, record_sha256=sha))
+    print("record -> %s (sha256 %s)" % (a.out, sha), flush=True)
 
 
 if __name__ == "__main__":
