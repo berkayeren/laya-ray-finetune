@@ -178,7 +178,8 @@ def load_job(state: dict[str, Any], bindings_fn: Callable[[], dict[str, dict[str
              threads: int) -> None:
     """On the worker thread, the binding stage, then the load. Binding: both systems (bindings_fn), then every seed dir
     of each system separately (bind_seeds: hashes only) and, for a system whose seeds all bound, its training rows
-    (training_entry); a system that failed binding gets its unavailable entry with its one line, and a bindings_fn
+    (training_entry); a system that failed binding gets its unavailable entry with its one line (a SystemExit's, or
+    LOAD_FAILED naming only the type of any other exception), never hiding the other system's rows, and a bindings_fn
     refusal gives both systems its line. state["training"] is published and training_status set ready before any
     model loads, whether or not the models load. Load: only when both systems bound (else the chat is refused with
     the first failing system's line), every seed loaded, one warm-up classify of pd.WARMUP_TEXT (output discarded),
@@ -198,6 +199,10 @@ def load_job(state: dict[str, Any], bindings_fn: Callable[[], dict[str, dict[str
             except SystemExit as e:
                 failed.append(_line(e))
                 training[kind] = pd.training_unavailable(_line(e))
+                continue
+            except Exception as e:                      # e.g. a PermissionError while hashing: this system only
+                failed.append(LOAD_FAILED % type(e).__name__)
+                training[kind] = pd.training_unavailable(failed[-1])
                 continue
             training[kind] = training_entry(bindings[kind], bound[kind])
         state["training"] = training
@@ -323,8 +328,12 @@ def main(argv: list[str] | None = None) -> None:
     import uvicorn
     state = new_state(a.device)
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="demo-model")
-    views = pd.build_views(REPO_ROOT)
-    app = create_app(state, executor, views, UI_DIST, pd.svg_allow_list(REPO_ROOT))
+    views = pd.build_views(REPO_ROOT)                   # never raises: a failing builder breaks only its view
+    try:
+        svgs = pd.svg_allow_list(REPO_ROOT)
+    except OSError:                                     # an unreadable results dir: the confidence view says why
+        svgs = {}
+    app = create_app(state, executor, views, UI_DIST, svgs)
     start_loading(state, executor, functools.partial(pd.protocol_bindings, REPO_ROOT), a.checkpoint_root, a.device,
                   a.threads)
     print("demo on http://127.0.0.1:%d (local only; stores nothing); the chat opens when the six final checkpoints "

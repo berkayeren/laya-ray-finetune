@@ -20,7 +20,8 @@ Design notes:
   report.final_seed_binding uses).
 - parse_classify_body's refusals are fixed one-line texts that never contain the submitted text, and the text it
   returns is unchanged (no strip, lowercasing, folding or normalization), as latency.py feeds texts.
-- A view builder's refusal (SystemExit) becomes that view's {"error", "source"}; every other view keeps serving.
+- A view builder's refusal (SystemExit), or any other exception (named by its type only), becomes that view's
+  {"error", "source"}; every other view keeps serving.
 - The verdict view mirrors report.py's --go-block, --final-table and --recommendation: the verdict record's bytes
   read once, pilot.protocol.require_frozen, then pilot.verdict.check_record, then the three frozen renders. Every
   verdict string it carries is a whole line (or a table cell) of those renders or a field of the record, and every
@@ -822,19 +823,24 @@ def fewshot_view(root: str = REPO_ROOT, path: str | None = None) -> dict[str, An
 VIEWS: dict[str, Callable[[str], dict[str, Any]]] = {"intents": intents_view, "verdict": verdict_view,
                                                      "selection": selection_view, "confidence": confidence_view,
                                                      "latency": latency_view, "fewshot": fewshot_view}
+VIEW_FAILED = "building the %s view failed (%s); check that its records are readable, then restart `make demo`"
 VIEW_SOURCES = {"intents": "intents.py", "verdict": VERDICT_RECORD, "selection": SELECTION_RECORDS["laya"][0],
                 "confidence": SVG_DIRS[0][0], "latency": LATENCY_DIR, "fewshot": FEWSHOT_RECORD}
 
 
 def build_views(root: str = REPO_ROOT) -> dict[str, dict[str, Any]]:
     """{name: view} of every VIEWS builder, each run once on `root`; a builder's SystemExit becomes that view's
-    {"error": its one line, "source": VIEW_SOURCES[name]}, so one refused record breaks only its own view."""
+    {"error": its one line, "source": VIEW_SOURCES[name]} and any other exception {"error": VIEW_FAILED naming only
+    its type, "source": VIEW_SOURCES[name]}, so one refused or unreadable record breaks only its own view. Never
+    raises an Exception."""
     out = {}
     for name, build in VIEWS.items():
         try:
             out[name] = build(root)
         except SystemExit as e:
             out[name] = {"error": str(e.code).replace("\n", " "), "source": VIEW_SOURCES[name]}
+        except Exception as e:
+            out[name] = {"error": VIEW_FAILED % (name, type(e).__name__), "source": VIEW_SOURCES[name]}
     return out
 
 

@@ -679,6 +679,38 @@ def test_build_views_keeps_a_refusal_to_its_view(monkeypatch: pytest.MonkeyPatch
     assert len(views["intents"]["tags"]) == 48
 
 
+@pytest.mark.parametrize("exc", [PermissionError, IndexError, KeyError])
+def test_build_views_keeps_any_exception_to_its_view(monkeypatch: pytest.MonkeyPatch, exc: type) -> None:
+    """A builder raising a non-SystemExit exception becomes that view's {error, source} naming only the exception
+    type (never its text); every other view still builds."""
+    def bad(root: str) -> dict[str, Any]:
+        raise exc(SENTINEL)
+    monkeypatch.setitem(pd.VIEWS, "broken", bad)
+    monkeypatch.setitem(pd.VIEW_SOURCES, "broken", "results/broken.json")
+    views = pd.build_views(REPO)
+    assert views["broken"] == {"error": pd.VIEW_FAILED % ("broken", exc.__name__), "source": "results/broken.json"}
+    assert pd.view_refused(views["broken"]) and SENTINEL not in views["broken"]["error"]
+    assert len(views["intents"]["tags"]) == 48 and not pd.view_refused(views["verdict"])
+
+
+def test_a_seed_binding_exception_hides_only_its_system(tiny: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """bind_seeds raising PermissionError for Laya: Laya's training view is unavailable with LOAD_FAILED naming only
+    the type, BERTurk's still charts, and the chat is refused with the same line before any load."""
+    real = demo.bind_seeds
+
+    def bind(binding: dict[str, Any], root: str) -> Any:
+        if binding["kind"] == "laya":
+            raise PermissionError(SENTINEL)
+        return real(binding, root)
+    monkeypatch.setattr(demo, "bind_seeds", bind)
+    no_load(monkeypatch)
+    state, body, text = training_of(tiny, tiny["root"])
+    line = demo.LOAD_FAILED % "PermissionError"
+    assert body["systems"]["laya"] == {"status": "unavailable", "message": line}
+    assert body["systems"]["berturk"]["status"] == "ok"
+    assert state["chat"] == pd.REFUSED and state["message"] == line and SENTINEL not in text
+
+
 def test_untrusted_host_is_refused(loaded: tuple[dict[str, Any], ThreadPoolExecutor, Any]) -> None:
     from starlette.testclient import TestClient
     _, _, app = loaded
