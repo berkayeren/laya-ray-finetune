@@ -1211,3 +1211,97 @@ def test_tensorboard_events_hold_loss_and_grad_norm_per_step(tb_run: TbRun) -> N
         step_losses = [loss[s] for s in range(start + 1, end + 1)]
         assert sum(step_losses) / len(step_losses) == pytest.approx(epoch_loss[end], rel=1e-5)
     assert sorted(epoch_loss) == [sum(r["optimizer_steps"] for r in rows[:k]) for k in range(1, len(rows) + 1)]
+
+
+TB_STEP_TAGS_CPU = {"train/loss", "train/lr_encoder", "train/lr_head", "train/grad_norm", "train/messages_per_s",
+                    "memory/rss_gib", "memory/swap_used_gib"}    # no device or MPS driver memory on cpu, no sigma
+TB_EPOCH_TAGS = {"epoch/loss", "epoch/train_s", "epoch/wall_s", "epoch/peak_total_gib", "epoch/swap_delta_mib"}
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_tensorboard_events_hold_every_scalar(tb_run: TbRun) -> None:
+    from tb_events import read_events, scalars
+    rid, run_dir, tb = tb_run
+    ev = read_events(str(tb / rid))
+    rows = _done_epochs(run_dir)
+    total = sum(r["optimizer_steps"] for r in rows)
+    tags = {kind for _, _, kind, _ in ev if kind not in ("session_log", "file_version")}
+    assert tags == TB_STEP_TAGS_CPU | TB_EPOCH_TAGS, sorted(tags)
+    for tag in TB_STEP_TAGS_CPU:
+        assert sorted(scalars(ev, tag)) == list(range(1, total + 1)), tag
+    enc, head = scalars(ev, "train/lr_encoder"), scalars(ev, "train/lr_head")
+    warm = [s for s in enc if enc[s] > 0]
+    assert warm and enc[1] == 0.0                                   # the linear warm-up starts at LR 0
+    for s in warm:                                                  # one multiplier for both LRs
+        assert head[s] / enc[s] == pytest.approx(HEAD_LR / ENC_LR, rel=1e-5)
+    assert all(v > 0 for v in scalars(ev, "train/messages_per_s").values())
+    ends = [sum(r["optimizer_steps"] for r in rows[:k]) for k in range(1, len(rows) + 1)]
+    train_s, wall_s = scalars(ev, "epoch/train_s"), scalars(ev, "epoch/wall_s")
+    for tag in TB_EPOCH_TAGS:
+        assert sorted(scalars(ev, tag)) == ends, tag
+    for r, end in zip(rows, ends):
+        assert train_s[end] == pytest.approx(r["train_s"], rel=1e-6)
+        assert wall_s[end] >= train_s[end]                          # the export write included
+
+
+def test_tensorboard_refuses_a_trainer_that_skips_the_accelerator_clip(inputs: Inputs, tmp_path: Path,
+                                                                       monkeypatch: pytest.MonkeyPatch,
+                                                                       capsys: pytest.CaptureFixture[str],
+                                                                       keep_threads: None) -> None:
+    """The pre-clip norm comes from trainer.accelerator.clip_grad_norm_: a Trainer that clips without it is refused at
+    the first step, and the event file is still closed (it reads back, crc-checked) with no train/ scalar in it."""
+    import berturk_train
+    import torch
+    import transformers
+    from tb_events import event_files, read_events
+    data, manifest, base = inputs
+
+    def clip_without_the_accelerator(self: Any, model: Any) -> Any:
+        """The Trainer's clip, bypassing trainer.accelerator."""
+        return torch.nn.utils.clip_grad_norm_(model.parameters(), self.args.max_grad_norm)
+    monkeypatch.setattr(transformers.Trainer, "_clip_grad_norm", clip_without_the_accelerator)
+    argv = [str(x) for x in train_argv(data, manifest, base, tmp_path / "s", "--tensorboard", tmp_path / "tb")]
+    berturk_train.main(argv + ["--print-run-id"])
+    rid = capsys.readouterr().out.strip()
+    with pytest.raises(SystemExit, match="check the transformers version"):
+        berturk_train.main(argv)
+    assert len(event_files(str(tmp_path / "tb" / rid))) == 1
+    ev = read_events(str(tmp_path / "tb" / rid))
+    assert not [kind for _, _, kind, _ in ev if kind.startswith("train/")]
+
+
+def test_tensorboard_print_run_id_creates_nothing(inputs: Inputs, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+                                                  no_load: None) -> None:
+    import berturk_train
+    data, manifest, base = inputs
+    argv = [str(x) for x in train_argv(data, manifest, base, tmp_path / "runs", "--print-run-id")]
+    berturk_train.main(argv)
+    plain = capsys.readouterr().out
+    berturk_train.main(argv + ["--tensorboard", str(tmp_path / "tb")])
+    assert capsys.readouterr().out == plain and plain.strip()
+    assert not (tmp_path / "runs").exists() and not (tmp_path / "tb").exists()
+
+
+@pytest.mark.parametrize("print_run_id", [False, True], ids=["train", "print_run_id"])
+@pytest.mark.parametrize("where", ["results", "protocol.json", "storage"])
+def test_tensorboard_refused_before_any_load(inputs: Inputs, tmp_path: Path, no_load: None, where: str,
+                                             print_run_id: bool) -> None:
+    """A --tensorboard DIR under results/ or protocol.json of the repo, or equal to --storage, is refused before the
+    split is read, any load or the run dir, also with --print-run-id; nothing is created."""
+    import berturk_train
+    data, manifest, base = inputs
+    storage = tmp_path / "runs"
+    tb = {"results": os.path.join(REPO, "results", "tb"), "protocol.json": os.path.join(REPO, "protocol.json"),
+          "storage": str(storage)}[where]
+    argv = [str(x) for x in train_argv(data, manifest, base, storage, "--tensorboard", tb)]
+    with pytest.raises(SystemExit) as e:
+        berturk_train.main(argv + (["--print-run-id"] if print_run_id else []))
+    assert str(e.value).startswith("--tensorboard "), str(e.value)
+    assert not storage.exists()
+    assert not os.path.exists(os.path.join(REPO, "results", "tb"))
+
+
+@pytest.mark.timeout(TIMEOUT)
+def test_tensorboard_flag_off_writes_no_event_file(two_runs: TwoRuns) -> None:
+    root = two_runs[1][0].parent.parent                             # the storage dirs a and b
+    assert not list(root.rglob("events.out.tfevents*"))
