@@ -289,7 +289,10 @@ BERTURK_RUN = "berturk_runs/berturk-selection_train-s0-0123abcd/"
                                  "other/model.safetensors",
                                  BERTURK_RUN + "exports/epoch-001/model.safetensors",
                                  BERTURK_RUN + "exports/epoch-001/berturk_train.json", BERTURK_RUN + "done.json",
-                                 "ckpt-berturk-final-s0/model.safetensors", "ckpt-berturk-final-s0/berturk_train.json"])
+                                 "ckpt-berturk-final-s0/model.safetensors", "ckpt-berturk-final-s0/berturk_train.json",
+                                 "tensorboard/laya-selection_train-neg8-s0-0123abcd/"
+                                 "events.out.tfevents.1.host.segment-000",
+                                 "tensorboard/berturk-selection_train-s0-0123abcd/events.out.tfevents.1.host.pid1"])
 def test_training_outputs_are_gitignored(rel: str) -> None:
     # documented commands write Ray storage and checkpoints into the repo root; `git add .` must not pick them up
     r = subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", rel], cwd=REPO_ROOT)

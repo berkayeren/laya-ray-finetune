@@ -7,12 +7,16 @@ checked against the repo's own frozen and tracked paths through symlinks, case v
 end through ray_train.py --print-run-id with a DIR/RUN_ID symlink into results/ (no Ray start, nothing created).
 """
 import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import pilot.data
+import pilot.reproduce
 import tb_events
 from conftest import make_raw
 from pilot import tensorboard as ptb
@@ -205,3 +209,79 @@ def test_symlinked_run_dir_into_results_is_refused_end_to_end(tmp_path: Path, mo
     assert rid not in capsys.readouterr().out                # no run id printed
     assert sorted(os.listdir(os.path.join(REPO_ROOT, "results"))) == before
     assert not (tmp_path / "s").exists() and not (tmp_path / "o").exists()
+
+
+def test_in_repo_logdir_must_be_gitignored() -> None:
+    # an event file's name carries the host name: inside the repo it may only land where `git add` never picks it up
+    for rel in ("tensorboard", "ray_results/tb"):
+        path = os.path.join(REPO_ROOT, rel)
+        assert ptb.check_logdir(path, {}) == os.path.realpath(path)
+    for path in (REPO_ROOT, os.path.join(REPO_ROOT, "tbx"), os.path.join(REPO_ROOT, "pilot", "tb")):
+        msg = _refused(path)
+        assert "not gitignored" in msg and "tensorboard/" in msg, msg
+        assert path == REPO_ROOT or not os.path.exists(path)
+
+
+def test_without_git_an_in_repo_logdir_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    # no git binary or no git work tree: nothing can be committed, so an in-repo dir is accepted
+    path = os.path.join(REPO_ROOT, "tbx")
+
+    def no_git(*a: Any, **kw: Any) -> Any:
+        raise FileNotFoundError("git")
+    monkeypatch.setattr("pilot.tensorboard.subprocess.run", no_git)
+    assert ptb.check_logdir(path, {}) == os.path.realpath(path)
+
+    def not_a_repo(argv: list[str], **kw: Any) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(argv, 128, b"", b"fatal: not a git repository")
+    monkeypatch.setattr("pilot.tensorboard.subprocess.run", not_a_repo)
+    assert ptb.check_logdir(path, {}) == os.path.realpath(path)
+    assert not os.path.exists(path)
+
+
+@pytest.mark.parametrize("entry", pilot.reproduce.CHECKED)
+def test_every_reproduce_checked_path_is_refused(entry: str) -> None:
+    # every path `make report` checks against git, and the same path with /tb appended
+    path = os.path.join(REPO_ROOT, entry.rstrip("/"))
+    for p in (path, os.path.join(path, "tb")):
+        _refused(p)
+    assert not os.path.exists(os.path.join(path, "tb"))
+
+
+def test_imports_stay_torch_free() -> None:
+    code = ("import sys, pilot.tensorboard; a = sorted(m for m in ('torch', 'numpy', 'tensorboardX') if m in "
+            "sys.modules); import berturk_train; print(a, 'tensorboardX' in sys.modules)")
+    r = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "[] False", r.stdout
+
+
+def _one_writer(logdir: str, step: int, suffix: str) -> None:
+    """Open a writer on logdir with suffix, write train/loss at step and close it."""
+    w = ptb.open_writer(logdir, step, suffix)
+    ptb.write(w, step, {"train/loss": float(step)})
+    w.close()
+
+
+def test_distinct_suffixes_keep_both_writers(tmp_path: Path) -> None:
+    logdir = str(tmp_path / "rid")
+    _one_writer(logdir, 1, ptb.segment_suffix(0))
+    _one_writer(logdir, 2, ptb.segment_suffix(1))
+    files = tb_events.event_files(logdir)
+    assert len(files) == 2, files
+    assert tb_events.scalars(tb_events.read_events(logdir), "train/loss") == {1: 1.0, 2: 2.0}
+
+
+def test_same_suffix_in_one_second_truncates(tmp_path: Path) -> None:
+    """The negative control of the suffix rule: two writers with one suffix, opened in one second, share one file name
+    (a 10-digit second and the host name) and the second truncates the first ('wb'). Fails, never skips, when no
+    attempt stays within one second."""
+    for attempt in range(5):
+        logdir = str(tmp_path / ("try-%d" % attempt))
+        t0 = str(time.time())[:10]
+        _one_writer(logdir, 1, ".same")
+        _one_writer(logdir, 2, ".same")
+        files = tb_events.event_files(logdir)
+        if len(files) == 1 and os.path.basename(files[0]).split(".")[3] == t0:
+            assert tb_events.scalars(tb_events.read_events(logdir), "train/loss") == {2: 2.0}
+            return
+    pytest.fail("no attempt opened both writers within one second; the truncation could not be shown")
