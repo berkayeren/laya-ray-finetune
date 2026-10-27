@@ -61,8 +61,10 @@ device, CPUs, the data and partition digests and counts, the base, the fixed rec
 segment per driver start (the git code state and, on MPS, the quiet-machine preflight), finished, and the record's
 sha256 once written. Once every trial ended without an error the record is built only from each trial dir's
 params.json, the CURVE_KEYS of its result.json lines and its attempts count (never Tune's own fields: hostname, pid,
-timestamps, trial-id prefixes) and the search file's segments, written atomically to --out, and refused over an
-existing --out of other content.
+timestamps, trial-id prefixes) and the search file's segments, written atomically to --out. An existing --out is
+refused before any fetch or ray.init unless the search file records its sha256 (check_existing_out), so a committed
+record is never retrained over; the search file is marked finished before --out is written, so a kill between the two
+leaves a search whose rerun writes --out without Ray.
 
 Resume: rerun the identical command. A search file of another spec is refused (naming the first differing key) before
 ray.init, and so is an experiment dir Ray Tune cannot restore (a kill before its first snapshot) or one without a
@@ -648,6 +650,20 @@ def stale_paths(storage: str, system: str) -> str:
     return ", ".join(os.path.join(storage, n) for n in (system, "%s-train" % system, "%s-search.json" % system))
 
 
+def check_existing_out(out: str, doc: dict[str, Any] | None) -> None:
+    """Refuse, before bind (no fetch, no split read) and ray.init, an existing --out this search did not write: one
+    with no search file, a search file without a record sha256 yet, or one whose record_sha256 is not the sha256 of the
+    file's bytes. A search runs for hours and MPS retraining is not bit-identical, so a committed record (or any other
+    file) at --out would otherwise be refused only after every trial ran."""
+    if not os.path.exists(out):
+        return
+    if (doc is not None and doc["record_sha256"] is not None and os.path.isfile(out)
+            and sha256_file(out) == doc["record_sha256"]):
+        return
+    raise SystemExit("--out %s already exists and is not the record this search in --storage wrote; a search record is "
+                     "never overwritten; pass another --out" % repo_relpath(out))
+
+
 def write_out(record: dict[str, Any], out: str) -> bool:
     """Check the record and write it atomically to `out`; an existing `out` of the same bytes is left as is. Returns
     True when it wrote `out`, False when `out` already held these bytes; SystemExit over an existing `out` of other
@@ -746,9 +762,9 @@ def status_mode(storage: str, system: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Parse, bind on the driver, compare the search file's spec, rebuild a finished search without Ray, or append
-    this start's segment, start Ray with headroom, run (or restore) the search, write the record and mark the search
-    finished."""
+    """Parse, refuse a results/ --out of another search and an existing --out this search did not write, bind on the
+    driver, compare the search file's spec, rebuild a finished search without Ray, or append this start's segment,
+    start Ray with headroom, run (or restore) the search, mark the search finished and write the record."""
     a = parse_args(argv)
     if a.check is not None:
         check_mode(a.check)
@@ -760,11 +776,12 @@ def main(argv: list[str] | None = None) -> None:
         render_mode(a.render, a.out)
         return
     check_results_out(a)
+    sp = spec_path(a.storage, a.system)
+    doc = read_search(sp)
+    check_existing_out(a.out, doc)                          # before bind: no fetch, no split read, no ray.init
     bound = bind(a)
     spec = search_spec(a, bound)
-    sp = spec_path(a.storage, a.system)
     path = os.path.join(a.storage, a.system)
-    doc = read_search(sp)
     if doc is not None:
         key = first_difference(doc["spec"], spec)
         if key is not None:
@@ -828,9 +845,11 @@ def main(argv: list[str] | None = None) -> None:
                          "run again from epoch 1 in their own trial dirs" % (len(grid), a.trials,
                                                                              ", ".join(errored) or "none"))
     record = finish(a, bound, doc)
-    write_out(record, a.out)
     sha = sha256_bytes(pt.record_bytes(record))
+    # finished first: a kill before write_out leaves a finished search whose rerun writes --out (no Ray), never an
+    # unfinished one that check_existing_out would refuse over its own record
     write_search(sp, dict(doc, finished=True, record_sha256=sha))
+    write_out(record, a.out)
     print("record -> %s (sha256 %s)" % (a.out, sha), flush=True)
 
 

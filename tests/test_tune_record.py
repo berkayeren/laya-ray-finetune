@@ -122,10 +122,12 @@ def test_results_out_elsewhere_is_refused(name: str, settings: str, snap: tuple[
 
 
 def test_the_committed_search_passes_the_guard(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The committed search's own settings reach bind (stubbed here: the guard is all this test runs)."""
+    """The committed search's own settings reach bind (stubbed here: the guard is all this test runs; the existing-out
+    check, which needs the search's own storage, is test_an_existing_out_is_refused_before_bind's)."""
     def stop(*a: Any, **kw: Any) -> None:
         raise RayReached("bind reached")
     monkeypatch.setattr(tune, "bind", stop)
+    monkeypatch.setattr(tune, "check_existing_out", lambda *a, **kw: None)
     with pytest.raises(RayReached):
         tune.main(["--system", "laya"])
     with pytest.raises(RayReached):
@@ -203,6 +205,39 @@ def test_a_finished_search_checks_its_rebuild_before_writing_out(snap: tuple[str
     tune.main(argv)
     assert "search finished; record written -> %s (sha256 %s)" % (out, sha) in capsys.readouterr().out
     assert pt.read_record(str(out))[1] == sha
+
+
+def test_an_existing_out_is_refused_before_bind(snap: tuple[str, str, str], tmp_path: Path,
+                                                 monkeypatch: pytest.MonkeyPatch, no_ray: None) -> None:
+    """An existing --out is refused before bind (no fetch, no split read) and ray.init, naming --out, unless the search
+    file in --storage records its sha256: the committed command from an empty storage never trains over its record;
+    a finished search's rerun with its own --out passes."""
+    def no_bind(*a: Any, **kw: Any) -> None:
+        raise AssertionError("bind reached; the existing --out must be refused first")
+    before = _guarded_status()
+    with monkeypatch.context() as m:
+        m.setattr(tune, "bind", no_bind)
+        with pytest.raises(SystemExit, match="results/tune/laya.json already exists .* pass another --out"):
+            tune.main(["--system", "laya", "--storage", str(tmp_path / "empty")])
+        assert not (tmp_path / "empty").exists() and _guarded_status() == before == ""
+        other = tmp_path / "other.json"
+        other.write_text("{}\n", encoding="utf-8")
+        with pytest.raises(SystemExit, match="already exists"):
+            tune.main(_smoke(snap, tmp_path / "s0", other))
+    storage, out = tmp_path / "s", tmp_path / "laya.json"
+    argv, sha = _finished_search(snap, storage, out)
+    out.write_text("{}\n", encoding="utf-8")               # not the bytes the search wrote
+    with pytest.raises(SystemExit, match="already exists"):
+        tune.main(argv)
+    out.unlink()
+    tune.main(argv)                                         # absent: the finished search writes it
+    tune.main(argv)                                         # its own bytes: unchanged
+    assert pt.read_record(str(out))[1] == sha
+    unfinished = tmp_path / "s2"
+    with pytest.raises(RayReached):
+        tune.main(_smoke(snap, unfinished, tmp_path / "new.json"))
+    with pytest.raises(SystemExit, match="already exists"):  # a search without a record yet wrote no --out
+        tune.main(_smoke(snap, unfinished, out))
 
 
 def test_an_unrestorable_experiment_dir_is_refused(snap: tuple[str, str, str], tmp_path: Path, no_ray: None) -> None:
