@@ -78,7 +78,8 @@ def _bytes_or_none(path: str) -> bytes | None:
 DEPARTURES = [(["--trials", "3"], "--trials"), (["--seed", "1"], "--seed"), (["--device", "cpu"], "--device"),
               (["--points", json.dumps([{"encoder_lr": 0.0001, "head_lr": 0.001, "neg": 8, "epochs": 4}])],
                "--points"),
-              (["--kill-at-trial", "1"], "--kill-at-trial"), ("BASE", "--base"), ("MANIFEST", "--manifest")]
+              (["--kill-at-trial", "1"], "--kill-at-trial"), (["--fail-at-trial", "1"], "--fail-at-trial"),
+              ("BASE", "--base"), ("MANIFEST", "--manifest")]
 
 
 @pytest.mark.parametrize("extra, flag", DEPARTURES, ids=[f for _, f in DEPARTURES])

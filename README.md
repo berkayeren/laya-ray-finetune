@@ -1927,8 +1927,9 @@ The two records are `results/tune/laya.json` and `results/tune/berturk.json` (sc
 byte from its own canonical part by `tune.py --check`), and their rendered summary, every trial's settings and dev
 scores, is `results/tune/tune.md` (`tune.py --render`). `make report` does not touch them. The per-epoch training and
 tuning-dev seconds the records hold sum to about 14.4 hours for Laya and about 28 minutes for BERTurk on the M4. A
-killed search continues when you rerun the identical command: Ray Tune's state lives in the gitignored `tune_runs/`,
-and a trial cut off mid-run restarts from its first epoch, its restart counted in the record.
+killed search, or one that ended with an errored trial, continues when you rerun the identical command: Ray Tune's
+state lives in the gitignored `tune_runs/`, and a trial cut off mid-run or errored runs again from its first epoch in
+its own trial dir, still one trial at a time, its restart counted in the record.
 
 ## Demo UI
 

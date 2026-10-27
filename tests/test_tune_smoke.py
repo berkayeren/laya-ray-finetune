@@ -198,6 +198,53 @@ def test_laya_search_resumes_after_a_kill(snapshot: Snapshot) -> None:
     assert _guarded_status() == before
 
 
+def _final_intervals(storage: Path, n_trials: int) -> list[tuple[float, int, int]]:
+    """(start, last report, trial) of every trial's last attempt: its last start in attempts.json and the largest Tune
+    timestamp (integer seconds) in its result.json, which a resumed trial starts afresh. Sorted by start."""
+    out = []
+    for k in range(n_trials):
+        d = storage / "laya" / pt.trial_dirname_of(k)
+        with open(d / pt.ATTEMPTS_FILE, encoding="utf-8") as f:
+            start = json.load(f)["started"][-1]
+        with open(d / "result.json", encoding="utf-8") as f:
+            last = max(json.loads(line)["timestamp"] for line in f if line.strip())
+        out.append((start, last, k))
+    return sorted(out)
+
+
+@pytest.mark.timeout(1200)
+def test_laya_search_resumes_errored_trials(snapshot: Snapshot) -> None:
+    """Trials 1 and 2 fail after their first epoch report on their first attempt (the hidden --fail-at-trial): the
+    search ends non-zero naming both. Rerunning the identical command resumes both under their own trial ids and dirs
+    (never Tune's restart, whose new trial id has no _NNNNN index), one at a time (the trial slot), each from epoch 1 with
+    its result.json started afresh: the record holds attempts [1, 2, 2], every curve epochs 1..k, two segments."""
+    d, data, manifest, base, _ = snapshot
+    storage, out = d / "err", d / "err.json"
+    before = _guarded_status()
+    argv = ["tune.py", "--system", "laya", "--device", "cpu", "--cpus", "1", "--trials", "3", "--seed", "0",
+            "--base", base, "--data", data, "--manifest", manifest, "--storage", storage, "--out", out,
+            "--points", json.dumps(LAYA_POINTS), "--fail-at-trial", "1", "--fail-at-trial", "2"]
+    code, text = _run_logged(argv, d / "err-1.log", {})
+    assert code != 0, text[-4000:]
+    assert "errored: trial_00001" in text and "trial_00002" in text, text[-4000:]
+    assert not out.exists()
+    code, text = _run_logged(argv, d / "err-2.log", {})
+    assert code == 0, text[-4000:]
+    assert "continuing the search" in text
+    record, sha = pt.read_record(str(out))
+    assert [t["attempts"] for t in record["trials"]] == [1, 2, 2]
+    assert [t["config"] for t in record["trials"]] == LAYA_POINTS
+    assert all([r["epoch"] for r in t["curve"]] == list(range(1, len(t["curve"]) + 1)) for t in record["trials"])
+    assert len(record["segments"]) == 2
+    found = sorted(n for n in os.listdir(storage / "laya") if n.startswith("trial_"))
+    assert found == [pt.trial_dirname_of(k) for k in range(3)]   # no extra trial dir from a restart
+    spans = _final_intervals(storage, 3)
+    for (start, _, k), (_, last, j) in zip(spans[1:], spans[:-1]):
+        assert start > last, (j, k, spans)                   # one trial at a time, the resumed ones too
+    assert _search_file(storage)["record_sha256"] == sha
+    assert _guarded_status() == before
+
+
 def _check_record(record: dict[str, Any], storage: Path, system: str, data: str) -> None:
     """The partition counts and digests, the notes, and n_train_messages / n_dev_messages in every result.json line."""
     with open(data, "rb") as f:

@@ -10,7 +10,9 @@ Search: tune.search.BasicVariantGenerator(random_state=--seed, max_concurrent=1)
 pilot.tune.SPACES[system] (the hidden --points pins the first ones, tests only), and ASHAScheduler(time_attr epoch,
 grace period 1, reduction factor 3, max_t the longest epoch schedule) stops the weak ones, on TuneConfig's metric
 dev_micro_f1, mode max. The one-at-a-time limit lives on the generator: TuneConfig(max_concurrent_trials) is ignored
-for a SearchGenerator such as BasicVariantGenerator, so it is never passed.
+for a SearchGenerator such as BasicVariantGenerator, so it is never passed. The generator limits only the trials it
+creates, so every trial also holds the one unit of a custom Ray resource (TRIAL_SLOT, ray.init(resources)), which keeps
+the trials a restore re-queues one at a time too.
 
 Data: the driver verifies --data (a registered train split, selection_train only), refuses committed held-out content
 in it (pilot.data.refuse_held_out, on the driver), and binds the tuning partition (pilot.tune.partition: folds 0-11
@@ -38,7 +40,8 @@ one at a time; the fixed recipe is pilot.tune.FIXED["berturk"]: max_len 128, see
 linear schedule, max grad norm 1.0, fp32. --base defaults to the system's pinned weights (multilingual, berturk).
 
 Ray 2.59 behaviour this design handles:
-- concurrency: max_concurrent=1 on the generator (above);
+- concurrency: max_concurrent=1 on the generator and the one TRIAL_SLOT (above): a restore puts its unfinished and
+  errored trials straight into the controller, which would start them together without the slot;
 - leaked placement groups: an ASHA-stopped Laya trial leaves its Train placement group behind (Ray's cleaner needs the
   dashboard's State API, which the lock does not install), so ray.init gets logical-CPU headroom, 1 + cpus x (trials +
   1), and the inner trainer's FailureConfig(max_failures=0, controller_failure_limit=0) turns a starved start into a
@@ -60,11 +63,14 @@ existing --out of other content.
 
 Resume: rerun the identical command. A search file of another spec is refused (naming the first differing key) before
 ray.init, and so is an experiment dir Ray Tune cannot restore (a kill before its first snapshot) or one without a
-search file. Otherwise this start appends its segment and Tuner.restore continues the search with unfinished and errored
-trials restarted from scratch: a trial that finished before the kill is not rerun once Ray's experiment snapshot holds
-it (Ray snapshots at most about every 10 s, so one that ended seconds before the kill can rerun), and a restarted trial
-runs from epoch 1 under a fresh inner run, its attempts count showing the restart. A finished search starts no Ray: its
-rerun rebuilds the record from the trial dirs and the search file, and must reproduce the sha256 it wrote.
+search file. Otherwise this start appends its segment and Tuner.restore continues the search, resuming unfinished and
+errored trials (resume_unfinished, resume_errored; never restart_errored, which gives a trial a new id without its
+_NNNNN index and a new trial dir): a resumed trial keeps its id and trial_NNNNN dir, holds no checkpoint, so it runs
+again from epoch 1 under a fresh inner run, Ray starts its result.json afresh, and its attempts count shows the restart.
+A trial that finished before the kill is not rerun once Ray's experiment snapshot holds it (Ray snapshots at most about
+every 10 s, so one that ended seconds before the kill can rerun). After an errored trial the search ends non-zero,
+naming it; rerunning the same command runs it again. A finished search starts no Ray: its rerun rebuilds the record
+from the trial dirs and the search file, and must reproduce the sha256 it wrote.
 
 Guards: under results/ a search writes only results/tune/<system>.json, and only as the committed search (--trials 20,
 --seed 0, --device mps, the pinned --base, the committed --manifest, no --points, no test hook), refused before any
@@ -108,6 +114,7 @@ TRIAL_DIR_RE = re.compile(r"^trial_\d{5}$")
 PINNED_BASE = {"laya": "multilingual", "berturk": "berturk"}   # --base default per system: the pinned weights
 SEARCH_FILE_KEYS = ("spec", "segments", "finished", "record_sha256")
 MIN_AVAILABLE_GIB = 7.0                                     # the spike's and latency's quiet-machine threshold
+TRIAL_SLOT = "tune_trial_slot"   # a custom Ray resource of 1 that every trial holds: one trial at a time, restores too
 
 
 def parser() -> argparse.ArgumentParser:
@@ -139,6 +146,9 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--points", default=None, help=argparse.SUPPRESS)   # JSON configs evaluated first; tests only
     # test hook: trial N's first attempt SIGKILLs the driver (the resume test); never in the spec or the record
     ap.add_argument("--kill-at-trial", type=int, default=None, help=argparse.SUPPRESS)
+    # test hook: trial N's first attempt fails after its first epoch report (repeatable; the errored-trial resume
+    # test); never in the spec or the record
+    ap.add_argument("--fail-at-trial", type=int, action="append", default=None, help=argparse.SUPPRESS)
     return ap
 
 
@@ -176,6 +186,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ap.error("--min-available-gib must be at least 0 (0 records a busy-machine run)")
     if a.kill_at_trial is not None and not 0 <= a.kill_at_trial < a.trials:
         ap.error("--kill-at-trial must be a trial index 0..%d" % (a.trials - 1))
+    for n in a.fail_at_trial or ():
+        if not 0 <= n < a.trials:
+            ap.error("--fail-at-trial must be a trial index 0..%d" % (a.trials - 1))
     if a.points is not None:
         try:
             points = json.loads(a.points)
@@ -249,7 +262,8 @@ def check_results_out(a: argparse.Namespace) -> None:
                            "another --base than the pinned %s" % PINNED_BASE[a.system]),
                           (not committed, "another --manifest than the committed data/splits.json"),
                           (a.points is not None, "--points"),
-                          (a.kill_at_trial is not None, "--kill-at-trial %s" % a.kill_at_trial)):
+                          (a.kill_at_trial is not None, "--kill-at-trial %s" % a.kill_at_trial),
+                          (a.fail_at_trial is not None, "--fail-at-trial")):
         if departs:
             raise SystemExit("--out results/tune/%s.json with %s: a record under results/tune/ is the committed search "
                              "(%d trials, seed %d, MPS, the pinned base, the committed manifest); pass another --out "
@@ -291,7 +305,8 @@ def bind(a: argparse.Namespace) -> dict[str, Any]:
                  "dev_rows_with_train_text": pt.shared_texts(train_rows, dev_rows),
                  "device": a.device, "cpus": a.cpus, "env": spike.spike_env("0", a.cpus) if a.device == "mps" else {},
                  "storage": a.storage, "train_storage": os.path.join(a.storage, "%s-train" % a.system),
-                 "kill_at_trial": a.kill_at_trial, "driver_pid": os.getpid()}, **base)
+                 "kill_at_trial": a.kill_at_trial, "fail_at_trials": sorted(set(a.fail_at_trial or ())),
+                 "driver_pid": os.getpid()}, **base)
 
 
 def bind_laya(a: argparse.Namespace) -> dict[str, Any]:
@@ -396,6 +411,13 @@ def kill_hook(bound: dict[str, Any], index: int, attempt: int) -> bool:
     return True
 
 
+def fail_hook(bound: dict[str, Any], index: int, attempt: int) -> bool:
+    """The hidden --fail-at-trial test hook: True on the first attempt of a listed trial, which then fails after its
+    first epoch report (Laya: ray_train.py's --fail-after-epoch 1; BERTurk: a raise in the epoch hook), so the trial
+    ends errored with one reported epoch. False otherwise."""
+    return index in bound.get("fail_at_trials", ()) and attempt == 1
+
+
 def laya_trial(config: dict[str, Any], bound: dict[str, Any]) -> None:
     """One Laya trial: count the start in attempts.json, build ray_train.py's train config for the trial's point (the
     fixed recipe plus encoder LR, head LR, neg K and epochs) with the partition block as tune, and run one TorchTrainer
@@ -425,6 +447,8 @@ def laya_trial(config: dict[str, Any], bound: dict[str, Any]) -> None:
             "--neg-seed", str(fixed["neg_seed"]), "--epochs", str(point["epochs"]), "--neg", str(point["neg"]),
             "--encoder-lr", repr(point["encoder_lr"]), "--head-lr", repr(point["head_lr"]), "--no-export-epochs",
             "--storage", train_storage]
+    if fail_hook(bound, index, attempt):                    # test hook; --fail-after-epoch is not in the run id
+        argv += ["--fail-after-epoch", "1"]
     a = ray_train.parser().parse_args(argv)
     r = ray_train.resolve(a)
     have = {"grad_checkpointing": r["grad_checkpointing"], "neg_seed": r["neg_seed"],
@@ -507,6 +531,8 @@ def berturk_trial(config: dict[str, Any], bound: dict[str, Any]) -> None:
                          train_s=float(row["train_s"]), dev_s=dev_s, peak_total_bytes=row["peak_total_bytes"],
                          swap_delta_bytes=row["swap_delta_bytes"], n_train_messages=len(train_rows),
                          n_dev_messages=len(dev_rows)))
+        if epoch == 1 and fail_hook(bound, index, attempt):
+            raise RuntimeError("simulated failure after epoch 1 (--fail-at-trial %d)" % index)
 
     print("trial %d attempt %d: %s (run %s)" % (index, attempt, json.dumps(point), rid), flush=True)
     berturk_train.fit(a, train_rows, labels, bound["base_dir"], bound["digests"], bound["entry"], canon, rid,
@@ -764,19 +790,25 @@ def main(argv: list[str] | None = None) -> None:
     write_search(sp, doc)                                   # this start's segment, before ray.init
     import ray
     from ray import tune
+    # one trial slot: the generator's max_concurrent=1 limits only the trials it creates, while a restore re-queues
+    # its unfinished and errored trials straight into the controller; a leaked inner placement group never holds it
     if a.system == "laya":                                  # leaked placement-group headroom (Ray Train trials)
-        init = {"num_cpus": 1 + a.cpus * (a.trials + 1), "include_dashboard": False}
-        trainable = tune.with_resources(tune.with_parameters(laya_trial, bound=bound), {"CPU": 1})
+        init = {"num_cpus": 1 + a.cpus * (a.trials + 1), "include_dashboard": False, "resources": {TRIAL_SLOT: 1}}
+        trainable = tune.with_resources(tune.with_parameters(laya_trial, bound=bound), {"CPU": 1, TRIAL_SLOT: 1})
     else:                                                   # one process per trial, no Ray Train: no placement group
-        init = {"num_cpus": a.cpus + 1, "include_dashboard": False}
-        trainable = tune.with_resources(tune.with_parameters(berturk_trial, bound=bound), {"CPU": a.cpus})
+        init = {"num_cpus": a.cpus + 1, "include_dashboard": False, "resources": {TRIAL_SLOT: 1}}
+        trainable = tune.with_resources(tune.with_parameters(berturk_trial, bound=bound),
+                                        {"CPU": a.cpus, TRIAL_SLOT: 1})
     if bound["env"]:
         init["runtime_env"] = {"env_vars": bound["env"]}   # the spike's MPS worker env reaches every trial worker
     ray.init(**init)
     ray_train.require_single_node(ray.nodes())
     if tune.Tuner.can_restore(path):
         print("continuing the search in %s (driver start %d)" % (path, len(doc["segments"])), flush=True)
-        tuner = tune.Tuner.restore(path, trainable=trainable, resume_unfinished=True, restart_errored=True)
+        # resume (never restart) errored trials: a restart gives a trial a new id without the _NNNNN index and a new
+        # trial dir; a resumed trial keeps both, holds no checkpoint, so it runs from epoch 1 again, and Ray starts
+        # its result.json afresh
+        tuner = tune.Tuner.restore(path, trainable=trainable, resume_unfinished=True, resume_errored=True)
     else:
         tuner = tune.Tuner(trainable, param_space=param_space(a.system),
                            tune_config=tune_config(a.system, a.seed, a.trials, a.points),
@@ -787,7 +819,8 @@ def main(argv: list[str] | None = None) -> None:
                      for r in grid if r.error is not None)       # trial dirs are trial_NNNNN: the trial index
     if len(grid) != a.trials or errored:
         raise SystemExit("the search ended with %d of %d trials, errored: %s; rerun the same command: errored trials "
-                         "restart from scratch" % (len(grid), a.trials, ", ".join(errored) or "none"))
+                         "run again from epoch 1 in their own trial dirs" % (len(grid), a.trials,
+                                                                             ", ".join(errored) or "none"))
     record, _ = finish(a, bound, doc)
     sha = sha256_bytes(pt.record_bytes(record))
     write_search(sp, dict(doc, finished=True, record_sha256=sha))
