@@ -124,10 +124,12 @@ are hash-registered too, so later stages can trust the flag list.
 | `reproduce.py` | the one-command reproduction CLI over `pilot/reproduce.py`: `--mode full` (`make reproduce`) or `--mode eval-only` (`make report`), `--dry-run` and `--all` (print the plan and the commands, run nothing), `--verify-checkpoints` and `--checkpoint-root` (re-hash the on-disk final seeds, reported, not gated) |
 | `pilot/reproduce.py` | torch-free step registry of the one-command reproduction: the pipeline steps in order (`STEP_NAMES`), each decided done only by its committed, hash-verified artifacts (`plan`), the eval-only rebuild (`eval_only`), the full run (`run_full`), the printed commands (`dry_run`) and the final-seed re-hash (`verify_checkpoints`) |
 | `pilot/memo.py` | the recommendation and decision memo, renders of the frozen verdict with no number of their own: the README recommendation block (`render_recommendation`), the one-page memo (`render_memo`) and its caveats (`CAVEATS`) |
+| `tune.py` | the exploratory Ray Tune search of one system (`--system laya` or `--system berturk`): a seeded random search with ASHA early stopping, one trial at a time, scored on a tuning-dev subset of `selection_train`, resumable by rerunning the identical command; `--status` (a search's progress, no Ray), `--check` (verify a record) and `--render` (the summary `results/tune/tune.md`); not a decision input |
+| `pilot/tune.py` | torch-free half of the search: the tuning partition by the fold in each uid, the dev objective, the search constants (`SPACES`, `ASHA`, `TRIALS`, `SEED`), the `tune/1` record and its render (`render_markdown`) |
 | `demo.py` | the local demo server: FastAPI + uvicorn on 127.0.0.1 only; it loads the six final seeds in-process through `score.py`'s loaders (fp32, no Ray) and serves the chat and the dashboard (`make demo`) |
 | `pilot/demo.py` | torch-free binding and record views of the demo: the seed-averaged answer mirrored from the frozen verdict's definition (`system_answer`) and the verdict, selection, latency and few-shot views behind `require_frozen`, `check_record` or a protocol.json pin; the confidence view unpinned (`build_views`) |
 | `ui/` | the React + TypeScript UI of the demo, built by Vite; its `package-lock.json` is committed, the built `ui/dist` is not |
-| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`), postfit records (`postfit/`: `laya*.json`, and `berturk.json`, `berturk-reference.json`, `berturk-final.json`), the two discarded BERTurk selection runs kept as disclosed history (`superseded/berturk-tied-head-lr/`, `superseded/berturk-10-epoch-grid/`, never current), the val confidence records and reliability diagrams (`confidence/`) and latency reports (`latency/`); the final seeds' gated test and HOTELS dumps and the zero-shot HOTELS reference (`dumps/`), and the verdict, per-seed test reports and test/HOTELS confidence records with their diagrams (`final/`); `fewshot/` holds the compute decision record (`projection.json`), the runs manifest (`runs.json`, the allow-list) and the few-shot results record (`fewshot.json`), and `dumps/` the few-shot dumps (each masked base on val and test, each continued run on test); and `final/memo.md`, the generated one-page decision memo |
+| `results/` | committed dumps (`dumps/`), full-test reports (`reports/`), legacy-protocol reports (`legacy/`), spike (`spike/`), compute checkpoint (`compute/`), postfit records (`postfit/`: `laya*.json`, and `berturk.json`, `berturk-reference.json`, `berturk-final.json`), the two discarded BERTurk selection runs kept as disclosed history (`superseded/berturk-tied-head-lr/`, `superseded/berturk-10-epoch-grid/`, never current), the val confidence records and reliability diagrams (`confidence/`) and latency reports (`latency/`); the final seeds' gated test and HOTELS dumps and the zero-shot HOTELS reference (`dumps/`), and the verdict, per-seed test reports and test/HOTELS confidence records with their diagrams (`final/`); `fewshot/` holds the compute decision record (`projection.json`), the runs manifest (`runs.json`, the allow-list) and the few-shot results record (`fewshot.json`), and `dumps/` the few-shot dumps (each masked base on val and test, each continued run on test); and `final/memo.md`, the generated one-page decision memo; `tune/` holds the two exploratory search records (`laya.json`, `berturk.json`) and their rendered summary `tune.md`, not decision inputs |
 | `tests/` | pytest suite (markers `unit`, `data`, `weights`, `ray`, `mps`) |
 
 ## Run
@@ -235,6 +237,13 @@ python reproduce.py --mode eval-only --verify-checkpoints   # what make report V
 make memo                   # results/final/memo.md, the one-page decision memo, from the committed records
 python report.py --memo results/final/verdict.json --out results/final/memo.md
 python report.py --recommendation results/final/verdict.json   # the README recommendation block
+
+# the exploratory Ray Tune search (not a decision input; one MPS job at a time; rerun the identical command to resume)
+python tune.py --system berturk --device mps    # 20 trials, seed 0 -> results/tune/berturk.json
+python tune.py --system laya --device mps       # 20 trials, seed 0 -> results/tune/laya.json
+python tune.py --status --system laya           # a search's progress from tune_runs/, without Ray
+python tune.py --check results/tune/laya.json   # verify a record: ok PATH SHA256
+python tune.py --render results/tune/laya.json results/tune/berturk.json --out results/tune/tune.md
 
 # the local demo UI (chat with both fine-tuned systems + results dashboard)
 make demo                   # build the UI, then serve it on http://127.0.0.1:8765 (the models on MPS)
@@ -1897,6 +1906,29 @@ The smoke run proves the pipeline (Ray Train → calibrated Laya checkpoint → 
 accuracy: it saw 8% of the training data with the encoder frozen. A real result needs a full
 fine-tune with the encoder unfrozen. Two Ray workers ran one DDP epoch here before the 7 GB sandbox
 ran out of memory (each worker holds ~2.6 GB); use ≥16 GB per worker.
+
+## Exploratory hyperparameter search (Ray Tune)
+
+`tune.py` ran one Ray Tune search per system with an equal budget: 20 trials each, search seed 0, Ray Tune's
+`BasicVariantGenerator` random search with ASHA early stopping on the epoch (grace period 1, reduction factor 3), one
+trial at a time on the Apple GPU. Laya trials run `ray_train.py`'s own training loop in one Ray Train worker; BERTurk
+trials run `berturk_train.py`'s HF Trainer recipe. Every trial trains on `selection_train` folds 0-11 (tuning-train)
+and is scored after every epoch on `selection_train` folds 12-13 (tuning-dev), split in memory by the fold in each
+uid: val, test and HOTELS are never read. Tuning-dev is scored at fp32 and T = 1, and the objective is the micro-F1 at
+the best global θ chosen on those same rows, so it is in-sample, optimistic and not comparable with the val or test
+numbers above.
+
+The search is exploratory and not a decision input. It does not change the verdict, `protocol.json` or any committed
+record, every existing run id is unchanged, no tuned model is scored on val, test or HOTELS, and no trial weights are
+kept. The pipeline's single encoder LR 2e-05 stays fixed, not tuned: the search reopens it for exploration only, as
+preparation for a round on the bank's own data. Its best configurations are not a recommendation.
+
+The two records are `results/tune/laya.json` and `results/tune/berturk.json` (schema `tune/1`, each rebuilt byte for
+byte from its own canonical part by `tune.py --check`), and their rendered summary, every trial's settings and dev
+scores, is `results/tune/tune.md` (`tune.py --render`). `make report` does not touch them. The per-epoch training and
+tuning-dev seconds the records hold sum to about 14.4 hours for Laya and about 28 minutes for BERTurk on the M4. A
+killed search continues when you rerun the identical command: Ray Tune's state lives in the gitignored `tune_runs/`,
+and a trial cut off mid-run restarts from its first epoch, its restart counted in the record.
 
 ## Demo UI
 
