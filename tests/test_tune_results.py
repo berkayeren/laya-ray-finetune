@@ -1,7 +1,8 @@
 """The committed exploratory search records under results/tune/, their rendered summary and the docs that name them.
 
-- results/tune/laya.json and results/tune/berturk.json rebuild byte for byte from their own canonical parts
-  (pilot.tune.read_record) and are the committed search: 20 trials (pilot.tune.TRIALS), search seed 0
+- results/tune/laya.json and results/tune/berturk.json hash to their pinned sha256 (RECORD_SHA256: a canonical number
+  edited with its derived fields re-derived still rebuilds, so the bytes are pinned too), rebuild byte for byte from
+  their own canonical parts (pilot.tune.read_record) and are the committed search: 20 trials (pilot.tune.TRIALS), search seed 0
   (pilot.tune.SEED), on mps, no pinned points, each system's space and ASHA scheduler, the committed manifest's
   selection_train, the pinned base, NOTES verbatim, and every driver start at a full git sha
 - their partition digests and counts are pilot.tune.partition of the verified committed selection_train (the one test
@@ -49,6 +50,9 @@ README_RULES = ("exploratory", "not a decision input", "does not change the verd
 CLAUDE_NAMES = ("tune.py", "pilot/tune.py", "results/tune/", "noul_margins", "tune_score", "train_config",
                 "bert_logits", "does not change the verdict")
 DOT_CLAUDE_NAMES = ("tune.py", "pilot/tune.py", "results/tune/", "does not change the verdict")
+# the committed records' bytes, pinned: check_record proves only that a record rebuilds from its own canonical part
+RECORD_SHA256 = {"laya": "b111b6e21db971fa765650c46a9534d530317fce620cea7f9e9f0c61f26feef5",
+                 "berturk": "acb143c13bc3b64dfbab5c819a435790e64671c39422654cc2342f2f10d3e70d"}
 
 
 def record(system: str) -> dict[str, Any]:
@@ -78,7 +82,7 @@ def readme_part(text: str, heading: str, end: str) -> str:
 @pytest.mark.parametrize("system", SYSTEMS)
 def test_committed_records_rebuild_byte_for_byte(system: str) -> None:
     r, sha = pt.read_record(os.path.join(TUNE, "%s.json" % system))
-    assert r["system"] == system and re.fullmatch(r"[0-9a-f]{64}", sha)
+    assert r["system"] == system and sha == RECORD_SHA256[system]
 
 
 @pytest.mark.parametrize("system", SYSTEMS)
