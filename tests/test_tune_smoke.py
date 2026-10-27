@@ -216,8 +216,9 @@ def _final_intervals(storage: Path, n_trials: int) -> list[tuple[float, int, int
 def test_laya_search_resumes_errored_trials(snapshot: Snapshot) -> None:
     """Trials 1 and 2 fail after their first epoch report on their first attempt (the hidden --fail-at-trial): the
     search ends non-zero naming both. Rerunning the identical command resumes both under their own trial ids and dirs
-    (never Tune's restart, whose new trial id has no _NNNNN index), one at a time (the trial slot), each from epoch 1 with
-    its result.json started afresh: the record holds attempts [1, 2, 2], every curve epochs 1..k, two segments."""
+    (never Tune's restart, whose new trial id has no _NNNNN index), one at a time (the trial slot), each from epoch 1
+    with its result.json started afresh: the record holds attempts [1, 2, 2], every curve epochs 1..k, two
+    segments."""
     d, data, manifest, base, _ = snapshot
     storage, out = d / "err", d / "err.json"
     before = _guarded_status()
