@@ -274,6 +274,19 @@ def test_an_existing_out_is_refused_before_bind(snap: tuple[str, str, str], tmp_
         tune.main(_smoke(snap, unfinished, out))
 
 
+def test_collect_refuses_a_trial_dir_without_its_files(snap: tuple[str, str, str], tmp_path: Path,
+                                                        no_ray: None) -> None:
+    """A trial dir without params.json or result.json (a trial that ended without reporting) is a one-line refusal
+    naming the dir, never a traceback."""
+    storage, out = tmp_path / "s", tmp_path / "laya.json"
+    _finished_search(snap, storage, out)
+    for name in ("result.json", "params.json"):
+        d = storage / "laya" / pt.trial_dirname_of(1)
+        (d / name).unlink()
+        with pytest.raises(SystemExit, match="%s has no .*%s" % (re.escape(str(d)), name)):
+            tune.collect(str(storage / "laya"), 3)
+
+
 def test_an_unrestorable_experiment_dir_is_refused(snap: tuple[str, str, str], tmp_path: Path, no_ray: None) -> None:
     """STORAGE/laya holding a stray file and no Tune state is refused before ray.init, naming the three paths to
     delete; so is an experiment dir without its search file."""

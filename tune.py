@@ -570,7 +570,8 @@ def berturk_trial(config: dict[str, Any], bound: dict[str, Any]) -> None:
 def collect(experiment_dir: str, n_trials: int) -> list[dict[str, Any]]:
     """The record's trials, read from each trial dir trial_00000.. in index order: the config from params.json (exactly
     the space's keys), the curve from the CURVE_KEYS of each result.json line (pilot.tune.curve_row: Tune's own
-    fields never pass) and the attempts count. SystemExit unless the experiment holds exactly n_trials trial dirs."""
+    fields never pass) and the attempts count. SystemExit unless the experiment holds exactly n_trials trial dirs, each
+    with its params.json and result.json."""
     found = sorted(n for n in os.listdir(experiment_dir) if TRIAL_DIR_RE.fullmatch(n)) \
         if os.path.isdir(experiment_dir) else []
     want = [pt.trial_dirname_of(i) for i in range(n_trials)]
@@ -581,6 +582,10 @@ def collect(experiment_dir: str, n_trials: int) -> list[dict[str, Any]]:
     out = []
     for i, name in enumerate(want):
         d = os.path.join(experiment_dir, name)
+        missing = [n for n in ("params.json", "result.json") if not os.path.isfile(os.path.join(d, n))]
+        if missing:
+            raise SystemExit("%s has no %s: the trial ended without reporting; delete %s to start the search again"
+                             % (d, " or ".join(missing), experiment_dir))
         with open(os.path.join(d, "params.json"), encoding="utf-8") as f:
             config = pt.check_point(system, json.load(f))
         with open(os.path.join(d, "result.json"), encoding="utf-8") as f:
