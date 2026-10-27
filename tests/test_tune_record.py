@@ -287,6 +287,25 @@ def test_collect_refuses_a_trial_dir_without_its_files(snap: tuple[str, str, str
             tune.collect(str(storage / "laya"), 3)
 
 
+def test_mps_and_disk_refusals_come_before_the_base(snap: tuple[str, str, str], tmp_path: Path,
+                                                   monkeypatch: pytest.MonkeyPatch, no_ray: None) -> None:
+    """MPS unavailable and too little free disk under --storage are refused before the split read and the base
+    binding (no weights fetch)."""
+    import torch
+
+    from pilot import runs
+    monkeypatch.setattr(tune, "bind_laya", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("base bound")))
+    monkeypatch.setattr(tune, "verify_split_file",
+                        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("split read")))
+    monkeypatch.setattr(torch.backends.mps, "is_available", lambda: False)
+    argv = [x if x != "cpu" else "mps" for x in _smoke(snap, tmp_path / "s", tmp_path / "laya.json")]
+    with pytest.raises(SystemExit, match="MPS is not available"):
+        tune.main(argv)
+    monkeypatch.setattr(runs, "free_bytes", lambda path: 0)
+    with pytest.raises(SystemExit, match="GiB free under --storage"):
+        tune.main(_smoke(snap, tmp_path / "s", tmp_path / "laya.json"))
+
+
 def test_an_unrestorable_experiment_dir_is_refused(snap: tuple[str, str, str], tmp_path: Path, no_ray: None) -> None:
     """STORAGE/laya holding a stray file and no Tune state is refused before ray.init, naming the three paths to
     delete; so is an experiment dir without its search file."""

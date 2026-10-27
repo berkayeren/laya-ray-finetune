@@ -303,7 +303,16 @@ def bind(a: argparse.Namespace) -> dict[str, Any]:
     CPUs and worker env, the storage dirs and the versions. Every path is absolute (a trial's cwd is under Ray's session
     dir). SystemExit on a split that is not selection_train, committed held-out content, a partition refusal, a base
     the system's binder refuses, MPS unavailable, or less free disk under --storage than pilot.tune.DISK_FLOOR_BYTES
-    (trials write no checkpoints)."""
+    (trials write no checkpoints). The MPS and disk refusals come first, before the split read and any weights fetch."""
+    if a.device == "mps":
+        import torch
+        if not torch.backends.mps.is_available():
+            raise SystemExit("--device mps, but MPS is not available here; use --device cpu, or run on Apple silicon "
+                             "with the locked torch build")
+    free = runs.free_bytes(a.storage)
+    if free < pt.DISK_FLOOR_BYTES:
+        raise SystemExit("%.1f GiB free under --storage; a search needs at least %.1f GiB (trial logs and Ray state); "
+                         "free disk or pass another --storage" % (free / 2**30, pt.DISK_FLOOR_BYTES / 2**30))
     if not os.path.isfile(a.data):
         raise SystemExit("%s not found; run `make data`" % a.data)
     with open(a.data, "rb") as f:
@@ -317,15 +326,6 @@ def bind(a: argparse.Namespace) -> dict[str, Any]:
     refuse_held_out(a.data, entry, rows)                    # keyed on the content, under any manifest
     train_rows, dev_rows, block = pt.partition(rows)
     base = bind_laya(a) if a.system == "laya" else bind_berturk(a)
-    if a.device == "mps":
-        import torch
-        if not torch.backends.mps.is_available():
-            raise SystemExit("--device mps, but MPS is not available here; use --device cpu, or run on Apple silicon "
-                             "with the locked torch build")
-    free = runs.free_bytes(a.storage)
-    if free < pt.DISK_FLOOR_BYTES:
-        raise SystemExit("%.1f GiB free under --storage; a search needs at least %.1f GiB (trial logs and Ray state); "
-                         "free disk or pass another --storage" % (free / 2**30, pt.DISK_FLOOR_BYTES / 2**30))
     return dict({"system": a.system, "data": a.data, "data_sha256": entry["sha256"], "manifest": a.manifest,
                  "manifest_is_committed": manifest_is_committed(a.manifest), "entry": entry, "block": block,
                  "n_train": len(train_rows), "n_dev": len(dev_rows),
