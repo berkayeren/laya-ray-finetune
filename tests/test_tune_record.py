@@ -274,7 +274,8 @@ BERTURK_POINT = {"encoder_lr": 5e-06, "head_lr": 3e-05, "batch": 32, "warmup_rat
 
 
 def _berturk_canonical() -> dict[str, Any]:
-    """A synthetic canonical berturk record: two trials of 10-epoch schedules, both attempted once."""
+    """A synthetic canonical berturk record of one driver start: two trials (a 10-epoch and a 20-epoch schedule),
+    both attempted once."""
     c = _canonical()
     c["system"] = "berturk"
     c["search"]["space"] = json.loads(json.dumps(pt.SPACES["berturk"]))
@@ -282,6 +283,7 @@ def _berturk_canonical() -> dict[str, Any]:
     c["fixed"] = dict(pt.FIXED["berturk"])
     c["base"] = {"name": "berturk", "model_sha256": "1" * 64, "config_sha256": "2" * 64}
     c["versions"] = {"ray": "2.59.0", "torch": "2.14.1", "transformers": "5.19.0", "accelerate": "1.15.0"}
+    c["segments"] = c["segments"][:1]                      # one driver start
     c["trials"] = [{"index": 0, "config": dict(BERTURK_POINT), "attempts": 1,
                     "curve": [_result(e, 1 + e, 2, 2) for e in range(1, 11)]},
                    {"index": 1, "config": dict(BERTURK_POINT, batch=16, epochs=20), "attempts": 1,

@@ -426,7 +426,9 @@ def _int(where: str, v: Any, low: int) -> None:
 
 
 def _check_canonical(c: dict[str, Any]) -> None:
-    """SystemExit naming the first part of a canonical tune/1 dict that is not the layout or not consistent."""
+    """SystemExit naming the first part of a canonical tune/1 dict that is not the layout or not consistent: among
+    others, a curve cut short of its schedule anywhere but at an ASHA rung (rungs), and a trial with more attempts than
+    the record has driver starts (Tune starts a trial at most once per start: max_failures 0)."""
     _keys("record", c, TOP_KEYS)
     _want("schema", c["schema"], SCHEMA)
     if c["system"] not in SYSTEMS:
@@ -520,6 +522,11 @@ def _check_canonical(c: dict[str, Any]) -> None:
         if len(curve) > cfg["epochs"]:
             raise SystemExit("%s.curve holds %d epochs, longer than its schedule of %d" % (where, len(curve),
                                                                                          cfg["epochs"]))
+        if len(curve) < cfg["epochs"] and len(curve) not in rungs(system):   # ASHA stops a trial only at a rung
+            raise SystemExit("%s stops at epoch %d, below its schedule %d but not an ASHA rung %s"
+                             % (where, len(curve), cfg["epochs"], rungs(system)))
+        if t["attempts"] > len(segs):                       # Tune starts a trial at most once per driver start
+            raise SystemExit("%s.attempts %d exceeds the %d driver starts" % (where, t["attempts"], len(segs)))
 
 
 def build_record(canonical: dict[str, Any]) -> dict[str, Any]:

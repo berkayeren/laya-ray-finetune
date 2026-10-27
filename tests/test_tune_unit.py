@@ -209,8 +209,8 @@ def test_a_diverged_epoch_carries_a_null_loss(tmp_path: Path) -> None:
 # ---- the tune/1 record ----
 
 def _canonical() -> dict[str, Any]:
-    """A synthetic canonical laya record: trial 0 with 3 epochs (best F1 1/2 first at epoch 2), trial 1 with 1 epoch
-    (F1 1/2 too: the tie goes to the lower index)."""
+    """A synthetic canonical laya record of two driver starts: trial 0 with 3 epochs (best F1 1/2 first at epoch 2),
+    trial 1 with 1 epoch and 2 attempts (F1 1/2 too: the tie goes to the lower index)."""
     h = "a" * 64
     return {"schema": pt.SCHEMA, "system": "laya",
             "search": {"seed": 0, "n_trials": 2, "search_alg": "BasicVariantGenerator", "max_concurrent": 1,
@@ -222,7 +222,8 @@ def _canonical() -> dict[str, Any]:
             "fixed": copy.deepcopy(pt.FIXED["laya"]),
             "base": {"name": "multilingual", "model_sha256": "d" * 64, "config_sha256": "e" * 64},
             "device": "mps", "cpus": 4, "versions": {"ray": "2.59.0", "torch": "2.14.1", "laya": "0.4.6"},
-            "segments": [{"git_sha": "f" * 40, "git_dirty": False, "git_diff_sha256": "0" * 64, "preflight": None}],
+            "segments": [{"git_sha": "f" * 40, "git_dirty": False, "git_diff_sha256": "0" * 64, "preflight": None},
+                         {"git_sha": "f" * 40, "git_dirty": False, "git_diff_sha256": "0" * 64, "preflight": None}],
             "notes": list(pt.NOTES),
             "trials": [{"index": 0, "config": dict(LAYA_POINT), "attempts": 1,
                         "curve": [_result(1, 1, 5, 3), _result(2, 2, 2, 2), _result(3, 3, 3, 3)]},
@@ -256,6 +257,26 @@ def test_record_rebuilds_byte_for_byte(tmp_path: Path) -> None:
     later = _canonical()                                    # a strictly better later trial wins
     later["trials"][1]["curve"] = [_result(1, 5, 1, 1)]
     assert pt.build_record(later)["best"]["index"] == 1
+
+
+def test_build_record_refuses_what_no_asha_search_produces() -> None:
+    """A curve cut short of its schedule off an ASHA rung (Laya rungs 1 and 3), and more attempts than driver starts
+    (Tune starts a trial at most once per start), are refused; a cut at a rung and attempts up to the starts pass."""
+    off = _canonical()
+    off["trials"][0]["curve"] = off["trials"][0]["curve"][:2]   # epoch 2 of 4: not a rung
+    with pytest.raises(SystemExit, match=r"trials\[0\] stops at epoch 2, below its schedule 4 but not an ASHA rung"):
+        pt.build_record(off)
+    many = _canonical()
+    many["trials"][1]["attempts"] = 3
+    with pytest.raises(SystemExit, match=r"trials\[1\].attempts 3 exceeds the 2 driver starts"):
+        pt.build_record(many)
+    one = _canonical()
+    one["segments"] = one["segments"][:1]                   # trial 1's 2 attempts need 2 starts
+    with pytest.raises(SystemExit, match="exceeds the 1 driver starts"):
+        pt.build_record(one)
+    ok = _canonical()
+    ok["trials"][0]["curve"] = ok["trials"][0]["curve"][:1]     # epoch 1: a rung
+    assert pt.build_record(ok)["trials"][0]["asha_stopped"] is True
 
 
 def _edit_best(rec: dict[str, Any]) -> None:
