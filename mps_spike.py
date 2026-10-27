@@ -69,8 +69,10 @@ from pilot.data import DEFAULT_MANIFEST, REPO_ROOT, repo_relpath, sha256_file, v
 from pilot.weights import fetch
 
 SPLIT = os.path.join(REPO_ROOT, "data", "splits", "selection_train.jsonl")
-# ray_train.py defaults. foreach AdamW kernels do not exist on MPS and fused is opt-in, so AdamW runs its
-# single-tensor loop on every device (a fused A/B is deferred).
+# the LRs and optimizer settings the spike measured (ray_train.py's defaults when the spike ran);
+# compute_checkpoint.child_command passes encoder_lr and head_lr explicitly, so its probe keeps this basis. foreach
+# AdamW kernels do not exist on MPS and fused is opt-in, so AdamW runs its single-tensor loop on every device (a fused
+# A/B is deferred).
 HPARAMS = {"encoder_lr": 2.5e-5, "head_lr": 1e-4, "weight_decay": 0.01, "clip_grad_norm": 1.0, "loss": "rlcd",
            "sigma": 0.4, "adamw_foreach": False, "adamw_fused": False}
 LAYA_INTERNALS = ["lt.load_checkpoint", "lt.items_from_rows", "lt.encode_item", "lt._forward", "lt.rlcd_loss",

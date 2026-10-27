@@ -4,10 +4,10 @@ runtime of the whole experiment matrix, for the user to approve before the Laya 
 Design (like mps_spike.py): this orchestrator imports no torch. It runs the spike's quiet-machine preflight (available
 memory, swap growth while idle), verifies the training split, reads the start config from the committed spike report
 (verdict.chosen, FITS only), checks the laya pin and the base weights, and then starts ONE fresh child process,
-`ray_train.py --device mps --workers 1` with the spike's micro-batch, max_len and grad-accum, --neg 8 and the spike's
-MPS env (strict fallback 0, HIGH and LOW watermarks 1.0). A fresh process, because torch reads
-PYTORCH_ENABLE_MPS_FALLBACK once at import and the MPS allocator keeps a process-wide high-water mark. The child's
-checkpoint carries the per-epoch run record (pilot.runs.read_record); pilot.compute turns it into the projection of
+`ray_train.py --device mps --workers 1` with the spike's micro-batch, max_len and grad-accum, --neg 8, the spike's
+encoder and head LRs (mps_spike.HPARAMS, passed explicitly, never ray_train.py's defaults) and the spike's MPS env
+(strict fallback 0, HIGH and LOW watermarks 1.0). A fresh process, because torch reads PYTORCH_ENABLE_MPS_FALLBACK once
+at import and the MPS allocator keeps a process-wide high-water mark. The child's checkpoint carries the per-epoch run record (pilot.runs.read_record); pilot.compute turns it into the projection of
 the whole experiment matrix (s_per_step = the largest train_s / optimizer_steps over the measured epochs; item counts
 of all five verified splits; the fixed per-run overhead = the measuring child's wall clock minus its record's terms,
 compute.run_overhead), a what-if table, a disk budget and the assumptions to confirm, and writes
@@ -72,6 +72,7 @@ from typing import Any
 
 import psutil
 
+import mps_spike
 from pilot import compute, pins, runs, spike
 from pilot import laya_adapter as la
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, repo_relpath, sha256_file,
@@ -121,12 +122,16 @@ def preflight(min_available_gib: float) -> dict[str, Any]:
 
 
 def child_command(a: argparse.Namespace, start: dict[str, Any], base: str, ckpt: str, storage: str) -> list[str]:
-    """The ray_train.py probe command: the spike's start config on its rung, neg 8, one worker."""
+    """The ray_train.py probe command: the spike's start config on its rung, neg 8 and the spike's LRs
+    (mps_spike.HPARAMS encoder_lr and head_lr), one worker. The epochs, neg and both LRs are passed explicitly, so
+    ray_train.py's own defaults never reach a probe and a new probe keeps the basis it shares with the spike."""
     cmd = [sys.executable, os.path.join(REPO_ROOT, "ray_train.py"), "--data", os.path.abspath(a.data),
            "--manifest", os.path.abspath(a.manifest), "--base", base, "--out", ckpt, "--storage", storage,
            "--device", a.device, "--workers", "1", "--cpus-per-worker", str(a.cpus), "--epochs", str(a.epochs),
            "--micro-batch", str(start["micro_batch"]), "--grad-accum", str(start["grad_accum"]),
-           "--max-len", str(start["max_len"]), "--neg", str(NEG), "--seed", str(a.seed)]
+           "--max-len", str(start["max_len"]), "--neg", str(NEG),
+           "--encoder-lr", repr(mps_spike.HPARAMS["encoder_lr"]), "--head-lr", repr(mps_spike.HPARAMS["head_lr"]),
+           "--seed", str(a.seed)]
     cmd += runs.rung_flags(start["rung"])
     if a.max_messages is not None:
         cmd += ["--max-messages", str(a.max_messages)]

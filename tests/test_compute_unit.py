@@ -133,6 +133,23 @@ def test_spike_start_refuses_a_fallback_config(tmp_path: Path) -> None:
         compute.spike_start(str(path))
 
 
+def test_child_command_passes_the_spike_lrs() -> None:
+    """The probe passes the spike's encoder and head LRs, neg 8 and its epochs explicitly, each once, so ray_train.py's
+    own defaults never reach a probe."""
+    import argparse
+    import compute_checkpoint
+    import mps_spike
+    a = argparse.Namespace(data="d.jsonl", manifest="m.json", device="mps", cpus=4, epochs=2, seed=0, max_messages=None)
+    start = {"micro_batch": 8, "grad_accum": 4, "max_len": 128, "rung": "none"}
+    cmd = compute_checkpoint.child_command(a, start, "multilingual", "ckpt", "storage")
+    want = {"--encoder-lr": "2.5e-05", "--head-lr": "0.0001", "--neg": "8", "--epochs": "2"}
+    for flag, value in want.items():
+        assert cmd.count(flag) == 1, flag
+        assert cmd[cmd.index(flag) + 1] == value, (flag, cmd)
+    assert want["--encoder-lr"] == repr(mps_spike.HPARAMS["encoder_lr"])
+    assert want["--head-lr"] == repr(mps_spike.HPARAMS["head_lr"])
+
+
 def test_torch_free_import() -> None:
     code = "import sys, compute_checkpoint, pilot.compute; assert 'torch' not in sys.modules, 'torch imported'"
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}

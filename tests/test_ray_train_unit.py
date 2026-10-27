@@ -170,6 +170,7 @@ def test_the_committed_probe_run_id_is_historical() -> None:
     (tests/test_compute_report.py). base_files_sha256 is still None for --base multilingual (the pin fixes its
     tokenizer/ and encoder/) and canonical() leaves it out. Offline: the committed manifest, report and pin."""
     import os
+    import mps_spike
     from pilot import runs
     from pilot.data import REPO_ROOT
     from pilot.weights import identity
@@ -183,6 +184,7 @@ def test_the_committed_probe_run_id_is_historical() -> None:
         "--data", "d.jsonl", "--out", "o", "--base", "multilingual", "--device", p["device"], "--workers", "1",
         "--cpus-per-worker", str(p["cpus"]), "--epochs", str(p["epochs"]), "--micro-batch", str(start["micro_batch"]),
         "--grad-accum", str(start["grad_accum"]), "--max-len", str(start["max_len"]), "--neg", str(p["neg"]),
+        "--encoder-lr", repr(mps_spike.HPARAMS["encoder_lr"]), "--head-lr", repr(mps_spike.HPARAMS["head_lr"]),
         "--seed", str(p["seed"])])
     vals = ray_train.identity_values(a, ray_train.resolve(a), entry, "multilingual", identity("multilingual"))
     canon = runs.canonical(vals)
