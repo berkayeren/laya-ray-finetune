@@ -121,6 +121,40 @@ def test_results_out_elsewhere_is_refused(name: str, settings: str, snap: tuple[
     assert _bytes_or_none(out) == before and _guarded_status() == ""
 
 
+GUARDED_OUTPUTS = [("--storage", os.path.join("results", "s")), ("--storage", os.path.join("data", "s")),
+                   ("--storage", os.path.join("ui", "s")), ("--storage", "results"),
+                   ("--storage", os.path.join("protocol.json", "s")), ("--out", os.path.join("data", "x.json")),
+                   ("--out", os.path.join("ui", "x.json")), ("--out", "protocol.json")]
+
+
+@pytest.mark.parametrize("flag, rel", GUARDED_OUTPUTS)
+def test_storage_and_out_never_land_in_guarded_dirs(flag: str, rel: str, snap: tuple[str, str, str], tmp_path: Path,
+                                                    monkeypatch: pytest.MonkeyPatch, no_ray: None) -> None:
+    """--storage under results/, data/, ui/ or protocol.json, and --out under data/, ui/ or protocol.json, are
+    refused before bind and ray.init, writing nothing (pilot.tensorboard.FORBIDDEN, by realpath and file identity)."""
+    monkeypatch.setattr(tune, "bind", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("bind reached")))
+    path = os.path.join(REPO, rel)
+    existed = os.path.exists(path)
+    argv = _smoke(snap, tmp_path / "s", tmp_path / "laya.json")
+    argv[argv.index(flag) + 1] = path
+    before = _guarded_status()
+    with pytest.raises(SystemExit, match="%s .* is under %s of this repo" % (flag, rel.split(os.sep)[0])):
+        tune.main(argv)
+    assert os.path.exists(path) == existed and _guarded_status() == before
+    assert not (tmp_path / "s").exists()
+
+
+def test_render_out_never_lands_in_guarded_dirs(tmp_path: Path) -> None:
+    """--render --out under data/, ui/ or protocol.json is refused before any record is read."""
+    a = pt.write_record(pt.build_record(_canonical()), str(tmp_path / "laya.json"))
+    before = _guarded_status()
+    for rel in (os.path.join("data", "x.md"), os.path.join("ui", "x.md"), "protocol.json"):
+        with pytest.raises(SystemExit, match="is under %s of this repo" % rel.split(os.sep)[0]):
+            tune.main(["--render", a, "--out", os.path.join(REPO, rel)])
+    assert not any(os.path.exists(os.path.join(REPO, d, "x.md")) for d in ("data", "ui"))
+    assert _guarded_status() == before
+
+
 def test_the_committed_search_passes_the_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """The committed search's own settings reach bind (stubbed here: the guard is all this test runs; the existing-out
     check, which needs the search's own storage, is test_an_existing_out_is_refused_before_bind's)."""

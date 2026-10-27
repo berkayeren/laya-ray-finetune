@@ -77,7 +77,9 @@ every 10 s, so one that ended seconds before the kill can rerun). After an error
 naming it; rerunning the same command runs it again. A finished search starts no Ray: its rerun rebuilds the record
 from the trial dirs and the search file, and must reproduce the sha256 it wrote.
 
-Guards: under results/ a search writes only results/tune/<system>.json, and only as the committed search (--trials 20,
+Guards: --storage never lies under results/, data/, ui/ or protocol.json, nor --out (search or --render) under data/,
+ui/ or protocol.json (pilot.tensorboard.FORBIDDEN, judged by realpath and file identity); under results/ a search writes
+only results/tune/<system>.json, and only as the committed search (--trials 20,
 --seed 0, --device mps, the pinned --base, the committed --manifest, no --points, no test hook), refused before any
 fetch or ray.init; any other run needs another --out. On MPS the quiet-machine preflight (compute_checkpoint.preflight,
 --min-available-gib, default 7.0; 0 records a busy-machine run) runs before ray.init and is the segment's preflight.
@@ -113,6 +115,7 @@ from pilot import laya_adapter as la
 from pilot import tune as pt
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, refuse_held_out,
                         repo_relpath, sha256_bytes, sha256_file, verify_split_file, write_atomic)
+from pilot.tensorboard import FORBIDDEN
 from pilot.weights import check_tokenizer_config_rewritable, checkpoint_digests, fetch, identity
 
 DEFAULT_DATA = os.path.join(REPO_ROOT, "data", "splits", "selection_train.jsonl")
@@ -247,6 +250,24 @@ def same_path(path: str, target: str) -> bool:
         return os.path.samestat(os.stat(d), os.stat(t))
     except OSError:
         return False
+
+
+def check_outside(flag: str, path: str, roots: tuple[str, ...], fix: str) -> None:
+    """Refuse `path` (named by `flag`) when it is or lies under one of `roots` (repo-relative names, e.g.
+    pilot.tensorboard.FORBIDDEN: results/, data/, ui/, protocol.json), judged by within (realpath and file identity);
+    `fix` ends the refusal."""
+    for name in roots:
+        if within(path, os.path.join(REPO_ROOT, name)):
+            raise SystemExit("%s %s is under %s of this repo, which holds frozen records or tracked files; %s"
+                             % (flag, path, name, fix))
+
+
+def check_outputs(a: argparse.Namespace) -> None:
+    """Refuse, before bind and ray.init, a search --storage under results/, data/, ui/ or protocol.json (the Tune
+    experiment, the inner runs and the search file never land there) and a search --out under data/, ui/ or
+    protocol.json (under results/, check_results_out allows the committed search's own record only)."""
+    check_outside("--storage", a.storage, FORBIDDEN, "pass tune_runs/ (gitignored) or a dir outside the repo")
+    check_outside("--out", a.out, tuple(n for n in FORBIDDEN if n != "results"), "pass another --out")
 
 
 def check_results_out(a: argparse.Namespace) -> None:
@@ -711,7 +732,10 @@ def render_out_ok(path: str) -> bool:
 
 def render_mode(paths: list[str], out: str | None) -> None:
     """--render RECORD... [--out PATH]: pilot.tune.render_markdown of the records read through read_record (checked),
-    printed, or written atomically to --out (refused, before any record is read, unless render_out_ok)."""
+    printed, or written atomically to --out (refused, before any record is read, under data/, ui/ or protocol.json,
+    and unless render_out_ok)."""
+    if out is not None:
+        check_outside("--out", out, tuple(n for n in FORBIDDEN if n != "results"), "pass another --out")
     if out is not None and not render_out_ok(out):
         raise SystemExit("--out %s: under results/ the rendered summary is results/tune/tune.md only; pass another "
                          "--out" % repo_relpath(out))
@@ -775,6 +799,7 @@ def main(argv: list[str] | None = None) -> None:
     if a.render is not None:
         render_mode(a.render, a.out)
         return
+    check_outputs(a)
     check_results_out(a)
     sp = spec_path(a.storage, a.system)
     doc = read_search(sp)
