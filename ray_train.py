@@ -167,6 +167,7 @@ import argparse
 import gc
 import hashlib
 import json
+import math
 import os
 import random
 import shutil
@@ -1006,6 +1007,8 @@ def train_loop_per_worker(c: dict[str, Any]) -> None:
                 tensorboard.flush(tb)                       # so a SIGKILL never leaves a completed epoch unlogged
 
             if c.get("tune") is not None:                   # a search trial: score tuning-dev, report metrics only
+                if not math.isfinite(metrics["loss"]):      # a diverged epoch: null in the curve, never NaN
+                    metrics["loss"] = None
                 if rank == 0:
                     with mps_oom_exit(epoch + 1, None, c["rung"], "while scoring the tuning-dev rows"):
                         metrics.update(tune_score(inner, tok, dev_rows, max_len, head_max_len, parallel, device,

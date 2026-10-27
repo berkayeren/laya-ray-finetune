@@ -105,6 +105,8 @@ NOTES = (
     "The pipeline's single encoder LR 2e-05 stays fixed, not tuned; this search reopens it for exploration only.",
 )
 RENDER_TITLE = "# Exploratory hyperparameter search (Ray Tune)"
+# rendered only when a trial's curve holds a null loss (a non-finite training loss)
+DIVERGED_LINE = "- Diverged trials (a non-finite training loss at some epoch, recorded as null): %s"
 # rendered only for a record of more than one driver start (never in NOTES, which committed records hold verbatim)
 RESTORE_LINE = ("- Restored %d time(s): Ray Tune 2.59 does not save ASHA's rung table with the experiment, so after "
                 "each restore ASHA judged a trial at a rung only against the results reported since that restore; its "
@@ -371,8 +373,9 @@ def _f1(tp: int, fp: int, fn: int) -> float:
 
 def curve_row(result: dict[str, Any]) -> dict[str, Any]:
     """Exactly CURVE_KEYS of one Tune result dict (a trial's per-epoch report), type-checked; SystemExit naming the
-    key. Tune's own fields (hostname, pid, timestamps, trial id) never pass. A result that also carries dev_micro_f1
-    must hold the F1 its counts give."""
+    key. Tune's own fields (hostname, pid, timestamps, trial id) never pass. loss is a finite float, or None for a
+    diverged epoch (a non-finite training loss: the trials report None, never NaN). A result that also carries
+    dev_micro_f1 must hold the F1 its counts give."""
     if not isinstance(result, dict):
         raise SystemExit("a trial result is %r, not a dict" % (result,))
     missing = [k for k in CURVE_KEYS if k not in result]
@@ -387,7 +390,9 @@ def curve_row(result: dict[str, Any]) -> dict[str, Any]:
     mf = result["dev_macro_f1"]
     if mf is not None and not (type(mf) is float and 0.0 <= mf <= 1.0):
         raise SystemExit("a trial result's dev_macro_f1 is %r, expected a float in [0, 1] or None" % (mf,))
-    for k in ("loss", "train_s", "dev_s"):
+    if result["loss"] is not None:                          # None: a diverged epoch
+        _num("loss", result["loss"], float)
+    for k in ("train_s", "dev_s"):
         _num(k, result[k], float)
     _num("peak_total_bytes", result["peak_total_bytes"], int, 0)
     _num("swap_delta_bytes", result["swap_delta_bytes"], int)
@@ -643,7 +648,8 @@ def render_markdown(records: list[dict[str, Any]]) -> str:
     """The markdown of checked tune/1 records, in the given order (results/tune/tune.md): RENDER_TITLE, RENDER_INTRO,
     per record a section with its settings (trials, search seed, device, CPUs, partition counts, the shared-text count,
     base, versions, driver starts with each one's short git sha and preflight, RESTORE_LINE when there was more than
-    one driver start (ASHA's rung table is lost on a restore), restarted and ASHA-stopped trials), the
+    one driver start (ASHA's rung table is lost on a restore), restarted and ASHA-stopped trials, DIVERGED_LINE when a
+    trial's curve holds a null loss), the
     highest tuning-dev score (trial, epoch, dev micro-F1 to 4 decimals, TP/FP/FN, config) and a table of every trial
     (its space values, log-uniform ones as %.1e, attempts, epochs run of its schedule, best epoch, best dev micro-F1,
     θ at the best epoch, ASHA stopped), then NOTES as bullets. Deterministic; no path, timestamp or uid."""
@@ -671,6 +677,9 @@ def render_markdown(records: list[dict[str, Any]]) -> str:
             out.append(RESTORE_LINE % (len(r["segments"]) - 1))
         out += ["- Restarted trials (attempts above 1): %d of %d" % (restarted, len(trials)),
                 "- ASHA-stopped trials: %d of %d" % (r["n_asha_stopped"], len(trials))]
+        diverged = [str(t["index"]) for t in trials if any(row["loss"] is None for row in t["curve"])]
+        if diverged:                                        # rendered only when a trial diverged
+            out.append(DIVERGED_LINE % ", ".join(diverged))
         b = r["best"]
         row = trials[b["index"]]["curve"][b["epoch"] - 1]
         out += ["", "Highest tuning-dev score: trial %d, epoch %d, dev micro-F1 %.4f (TP %d, FP %d, FN %d); %s"

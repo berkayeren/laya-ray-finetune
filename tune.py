@@ -97,6 +97,7 @@ usage:
 import argparse
 import copy
 import json
+import math
 import os
 import re
 import signal
@@ -530,7 +531,8 @@ def berturk_trial(config: dict[str, Any], bound: dict[str, Any]) -> None:
             dev_s = time.perf_counter() - t
         finally:
             model.train()
-        tune.report(dict(pt.dev_objective(Y, logits), epoch=epoch, loss=float(row["loss"]),
+        loss = float(row["loss"])                           # a diverged epoch reports null, never NaN
+        tune.report(dict(pt.dev_objective(Y, logits), epoch=epoch, loss=loss if math.isfinite(loss) else None,
                          train_s=float(row["train_s"]), dev_s=dev_s, peak_total_bytes=row["peak_total_bytes"],
                          swap_delta_bytes=row["swap_delta_bytes"], n_train_messages=len(train_rows),
                          n_dev_messages=len(dev_rows)))
@@ -738,9 +740,9 @@ def status_mode(storage: str, system: str) -> None:
         f1 = [(Fraction(2 * r["dev_tp"], 2 * r["dev_tp"] + r["dev_fp"] + r["dev_fn"]) if r["dev_tp"] else Fraction(0),
                -r["epoch"]) for r in rows]
         top, neg_epoch = max(f1)                            # the earliest epoch of the best score
-        print("trial %d: attempts %d, epoch %d of %s, best dev micro-F1 %.4f (epoch %d)"
+        print("trial %d: attempts %d, epoch %d of %s, best dev micro-F1 %.4f (epoch %d)%s"
               % (index, attempts, rows[-1]["epoch"], schedule if schedule is not None else "?", float(top),
-                 -neg_epoch), flush=True)
+                 -neg_epoch, ", diverged" if any(r["loss"] is None for r in rows) else ""), flush=True)
 
 
 def main(argv: list[str] | None = None) -> None:

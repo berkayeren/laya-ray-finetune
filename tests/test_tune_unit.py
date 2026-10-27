@@ -190,6 +190,22 @@ def test_curve_row_keeps_only_the_curve_keys() -> None:
             pt.curve_row(dict(res, **{key: bad}))
 
 
+def test_a_diverged_epoch_carries_a_null_loss(tmp_path: Path) -> None:
+    """A diverged epoch (a non-finite training loss) is reported as loss None: curve_row keeps it, the record builds,
+    writes and reads back byte for byte, and the render names the diverged trial; NaN itself is still refused."""
+    res = dict(_result(1, 0, 0, 5), loss=None)
+    assert pt.curve_row(res) == res
+    with pytest.raises(SystemExit, match="loss"):
+        pt.curve_row(dict(res, loss=float("inf")))
+    c = _canonical()
+    c["trials"][1]["curve"] = [dict(_result(1, 0, 0, 5), loss=None)]
+    rec = pt.build_record(c)
+    got, _ = pt.read_record(pt.write_record(rec, str(tmp_path / "laya.json")))
+    assert got == rec and got["trials"][1]["curve"][0]["loss"] is None
+    assert pt.DIVERGED_LINE % "1" in pt.render_markdown([rec]).splitlines()
+    assert "Diverged" not in pt.render_markdown([pt.build_record(_canonical())])
+
+
 # ---- the tune/1 record ----
 
 def _canonical() -> dict[str, Any]:
