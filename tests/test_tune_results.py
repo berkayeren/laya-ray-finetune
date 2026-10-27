@@ -170,3 +170,11 @@ def test_readme_states_the_search_rules() -> None:
     assert "<!-- " not in section, "the README search section holds no generated block"
     assert text.index(SEARCH_HEADING) < text.index("\n## Demo UI\n")
 
+
+def test_claude_docs_describe_the_search() -> None:
+    text = text_of(os.path.join(REPO_ROOT, "CLAUDE.md"))
+    missing = [w for w in CLAUDE_NAMES if w not in text]
+    assert not missing, "CLAUDE.md does not name %r" % missing
+    text = text_of(os.path.join(REPO_ROOT, ".claude", "CLAUDE.md"))
+    missing = [w for w in DOT_CLAUDE_NAMES if w not in text]
+    assert not missing, ".claude/CLAUDE.md does not name %r" % missing
