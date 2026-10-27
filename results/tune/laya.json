@@ -1,0 +1,1241 @@
+{
+  "schema": "tune/1",
+  "system": "laya",
+  "search": {
+    "seed": 0,
+    "n_trials": 20,
+    "search_alg": "BasicVariantGenerator",
+    "max_concurrent": 1,
+    "points_to_evaluate": null,
+    "space": {
+      "encoder_lr": [
+        "loguniform",
+        5e-06,
+        0.0001
+      ],
+      "head_lr": [
+        "loguniform",
+        3e-05,
+        0.001
+      ],
+      "neg": [
+        "choice",
+        [
+          4,
+          8,
+          16
+        ]
+      ],
+      "epochs": [
+        "choice",
+        [
+          4,
+          6,
+          8
+        ]
+      ]
+    },
+    "scheduler": {
+      "name": "ASHAScheduler",
+      "time_attr": "epoch",
+      "metric": "dev_micro_f1",
+      "mode": "max",
+      "grace_period": 1,
+      "reduction_factor": 3,
+      "max_t": 8
+    },
+    "objective": "dev_micro_f1: the micro-F1 over the tuning-dev rows (selection_train folds 12-13) at the global θ pilot.metrics.select_theta picks on those same rows, with probabilities at T = 1 from the in-memory fp32 model scored in-process after every epoch; a trial's score is its best epoch"
+  },
+  "data": {
+    "split": "selection_train",
+    "sha256": "a3b5fad486b3ce472178bdbaea4f0016916a4164fd861e0b7a43a8b259623331",
+    "manifest_is_committed": true,
+    "train_folds": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "dev_folds": [
+      12,
+      13
+    ],
+    "train_uids_sha256": "8d9888037cf726251df0e4ed65da9f8a0198c9d963f8bd1bbdbaabe7ece98e94",
+    "dev_uids_sha256": "64bf8e57cf8f86a6474d27b60f34f5ca9e4183cf929b0dacdf6cc4b4e1d880f8",
+    "n_train": 1244,
+    "n_dev": 206,
+    "dev_rows_with_train_text": 4
+  },
+  "fixed": {
+    "workers": 1,
+    "micro_batch": 8,
+    "grad_accum": 4,
+    "max_len": 128,
+    "freeze_encoder": false,
+    "freeze_embeddings": false,
+    "grad_checkpointing": true,
+    "loss": "rlcd",
+    "seed": 0,
+    "neg_seed": 0,
+    "precision": "fp32"
+  },
+  "base": {
+    "name": "multilingual",
+    "model_sha256": "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204",
+    "config_sha256": "25061739243b617ad88d1219ba6f8a9c86c5881ca28df024fa2d9b3b2fcc30c6"
+  },
+  "device": "mps",
+  "cpus": 4,
+  "versions": {
+    "ray": "2.59.0",
+    "torch": "2.14.1",
+    "laya": "0.4.6"
+  },
+  "segments": [
+    {
+      "git_sha": "7480c7a9a2886536f61d5e7d8e9129e6fd4c8db4",
+      "git_dirty": false,
+      "git_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "preflight": {
+        "available_gib": 8.44,
+        "min_available_gib": 7.0,
+        "swap_used_bytes": [
+          343867392,
+          343867392
+        ],
+        "swap_grew_while_idle": false,
+        "swapouts": [
+          1967327,
+          1967327
+        ],
+        "swapouts_grew_while_idle": false,
+        "passed": true,
+        "override": false
+      }
+    }
+  ],
+  "notes": [
+    "This search is exploratory and not a decision input: protocol.json, the frozen verdict, every committed record and every existing run id are unchanged by it.",
+    "No trial model is scored on val, test or HOTELS, and no trial weights are kept.",
+    "Tuning-train is selection_train folds 0-11 and tuning-dev is selection_train folds 12-13, split in memory by the fold in each uid; no trial reads val (folds 14-15), test or HOTELS.",
+    "θ is chosen on the same tuning-dev rows it scores (in-sample) at T = 1, so dev micro-F1 is optimistic and not comparable to the val or test numbers.",
+    "Dev scoring uses the in-memory fp32 weights (Laya: the training-side noul route, equal to laya.load's; BERTurk: the classifier logits), not fp16 exports.",
+    "ASHA compares trials at the same epoch across schedule lengths (Laya 4, 6 or 8 epochs; BERTurk 10, 20 or 30), which favours short schedules at the rungs.",
+    "A trial with attempts above 1 was restarted after a kill and may have passed a rung it had been judged at, and Ray Tune snapshots the experiment at most every 10 s, so a trial that ended seconds before a kill can rerun.",
+    "Duplicate message texts across the two partitions are kept (the duplicate audit is report-only); dev_rows_with_train_text counts the tuning-dev rows whose exact text is also a tuning-train text.",
+    "peak_total_bytes and swap_delta_bytes cover the epoch's training steps only.",
+    "The pipeline's single encoder LR 2e-05 stays fixed, not tuned; this search reopens it for exploration only."
+  ],
+  "best": {
+    "index": 14,
+    "epoch": 6,
+    "dev_micro_f1": 0.8660624370594159,
+    "config": {
+      "encoder_lr": 2.9660069889947058e-05,
+      "head_lr": 9.811131074677546e-05,
+      "neg": 16,
+      "epochs": 6
+    }
+  },
+  "n_asha_stopped": 13,
+  "trials": [
+    {
+      "index": 0,
+      "config": {
+        "encoder_lr": 3.3703597963683545e-05,
+        "head_lr": 7.726338067524872e-05,
+        "neg": 4,
+        "epochs": 4
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 429,
+          "dev_fp": 517,
+          "dev_fn": 39,
+          "dev_micro_f1": 0.6067892503536068,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.6107160000133501,
+          "loss": 0.8139240591590665,
+          "train_s": 443.5539588329848,
+          "dev_s": 70.55827012495138,
+          "peak_total_bytes": 8697053184,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 2,
+          "dev_tp": 428,
+          "dev_fp": 349,
+          "dev_fn": 40,
+          "dev_micro_f1": 0.6875502008032128,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.6644848346547485,
+          "loss": 0.7699383637450864,
+          "train_s": 442.65375820803456,
+          "dev_s": 70.38949779095128,
+          "peak_total_bytes": 9291677696,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 3,
+          "dev_tp": 430,
+          "dev_fp": 322,
+          "dev_fn": 38,
+          "dev_micro_f1": 0.7049180327868853,
+          "dev_theta": 0.94,
+          "dev_macro_f1": 0.6901812100852615,
+          "loss": 0.5246523883873826,
+          "train_s": 444.83673379092943,
+          "dev_s": 70.60183658299502,
+          "peak_total_bytes": 9306669056,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 4,
+          "dev_tp": 434,
+          "dev_fp": 304,
+          "dev_fn": 34,
+          "dev_micro_f1": 0.7197346600331676,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.7317364400978887,
+          "loss": 0.3566743441558836,
+          "train_s": 443.55426124995574,
+          "dev_s": 70.54534416692331,
+          "peak_total_bytes": 9371254784,
+          "swap_delta_bytes": 0
+        }
+      ],
+      "best_epoch": 4,
+      "best_dev_micro_f1": 0.7197346600331676,
+      "stop_epoch": 4,
+      "asha_stopped": false
+    },
+    {
+      "index": 1,
+      "config": {
+        "encoder_lr": 5.253792956176697e-06,
+        "head_lr": 0.0005195570187972236,
+        "neg": 8,
+        "epochs": 8
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 387,
+          "dev_fp": 245,
+          "dev_fn": 81,
+          "dev_micro_f1": 0.7036363636363636,
+          "dev_theta": 0.94,
+          "dev_macro_f1": 0.6765029737045878,
+          "loss": 0.5987649126954863,
+          "train_s": 724.0180744170211,
+          "dev_s": 70.33590954099782,
+          "peak_total_bytes": 9544417280,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 2,
+          "dev_tp": 394,
+          "dev_fp": 206,
+          "dev_fn": 74,
+          "dev_micro_f1": 0.7378277153558053,
+          "dev_theta": 0.9,
+          "dev_macro_f1": 0.7132719621362644,
+          "loss": 0.6351615692157987,
+          "train_s": 723.5068147500278,
+          "dev_s": 70.25317479204386,
+          "peak_total_bytes": 9629335552,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 3,
+          "dev_tp": 407,
+          "dev_fp": 198,
+          "dev_fn": 61,
+          "dev_micro_f1": 0.7586206896551724,
+          "dev_theta": 0.84,
+          "dev_macro_f1": 0.7559393286091424,
+          "loss": 0.43629256361320945,
+          "train_s": 724.3456670419546,
+          "dev_s": 70.27926937502343,
+          "peak_total_bytes": 9500917760,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 4,
+          "dev_tp": 422,
+          "dev_fp": 233,
+          "dev_fn": 46,
+          "dev_micro_f1": 0.7515583259127337,
+          "dev_theta": 0.5,
+          "dev_macro_f1": 0.7438655186882844,
+          "loss": 0.3179013668477244,
+          "train_s": 723.6320553750265,
+          "dev_s": 70.29471479100175,
+          "peak_total_bytes": 9477439488,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 5,
+          "dev_tp": 431,
+          "dev_fp": 280,
+          "dev_fn": 37,
+          "dev_micro_f1": 0.731128074639525,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.722338506255399,
+          "loss": 0.2103341077636287,
+          "train_s": 724.0333781669615,
+          "dev_s": 70.25763945793733,
+          "peak_total_bytes": 9342828544,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 6,
+          "dev_tp": 417,
+          "dev_fp": 217,
+          "dev_fn": 51,
+          "dev_micro_f1": 0.7568058076225045,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.760541103361475,
+          "loss": 0.14362286965498097,
+          "train_s": 723.6451459579403,
+          "dev_s": 70.37723066704348,
+          "peak_total_bytes": 9362571264,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 7,
+          "dev_tp": 429,
+          "dev_fp": 278,
+          "dev_fn": 39,
+          "dev_micro_f1": 0.7302127659574468,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.7153662377371162,
+          "loss": 0.09599607526985235,
+          "train_s": 723.7786964579718,
+          "dev_s": 70.3371507920092,
+          "peak_total_bytes": 9377529856,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 8,
+          "dev_tp": 427,
+          "dev_fp": 248,
+          "dev_fn": 41,
+          "dev_micro_f1": 0.7471566054243219,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.7508532290615871,
+          "loss": 0.08039679655760391,
+          "train_s": 723.0409214160172,
+          "dev_s": 70.4231664170511,
+          "peak_total_bytes": 9400483840,
+          "swap_delta_bytes": 0
+        }
+      ],
+      "best_epoch": 3,
+      "best_dev_micro_f1": 0.7586206896551724,
+      "stop_epoch": 8,
+      "asha_stopped": false
+    },
+    {
+      "index": 2,
+      "config": {
+        "encoder_lr": 3.077664995727643e-05,
+        "head_lr": 0.0003873076384553642,
+        "neg": 8,
+        "epochs": 6
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 403,
+          "dev_fp": 283,
+          "dev_fn": 65,
+          "dev_micro_f1": 0.6984402079722704,
+          "dev_theta": 0.94,
+          "dev_macro_f1": 0.66681352826605,
+          "loss": 0.813298013632933,
+          "train_s": 722.5040928749368,
+          "dev_s": 70.25459095800761,
+          "peak_total_bytes": 8929525760,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 2,
+          "dev_tp": 422,
+          "dev_fp": 343,
+          "dev_fn": 46,
+          "dev_micro_f1": 0.6845093268450932,
+          "dev_theta": 0.9,
+          "dev_macro_f1": 0.660078242857098,
+          "loss": 0.6571552080773279,
+          "train_s": 721.9840438750107,
+          "dev_s": 70.12221016699914,
+          "peak_total_bytes": 9520775168,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 3,
+          "dev_tp": 431,
+          "dev_fp": 234,
+          "dev_fn": 37,
+          "dev_micro_f1": 0.7608120035304501,
+          "dev_theta": 0.86,
+          "dev_macro_f1": 0.776629707975023,
+          "loss": 0.5043520266057304,
+          "train_s": 722.2739696670324,
+          "dev_s": 70.4189165000571,
+          "peak_total_bytes": 9459843072,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 4,
+          "dev_tp": 434,
+          "dev_fp": 160,
+          "dev_fn": 34,
+          "dev_micro_f1": 0.8173258003766478,
+          "dev_theta": 0.92,
+          "dev_macro_f1": 0.8026540842645339,
+          "loss": 0.2973968922642791,
+          "train_s": 723.190986874979,
+          "dev_s": 70.21141383307986,
+          "peak_total_bytes": 9352151040,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 5,
+          "dev_tp": 442,
+          "dev_fp": 184,
+          "dev_fn": 26,
+          "dev_micro_f1": 0.8080438756855576,
+          "dev_theta": 0.94,
+          "dev_macro_f1": 0.8011136359327281,
+          "loss": 0.19512025690681742,
+          "train_s": 723.0137416250072,
+          "dev_s": 70.21471520804334,
+          "peak_total_bytes": 9331163136,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 6,
+          "dev_tp": 442,
+          "dev_fp": 178,
+          "dev_fn": 26,
+          "dev_micro_f1": 0.8125,
+          "dev_theta": 0.85,
+          "dev_macro_f1": 0.8045247286377948,
+          "loss": 0.1498028510017485,
+          "train_s": 722.0910661250819,
+          "dev_s": 70.21874270797707,
+          "peak_total_bytes": 9346138112,
+          "swap_delta_bytes": 0
+        }
+      ],
+      "best_epoch": 4,
+      "best_dev_micro_f1": 0.8173258003766478,
+      "stop_epoch": 6,
+      "asha_stopped": false
+    },
+    {
+      "index": 3,
+      "config": {
+        "encoder_lr": 8.23241538863603e-05,
+        "head_lr": 0.0005242848297799108,
+        "neg": 16,
+        "epochs": 4
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 0,
+          "dev_fp": 0,
+          "dev_fn": 468,
+          "dev_micro_f1": 0.0,
+          "dev_theta": 0.5,
+          "dev_macro_f1": 0.0,
+          "loss": 1.6663282549324878,
+          "train_s": 1282.9578029169934,
+          "dev_s": 70.29469820891973,
+          "peak_total_bytes": 9074524160,
+          "swap_delta_bytes": 0
+        }
+      ],
+      "best_epoch": 1,
+      "best_dev_micro_f1": 0.0,
+      "stop_epoch": 1,
+      "asha_stopped": true
+    },
+    {
+      "index": 4,
+      "config": {
+        "encoder_lr": 6.523470256645672e-05,
+        "head_lr": 3.37495520954843e-05,
+        "neg": 16,
+        "epochs": 8
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 240,
+          "dev_fp": 330,
+          "dev_fn": 228,
+          "dev_micro_f1": 0.4624277456647399,
+          "dev_theta": 0.64,
+          "dev_macro_f1": 0.38025086264619556,
+          "loss": 1.1601661543375814,
+          "train_s": 1284.4607060420094,
+          "dev_s": 70.32818241696805,
+          "peak_total_bytes": 9598763008,
+          "swap_delta_bytes": 0
+        }
+      ],
+      "best_epoch": 1,
+      "best_dev_micro_f1": 0.4624277456647399,
+      "stop_epoch": 1,
+      "asha_stopped": true
+    },
+    {
+      "index": 5,
+      "config": {
+        "encoder_lr": 8.462588737105826e-06,
+        "head_lr": 0.0006189250906421625,
+        "neg": 4,
+        "epochs": 6
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 407,
+          "dev_fp": 420,
+          "dev_fn": 61,
+          "dev_micro_f1": 0.6285714285714286,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.6143961623789554,
+          "loss": 0.6465966674707466,
+          "train_s": 442.88380895892624,
+          "dev_s": 70.28904512501322,
+          "peak_total_bytes": 9512763392,
+          "swap_delta_bytes": 0
+        }
+      ],
+      "best_epoch": 1,
+      "best_dev_micro_f1": 0.6285714285714286,
+      "stop_epoch": 1,
+      "asha_stopped": true
+    },
+    {
+      "index": 6,
+      "config": {
+        "encoder_lr": 1.2271684013075577e-05,
+        "head_lr": 0.00013207561444056754,
+        "neg": 8,
+        "epochs": 4
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 420,
+          "dev_fp": 290,
+          "dev_fn": 48,
+          "dev_micro_f1": 0.7130730050933786,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.6921668065495483,
+          "loss": 0.6393986472419987,
+          "train_s": 725.5807892499724,
+          "dev_s": 70.33479250001255,
+          "peak_total_bytes": 9459171328,
+          "swap_delta_bytes": -8388608
+        },
+        {
+          "epoch": 2,
+          "dev_tp": 414,
+          "dev_fp": 184,
+          "dev_fn": 54,
+          "dev_micro_f1": 0.776735459662289,
+          "dev_theta": 0.67,
+          "dev_macro_f1": 0.755740542588157,
+          "loss": 0.5223212878381034,
+          "train_s": 726.1129582499852,
+          "dev_s": 70.20345929102041,
+          "peak_total_bytes": 9259712512,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 3,
+          "dev_tp": 428,
+          "dev_fp": 204,
+          "dev_fn": 40,
+          "dev_micro_f1": 0.7781818181818182,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.7637137167606944,
+          "loss": 0.2986759148641878,
+          "train_s": 725.4465686250478,
+          "dev_s": 70.26961583306547,
+          "peak_total_bytes": 9246867456,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 4,
+          "dev_tp": 437,
+          "dev_fp": 230,
+          "dev_fn": 31,
+          "dev_micro_f1": 0.7700440528634361,
+          "dev_theta": 0.94,
+          "dev_macro_f1": 0.7635322155537624,
+          "loss": 0.18688711004323336,
+          "train_s": 726.1667887920048,
+          "dev_s": 70.27945445908699,
+          "peak_total_bytes": 9219080192,
+          "swap_delta_bytes": 0
+        }
+      ],
+      "best_epoch": 3,
+      "best_dev_micro_f1": 0.7781818181818182,
+      "stop_epoch": 4,
+      "asha_stopped": false
+    },
+    {
+      "index": 7,
+      "config": {
+        "encoder_lr": 7.255482100397885e-06,
+        "head_lr": 0.00031506555211937605,
+        "neg": 8,
+        "epochs": 6
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 419,
+          "dev_fp": 293,
+          "dev_fn": 49,
+          "dev_micro_f1": 0.7101694915254237,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.7007153723577367,
+          "loss": 0.5743178424838559,
+          "train_s": 724.2564901249716,
+          "dev_s": 70.14684262499213,
+          "peak_total_bytes": 8773746688,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 2,
+          "dev_tp": 424,
+          "dev_fp": 285,
+          "dev_fn": 44,
+          "dev_micro_f1": 0.7204757858963466,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.7191007975431174,
+          "loss": 0.5461443704435162,
+          "train_s": 725.3657667089719,
+          "dev_s": 70.08714395796414,
+          "peak_total_bytes": 9264431104,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 3,
+          "dev_tp": 420,
+          "dev_fp": 191,
+          "dev_fn": 48,
+          "dev_micro_f1": 0.7784986098239111,
+          "dev_theta": 0.92,
+          "dev_macro_f1": 0.7575283106640818,
+          "loss": 0.3479724542099569,
+          "train_s": 728.3299025830347,
+          "dev_s": 70.21299941698089,
+          "peak_total_bytes": 9271672832,
+          "swap_delta_bytes": 230162432
+        },
+        {
+          "epoch": 4,
+          "dev_tp": 430,
+          "dev_fp": 213,
+          "dev_fn": 38,
+          "dev_micro_f1": 0.774077407740774,
+          "dev_theta": 0.91,
+          "dev_macro_f1": 0.7551643215712719,
+          "loss": 0.22038106207214905,
+          "train_s": 728.2206835420802,
+          "dev_s": 70.25846558401827,
+          "peak_total_bytes": 9359671296,
+          "swap_delta_bytes": -8388608
+        },
+        {
+          "epoch": 5,
+          "dev_tp": 425,
+          "dev_fp": 201,
+          "dev_fn": 43,
+          "dev_micro_f1": 0.7769652650822669,
+          "dev_theta": 0.88,
+          "dev_macro_f1": 0.7661318788370179,
+          "loss": 0.14023709958656758,
+          "train_s": 727.8832022499992,
+          "dev_s": 70.2236874580849,
+          "peak_total_bytes": 9314582528,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 6,
+          "dev_tp": 420,
+          "dev_fp": 173,
+          "dev_fn": 48,
+          "dev_micro_f1": 0.7917059377945335,
+          "dev_theta": 0.91,
+          "dev_macro_f1": 0.7758726531662483,
+          "loss": 0.09488040896396978,
+          "train_s": 727.3920827090042,
+          "dev_s": 70.6140369999921,
+          "peak_total_bytes": 9362866176,
+          "swap_delta_bytes": 0
+        }
+      ],
+      "best_epoch": 6,
+      "best_dev_micro_f1": 0.7917059377945335,
+      "stop_epoch": 6,
+      "asha_stopped": false
+    },
+    {
+      "index": 8,
+      "config": {
+        "encoder_lr": 3.159399123001888e-05,
+        "head_lr": 0.00011519023045454686,
+        "neg": 8,
+        "epochs": 8
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 363,
+          "dev_fp": 404,
+          "dev_fn": 105,
+          "dev_micro_f1": 0.5878542510121457,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.49572064694815965,
+          "loss": 1.0402051095469775,
+          "train_s": 726.7968505000463,
+          "dev_s": 70.33338375005405,
+          "peak_total_bytes": 9241952256,
+          "swap_delta_bytes": -8388608
+        }
+      ],
+      "best_epoch": 1,
+      "best_dev_micro_f1": 0.5878542510121457,
+      "stop_epoch": 1,
+      "asha_stopped": true
+    },
+    {
+      "index": 9,
+      "config": {
+        "encoder_lr": 9.442047934607997e-05,
+        "head_lr": 0.00033198508436218973,
+        "neg": 16,
+        "epochs": 6
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 173,
+          "dev_fp": 112,
+          "dev_fn": 295,
+          "dev_micro_f1": 0.4594953519256308,
+          "dev_theta": 0.33,
+          "dev_macro_f1": 0.2736044871202657,
+          "loss": 1.1268900155711914,
+          "train_s": 1289.9843389160233,
+          "dev_s": 70.37279533303808,
+          "peak_total_bytes": 9475735552,
+          "swap_delta_bytes": 0
+        }
+      ],
+      "best_epoch": 1,
+      "best_dev_micro_f1": 0.4594953519256308,
+      "stop_epoch": 1,
+      "asha_stopped": true
+    },
+    {
+      "index": 10,
+      "config": {
+        "encoder_lr": 3.932419592537805e-05,
+        "head_lr": 0.00011732793441385053,
+        "neg": 16,
+        "epochs": 4
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 334,
+          "dev_fp": 162,
+          "dev_fn": 134,
+          "dev_micro_f1": 0.6929460580912863,
+          "dev_theta": 0.92,
+          "dev_macro_f1": 0.6096964047685932,
+          "loss": 0.8231013614520863,
+          "train_s": 1293.2466743330006,
+          "dev_s": 69.99706054199487,
+          "peak_total_bytes": 8745418752,
+          "swap_delta_bytes": 559611904
+        }
+      ],
+      "best_epoch": 1,
+      "best_dev_micro_f1": 0.6929460580912863,
+      "stop_epoch": 1,
+      "asha_stopped": true
+    },
+    {
+      "index": 11,
+      "config": {
+        "encoder_lr": 4.341581684501093e-05,
+        "head_lr": 0.0001893094031081735,
+        "neg": 8,
+        "epochs": 4
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 384,
+          "dev_fp": 272,
+          "dev_fn": 84,
+          "dev_micro_f1": 0.6832740213523132,
+          "dev_theta": 0.94,
+          "dev_macro_f1": 0.6221614021362937,
+          "loss": 0.6535671752873076,
+          "train_s": 727.5355720000807,
+          "dev_s": 70.26266187499277,
+          "peak_total_bytes": 8802287616,
+          "swap_delta_bytes": 0
+        }
+      ],
+      "best_epoch": 1,
+      "best_dev_micro_f1": 0.6832740213523132,
+      "stop_epoch": 1,
+      "asha_stopped": true
+    },
+    {
+      "index": 12,
+      "config": {
+        "encoder_lr": 2.1431688044033635e-05,
+        "head_lr": 0.0006787398870536586,
+        "neg": 4,
+        "epochs": 8
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 430,
+          "dev_fp": 725,
+          "dev_fn": 38,
+          "dev_micro_f1": 0.529882932840419,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.5220410324804124,
+          "loss": 0.7780453143580657,
+          "train_s": 443.4298913750099,
+          "dev_s": 70.30755537503865,
+          "peak_total_bytes": 8809218048,
+          "swap_delta_bytes": 0
+        }
+      ],
+      "best_epoch": 1,
+      "best_dev_micro_f1": 0.529882932840419,
+      "stop_epoch": 1,
+      "asha_stopped": true
+    },
+    {
+      "index": 13,
+      "config": {
+        "encoder_lr": 1.4604015578747488e-05,
+        "head_lr": 0.0002225829460029659,
+        "neg": 4,
+        "epochs": 4
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 434,
+          "dev_fp": 603,
+          "dev_fn": 34,
+          "dev_micro_f1": 0.5767441860465117,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.5649858825136607,
+          "loss": 0.6896277338365179,
+          "train_s": 445.2712342500454,
+          "dev_s": 70.25847541599069,
+          "peak_total_bytes": 9560358912,
+          "swap_delta_bytes": 0
+        }
+      ],
+      "best_epoch": 1,
+      "best_dev_micro_f1": 0.5767441860465117,
+      "stop_epoch": 1,
+      "asha_stopped": true
+    },
+    {
+      "index": 14,
+      "config": {
+        "encoder_lr": 2.9660069889947058e-05,
+        "head_lr": 9.811131074677546e-05,
+        "neg": 16,
+        "epochs": 6
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 366,
+          "dev_fp": 171,
+          "dev_fn": 102,
+          "dev_micro_f1": 0.7283582089552239,
+          "dev_theta": 0.5,
+          "dev_macro_f1": 0.6556584502503798,
+          "loss": 0.7629097115193809,
+          "train_s": 1290.2008513330948,
+          "dev_s": 70.1806450409349,
+          "peak_total_bytes": 8619753472,
+          "swap_delta_bytes": -8388608
+        },
+        {
+          "epoch": 2,
+          "dev_tp": 408,
+          "dev_fp": 166,
+          "dev_fn": 60,
+          "dev_micro_f1": 0.783109404990403,
+          "dev_theta": 0.5,
+          "dev_macro_f1": 0.7372263810874632,
+          "loss": 0.5068940810179132,
+          "train_s": 1293.485867875046,
+          "dev_s": 70.16989120899234,
+          "peak_total_bytes": 9261285376,
+          "swap_delta_bytes": 576651264
+        },
+        {
+          "epoch": 3,
+          "dev_tp": 425,
+          "dev_fp": 116,
+          "dev_fn": 43,
+          "dev_micro_f1": 0.8424182358771061,
+          "dev_theta": 0.5,
+          "dev_macro_f1": 0.8349951207188794,
+          "loss": 0.3030304745867188,
+          "train_s": 1291.113462959067,
+          "dev_s": 70.34758737497032,
+          "peak_total_bytes": 9361768448,
+          "swap_delta_bytes": -142606336
+        },
+        {
+          "epoch": 4,
+          "dev_tp": 431,
+          "dev_fp": 127,
+          "dev_fn": 37,
+          "dev_micro_f1": 0.8401559454191033,
+          "dev_theta": 0.51,
+          "dev_macro_f1": 0.8378583843782494,
+          "loss": 0.19126137879053703,
+          "train_s": 1294.698671124992,
+          "dev_s": 70.25289841706399,
+          "peak_total_bytes": 9356902400,
+          "swap_delta_bytes": -100663296
+        },
+        {
+          "epoch": 5,
+          "dev_tp": 431,
+          "dev_fp": 113,
+          "dev_fn": 37,
+          "dev_micro_f1": 0.8517786561264822,
+          "dev_theta": 0.89,
+          "dev_macro_f1": 0.8470313596363396,
+          "loss": 0.10609277548416186,
+          "train_s": 1296.3690911669983,
+          "dev_s": 70.30250391596928,
+          "peak_total_bytes": 9337749504,
+          "swap_delta_bytes": -176357376
+        },
+        {
+          "epoch": 6,
+          "dev_tp": 430,
+          "dev_fp": 95,
+          "dev_fn": 38,
+          "dev_micro_f1": 0.8660624370594159,
+          "dev_theta": 0.13,
+          "dev_macro_f1": 0.8626308493430489,
+          "loss": 0.07386540518503634,
+          "train_s": 1293.6386472079903,
+          "dev_s": 70.3014741250081,
+          "peak_total_bytes": 9363472384,
+          "swap_delta_bytes": -85786624
+        }
+      ],
+      "best_epoch": 6,
+      "best_dev_micro_f1": 0.8660624370594159,
+      "stop_epoch": 6,
+      "asha_stopped": false
+    },
+    {
+      "index": 15,
+      "config": {
+        "encoder_lr": 7.19852704534731e-05,
+        "head_lr": 6.653569930030593e-05,
+        "neg": 16,
+        "epochs": 6
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 219,
+          "dev_fp": 133,
+          "dev_fn": 249,
+          "dev_micro_f1": 0.5341463414634147,
+          "dev_theta": 0.53,
+          "dev_macro_f1": 0.3511786364809174,
+          "loss": 1.282210716294374,
+          "train_s": 1282.2910289589781,
+          "dev_s": 69.82380695804022,
+          "peak_total_bytes": 9015623680,
+          "swap_delta_bytes": -25165824
+        }
+      ],
+      "best_epoch": 1,
+      "best_dev_micro_f1": 0.5341463414634147,
+      "stop_epoch": 1,
+      "asha_stopped": true
+    },
+    {
+      "index": 16,
+      "config": {
+        "encoder_lr": 6.430970041416098e-06,
+        "head_lr": 0.0005560800692215166,
+        "neg": 8,
+        "epochs": 8
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 399,
+          "dev_fp": 249,
+          "dev_fn": 69,
+          "dev_micro_f1": 0.7150537634408602,
+          "dev_theta": 0.94,
+          "dev_macro_f1": 0.6805336895090229,
+          "loss": 0.609577112177618,
+          "train_s": 725.1624783748994,
+          "dev_s": 70.24228454101831,
+          "peak_total_bytes": 8660664320,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 2,
+          "dev_tp": 404,
+          "dev_fp": 174,
+          "dev_fn": 64,
+          "dev_micro_f1": 0.7724665391969407,
+          "dev_theta": 0.94,
+          "dev_macro_f1": 0.76027125196181,
+          "loss": 0.5685406565906816,
+          "train_s": 727.469957082998,
+          "dev_s": 70.0595355000114,
+          "peak_total_bytes": 9279684608,
+          "swap_delta_bytes": -8388608
+        },
+        {
+          "epoch": 3,
+          "dev_tp": 428,
+          "dev_fp": 253,
+          "dev_fn": 40,
+          "dev_micro_f1": 0.7449956483899043,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.740225126292351,
+          "loss": 0.4000386438640909,
+          "train_s": 727.9655052500311,
+          "dev_s": 70.028550292016,
+          "peak_total_bytes": 9219391488,
+          "swap_delta_bytes": -58785792
+        }
+      ],
+      "best_epoch": 2,
+      "best_dev_micro_f1": 0.7724665391969407,
+      "stop_epoch": 3,
+      "asha_stopped": true
+    },
+    {
+      "index": 17,
+      "config": {
+        "encoder_lr": 1.0242284373798553e-05,
+        "head_lr": 0.0006484857846021932,
+        "neg": 4,
+        "epochs": 4
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 432,
+          "dev_fp": 584,
+          "dev_fn": 36,
+          "dev_micro_f1": 0.5822102425876011,
+          "dev_theta": 0.95,
+          "dev_macro_f1": 0.5622493184740393,
+          "loss": 0.6650830323657251,
+          "train_s": 445.81467812496703,
+          "dev_s": 70.18883237498812,
+          "peak_total_bytes": 8724152320,
+          "swap_delta_bytes": -50331648
+        }
+      ],
+      "best_epoch": 1,
+      "best_dev_micro_f1": 0.5822102425876011,
+      "stop_epoch": 1,
+      "asha_stopped": true
+    },
+    {
+      "index": 18,
+      "config": {
+        "encoder_lr": 1.3685743059703372e-05,
+        "head_lr": 5.081344744850783e-05,
+        "neg": 16,
+        "epochs": 6
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 392,
+          "dev_fp": 165,
+          "dev_fn": 76,
+          "dev_micro_f1": 0.7648780487804878,
+          "dev_theta": 0.92,
+          "dev_macro_f1": 0.7449442597100797,
+          "loss": 0.6431100688175606,
+          "train_s": 1294.0725085840095,
+          "dev_s": 70.19093037501443,
+          "peak_total_bytes": 8791523328,
+          "swap_delta_bytes": -25165824
+        },
+        {
+          "epoch": 2,
+          "dev_tp": 410,
+          "dev_fp": 117,
+          "dev_fn": 58,
+          "dev_micro_f1": 0.8241206030150754,
+          "dev_theta": 0.93,
+          "dev_macro_f1": 0.814536369784356,
+          "loss": 0.3868451650238241,
+          "train_s": 1294.5020157089457,
+          "dev_s": 70.19395112490747,
+          "peak_total_bytes": 8632401920,
+          "swap_delta_bytes": -8388608
+        },
+        {
+          "epoch": 3,
+          "dev_tp": 425,
+          "dev_fp": 114,
+          "dev_fn": 43,
+          "dev_micro_f1": 0.8440913604766633,
+          "dev_theta": 0.81,
+          "dev_macro_f1": 0.8373052150304872,
+          "loss": 0.23011027649096139,
+          "train_s": 1295.5878016250208,
+          "dev_s": 70.32631741603836,
+          "peak_total_bytes": 8571764736,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 4,
+          "dev_tp": 417,
+          "dev_fp": 82,
+          "dev_fn": 51,
+          "dev_micro_f1": 0.8624612202688728,
+          "dev_theta": 0.94,
+          "dev_macro_f1": 0.8578286717593417,
+          "loss": 0.13455995341636195,
+          "train_s": 1295.2853255830705,
+          "dev_s": 70.44045545905828,
+          "peak_total_bytes": 8587722752,
+          "swap_delta_bytes": -8388608
+        },
+        {
+          "epoch": 5,
+          "dev_tp": 429,
+          "dev_fp": 108,
+          "dev_fn": 39,
+          "dev_micro_f1": 0.8537313432835821,
+          "dev_theta": 0.5,
+          "dev_macro_f1": 0.8605826833218023,
+          "loss": 0.07135018026630482,
+          "train_s": 1297.6660962499445,
+          "dev_s": 70.41994958394207,
+          "peak_total_bytes": 8565997568,
+          "swap_delta_bytes": 0
+        },
+        {
+          "epoch": 6,
+          "dev_tp": 431,
+          "dev_fp": 98,
+          "dev_fn": 37,
+          "dev_micro_f1": 0.8645937813440321,
+          "dev_theta": 0.54,
+          "dev_macro_f1": 0.8684557327727824,
+          "loss": 0.05590388266988852,
+          "train_s": 1295.9030839169864,
+          "dev_s": 70.41762404202018,
+          "peak_total_bytes": 8583872512,
+          "swap_delta_bytes": -8388608
+        }
+      ],
+      "best_epoch": 6,
+      "best_dev_micro_f1": 0.8645937813440321,
+      "stop_epoch": 6,
+      "asha_stopped": false
+    },
+    {
+      "index": 19,
+      "config": {
+        "encoder_lr": 5.432650498662471e-05,
+        "head_lr": 6.735368671921905e-05,
+        "neg": 16,
+        "epochs": 4
+      },
+      "attempts": 1,
+      "curve": [
+        {
+          "epoch": 1,
+          "dev_tp": 316,
+          "dev_fp": 280,
+          "dev_fn": 152,
+          "dev_micro_f1": 0.5939849624060151,
+          "dev_theta": 0.94,
+          "dev_macro_f1": 0.47876883166158196,
+          "loss": 0.9751653480067178,
+          "train_s": 1292.4289863749873,
+          "dev_s": 70.19938383297995,
+          "peak_total_bytes": 8751808512,
+          "swap_delta_bytes": -8388608
+        }
+      ],
+      "best_epoch": 1,
+      "best_dev_micro_f1": 0.5939849624060151,
+      "stop_epoch": 1,
+      "asha_stopped": true
+    }
+  ]
+}
