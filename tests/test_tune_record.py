@@ -157,6 +157,54 @@ def test_a_changed_spec_is_refused(snap: tuple[str, str, str], tmp_path: Path, n
     assert len(json.loads((storage / "laya-search.json").read_text(encoding="utf-8"))["segments"]) == 2
 
 
+FINISHED_POINTS = [{"encoder_lr": 0.0001, "head_lr": 0.001, "neg": 8, "epochs": 4},
+                   {"encoder_lr": 5e-06, "head_lr": 3e-05, "neg": 4, "epochs": 4},
+                   {"encoder_lr": 0.0001, "head_lr": 0.001, "neg": 8, "epochs": 6}]
+
+
+def _finished_search(snap: tuple[str, str, str], storage: Path, out: Path) -> tuple[list[str], str]:
+    """(argv, record sha256) of a 3-trial search made finished without Ray: the first start writes the search file,
+    each trial dir gets params.json, a one-epoch result.json (an ASHA stop at rung 1) and attempts.json, and the
+    search file is marked finished with the record's sha256, as the end of main does. --out is not written."""
+    argv = _smoke(snap, storage, out)
+    with pytest.raises(RayReached):
+        tune.main(argv)
+    for i, point in enumerate(FINISHED_POINTS):
+        d = storage / "laya" / pt.trial_dirname_of(i)
+        d.mkdir(parents=True)
+        (d / "params.json").write_text(json.dumps(point), encoding="utf-8")
+        (d / "result.json").write_text(json.dumps(dict(_result(1, 1 + i, 2, 2), timestamp=1, pid=2)) + "\n",
+                                       encoding="utf-8")
+        pt.bump_attempts(str(d))
+    a = tune.parse_args(argv)
+    sp = tune.spec_path(str(storage), "laya")
+    doc = tune.read_search(sp)
+    record = tune.finish(a, tune.bind(a), doc)
+    sha = pilot.data.sha256_bytes(pt.record_bytes(record))
+    tune.write_search(sp, dict(doc, finished=True, record_sha256=sha))
+    return argv, sha
+
+
+def test_a_finished_search_checks_its_rebuild_before_writing_out(snap: tuple[str, str, str], tmp_path: Path,
+                                                                 capsys: pytest.CaptureFixture[str],
+                                                                 no_ray: None) -> None:
+    """A finished search's rerun starts no Ray and writes --out only once the rebuilt record has the sha256 the search
+    wrote: with a changed trial dir it is refused and --out stays absent."""
+    storage, out = tmp_path / "s", tmp_path / "laya.json"
+    argv, sha = _finished_search(snap, storage, out)
+    result = storage / "laya" / pt.trial_dirname_of(2) / "result.json"
+    good = result.read_text(encoding="utf-8")
+    result.write_text(good.replace('"dev_tp": 3', '"dev_tp": 4'), encoding="utf-8")
+    with pytest.raises(SystemExit, match="rebuilds a record of sha256 .* not the %s it wrote" % sha):
+        tune.main(argv)
+    assert not out.exists()
+    result.write_text(good, encoding="utf-8")
+    capsys.readouterr()
+    tune.main(argv)
+    assert "search finished; record written -> %s (sha256 %s)" % (out, sha) in capsys.readouterr().out
+    assert pt.read_record(str(out))[1] == sha
+
+
 def test_an_unrestorable_experiment_dir_is_refused(snap: tuple[str, str, str], tmp_path: Path, no_ray: None) -> None:
     """STORAGE/laya holding a stray file and no Tune state is refused before ray.init, naming the three paths to
     delete; so is an experiment dir without its search file."""

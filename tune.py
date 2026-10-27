@@ -664,12 +664,12 @@ def write_out(record: dict[str, Any], out: str) -> bool:
     return True
 
 
-def finish(a: argparse.Namespace, bound: dict[str, Any], doc: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    """(record, written) of a search whose trials all ended: the record built from the trial dirs under STORAGE/SYS
-    and every segment of the search file, written to --out by write_out."""
+def finish(a: argparse.Namespace, bound: dict[str, Any], doc: dict[str, Any]) -> dict[str, Any]:
+    """The record of a search whose trials all ended, built from the trial dirs under STORAGE/SYS and every segment of
+    the search file. Writes nothing: the caller checks it (a finished search: against the sha256 it wrote) before
+    write_out."""
     trials = collect(os.path.join(a.storage, a.system), a.trials)
-    record = pt.build_record(canonical_of(a, bound, trials, copy.deepcopy(doc["segments"])))
-    return record, write_out(record, a.out)
+    return pt.build_record(canonical_of(a, bound, trials, copy.deepcopy(doc["segments"])))
 
 
 def preflight(a: argparse.Namespace) -> dict[str, Any]:
@@ -771,12 +771,13 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit("%s holds a search with another spec (key %s); rerun the command that started it, or "
                              "delete %s to start over" % (a.storage, key, stale_paths(a.storage, a.system)))
     if doc is not None and doc["finished"]:                 # no Ray: the trial dirs and the segments rebuild it
-        record, written = finish(a, bound, doc)
+        record = finish(a, bound, doc)
         sha = sha256_bytes(pt.record_bytes(record))
-        if sha != doc["record_sha256"]:
+        if sha != doc["record_sha256"]:                     # refused before --out is touched
             raise SystemExit("the finished search in %s rebuilds a record of sha256 %s, not the %s it wrote; its trial "
                              "dirs changed; delete %s to start over" % (a.storage, sha, doc["record_sha256"],
                                                                          stale_paths(a.storage, a.system)))
+        written = write_out(record, a.out)
         print("search finished; record %s -> %s (sha256 %s)" % ("written" if written else "unchanged", a.out, sha),
               flush=True)
         return
@@ -826,7 +827,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit("the search ended with %d of %d trials, errored: %s; rerun the same command: errored trials "
                          "run again from epoch 1 in their own trial dirs" % (len(grid), a.trials,
                                                                              ", ".join(errored) or "none"))
-    record, _ = finish(a, bound, doc)
+    record = finish(a, bound, doc)
+    write_out(record, a.out)
     sha = sha256_bytes(pt.record_bytes(record))
     write_search(sp, dict(doc, finished=True, record_sha256=sha))
     print("record -> %s (sha256 %s)" % (a.out, sha), flush=True)
