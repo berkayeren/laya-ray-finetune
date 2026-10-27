@@ -64,6 +64,15 @@ def _smoke(snap: tuple[str, str, str], storage: Path, out: Path, *extra: str) ->
             "--data", data, "--manifest", manifest, "--storage", str(storage), "--out", str(out), *extra]
 
 
+def _bytes_or_none(path: str) -> bytes | None:
+    """The bytes of `path`, or None when it does not exist: a refused run must leave it as it was (absent, or a
+    committed record byte for byte)."""
+    if not os.path.exists(path):
+        return None
+    with open(path, "rb") as f:
+        return f.read()
+
+
 # ---- the results/ guard ----
 
 DEPARTURES = [(["--trials", "3"], "--trials"), (["--seed", "1"], "--seed"), (["--device", "cpu"], "--device"),
@@ -105,9 +114,10 @@ def test_results_out_elsewhere_is_refused(name: str, settings: str, snap: tuple[
     out = os.path.join(REPO, "results", name)
     argv = (["--system", "laya", "--out", out, "--storage", str(tmp_path / "s")] if settings == "committed"
             else _smoke(snap, tmp_path / "s", Path(out)))
+    before = _bytes_or_none(out)                            # results/tune/berturk.json is a committed record
     with pytest.raises(SystemExit, match="results/tune/laya.json"):
         tune.main(argv)
-    assert not os.path.exists(out) and _guarded_status() == ""
+    assert _bytes_or_none(out) == before and _guarded_status() == ""
 
 
 def test_the_committed_search_passes_the_guard(monkeypatch: pytest.MonkeyPatch) -> None:
