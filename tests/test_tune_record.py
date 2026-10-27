@@ -326,6 +326,13 @@ def test_mps_preflight_lands_in_the_segment(gib: str | None, snap: tuple[str, st
 
 # ---- --check and --status ----
 
+def test_default_storage_is_the_repo_tune_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default --storage is REPO_ROOT/tune_runs (the gitignored /tune_runs/), whatever the current directory."""
+    monkeypatch.chdir(tmp_path)
+    for argv in (["--status", "--system", "laya"], ["--system", "laya"]):
+        assert tune.parse_args(argv).storage == os.path.join(REPO, "tune_runs")
+
+
 def test_check_mode(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """--check RECORD prints ok with the record's sha256; one changed byte is the read_record refusal (exit 1)."""
     path = pt.write_record(pt.build_record(_canonical()), str(tmp_path / "laya.json"))

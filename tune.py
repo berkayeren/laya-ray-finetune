@@ -134,8 +134,8 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--trials", type=int, default=pt.TRIALS, help="trials of the search (default %d)" % pt.TRIALS)
     ap.add_argument("--seed", type=int, default=pt.SEED, help="the search seed (default %d)" % pt.SEED)
     ap.add_argument("--device", choices=("mps", "cpu"), default="mps", help="training device (default mps)")
-    ap.add_argument("--storage", default=os.path.abspath("tune_runs"),
-                    help="Ray Tune and Train storage (default tune_runs/, gitignored)")
+    ap.add_argument("--storage", default=os.path.join(REPO_ROOT, "tune_runs"),
+                    help="Ray Tune and Train storage (default the repo's tune_runs/, gitignored)")
     ap.add_argument("--out", default=None, help="the tune/1 record (default results/tune/<system>.json)")
     ap.add_argument("--data", default=DEFAULT_DATA, help="the selection_train split (default the committed one)")
     ap.add_argument("--manifest", default=DEFAULT_MANIFEST,
