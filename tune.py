@@ -49,6 +49,9 @@ Ray 2.59 behaviour this design handles:
 - a restore can let a restarted trial pass an ASHA rung it had been judged at, so every trial counts its starts in
   attempts.json in its storage trial dir (pilot.tune.bump_attempts, trial_store_dir; never Tune's get_trial_dir(), a
   session working dir synced only at a report) and the record carries the count (never repaired);
+- ASHA's rung table is not saved with the experiment (Tune's controller leaves its scheduler out of its state), so after
+  a restore ASHA judges trials only against the results reported since; the rendered summary of a record of more than
+  one driver start says so (pilot.tune.RESTORE_LINE);
 - a function trial runs with its cwd under Ray's session dir, so every path a trial receives is absolute.
 
 Storage (default tune_runs/, gitignored): <storage>/<system>/ is the Tune experiment (trial dirs trial_NNNNN, each with

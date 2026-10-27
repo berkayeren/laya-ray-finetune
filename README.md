@@ -1929,7 +1929,9 @@ scores, is `results/tune/tune.md` (`tune.py --render`). `make report` does not t
 tuning-dev seconds the records hold sum to about 14.4 hours for Laya and about 28 minutes for BERTurk on the M4. A
 killed search, or one that ended with an errored trial, continues when you rerun the identical command: Ray Tune's
 state lives in the gitignored `tune_runs/`, and a trial cut off mid-run or errored runs again from its first epoch in
-its own trial dir, still one trial at a time, its restart counted in the record.
+its own trial dir, still one trial at a time, its restart counted in the record. Ray Tune does not save ASHA's rung
+table with the experiment, so after a restore ASHA compares a trial only with the results reported since; the rendered
+summary says so for a record of more than one driver start (each committed search ran in one).
 
 ## Demo UI
 

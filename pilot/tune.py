@@ -105,6 +105,10 @@ NOTES = (
     "The pipeline's single encoder LR 2e-05 stays fixed, not tuned; this search reopens it for exploration only.",
 )
 RENDER_TITLE = "# Exploratory hyperparameter search (Ray Tune)"
+# rendered only for a record of more than one driver start (never in NOTES, which committed records hold verbatim)
+RESTORE_LINE = ("- Restored %d time(s): Ray Tune 2.59 does not save ASHA's rung table with the experiment, so after "
+                "each restore ASHA judged a trial at a rung only against the results reported since that restore; its "
+                "stopping decisions after a restore are not the ones an uninterrupted search would have made")
 RENDER_NAMES = {"laya": "Laya", "berturk": "BERTurk"}
 RENDER_INTRO = (
     "This search is exploratory and not a decision input: it does not change the frozen verdict, protocol.json or any "
@@ -638,7 +642,8 @@ def _segment(seg: dict[str, Any]) -> str:
 def render_markdown(records: list[dict[str, Any]]) -> str:
     """The markdown of checked tune/1 records, in the given order (results/tune/tune.md): RENDER_TITLE, RENDER_INTRO,
     per record a section with its settings (trials, search seed, device, CPUs, partition counts, the shared-text count,
-    base, versions, driver starts with each one's short git sha and preflight, restarted and ASHA-stopped trials), the
+    base, versions, driver starts with each one's short git sha and preflight, RESTORE_LINE when there was more than
+    one driver start (ASHA's rung table is lost on a restore), restarted and ASHA-stopped trials), the
     highest tuning-dev score (trial, epoch, dev micro-F1 to 4 decimals, TP/FP/FN, config) and a table of every trial
     (its space values, log-uniform ones as %.1e, attempts, epochs run of its schedule, best epoch, best dev micro-F1,
     θ at the best epoch, ASHA stopped), then NOTES as bullets. Deterministic; no path, timestamp or uid."""
@@ -661,8 +666,10 @@ def render_markdown(records: list[dict[str, Any]]) -> str:
                 "- Base: %s (model sha256 %s)" % (base, r["base"]["model_sha256"][:12]),
                 "- Versions: %s" % ", ".join("%s %s" % kv for kv in r["versions"].items()),
                 "- Driver starts: %d (%s)" % (len(r["segments"]), "; ".join("%d: %s" % (i + 1, _segment(g))
-                                                                            for i, g in enumerate(r["segments"]))),
-                "- Restarted trials (attempts above 1): %d of %d" % (restarted, len(trials)),
+                                                                            for i, g in enumerate(r["segments"])))]
+        if len(r["segments"]) > 1:
+            out.append(RESTORE_LINE % (len(r["segments"]) - 1))
+        out += ["- Restarted trials (attempts above 1): %d of %d" % (restarted, len(trials)),
                 "- ASHA-stopped trials: %d of %d" % (r["n_asha_stopped"], len(trials))]
         b = r["best"]
         row = trials[b["index"]]["curve"][b["epoch"] - 1]

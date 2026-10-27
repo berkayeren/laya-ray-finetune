@@ -336,6 +336,20 @@ def test_render_markdown_of_two_records() -> None:
     assert not re.search(r"\d{4}-\d{2}-\d{2}|\d{2}:\d{2}:\d{2}", text)
 
 
+def test_render_discloses_a_restore() -> None:
+    """A record of more than one driver start renders RESTORE_LINE (ASHA's rung table does not survive a restore) in
+    its section, right after the driver starts; a one-start record does not."""
+    one = _berturk_canonical()
+    assert len(one["segments"]) == 1
+    text = pt.render_markdown([pt.build_record(one)])
+    assert "Restored" not in text and "rung table" not in text
+    two = _berturk_canonical()
+    two["segments"] = two["segments"] * 3
+    lines = pt.render_markdown([pt.build_record(two)]).splitlines()
+    i = [n for n, line in enumerate(lines) if line.startswith("- Driver starts: 3 ")]
+    assert len(i) == 1 and lines[i[0] + 1] == pt.RESTORE_LINE % 2
+
+
 def test_render_refuses_an_unchecked_record(tmp_path: Path) -> None:
     """--render reads each record through read_record: an edited best is refused."""
     rec = pt.build_record(_canonical())
