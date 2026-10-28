@@ -110,3 +110,72 @@ def test_a_plain_laya_command_names_the_tuned_recipe() -> None:
         assert explicit[key] == want and type(explicit[key]) is type(want), flag
         assert {k: explicit[k] for k in defaults.LAYA if k != key} == {k: canon[k] for k in defaults.LAYA if k != key}
 
+
+# ---- Laya: every committed command names its own recipe ----
+
+LAYA_RECIPE_FLAGS = ("--epochs", "--encoder-lr", "--head-lr", "--neg")
+
+
+def _read_json(*parts: str) -> Any:
+    with open(os.path.join(REPO_ROOT, *parts), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _laya_commands(step: str) -> list[tuple[str, ...]]:
+    from pilot import reproduce as rp
+    return [c for c in rp.commands(step) if c[0] == "ray_train.py"]
+
+
+def test_committed_laya_commands_pass_every_tuned_flag() -> None:
+    counts = {"laya-selection": 2, "laya-final": 3, "fewshot-bases": 3, "fewshot-continued": 6}
+    for step, n in counts.items():
+        cmds = _laya_commands(step)
+        assert len(cmds) == n, (step, len(cmds))
+        for c in cmds:
+            for flag in LAYA_RECIPE_FLAGS:
+                assert c.count(flag) == 1, (step, flag, c)
+
+
+def _committed_laya_canon(argv: list[str], ident: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """(canonical config, postfit record or None) of a committed ray_train.py command, offline: the committed
+    data/splits.json entry named by the --data file's stem, the pinned base identity, and for a final seed the sha256
+    of its postfit record."""
+    import ray_train
+    from pilot import postfit, runs
+    a = ray_train.parser().parse_args(argv)
+    entry = _read_json("data", "splits.json")["splits"][os.path.splitext(os.path.basename(a.data))[0]]
+    record, sha = (None, None)
+    if a.postfit is not None:
+        record, sha = postfit.read_record(os.path.join(REPO_ROOT, a.postfit))
+    vals = ray_train.identity_values(a, ray_train.resolve(a), entry, "multilingual", ident, sha)
+    return runs.canonical(vals), record
+
+
+def test_committed_laya_run_ids_recompute_offline() -> None:
+    pytest.importorskip("ray_train")
+    from pilot import postfit, runs
+    from pilot.weights import identity
+    ident = identity("multilingual")
+    chosen = _read_json("results", "postfit", "laya.json")["chosen"]["train_run_id"]
+    assert chosen == "laya-selection_train-neg8-s0-d92447f4"
+    sel = list(_laya_commands("laya-selection")[1][1:])
+    assert "--print-run-id" not in sel
+    canon, _ = _committed_laya_canon(sel, ident)
+    assert runs.run_id(canon) == chosen
+    final_ids = {s["seed"]: s["train_run_id"] for s in _read_json("results", "postfit", "laya-final.json")["seeds"]}
+    finals = _laya_commands("laya-final")
+    assert len(finals) == 3
+    for c in finals:
+        argv = list(c[1:])
+        canon, record = _committed_laya_canon(argv, ident)
+        assert record is not None
+        postfit.check_final(record, canon)
+        assert runs.run_id(canon) == final_ids[canon["seed"]]
+    assert sorted(final_ids) == [0, 1, 2]
+    # negative control: without its four recipe flags the selection command names another run, at the tuned neg
+    bare = list(sel)
+    for flag in LAYA_RECIPE_FLAGS:
+        i = bare.index(flag)
+        del bare[i:i + 2]
+    other = runs.run_id(_committed_laya_canon(bare, ident)[0])
+    assert other != chosen and other.startswith("laya-selection_train-neg%d-s0-" % defaults.LAYA["neg"])
