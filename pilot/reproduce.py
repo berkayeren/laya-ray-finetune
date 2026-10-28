@@ -911,25 +911,38 @@ def _laya_argv(b: dict[str, Any], data: str, base: str, epochs: int, seed: int, 
 
 
 def _berturk_argv(b: dict[str, Any], data: str, base: str, epochs: int, seed: int, lr: float, head_lr: float,
-                  stop: int | None = None, tail: Sequence[str] = ()) -> Cmd:
-    """A berturk_train.py argv in the recorded flag order from a protocol recipe b (fewshot.rules.base_runs.berturk);
-    --batch and --max-len only where b differs from berturk_train.py's defaults (pilot.berturk.BATCH, MAX_LEN), as
-    the recorded commands pass neither."""
+                  stop: int | None = None, tail: Sequence[str] = (), recipe: bool = False) -> Cmd:
+    """A berturk_train.py argv in the recorded flag order from a protocol recipe b (fewshot.rules.base_runs.berturk).
+
+    berturk_train.py resolves an omitted recipe flag from the run's context (a --postfit record's chosen run, the
+    frozen selection run for --fewshot-base, the masked base for --fewshot-draw), else from the tuned defaults of new
+    runs (pilot.defaults.BERTURK). A selection run has no context, so with recipe True (the selection command only)
+    the argv spells out the frozen recipe right after the LRs: --batch from b (pilot.berturk.BATCH when b has none),
+    --warmup-ratio pilot.berturk.WARMUP_RATIO and --weight-decay pilot.berturk.WEIGHT_DECAY, always, so it names the
+    committed selection run whatever the defaults are; no record is read, so a from-scratch tree prints it too. A
+    few-shot command (recipe False) resolves them from its frozen context, so its recorded text passes neither: --batch
+    only where b differs from pilot.berturk.BATCH, the batch every committed run used. --max-len only where b differs
+    from pilot.berturk.MAX_LEN, berturk_train.py's --max-len default."""
     from pilot import berturk
     argv = [b["trainer"], "--data", data, "--base", base, "--device", b["device"], "--epochs", str(epochs)]
     if stop is not None:
         argv += ["--stop-after-epoch", str(stop)]
     argv += ["--lr", repr(lr), "--head-lr", repr(head_lr)]
-    for key, flag, default in (("batch", "--batch", berturk.BATCH), ("max_len", "--max-len", berturk.MAX_LEN)):
-        if b.get(key, default) != default:
-            argv += [flag, str(b[key])]
+    if recipe:
+        argv += ["--batch", str(b.get("batch", berturk.BATCH)), "--warmup-ratio", repr(berturk.WARMUP_RATIO),
+                 "--weight-decay", repr(berturk.WEIGHT_DECAY)]
+    elif b.get("batch", berturk.BATCH) != berturk.BATCH:
+        argv += ["--batch", str(b["batch"])]
+    if b.get("max_len", berturk.MAX_LEN) != berturk.MAX_LEN:
+        argv += ["--max-len", str(b["max_len"])]
     return tuple(argv + ["--seed", str(seed)]) + tuple(tail)
 
 
 def selection_command(proto: dict[str, Any], kind: str) -> Cmd:
     """The selection run of kind: protocol fewshot.rules.base_runs.<kind> (every field but stop_after_epoch, the full
     schedule) at pilot.postfit.SELECTION_SEED on the base runs' split; Laya with --storage ray_results --out ckpt-sel,
-    BERTurk with --storage berturk_runs (its exports are its output)."""
+    BERTurk with --storage berturk_runs (its exports are its output) and its frozen recipe (batch, warm-up, weight
+    decay) spelled out, since berturk_train.py would resolve an omitted one to the tuned defaults of new runs."""
     from pilot import postfit
     runs = proto["fewshot"]["rules"]["base_runs"]
     b, data = runs[kind], "data/splits/%s.jsonl" % runs["split"]
@@ -937,7 +950,7 @@ def selection_command(proto: dict[str, Any], kind: str) -> Cmd:
         return _laya_argv(b, data, BASE[kind], b["epochs"], postfit.SELECTION_SEED, b["encoder_lr"], b["head_lr"],
                           tail=("--storage", STORAGE[kind], "--out", SELECTION_OUT))
     return _berturk_argv(b, data, BASE[kind], b["epochs"], postfit.SELECTION_SEED, b["encoder_lr"], b["head_lr"],
-                         tail=("--storage", STORAGE[kind]))
+                         tail=("--storage", STORAGE[kind]), recipe=True)
 
 
 def _selection_lines(kind: str) -> Builder:

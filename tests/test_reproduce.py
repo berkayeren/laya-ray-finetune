@@ -922,6 +922,7 @@ def test_selection_commands_match_the_chosen_canonical() -> None:
                      "--grad-accum": "grad_accum", "--max-len": "max_len", "--epochs": "epochs", "--neg": "neg",
                      "--seed": "seed", "--encoder-lr": "encoder_lr", "--head-lr": "head_lr"},
             "berturk": {"--device": "device", "--epochs": "epochs", "--lr": "encoder_lr", "--head-lr": "head_lr",
+                        "--batch": "batch", "--warmup-ratio": "warmup_ratio", "--weight-decay": "weight_decay",
                         "--seed": "seed"}}
     for kind, script, storage in (("laya", "ray_train.py", "ray_results"), ("berturk", "berturk_train.py",
                                                                              "berturk_runs")):
@@ -943,6 +944,35 @@ def test_selection_commands_match_the_chosen_canonical() -> None:
         assert scored == exports and pruned == exports, kind
         assert len(exports) == len(rec["candidates"]) and len(cmds) == 2 + 2 * len(exports)
         assert all(flags(x)["--model"] == kind and x[1] == "data/splits/val.jsonl" for x in cmds if x[0] == "score.py")
+
+
+BERTURK_SELECTION = ("berturk_train.py", "--data", "data/splits/selection_train.jsonl", "--base", "berturk", "--device",
+                     "mps", "--epochs", "30", "--lr", "2e-05", "--head-lr", "0.0001", "--batch", "32", "--warmup-ratio",
+                     "0.1", "--weight-decay", "0.01", "--seed", "0", "--storage", "berturk_runs")
+BERTURK_RECIPE_FLAGS = ("--batch", "--warmup-ratio", "--weight-decay")
+
+
+def test_berturk_selection_command_spells_out_the_frozen_recipe(bare: str) -> None:
+    """The BERTurk selection run has no context berturk_train.py could resolve an omitted recipe flag from, so its
+    command spells out the frozen batch, warm-up and weight decay (the unchanged pilot.berturk constants and the
+    protocol's batch), in the committed and the from-scratch tree; no few-shot command passes them (each resolves them
+    from its frozen context)."""
+    from pilot import berturk
+    proto, _ = pilot.protocol.require_frozen()
+    for root in (REPO_ROOT, bare):
+        cmds = rp.commands("berturk-selection", root)
+        assert cmds[1] == BERTURK_SELECTION, root
+        assert cmds[0] == BERTURK_SELECTION + ("--print-run-id",), root
+    f = flags(BERTURK_SELECTION)
+    assert f["--batch"] == str(berturk.BATCH) == str(proto["fewshot"]["rules"]["base_runs"]["berturk"]["batch"])
+    assert f["--warmup-ratio"] == repr(berturk.WARMUP_RATIO) and f["--weight-decay"] == repr(berturk.WEIGHT_DECAY)
+    seen = 0
+    for name in ("fewshot-bases", "fewshot-continued"):
+        for c in rp.commands(name):
+            if c[0] == "berturk_train.py":
+                seen += 1
+                assert not set(BERTURK_RECIPE_FLAGS) & set(c), (name, c)
+    assert seen == 9
 
 
 def test_final_seed_commands_are_the_records(bare: str) -> None:
