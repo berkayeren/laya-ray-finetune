@@ -4,8 +4,11 @@ fine-tuned head, end to end through berturk_train.py and the HF Trainer on CPU, 
 tests/fewshot_synthetic.synthetic_protocol installs a protocol whose fewshot block holds the tag card, k 1 and 2, one
 draw (seed 0) and tiny recipes (base: --epochs 2 --stop-after-epoch 1, batch 4, max_len 32, cpu, fp32, mask label
 -100; continued: 1 epoch at the base LRs). The chosen selection run is stood in for by a 2-epoch unmasked tiny run on
-the same synthetic selection_train: its berturk_train.json canonical config is the synthetic postfit record's
-chosen.canonical, so check_base binds the masked base to it. berturk_train.main runs in this process (--manifest
+the same synthetic selection_train, trained at the frozen warm-up 0.1 and weight decay 0.01 (both differ from the
+tuned defaults of new runs, as its batch 4 does): its berturk_train.json canonical config is the synthetic postfit
+record's chosen.canonical, so check_base binds the masked base to it, and the few-shot commands, which omit the batch,
+warm-up and weight decay, prove they resolve them from that run (the base) and from the masked base (the continued
+run), never from pilot.defaults.BERTURK. berturk_train.main runs in this process (--manifest
 passed explicitly), like a user's command:
 
 - `--fewshot-base` keeps every message, sets the card column of every label vector to pilot.berturk.MASK_LABEL and
@@ -42,6 +45,9 @@ BERTURK_RULE = {"trainer": "berturk_train.py", "epochs": 2, "stop_after_epoch": 
 CONTINUED = {"epochs": 1, "encoder_lr": 2e-05, "head_lr": 0.0001, "rule": "the synthetic continued training"}
 COMMON = ["--device", "cpu", "--batch", "4", "--max-len", "32", "--lr", "2e-05", "--head-lr", "0.0001",
           "--seed", "0"]
+# the stand-in chosen run's warm-up and weight decay: the frozen recipe's, which differ from the tuned defaults of new
+# runs, so a few-shot command that resolved from the plain context (pilot.defaults.BERTURK) would be told apart
+FROZEN_TAIL = ["--warmup-ratio", "0.1", "--weight-decay", "0.01"]
 GROUPS = [("encoder", True, 2e-05), ("encoder", False, 2e-05), ("head", True, 0.0001), ("head", False, 0.0001)]
 
 
@@ -103,8 +109,14 @@ def test_berturk_masked_base_then_continued_run(tmp_path: Path, synthetic_raw: S
     pre_dir, pre_manifest = prepared(tmp_path, synthetic_raw, name="pre")
     chosen_out = tmp_path / "ckpt-chosen"
     train(["--data", os.path.join(pre_dir, "splits", "selection_train.jsonl"), "--manifest", pre_manifest,
-           "--base", tiny, "--out", chosen_out, "--storage", tmp_path / "runs-chosen", "--epochs", "2"] + COMMON)
+           "--base", tiny, "--out", chosen_out, "--storage", tmp_path / "runs-chosen", "--epochs", "2"] + COMMON
+          + FROZEN_TAIL)
     chosen = read(chosen_out)[1]["canonical"]
+    from pilot import defaults
+    # every resolved key of the stand-in differs from the tuned default, so each context check below tells the
+    # chosen run's (or the masked base's) value from the plain context's
+    assert all(chosen[k] != defaults.BERTURK[k] for k in RESOLVED_KEYS), chosen
+    assert all(f not in COMMON for f in ("--warmup-ratio", "--weight-decay"))   # the few-shot commands omit them
     assert "fewshot" not in chosen and "mask_tags" not in chosen       # dropped when None
     ns = synthetic_protocol(tmp_path, synthetic_raw, monkeypatch, rules=rules(),
                             systems=postfit_systems(tmp_path, {"berturk": chosen}))
@@ -121,6 +133,11 @@ def test_berturk_masked_base_then_continued_run(tmp_path: Path, synthetic_raw: S
     assert not storage.exists() and not base_out.exists()           # --print-run-id creates nothing
     # --batch omitted: resolved from the frozen selection run (the tuned 16 would be refused by check_base)
     assert print_run_id(without(base_argv, "--batch"), capsys) == base_rid
+    # the tuned default given explicitly departs from the frozen selection run and is refused by check_base
+    for flag, key in (("--warmup-ratio", "warmup_ratio"), ("--weight-decay", "weight_decay")):
+        with pytest.raises(SystemExit, match=key):
+            train(base_argv + [flag, repr(defaults.BERTURK[key]), "--print-run-id"])
+    assert not storage.exists() and not base_out.exists()
     train(base_argv)
     raw, rec = read(base_out)
     assert rec["run_id"] == base_rid == berturk.run_id(rec["canonical"]) and rec["epoch"] == 1
@@ -154,8 +171,8 @@ def test_berturk_masked_base_then_continued_run(tmp_path: Path, synthetic_raw: S
     assert print_run_id(without(cont_argv, "--batch"), capsys) == cont_rid
     with pytest.raises(SystemExit, match="epochs is 2 here but 1"):
         train(without(cont_argv, "--epochs") + ["--print-run-id"])
-    with pytest.raises(SystemExit, match="weight_decay"):
-        train(cont_argv + ["--weight-decay", "0.01", "--print-run-id"])
+    with pytest.raises(SystemExit, match="weight_decay"):    # the tuned 0.0, not the base's resolved 0.01
+        train(cont_argv + ["--weight-decay", "0.0", "--print-run-id"])
     assert not storage.exists() and not seen
     train(cont_argv)
     head = load_file(os.path.join(str(base_out), "model.safetensors"))
