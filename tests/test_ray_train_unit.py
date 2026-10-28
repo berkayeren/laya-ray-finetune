@@ -10,11 +10,17 @@ from typing import Any
 
 import pytest
 
+from pilot import defaults
+
 ray_train = pytest.importorskip("ray_train")                # imports ray, torch and laya (the locked env has them)
 
 pytestmark = pytest.mark.unit
 
 SyntheticRaw = Callable[..., tuple[str, dict[str, str]]]     # conftest's synthetic_raw: () -> (root, raw_sha256)
+NEG = defaults.LAYA["neg"]                                  # the tuned default --neg of a plain command
+# the old defaults (the frozen recipe's neg 8 with the pre-tuning LRs and 4 epochs), spelled out: the same canonical
+# config a plain command had before the tuned defaults, so a pin of a historical default run id still holds
+OLD_DEFAULTS = ["--epochs", "4", "--encoder-lr", "2.5e-05", "--head-lr", "0.0001", "--neg", "8"]
 
 
 def _write(path: Path, rows: list[dict[str, Any]]) -> str:
@@ -84,7 +90,7 @@ def _rid(*argv: str) -> str:
 def test_run_id_ignores_paths_and_resources_and_follows_the_seed() -> None:
     base = ["--data", "d.jsonl", "--out", "o"]
     rid = _rid(*base)
-    assert rid.startswith("laya-selection_train-neg8-s0-")
+    assert rid.startswith("laya-selection_train-neg%d-s0-" % NEG)
     for other in (["--out", "elsewhere"], ["--storage", "/x/ray"], ["--cpus-per-worker", "3"],
                   ["--manifest", "m.json"], ["--object-store-gb", "2"], ["--tensorboard", "/x/tb"]):
         assert _rid(*(base + other)) == rid, other
@@ -221,7 +227,7 @@ def test_a_local_base_names_the_run_by_its_tokenizer_and_encoder(tiny_run: list[
         same, changed = identity(base), identity(str(other))
         assert (same["model_sha256"], same["config_sha256"]) == (changed["model_sha256"], changed["config_sha256"])
         ids.add(rid(other))
-    assert len(ids) == 3 and all(re.fullmatch(r"laya-selection_train-neg8-s0-[0-9a-f]{8}", i) for i in ids), ids
+    assert len(ids) == 3 and all(re.fullmatch(r"laya-selection_train-neg%d-s0-[0-9a-f]{8}" % NEG, i) for i in ids), ids
     assert "base_files_sha256" in runs.IDENTITY and "base_files_sha256" in runs.DROPPED_WHEN_NONE
 
 
@@ -640,16 +646,20 @@ def test_stop_after_epoch_inside_the_schedule_resolves(tiny_run: list[str], caps
         ids.add(capsys.readouterr().out.strip())
     ray_train.main(tiny_run + ["--epochs", "4", "--print-run-id"])
     ids.add(capsys.readouterr().out.strip())
-    assert len(ids) == 3 and all(re.fullmatch(r"laya-selection_train-neg8-s0-[0-9a-f]{8}", i) for i in ids), ids
+    assert len(ids) == 3 and all(re.fullmatch(r"laya-selection_train-neg%d-s0-[0-9a-f]{8}" % NEG, i) for i in ids), ids
 
 
 def test_run_id_follows_stop_after_epoch_and_postfit() -> None:
     """stop_after_epoch and postfit_sha256 name a final seed's run; without them a selection run keeps the id it had
-    before they existed (laya-selection_train-neg8-s0-c3859768 for this command at 6ef1567)."""
+    before they existed (laya-selection_train-neg8-s0-c3859768 for this command at 6ef1567). The command spells out
+    the old defaults (OLD_DEFAULTS: --epochs 4, --encoder-lr 2.5e-05, --head-lr 0.0001, --neg 8), the same canonical
+    config the plain command had before the tuned defaults, so it reaches the same id; the plain command now names the
+    tuned recipe and another run."""
     from pilot import runs
-    base = ["--data", "d.jsonl", "--out", "o"]
+    base = ["--data", "d.jsonl", "--out", "o"] + OLD_DEFAULTS
     rid = _rid(*base)
     assert rid == "laya-selection_train-neg8-s0-c3859768"
+    assert _rid("--data", "d.jsonl", "--out", "o") != rid
     a = ray_train.parser().parse_args(base)
     vals = ray_train.identity_values(a, ray_train.resolve(a), ENTRY, "multilingual", BASE_IDENT)
     assert vals["stop_after_epoch"] is None and vals["postfit_sha256"] is None
@@ -667,7 +677,8 @@ def test_run_id_follows_stop_after_epoch_and_postfit() -> None:
 @pytest.fixture
 def final_cmd(tiny_run: list[str], tmp_path: Path) -> tuple[list[str], str, dict[str, Any]]:
     """(argv of the final_train command bound to `record`, record path, record) for the tiny command: the chosen
-    canonical is the selection canonical of tiny_run itself (epoch 4 of 4, so no --stop-after-epoch)."""
+    canonical is the selection canonical of tiny_run itself (the default epochs, epoch N of N, so no
+    --stop-after-epoch; the default LRs and neg of pilot.defaults.LAYA)."""
     import pilot.data
     from pilot import postfit, runs
     from pilot.weights import identity
@@ -699,16 +710,18 @@ def test_postfit_refuses_a_mismatched_final_command_before_ray(final_cmd: tuple[
     from pilot import postfit
     argv, path, record = final_cmd
     ray_train.main(argv + ["--print-run-id"])
-    assert re.fullmatch(r"laya-final_train-neg8-s0-[0-9a-f]{8}", capsys.readouterr().out.strip())
+    assert re.fullmatch(r"laya-final_train-neg%d-s0-[0-9a-f]{8}" % NEG, capsys.readouterr().out.strip())
     ray_train.main(argv + ["--seed", "2", "--print-run-id"])                   # every final seed is accepted
-    assert re.fullmatch(r"laya-final_train-neg8-s2-[0-9a-f]{8}", capsys.readouterr().out.strip())
+    assert re.fullmatch(r"laya-final_train-neg%d-s2-[0-9a-f]{8}" % NEG, capsys.readouterr().out.strip())
     sel = list(argv)
     sel[sel.index("--data") + 1] = str(tmp_path / "data" / "splits" / "selection_train.jsonl")
-    for extra, match in ((["--encoder-lr", "3e-05"], "encoder_lr is 3e-05 here but 2.5e-05 in the chosen selection run"),
+    lr, epochs = re.escape(repr(defaults.LAYA["encoder_lr"])), defaults.LAYA["epochs"]
+    for extra, match in ((["--encoder-lr", "3e-05"], "encoder_lr is 3e-05 here but %s in the chosen selection "
+                                                     "run" % lr),
                          (["--seed", "5"], "--seed 5 is not one of the record's final seeds \\[0, 1, 2\\]"),
-                         (["--stop-after-epoch", "1"], "chosen candidate is epoch 4 of the --epochs 4 schedule, so omit "
-                                                       "--stop-after-epoch"),
-                         (["--neg", "4"], "neg is 4 here but 8"),
+                         (["--stop-after-epoch", "1"], "chosen candidate is epoch %d of the --epochs %d schedule, so "
+                                                       "omit --stop-after-epoch" % (epochs, epochs)),
+                         (["--neg", "4"], "neg is 4 here but %d" % NEG),
                          (["--max-messages", "7"], "max_messages is 7 here but None")):
         with pytest.raises(SystemExit, match=match):
             ray_train.main(argv + extra + ["--print-run-id"])

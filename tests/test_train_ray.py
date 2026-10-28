@@ -21,7 +21,7 @@ import pytest
 
 import pilot.data
 from conftest import make_raw
-from pilot import dumps, postfit, runs
+from pilot import defaults, dumps, postfit, runs
 from pilot.data import sha256_file
 from pilot.weights import identity
 from tiny_laya import tiny_checkpoint
@@ -67,7 +67,7 @@ def tiny_train(tmp_path_factory: pytest.TempPathFactory) -> Any:
 
 @pytest.fixture(scope="module")
 def cpu_run(tiny_train: Any) -> str:
-    """Checkpoint dir of a 2-epoch full-encoder run at the default flags (neg 8, rung none)."""
+    """Checkpoint dir of a 2-epoch full-encoder run at the default flags (the tuned default neg, rung none)."""
     return tiny_train("ckpt", "--epochs", "2")
 
 
@@ -103,10 +103,10 @@ def test_cpu_record_keeps_local_paths_and_raw_env_out(cpu_run: str) -> None:
 
 @pytest.mark.timeout(600)
 def test_neg_items_match_the_count(cpu_run: str) -> None:
-    """Default --neg 8: train items are the sampled positives + 8 negatives, on every one of the 12 selected messages
-    (no calibration holdout)."""
+    """The default --neg (the tuned pilot.defaults.LAYA neg, 16): train items are the sampled positives + that many
+    negatives, on every one of the 12 selected messages (no calibration holdout)."""
     rec = runs.read_record(cpu_run)
-    assert rec["neg"] == 8 and rec["neg_seed"] == 0
+    assert rec["neg"] == defaults.LAYA["neg"] and rec["neg_seed"] == 0
     assert rec["n_train_messages"] == 12                    # the whole --max-messages subsample trains
     assert rec["n_train_items"] == rec["n_train_items_counted"] > 0
     assert rec["n_train_items"] < 48 * rec["n_train_messages"]
@@ -196,7 +196,7 @@ def test_postfit_final_seed_end_to_end(tiny_train: Any) -> None:
     give a postfit record (one-LR grid); a --postfit final seed on final_train trains the chosen recipe and epoch,
     serves the record's T bit for bit, records the binding, and its own (in-sample) val dump is refused by postfit."""
     manifest = os.path.join(tiny_train.data, "splits.json")
-    sel = tiny_train("sel_2e5", "--epochs", "2", "--encoder-lr", "2e-05")
+    sel = tiny_train("sel_2e5", "--epochs", "2", "--encoder-lr", "2e-05", "--head-lr", "0.0001")   # postfit.HEAD_LR
     rid = runs.read_record(sel)["run_id"]
     run_dirs = [_score_val(tiny_train, os.path.join(tiny_train.storage, rid, "exports", "epoch-%03d" % e))
                 for e in (1, 2)]
@@ -206,8 +206,8 @@ def test_postfit_final_seed_end_to_end(tiny_train: Any) -> None:
     assert chosen["train_run_id"] == rid and chosen["stop_after_epoch"] == (1 if chosen["epoch"] == 1 else None)
     T = chosen["temperature"]
     stop = ["--stop-after-epoch", "1"] if chosen["stop_after_epoch"] == 1 else []
-    final = tiny_train("final_s1", "--epochs", "2", "--encoder-lr", "2e-05", "--seed", "1", "--postfit", path,
-                       "--no-export-epochs", *stop, split="final_train")
+    final = tiny_train("final_s1", "--epochs", "2", "--encoder-lr", "2e-05", "--head-lr", "0.0001", "--seed", "1",
+                       "--postfit", path, "--no-export-epochs", *stop, split="final_train")
 
     cfg = _config(final)
     assert cfg["temperature"] == [1.0, 1.0, T] and cfg["temperature"][2] == T      # bit for bit, never rounded

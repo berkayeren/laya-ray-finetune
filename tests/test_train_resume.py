@@ -20,7 +20,7 @@ import pilot.data
 import pilot.tensorboard
 import tb_events
 from conftest import make_raw
-from pilot import runs
+from pilot import defaults, runs
 from tiny_laya import tiny_checkpoint
 
 pytestmark = pytest.mark.ray
@@ -328,7 +328,8 @@ def test_tensorboard_events_hold_every_scalar(tb_run: TbRun) -> None:
     for tag in step_tags:
         assert sorted(got[tag]) == steps, tag
     enc, head = [got["train/lr_encoder"][s] for s in steps], [got["train/lr_head"][s] for s in steps]
-    assert enc[0] == pytest.approx(2.5e-5, rel=1e-6) and head[0] == pytest.approx(1e-4, rel=1e-6)
+    assert enc[0] == pytest.approx(defaults.LAYA["encoder_lr"], rel=1e-6)
+    assert head[0] == pytest.approx(defaults.LAYA["head_lr"], rel=1e-6)
     assert all(b <= a for a, b in zip(enc, enc[1:])) and all(b <= a for a, b in zip(head, head[1:]))
     first = 1
     for e, row in enumerate(rows):

@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+from typing import Any
 
 import pytest
 
@@ -70,3 +71,42 @@ def test_defaults_module_imports_the_stdlib_only() -> None:
                 assert alias.name.split(".")[0] in sys.stdlib_module_names, alias.name
         if isinstance(node, ast.ImportFrom):
             assert node.level == 0 and (node.module or "").split(".")[0] in sys.stdlib_module_names, node.module
+
+
+# ---- Laya: ray_train.py's parser defaults ----
+
+ENTRY = {"path": "splits/selection_train.jsonl", "sha256": "a" * 64, "role": "train"}
+BASE_IDENT = {"repo": "r", "subfolder": "s", "revision": "c" * 40, "model_sha256": "b" * 64}
+LAYA_DESTS = {"encoder_lr": "encoder_lr", "head_lr": "head_lr", "neg": "neg", "epochs": "epochs"}   # key: argparse dest
+
+
+def _laya_canon(*argv: str) -> dict[str, Any]:
+    """The canonical config of a ray_train.py command on a placeholder split entry and base identity."""
+    import ray_train
+    from pilot import runs
+    a = ray_train.parser().parse_args(list(argv))
+    return runs.canonical(ray_train.identity_values(a, ray_train.resolve(a), ENTRY, "multilingual", BASE_IDENT))
+
+
+def test_ray_train_parser_defaults_are_the_tuned_laya_config() -> None:
+    ray_train = pytest.importorskip("ray_train")
+    dests = {act.dest: act.default for act in ray_train.parser()._actions}
+    got = {key: dests[dest] for key, dest in LAYA_DESTS.items()}
+    assert list(got) == list(defaults.LAYA)
+    assert json.dumps(got, sort_keys=True) == json.dumps(defaults.LAYA, sort_keys=True)
+
+
+def test_a_plain_laya_command_names_the_tuned_recipe() -> None:
+    pytest.importorskip("ray_train")
+    from pilot import runs
+    base = ["--data", "d.jsonl", "--out", "o"]
+    canon = _laya_canon(*base)
+    got = {key: canon[key] for key in defaults.LAYA}
+    assert json.dumps(got, sort_keys=True) == json.dumps(defaults.LAYA, sort_keys=True)
+    assert runs.run_id(canon).startswith("laya-selection_train-neg16-s0-")
+    for flag, value, key, want in (("--epochs", "4", "epochs", 4), ("--encoder-lr", "3e-05", "encoder_lr", 3e-05),
+                                   ("--head-lr", "0.0002", "head_lr", 0.0002), ("--neg", "8", "neg", 8)):
+        explicit = _laya_canon(*(base + [flag, value]))
+        assert explicit[key] == want and type(explicit[key]) is type(want), flag
+        assert {k: explicit[k] for k in defaults.LAYA if k != key} == {k: canon[k] for k in defaults.LAYA if k != key}
+

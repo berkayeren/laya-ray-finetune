@@ -29,10 +29,19 @@ pilot.runs.SEGMENT_FIELDS entry per run segment (start epoch, git sha, dirty fla
 resume load seconds and memory), plus code_changed_on_resume (another HEAD or another uncommitted diff between segments,
 or no git; flagged, never refused), the relative export names, train_state_bytes and export_bytes.
 
-Items (data_neg8 by default): the split files label all 48 tags. Every message the --max-messages subsample selects
-(all of them without it) trains: there is no calibration holdout (the temperature comes only from val). Every
-message keeps all its positives plus --neg K random negatives (pilot.spike.neg8_rows, one random.Random(--neg-seed)
-draw per run, --neg-seed defaulting to --seed); --neg 0 trains on all 48 labels (data_full). The record carries the
+Recipe defaults: a new run defaults to the tuned Laya recipe, the best configuration of the committed exploratory
+search (pilot.defaults.LAYA, bound by tests/test_defaults.py to results/tune/laya.json): --epochs 6, the tuned
+--encoder-lr and --head-lr, and --neg 16; every other default is unchanged. Every committed Laya run (the selection run,
+the final seeds, the few-shot bases and continued runs) used the frozen recipe of pilot.postfit (encoder LR 2e-05, head
+LR 1e-4, neg 8, the 4-epoch schedule; 10 epochs for a continued few-shot run) and its command passes --epochs,
+--encoder-lr, --head-lr and --neg explicitly (postfit.final_command, pilot.reproduce), so its run id is unchanged. A
+hand-typed final-seed or few-shot command that omits one of them is refused by the existing bindings
+(pilot.postfit.check_final, pilot.fewshot.check_base, check_continued), never trained under another recipe.
+
+Items (data_neg16 by default, data_neg8 in every committed run): the split files label all 48 tags. Every message the
+--max-messages subsample selects (all of them without it) trains: there is no calibration holdout (the temperature
+comes only from val). Every message keeps all its positives plus --neg K random negatives (pilot.spike.neg8_rows, one
+random.Random(--neg-seed) draw per run, --neg-seed defaulting to --seed); --neg 0 trains on all 48 labels (data_full). The record carries the
 items laya built and the torch-free count pilot.runs.neg_items gives, so the compute projection can count any split
 without a tokenizer. Every export and the final checkpoint carry temperature UNCALIBRATED_TEMPERATURE and an empty
 temperature_by_options, reset explicitly, never inherited from the base (a base with a fitted T must not leak it).
@@ -149,18 +158,19 @@ manifest cannot change any split's role, path or folds, and the checkpoint prove
 usage:
   python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
                       --workers 4 --device cuda    # 4 GPUs on one node (--gpu is the same)
-  python ray_train.py ... --device mps --workers 1  # the full encoder on the Apple GPU
+  python ray_train.py ... --device mps --workers 1  # the full encoder on the Apple GPU (the tuned recipe defaults)
   python ray_train.py ... --device mps --workers 1 --freeze-embeddings   # fallback rung 1 after an MPS OOM
   python ray_train.py ... --workers 2 --freeze-encoder --max-messages 100   # CPU smoke test
   python ray_train.py ... --print-run-id            # the run id (storage/<run_id>/); rerun a killed command to resume
   python ray_train.py ... --tensorboard tensorboard   # live TensorBoard scalars from rank 0 into tensorboard/RUN_ID/
-  python ray_train.py --data data/splits/final_train.jsonl ... --epochs 4 --stop-after-epoch 2 --seed 1 \
+  python ray_train.py --data data/splits/final_train.jsonl ... --epochs 4 --stop-after-epoch 2 --neg 8 \
+                      --encoder-lr 2e-05 --head-lr 0.0001 --seed 1 \
                       --postfit results/postfit/laya.json --no-export-epochs   # a final seed (postfit.py prints it)
   python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt-fewshot-base-s0 \
-                      --device mps --workers 1 --epochs 4 --stop-after-epoch 3 --encoder-lr 2e-05 --seed 0 \
-                      --fewshot-base                        # a few-shot masked base (the frozen recipe)
+                      --device mps --workers 1 --epochs 4 --stop-after-epoch 3 --neg 8 --encoder-lr 2e-05 \
+                      --head-lr 0.0001 --seed 0 --fewshot-base   # a few-shot masked base (the frozen recipe)
   python ray_train.py --data data/splits/selection_train.jsonl --base ckpt-fewshot-base-s0 --out ckpt-fewshot-d0-k10 \
-                      --device mps --workers 1 --epochs 10 --encoder-lr 2e-05 --seed 0 \
+                      --device mps --workers 1 --epochs 10 --neg 8 --encoder-lr 2e-05 --head-lr 0.0001 --seed 0 \
                       --fewshot-draw 0 --fewshot-k 10       # a few-shot continued run from it
 """
 import argparse
@@ -187,7 +197,7 @@ from ray.train.torch import TorchTrainer
 
 import pilot.tune
 from pilot import laya_adapter as la
-from pilot import dumps, fewshot, pins, postfit, protocol, runs, spike, tensorboard
+from pilot import defaults, dumps, fewshot, pins, postfit, protocol, runs, spike, tensorboard
 from pilot.data import (DEFAULT_MANIFEST, REPO_ROOT, manifest_is_committed, parse_jsonl, refuse_held_out,
                         repo_relpath, sha256_bytes, sha256_file, verify_split_file)
 from pilot.weights import (check_tokenizer_config_rewritable, check_tokenizer_config_rewritten, checkpoint_digests,
@@ -1152,11 +1162,17 @@ def parser() -> argparse.ArgumentParser:
                     help="gradient checkpointing on the encoder and the Laya head for full-encoder runs (default on)")
     ap.add_argument("--cpus-per-worker", type=int, default=None, help="CPUs and torch threads per worker "
                     "(default 4 on mps, the spike's timing basis; 1 otherwise)")
-    ap.add_argument("--epochs", type=int, default=4)
+    ap.add_argument("--epochs", type=int, default=defaults.LAYA["epochs"],
+                    help="epochs of the schedule (default %(default)s, the tuned Laya default of pilot/defaults.py: "
+                         "the best configuration of results/tune/laya.json)")
     ap.add_argument("--micro-batch", type=int, default=8)
     ap.add_argument("--grad-accum", type=int, default=4)
-    ap.add_argument("--encoder-lr", type=float, default=2.5e-5)
-    ap.add_argument("--head-lr", type=float, default=1e-4)
+    ap.add_argument("--encoder-lr", type=float, default=defaults.LAYA["encoder_lr"],
+                    help="encoder LR (default %(default)r, the tuned Laya default of pilot/defaults.py: the best "
+                         "configuration of results/tune/laya.json)")
+    ap.add_argument("--head-lr", type=float, default=defaults.LAYA["head_lr"],
+                    help="Laya head LR (default %(default)r, the tuned Laya default of pilot/defaults.py: the best "
+                         "configuration of results/tune/laya.json)")
     ap.add_argument("--loss", choices=("rlcd", "soft-ce"), default="rlcd")
     ap.add_argument("--freeze-encoder", action="store_true",
                     help="fallback rung 3: train the head only (labelled head-only, weaker)")
@@ -1166,8 +1182,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--max-len", type=int, default=None)
     ap.add_argument("--head-max-len", type=int, default=None)
     ap.add_argument("--max-messages", type=int, default=None, help="subsample messages (smoke tests)")
-    ap.add_argument("--neg", type=int, default=8,
-                    help="negatives kept per training message; 0 = all 48 labels (data_full)")
+    ap.add_argument("--neg", type=int, default=defaults.LAYA["neg"],
+                    help="negatives kept per training message; 0 = all 48 labels (data_full) (default %(default)s, "
+                         "the tuned Laya default of pilot/defaults.py: the best configuration of "
+                         "results/tune/laya.json)")
     ap.add_argument("--neg-seed", type=int, default=None, help="negative-sampling seed; default --seed")
     ap.add_argument("--object-store-gb", type=float, default=None)
     ap.add_argument("--seed", type=int, default=0)
