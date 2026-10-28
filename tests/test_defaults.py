@@ -286,3 +286,48 @@ def test_committed_laya_bases_recompute_offline() -> None:
         canon = runs.canonical(vals)
         fewshot.check_base(proto, pin, "laya", canon, chosen, mode)
         assert runs.run_id(canon) == entries[a.seed]["train_run_id"]
+
+
+# ---- the continued few-shot runs: their bases were pruned, so their gated sidecars hold the canonical configs ----
+
+def _sidecar_training(dump_run_id: str) -> dict[str, Any]:
+    """The training block of a committed gated test-dump sidecar (JSON only, never the .npz)."""
+    return _read_json("results", "dumps", dump_run_id, "test.json")["training"]
+
+
+def test_committed_continued_runs_resolve_to_their_canonical() -> None:
+    berturk_train = pytest.importorskip("berturk_train")
+    ray_train = pytest.importorskip("ray_train")
+    from pilot import berturk, fewshot, protocol, runs
+    proto, pin = protocol.require_frozen()
+    mode = fewshot.read_mode(pin)
+    entries = _read_json("results", "fewshot", "runs.json")["entries"]
+    by_out = {e["checkpoint_name"]: e for e in entries if e["stage"] == "continued"}
+    bases = {(e["kind"], e["seed"]): e for e in entries if e["stage"] == "base"}
+    seen = {"berturk": 0, "laya": 0}
+    for script, kind in (("berturk_train.py", "berturk"), ("ray_train.py", "laya")):
+        for argv in _training_lines("fewshot-continued", script):
+            p = (berturk_train if kind == "berturk" else ray_train).parser()
+            a = p.parse_args(argv)
+            entry = by_out[a.out]
+            assert entry["kind"] == kind and (a.fewshot_draw, a.fewshot_k) == (entry["draw"], entry["k"])
+            base = bases[(kind, entry["base_seed"])]
+            assert base["train_run_id"] == entry["base_run_id"]
+            base_training, training = _sidecar_training(base["dump_run_id"]), _sidecar_training(entry["dump_run_id"])
+            if base_training.get("run_id") is not None:
+                assert base_training["run_id"] == base["train_run_id"]
+            base_canon, canon = base_training["canonical"], training["canonical"]
+            if kind == "berturk":
+                context = {"run_id": base["train_run_id"], "canonical": base_canon}
+                berturk_train.resolve_recipe(a, *berturk_train.recipe_context(a, None, None, context))
+                for dest, key in berturk_train.RECIPE_FLAGS:
+                    assert json.dumps(getattr(a, dest)) == json.dumps(canon[key]), (a.out, key)
+                assert berturk.run_id(canon) == entry["train_run_id"]
+            else:
+                for key, dest in LAYA_DESTS.items():
+                    assert json.dumps(getattr(a, dest)) == json.dumps(canon[key]), (a.out, key)
+                assert runs.run_id(canon) == entry["train_run_id"]
+            fewshot.check_continued(proto, pin, kind, canon, base_canon, base["train_run_id"], entry["draw"],
+                                    entry["k"], mode)
+            seen[kind] += 1
+    assert seen == {"berturk": 6, "laya": 6}
