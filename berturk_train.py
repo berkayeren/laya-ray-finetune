@@ -1,9 +1,12 @@
 """Fine-tune BERTurk (dbmdz/bert-base-turkish-cased at its pinned revision) with the HF Trainer as a 48-label
 multi-label intent classifier: the BERTurk baseline that Laya is compared against.
 
-One process, no Ray (BERTurk is trained with the HF Trainer, not the Ray harness): --device cpu, mps or cuda. The
-frozen recipe, the one the user confirmed before the first BERTurk run and the one every committed BERTurk run used
-(pilot.berturk holds the values, unchanged; new runs default to the tuned recipe, see "Recipe resolution" below):
+One process, no Ray (BERTurk is trained with the HF Trainer, not the Ray harness): --device cpu, mps or cuda. The frozen
+recipe, the one the user confirmed before the first BERTurk run and the one every current committed BERTurk run used
+(the selection run, the final seeds and the masked bases; the continued few-shot runs at the frozen 10 epochs; the two
+superseded selection runs under results/superseded/, both on a 10-epoch grid, the first with the head LR tied to the
+encoder LR, excepted; pilot.berturk holds the values, unchanged; new runs default to the tuned recipe, see "Recipe
+resolution" below):
 - LRs: the encoder LR, --lr (2e-05, Laya's single encoder LR), and the classifier head's LR, --head-lr (1e-4,
   pilot.berturk.HEAD_LR = Laya's head LR): the first fix after the BERTurk reference check (2026-10-21), which
   replaced one LR for encoder and head. The head is exactly the parameters from_pretrained newly initialised
