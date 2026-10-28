@@ -287,7 +287,9 @@ def check_recipe(ap: argparse.ArgumentParser, a: argparse.Namespace) -> None:
     """ap.error (exit 2) on an out-of-range recipe value of `a`, checking only the values that are set: before the
     resolution the given flags, after it every one (a context value too). --epochs and --batch at least 1, --lr and
     --head-lr positive, --warmup-ratio in [0, 1), --weight-decay at least 0, and --stop-after-epoch in
-    1..--epochs - 1 once --epochs is known (naming that --epochs)."""
+    1..--epochs - 1 once --epochs is known (naming that --epochs). With --epochs omitted, the first call (right after
+    parsing) still refuses a --stop-after-epoch below 1; only the upper bound waits for the resolved --epochs, so it is
+    refused after the inputs are read and hashed (still before any fetch, load or run dir)."""
     for flag, v in (("--epochs", a.epochs), ("--batch", a.batch)):
         if v is not None and v < 1:
             ap.error("%s must be at least 1" % flag)
@@ -303,6 +305,9 @@ def check_recipe(ap: argparse.ArgumentParser, a: argparse.Namespace) -> None:
     if a.stop_after_epoch is not None and a.epochs is not None and not 1 <= a.stop_after_epoch < a.epochs:
         ap.error("--stop-after-epoch must be at least 1 and below --epochs (%d); omit it to train every epoch"
                  % a.epochs)
+    if a.stop_after_epoch is not None and a.stop_after_epoch < 1:     # --epochs not resolved yet: the context-free part
+        ap.error("--stop-after-epoch must be at least 1 (and below --epochs, checked once it is resolved); omit it to "
+                 "train every epoch")
 
 
 def parser() -> argparse.ArgumentParser:

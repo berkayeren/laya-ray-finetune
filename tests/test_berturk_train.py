@@ -395,8 +395,9 @@ def test_stop_after_epoch_is_checked_against_the_resolved_epochs(inputs: Inputs,
                                                                   capsys: pytest.CaptureFixture[str],
                                                                   no_load: None) -> None:
     """A plain command (no recipe flag, no context) resolves --epochs to the tuned 20, and --stop-after-epoch 20 is
-    then refused against that resolved value, naming it, before anything is created; the recipe's argument errors
-    still exit 2 before anything is read."""
+    then refused against that resolved value, naming it, before anything is created; the recipe's argument errors,
+    and a --stop-after-epoch below 1 without --epochs (the context-free part of its bound), still exit 2 before
+    anything is read."""
     from pilot import defaults
     data, manifest, base = inputs
     storage = tmp_path / "runs"
@@ -408,7 +409,10 @@ def test_stop_after_epoch_is_checked_against_the_resolved_epochs(inputs: Inputs,
     assert not os.path.exists(str(storage))
     for extra, msg in ((("--lr", "0"), "--lr must be positive"), (("--head-lr", "-1"), "--head-lr must be positive"),
                        (("--epochs", "0"), "--epochs must be at least 1"),
-                       (("--batch", "0"), "--batch must be at least 1")):
+                       (("--batch", "0"), "--batch must be at least 1"),
+                       # --epochs omitted: the lower bound of --stop-after-epoch is still an argument error up front
+                       (("--stop-after-epoch", "0"), "--stop-after-epoch must be at least 1 (and below --epochs"),
+                       (("--stop-after-epoch", "-2"), "--stop-after-epoch must be at least 1 (and below --epochs")):
         code, err = exit_code(["--data", str(tmp_path / "absent.jsonl"), *extra], capsys)
         assert code == 2 and msg in err, (extra, err)
 
