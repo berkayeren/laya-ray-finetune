@@ -527,7 +527,11 @@ def test_recipe_context_follows_the_command() -> None:
     ctx, what = berturk_train.recipe_context(parsed("--fewshot-draw", "0", "--fewshot-k", "5"), None, None, base_info)
     assert ctx is base_info["canonical"] and "masked base" in what
     ctx, what = berturk_train.recipe_context(parsed(), None, None, None)
-    assert ctx is defaults.BERTURK and "pilot/defaults.py" in what
+    assert ctx == defaults.BERTURK and ctx is not defaults.BERTURK and "pilot/defaults.py" in what
+    before = json.dumps(defaults.BERTURK)
+    ctx["batch"], ctx["derived"] = 999, True                # a caller writing into its context
+    assert json.dumps(defaults.BERTURK) == before           # leaves the process-wide defaults unchanged
+    assert berturk_train.recipe_context(parsed(), None, None, None)[0] == defaults.BERTURK
     with pytest.raises(ValueError, match="--fewshot-base"):
         berturk_train.recipe_context(parsed("--fewshot-base"), None, None, None)
     for dest, key in berturk_train.RECIPE_FLAGS:

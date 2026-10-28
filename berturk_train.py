@@ -249,7 +249,8 @@ def recipe_context(a: argparse.Namespace, pf_record: dict[str, Any] | None, chos
     refusal. In order: a --postfit record (pf_record) gives its chosen selection run's canonical config; --fewshot-base
     gives `chosen` (pilot.fewshot.chosen_canonical of the frozen protocol, the value check_base receives); a continued
     run gives its masked base's canonical config (base_info, fewshot_base_of); a plain command gets the tuned defaults
-    of new runs, pilot.defaults.BERTURK. A context-bound command never falls back to the tuned defaults. SystemExit,
+    of new runs, a copy of pilot.defaults.BERTURK (so no caller can change the process-wide defaults). A context-bound
+    command never falls back to the tuned defaults. SystemExit,
     before any load, for a --postfit record whose chosen run has no canonical config (missing or not a dict: the
     refusal pilot.postfit.check_final gives, which this resolution now precedes)."""
     if pf_record is not None:
@@ -263,7 +264,7 @@ def recipe_context(a: argparse.Namespace, pf_record: dict[str, Any] | None, chos
         return chosen, "the frozen selection run"
     if base_info is not None:
         return base_info["canonical"], "the masked base's berturk_train.json"
-    return defaults.BERTURK, "the tuned defaults (pilot/defaults.py)"
+    return dict(defaults.BERTURK), "the tuned defaults (pilot/defaults.py)"   # a copy, never the module dict
 
 
 def resolve_recipe(a: argparse.Namespace, context: dict[str, Any], what: str) -> None:
