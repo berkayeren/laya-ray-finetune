@@ -8,8 +8,9 @@
 - ray_train.py's --epochs, --encoder-lr, --head-lr and --neg default to pilot.defaults.LAYA, an explicit flag wins
 - every committed command of both systems, as pilot.reproduce prints it, keeps its committed run id, rebuilt offline
   through the trainer's own parser, resolution and identity_values with the bindings run on it: the selection runs,
-  the final seeds (check_final), the masked bases (check_base) and, through their gated sidecars' canonical configs
-  (JSON only), the continued few-shot runs (check_continued); without its recipe flags a command names another run
+  the final seeds (check_final), the masked bases (check_base) and the continued few-shot runs (check_continued),
+  whose pruned masked bases enter by the identity their gated sidecars record (JSON only), the whole rebuilt canonical
+  config equal to the continued run's sidecar config; without its recipe flags a command names another run
 - README.md, CLAUDE.md and .claude/CLAUDE.md name the tuned defaults and spell out the frozen BERTurk selection recipe
 
 Every test is unit-marked and offline (the committed records, protocol.json, data/splits.json and the pins only).
@@ -295,14 +296,34 @@ def test_committed_laya_bases_recompute_offline() -> None:
         assert runs.run_id(canon) == entries[a.seed]["train_run_id"]
 
 
-# ---- the continued few-shot runs: their bases were pruned, so their gated sidecars hold the canonical configs ----
+# ---- the continued few-shot runs: their bases were pruned, so their gated sidecars hold the identities ----
 
-def _sidecar_training(dump_run_id: str) -> dict[str, Any]:
-    """The training block of a committed gated test-dump sidecar (JSON only, never the .npz)."""
-    return _read_json("results", "dumps", dump_run_id, "test.json")["training"]
+def _sidecar(dump_run_id: str) -> dict[str, Any]:
+    """A committed gated test-dump sidecar (JSON only, never the .npz)."""
+    return _read_json("results", "dumps", dump_run_id, "test.json")
 
 
-def test_committed_continued_runs_resolve_to_their_canonical() -> None:
+def _base_digests(kind: str, ident: dict[str, Any]) -> dict[str, Any]:
+    """The base identity a continued run's main hashes from its masked base dir, rebuilt from the base's gated sidecar
+    checkpoint_identity: BERTurk's per-file digests (berturk_train.main: sha256_file of each pilot.berturk.BASE_FILES
+    entry), Laya's pilot.weights.identity fields (ray_train.identity_values reads model_sha256, config_sha256 and
+    files_sha256)."""
+    if kind == "berturk":
+        return {"model.safetensors": ident["model_sha256"], "config.json": ident["config_sha256"],
+                **ident["files_sha256"]}
+    return {"model_sha256": ident["model_sha256"], "config_sha256": ident["config_sha256"],
+            "files_sha256": ident["files_sha256"]}
+
+
+def test_committed_continued_runs_rebuild_their_run_ids_from_the_command() -> None:
+    """Each of the 12 printed continued few-shot commands is parsed by its trainer, its omitted recipe flags resolved
+    as main resolves them (BERTurk: from the masked base's canonical config), and its whole canonical config rebuilt by
+    the trainer's own identity_values from the command, the committed split entry, the masked base's identity (from the
+    base's gated sidecar, since the base checkpoints were pruned) and the few-shot binding of the frozen draw and the
+    base's run id: it equals the continued run's gated sidecar canonical config key for key, its run id is the runs
+    manifest's, and check_continued accepts it against the base's canonical config. So a change in how a continued
+    command maps any key (seed, draw and k, max_len, micro-batch, neg_seed, the base digests), not only the recipe
+    keys, fails here."""
     berturk_train = pytest.importorskip("berturk_train")
     ray_train = pytest.importorskip("ray_train")
     from pilot import berturk, fewshot, protocol, runs
@@ -318,23 +339,32 @@ def test_committed_continued_runs_resolve_to_their_canonical() -> None:
             a = p.parse_args(argv)
             entry = by_out[a.out]
             assert entry["kind"] == kind and (a.fewshot_draw, a.fewshot_k) == (entry["draw"], entry["k"])
+            assert a.base != ("berturk" if kind == "berturk" else "multilingual"), argv   # a local masked base
             base = bases[(kind, entry["base_seed"])]
             assert base["train_run_id"] == entry["base_run_id"]
-            base_training, training = _sidecar_training(base["dump_run_id"]), _sidecar_training(entry["dump_run_id"])
-            if base_training.get("run_id") is not None:
-                assert base_training["run_id"] == base["train_run_id"]
-            base_canon, canon = base_training["canonical"], training["canonical"]
+            base_side, side = _sidecar(base["dump_run_id"]), _sidecar(entry["dump_run_id"])
+            if base_side["training"].get("run_id") is not None:
+                assert base_side["training"]["run_id"] == base["train_run_id"]
+            assert base_side["system"]["checkpoint"] == base["checkpoint_name"]
+            base_canon, canon = base_side["training"]["canonical"], side["training"]["canonical"]
+            assert (runs.run_id if kind == "laya" else berturk.run_id)(base_canon) == base["train_run_id"]
+            digests = _base_digests(kind, base_side["system"]["checkpoint_identity"])
+            fsb = fewshot.binding(pin, "continued", a.fewshot_draw, a.fewshot_k,
+                                  proto["fewshot"]["draws"][a.fewshot_draw]["digest"], base["train_run_id"])
             if kind == "berturk":
                 context = {"run_id": base["train_run_id"], "canonical": base_canon}
                 berturk_train.resolve_recipe(a, *berturk_train.recipe_context(a, None, None, context))
-                for dest, key in berturk_train.RECIPE_FLAGS:
-                    assert json.dumps(getattr(a, dest)) == json.dumps(canon[key]), (a.out, key)
-                assert berturk.run_id(canon) == entry["train_run_id"]
+                built = berturk.canonical(berturk_train.identity_values(a, _entry_of(a.data), digests, (), None, fsb))
+                rid = berturk.run_id(built)
             else:
-                for key, dest in LAYA_DESTS.items():
-                    assert json.dumps(getattr(a, dest)) == json.dumps(canon[key]), (a.out, key)
-                assert runs.run_id(canon) == entry["train_run_id"]
-            fewshot.check_continued(proto, pin, kind, canon, base_canon, base["train_run_id"], entry["draw"],
+                vals = ray_train.identity_values(a, ray_train.resolve(a), _entry_of(a.data), a.base, digests, None,
+                                                 fewshot=fsb)
+                built = runs.canonical(vals)
+                rid = runs.run_id(built)
+            assert built == canon, (a.out, sorted(k for k in set(built) | set(canon) if built.get(k) != canon.get(k)))
+            assert json.dumps(built, sort_keys=True) == json.dumps(canon, sort_keys=True), a.out   # types too
+            assert rid == entry["train_run_id"], a.out
+            fewshot.check_continued(proto, pin, kind, built, base_canon, base["train_run_id"], entry["draw"],
                                     entry["k"], mode)
             seen[kind] += 1
     assert seen == {"berturk": 6, "laya": 6}
