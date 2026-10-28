@@ -1,8 +1,15 @@
 """The defaults of new training runs: the best configuration of each committed exploratory search record.
 
 ray_train.py (Laya) and berturk_train.py (BERTurk) read their recipe defaults from here: a plain command, one that
-passes none of these flags and has no context to resolve them from, trains the best trial of the committed Ray Tune
-search of its system. An explicit flag always wins.
+passes none of these flags and has no context to resolve them from, trains the tuned keys of the best trial of the
+committed Ray Tune search of its system (Laya: the encoder and head LRs, neg and epochs; BERTurk: the two LRs, batch,
+warm-up, weight decay and epochs). An explicit flag always wins.
+
+The trial's fixed settings (pilot.tune.FIXED) and its device are not defaults of new runs. A Laya trial ran at
+--max-len 128, micro-batch 8 and grad-accum 4 on one MPS worker; a plain ray_train.py command keeps --max-len None
+(the base config's max_len, 512), --workers 2 and --device cpu, so a run of the trial's recipe passes
+--device mps --workers 1 --max-len 128 explicitly, as the README Run block does. BERTurk's plain --max-len is the
+trial's 128; its trial ran with --device mps, which a plain berturk_train.py command (--device cpu) must pass.
 
 Source (the `best` block of each record, its `config` copied exactly):
 - LAYA: results/tune/laya.json (schema tune/1, sha256 b111b6e21db971fa765650c46a9534d530317fce620cea7f9e9f0c61f26feef5),

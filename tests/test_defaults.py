@@ -412,3 +412,32 @@ def test_docs_name_the_tuned_defaults() -> None:
     dot = _text(os.path.join(REPO_ROOT, ".claude", "CLAUDE.md"))
     for name in ("pilot/defaults.py", "results/tune/"):
         assert name in dot, name
+
+
+def test_docs_say_the_trial_fixed_settings_are_not_defaults() -> None:
+    """A plain command trains the tuned keys only: the trials' fixed settings (pilot.tune.FIXED) and device are not
+    defaults. The claim's basis is checked against the parsers (Laya's plain --max-len None and --workers 2 against the
+    trial's 128 and 1, BERTurk's plain --max-len the trial's 128, both plain devices cpu against the trials' mps), and
+    pilot/defaults.py, the ray_train.py docstring and the README search section name pilot.tune.FIXED and the flags a
+    run of the Laya trial's recipe passes; the withdrawn "trains them" wording is gone."""
+    berturk_train = pytest.importorskip("berturk_train")
+    ray_train = pytest.importorskip("ray_train")
+    laya = {act.dest: act.default for act in ray_train.parser()._actions}
+    bert = {act.dest: act.default for act in berturk_train.parser()._actions}
+    fixed = pt.FIXED
+    assert fixed["laya"]["max_len"] == 128 and laya["max_len"] is None
+    assert fixed["laya"]["workers"] == 1 and laya["workers"] == 2
+    assert (fixed["laya"]["micro_batch"], fixed["laya"]["grad_accum"]) == (laya["micro_batch"], laya["grad_accum"])
+    assert fixed["berturk"]["max_len"] == bert["max_len"] == 128
+    plain = ray_train.parser().parse_args(["--data", "d", "--out", "o"])
+    assert laya["device"] is None and ray_train.resolve(plain)["device"] == "cpu"
+    assert bert["device"] == "cpu"
+    for rec in ("laya", "berturk"):
+        assert pt.read_record(os.path.join(REPO_ROOT, defaults.SOURCES[rec]["record"]))[0]["device"] == "mps", rec
+    search = _part(_text(README), "\n## Exploratory hyperparameter search (Ray Tune)\n", "\n## Demo UI\n")
+    flags = "--device mps --workers 1 --max-len 128"
+    for name, text in (("pilot/defaults.py", defaults.__doc__ or ""), ("ray_train.py", ray_train.__doc__ or ""),
+                       ("README.md", search)):
+        flat = " ".join(text.split())
+        assert "pilot.tune.FIXED" in flat and flags in flat, name
+    assert "command trains them" not in " ".join(search.split())

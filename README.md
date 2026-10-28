@@ -1928,11 +1928,15 @@ preparation for a round on the bank's own data.
 
 Its best configurations are the defaults of new training runs (`pilot/defaults.py`, bound by a test to the two records
 below): Laya the tuned encoder and head LRs, neg 16 and 6 epochs; BERTurk the tuned LRs, batch 16, warm-up 0.06, weight
-decay 0.0 and 20 epochs. So a plain `ray_train.py` or `berturk_train.py` command trains them. Every committed run,
-record and the verdict used the frozen recipe and are unchanged: every reproduction command names that recipe
-(`ray_train.py` always passes its four recipe flags; the BERTurk selection command spells out batch, warm-up and weight
-decay) or resolves it from its context (a `berturk_train.py` final seed from its postfit record, a few-shot run from
-the frozen selection run or its masked base). The defaults are not a decision input and do not change the verdict.
+decay 0.0 and 20 epochs. So a plain `ray_train.py` or `berturk_train.py` command trains these tuned values. The trials'
+fixed settings (`pilot.tune.FIXED`) and device are not defaults: a Laya trial ran at `--max-len 128` on one MPS worker,
+while a plain `ray_train.py` command keeps the base config's max_len (512), two workers and the CPU, so pass
+`--device mps --workers 1 --max-len 128` as the Run block does; a BERTurk trial ran at the plain `--max-len` 128, on
+`--device mps`. Every committed run, record and the verdict used the frozen recipe and are unchanged: every
+reproduction command names that recipe (`ray_train.py` always passes its four recipe flags; the BERTurk selection
+command spells out batch, warm-up and weight decay) or resolves it from its context (a `berturk_train.py` final seed
+from its postfit record, a few-shot run from the frozen selection run or its masked base). The defaults are not a
+decision input and do not change the verdict.
 
 The two records are `results/tune/laya.json` and `results/tune/berturk.json` (schema `tune/1`, each rebuilt byte for
 byte from its own canonical part by `tune.py --check`), and their rendered summary, every trial's settings and dev

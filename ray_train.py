@@ -29,14 +29,17 @@ pilot.runs.SEGMENT_FIELDS entry per run segment (start epoch, git sha, dirty fla
 resume load seconds and memory), plus code_changed_on_resume (another HEAD or another uncommitted diff between segments,
 or no git; flagged, never refused), the relative export names, train_state_bytes and export_bytes.
 
-Recipe defaults: a new run defaults to the tuned Laya recipe, the best configuration of the committed exploratory
-search (pilot.defaults.LAYA, bound by tests/test_defaults.py to results/tune/laya.json): --epochs 6, the tuned
---encoder-lr and --head-lr, and --neg 16; every other default is unchanged. Every committed Laya run (the selection run,
-the final seeds, the few-shot bases and continued runs) used the frozen recipe of pilot.postfit (encoder LR 2e-05, head
-LR 1e-4, neg 8, the 4-epoch schedule; 10 epochs for a continued few-shot run) and its command passes --epochs,
---encoder-lr, --head-lr and --neg explicitly (postfit.final_command, pilot.reproduce), so its run id is unchanged. A
-hand-typed final-seed or few-shot command that omits one of them is refused by the existing bindings
-(pilot.postfit.check_final, pilot.fewshot.check_base, check_continued), never trained under another recipe.
+Recipe defaults: a new run defaults to the tuned Laya recipe, the best configuration of the committed exploratory search
+(pilot.defaults.LAYA, bound by tests/test_defaults.py to results/tune/laya.json): --epochs 6, the tuned --encoder-lr and
+--head-lr, and --neg 16; every other default is unchanged. The trial's fixed settings (pilot.tune.FIXED: max_len 128,
+micro-batch 8, grad-accum 4, one worker) and its device (mps) are not defaults: a plain command keeps --max-len None
+(the base config's 512), --workers 2 and --device cpu, so a run of the trial's recipe passes --device mps --workers 1
+--max-len 128 explicitly. Every committed Laya run (the selection run, the final seeds, the few-shot bases and continued
+runs) used the frozen recipe of pilot.postfit (encoder LR 2e-05, head LR 1e-4, neg 8, the 4-epoch schedule; 10 epochs
+for a continued few-shot run) and its command passes --epochs, --encoder-lr, --head-lr and --neg explicitly
+(postfit.final_command, pilot.reproduce), so its run id is unchanged. A hand-typed final-seed or few-shot command that
+omits one of them is refused by the existing bindings (pilot.postfit.check_final, pilot.fewshot.check_base,
+check_continued), never trained under another recipe.
 
 Items (data_neg16 by default, data_neg8 in every committed run): the split files label all 48 tags. Every message the
 --max-messages subsample selects (all of them without it) trains: there is no calibration holdout (the temperature
