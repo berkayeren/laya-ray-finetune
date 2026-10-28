@@ -103,7 +103,7 @@ are hash-registered too, so later stages can trust the flag list.
 | `pilot/runs.py` | torch-free run-record schema of `ray_train.py`, the run id, the neg-K item count, the MPS fallback ladder |
 | `pilot/tensorboard.py` | torch-free TensorBoard helpers of both trainers: the `--tensorboard DIR` guard (`check_logdir`), the fixed tag names (`TAGS`), the lazy tensorboardX writer (`open_writer`, one file per writer, a purge step after a resume) and the scalar builders |
 | `pilot/compute.py` | torch-free compute-checkpoint logic: projection, what-if table, disk budget, report and markdown; for the few-shot experiment: the few-shot projection on the committed rates and the frozen compute-fallback decision (`fewshot_projection`, `fewshot_decision`) |
-| `ray_train.py` | Ray Train `TorchTrainer` (DDP) fine-tune using Laya's own loss and checkpoint format, uncalibrated (T = 1) checkpoints; cpu, cuda or one MPS worker; resumes by rerunning; few-shot: `--fewshot-base` trains a label-masked base (the held-out tags deleted from every row before negative sampling; `--mask-tags` only names them) and `--fewshot-draw D --fewshot-k K` continues a masked base on a frozen support set plus its replay set, both bound to the frozen protocol by refusal; `--tensorboard DIR` writes live TensorBoard scalars from rank 0 (not part of the run id) |
+| `ray_train.py` | Ray Train `TorchTrainer` (DDP) fine-tune using Laya's own loss and checkpoint format, uncalibrated (T = 1) checkpoints; cpu, cuda or one MPS worker; resumes by rerunning; new runs default to the tuned recipe (`--epochs`, `--encoder-lr`, `--head-lr`, `--neg` from `pilot/defaults.py`), while every committed command passes all four; few-shot: `--fewshot-base` trains a label-masked base (the held-out tags deleted from every row before negative sampling; `--mask-tags` only names them) and `--fewshot-draw D --fewshot-k K` continues a masked base on a frozen support set plus its replay set, both bound to the frozen protocol by refusal; `--tensorboard DIR` writes live TensorBoard scalars from rank 0 (not part of the run id) |
 | `score.py` | the only place a model runs: one system on one val, test or hotels_probe split → a logit dump (in-process or Ray Data actors); a fine-tuned checkpoint reaches test or HOTELS only through the protocol gate (one of the frozen protocol's final seeds, once); a few-shot checkpoint listed in `results/fewshot/runs.json` reaches test only, once, its sidecar bound to that manifest (`fewshot_runs_sha256`) |
 | `report.py` | dumps → metrics (numpy only, no model); `--compare` paired bootstrap; `--table` results table; `--confidence` the confidence record (calibration, abstention, no-intent and, on `--split hotels_probe`, out-of-domain false positives) with its reliability diagram; `--confidence-table` its markdown; `RUN_DIR --split test --postfit RECORD` reports a final seed at its postfit record's θ, `--verdict` writes the verdict record of the frozen protocol, `--final-table` and `--go-block` print the results table and the GO block; `--verdict --fewshot RECORD` decides criterion (d)'s few-shot path from the few-shot results record, recomputed from the dumps; `--recommendation` prints the README recommendation block, `--memo` writes the decision memo |
 | `evaluate.py` | one-step wrapper: `score.py --model laya`, then `report.py`'s report of that dump |
@@ -111,7 +111,7 @@ are hash-registered too, so later stages can trust the flag list.
 | `compute_checkpoint.py` | the compute checkpoint: a measured MPS fine-tune probe and the projected experiment-matrix runtime (`results/compute/`) |
 | `pilot/postfit.py` | torch-free postfit: the val-fitted T, θ and the chosen epoch in one byte-reproducible record; the final-seed binding and manifest; the README Laya val selection block |
 | `postfit.py` | the postfit CLI of both models: val dumps → `results/postfit/laya.json` or `berturk.json` (the protocol by system kind), `--prune`, `--print-final-commands`, `--final-manifest`, `--render`, `--reference-check` and `--render-berturk` (BERTurk) |
-| `berturk_train.py` | the BERTurk trainer: the HF Trainer, masked BCE, encoder LR `--lr` and head LR `--head-lr` in their own param groups, `--epochs` (default 30), a per-epoch export, `--stop-after-epoch`, `--postfit` and `--reference` for the final seeds; one process, no Ray; few-shot: `--fewshot-base` trains a label-masked base (the held-out label columns masked, so they get no gradient) and `--fewshot-draw D --fewshot-k K` continues a masked base from its own fine-tuned head on a frozen support set plus its replay set; `--tensorboard DIR` writes live TensorBoard scalars through a second Trainer callback (not part of the run id) |
+| `berturk_train.py` | the BERTurk trainer: the HF Trainer, masked BCE, encoder LR `--lr` and head LR `--head-lr` in their own param groups, the recipe flags (`--epochs`, `--lr`, `--head-lr`, `--batch`, `--warmup-ratio`, `--weight-decay`) resolved from the run's context when omitted (a `--postfit` record's chosen run, the frozen selection run for `--fewshot-base`, the masked base for `--fewshot-draw`, else the tuned defaults of `pilot/defaults.py`), a per-epoch export, `--stop-after-epoch`, `--postfit` and `--reference` for the final seeds; one process, no Ray; few-shot: `--fewshot-base` trains a label-masked base (the held-out label columns masked, so they get no gradient) and `--fewshot-draw D --fewshot-k K` continues a masked base from its own fine-tuned head on a frozen support set plus its replay set; `--tensorboard DIR` writes live TensorBoard scalars through a second Trainer callback (not part of the run id) |
 | `pilot/berturk.py` | torch-free BERTurk bookkeeping: the recipe and run id, labels in `INTENTS` order, the checkpoint identity, the postfit protocol, the published reference check, the final commands and manifest, the superseded chain (`SUPERSEDED`, `load_superseded`) and the README BERTurk baseline block |
 | `latency.py` | the latency harness: times every final seed of one system per message on one device, in-process at batch 1, fp32, through the load path that scored the dumps; `--render` the markdown; reported, not gated |
 | `pilot/latency.py` | torch-free latency logic: the timing contract and loop, nearest-rank percentiles, the final-manifest reader, the `latency/1` report and its markdown |
@@ -126,6 +126,7 @@ are hash-registered too, so later stages can trust the flag list.
 | `pilot/memo.py` | the recommendation and decision memo, renders of the frozen verdict with no number of their own: the README recommendation block (`render_recommendation`), the one-page memo (`render_memo`) and its caveats (`CAVEATS`) |
 | `tune.py` | the exploratory Ray Tune search of one system (`--system laya` or `--system berturk`): a seeded random search with ASHA early stopping, one trial at a time, scored on a tuning-dev subset of `selection_train`, resumable by rerunning the identical command; `--status` (a search's progress, no Ray), `--check` (verify a record) and `--render` (the summary `results/tune/tune.md`); not a decision input |
 | `pilot/tune.py` | torch-free half of the search: the tuning partition by the fold in each uid, the dev objective, the search constants (`SPACES`, `ASHA`, `TRIALS`, `SEED`), the `tune/1` record and its render (`render_markdown`) |
+| `pilot/defaults.py` | stdlib-only tuned defaults of new training runs: the best configuration of each exploratory search record (`LAYA`, `BERTURK`), with their source (`SOURCES`: record path, sha256, trial, epoch), bound by a test to `results/tune/`; the committed runs used the frozen recipe |
 | `demo.py` | the local demo server: FastAPI + uvicorn on 127.0.0.1 only; it loads the six final seeds in-process through `score.py`'s loaders (fp32, no Ray) and serves the chat and the dashboard (`make demo`) |
 | `pilot/demo.py` | torch-free binding and record views of the demo: the seed-averaged answer mirrored from the frozen verdict's definition (`system_answer`) and the verdict, selection, latency and few-shot views behind `require_frozen`, `check_record` or a protocol.json pin; the confidence view unpinned (`build_views`) |
 | `ui/` | the React + TypeScript UI of the demo, built by Vite; its `package-lock.json` is committed, the built `ui/dist` is not |
@@ -135,7 +136,8 @@ are hash-registered too, so later stages can trust the flag list.
 ## Run
 
 ```bash
-# full-encoder fine-tune on the Apple GPU: one Ray worker, the MPS spike's start config, neg8 items
+# full-encoder fine-tune on the Apple GPU: one Ray worker, the MPS spike's start config and the tuned defaults of new
+# runs (6 epochs, neg 16 items, the tuned encoder and head LRs; pilot/defaults.py)
 python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
     --device mps --workers 1 --micro-batch 8 --grad-accum 4 --max-len 128
 python ray_train.py ... --print-run-id     # the run id: its Ray dir ray_results/<run_id>/ and resume key
@@ -148,7 +150,8 @@ python ray_train.py --data data/splits/final_train.jsonl ... --epochs 4 --stop-a
     --postfit results/postfit/laya.json --no-export-epochs --storage ray_results --out ckpt-final-s0
 
 # BERTurk baseline: the 30-epoch selection run, val scoring of each export, postfit and the published reference check
-python berturk_train.py --data data/splits/selection_train.jsonl --device mps --epochs 30 --lr 2e-05 --head-lr 0.0001
+python berturk_train.py --data data/splits/selection_train.jsonl --device mps --epochs 30 --lr 2e-05 --head-lr 0.0001 \
+    --batch 32 --warmup-ratio 0.1 --weight-decay 0.01   # the frozen recipe, spelled out (a plain run takes the tuned one)
 python score.py data/splits/val.jsonl --model berturk --checkpoint berturk_runs/RUN_ID/exports/epoch-001 \
     --device mps --workers 0                     # on test only a final seed, through the protocol gate
 make berturk-postfit                             # results/postfit/berturk.json from the 30 committed val dumps
@@ -559,7 +562,7 @@ fine-tuned Laya is compared against in the head-to-head verdict.
 ```bash
 # the selection run: 30 epochs, encoder LR 2e-05, head LR 1e-4, an export per epoch under berturk_runs/<run_id>/exports/
 python berturk_train.py --data data/splits/selection_train.jsonl --base berturk --device mps --epochs 30 \
-    --lr 2e-05 --head-lr 0.0001 --seed 0 --storage berturk_runs
+    --lr 2e-05 --head-lr 0.0001 --batch 32 --warmup-ratio 0.1 --weight-decay 0.01 --seed 0 --storage berturk_runs
 # score each epoch export on val (fp32 on MPS, in-process), then delete the export once its verified val dump exists
 python score.py data/splits/val.jsonl --model berturk --checkpoint berturk_runs/RUN_ID/exports/epoch-001 \
     --device mps --workers 0
@@ -1921,7 +1924,15 @@ numbers above.
 The search is exploratory and not a decision input. It does not change the verdict, `protocol.json` or any committed
 record, every existing run id is unchanged, no tuned model is scored on val, test or HOTELS, and no trial weights are
 kept. The pipeline's single encoder LR 2e-05 stays fixed, not tuned: the search reopens it for exploration only, as
-preparation for a round on the bank's own data. Its best configurations are not a recommendation.
+preparation for a round on the bank's own data.
+
+Its best configurations are the defaults of new training runs (`pilot/defaults.py`, bound by a test to the two records
+below): Laya the tuned encoder and head LRs, neg 16 and 6 epochs; BERTurk the tuned LRs, batch 16, warm-up 0.06, weight
+decay 0.0 and 20 epochs. So a plain `ray_train.py` or `berturk_train.py` command trains them. Every committed run,
+record and the verdict used the frozen recipe and are unchanged: every reproduction command names that recipe
+(`ray_train.py` always passes its four recipe flags; the BERTurk selection command spells out batch, warm-up and weight
+decay) or resolves it from its context (a `berturk_train.py` final seed from its postfit record, a few-shot run from
+the frozen selection run or its masked base). The defaults are not a decision input and do not change the verdict.
 
 The two records are `results/tune/laya.json` and `results/tune/berturk.json` (schema `tune/1`, each rebuilt byte for
 byte from its own canonical part by `tune.py --check`), and their rendered summary, every trial's settings and dev

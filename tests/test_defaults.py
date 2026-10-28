@@ -5,12 +5,19 @@
   so a rounded value or an int written for a float (0 for 0.0) fails; SOURCES names each record, its sha256, the best
   trial and its epoch
 - pilot.defaults imports nothing outside the stdlib, no other pilot module, and reads no file
+- ray_train.py's --epochs, --encoder-lr, --head-lr and --neg default to pilot.defaults.LAYA, an explicit flag wins
+- every committed command of both systems, as pilot.reproduce prints it, keeps its committed run id, rebuilt offline
+  through the trainer's own parser, resolution and identity_values with the bindings run on it: the selection runs,
+  the final seeds (check_final), the masked bases (check_base) and, through their gated sidecars' canonical configs
+  (JSON only), the continued few-shot runs (check_continued); without its recipe flags a command names another run
+- README.md, CLAUDE.md and .claude/CLAUDE.md name the tuned defaults and spell out the frozen BERTurk selection recipe
 
-Every test is unit-marked and offline.
+Every test is unit-marked and offline (the committed records, protocol.json, data/splits.json and the pins only).
 """
 import ast
 import json
 import os
+import re
 import subprocess
 import sys
 from typing import Any
@@ -331,3 +338,47 @@ def test_committed_continued_runs_resolve_to_their_canonical() -> None:
                                     entry["k"], mode)
             seen[kind] += 1
     assert seen == {"berturk": 6, "laya": 6}
+
+
+# ---- the docs name the tuned defaults and the frozen recipe of the committed runs ----
+
+README = os.path.join(REPO_ROOT, "README.md")
+RECIPE_TEXT = "--batch 32 --warmup-ratio 0.1 --weight-decay 0.01"
+
+
+def _text(path: str) -> str:
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def _part(text: str, heading: str, end: str) -> str:
+    """The text from `heading` to the next `end` heading after it (exactly one heading)."""
+    assert text.count(heading) == 1, heading
+    i = text.index(heading)
+    return text[i:text.index(end, i + len(heading))]
+
+
+def _berturk_lines_with_recipe(part: str) -> list[str]:
+    """The berturk_train.py command lines (a command and its backslash continuations, joined) holding RECIPE_TEXT."""
+    joined = part.replace("\\\n", " ")
+    return [l for l in joined.splitlines() if "berturk_train.py" in l and RECIPE_TEXT in " ".join(l.split())]
+
+
+def test_docs_name_the_tuned_defaults() -> None:
+    from pilot import reproduce as rp
+    readme = _text(README)
+    files = _part(readme, "\n## Files\n", "\n## Run\n")
+    assert re.search(r"^\| `pilot/defaults\.py` \| ", files, re.M), "the README Files table has no pilot/defaults.py row"
+    assert _berturk_lines_with_recipe(_part(readme, "\n## Run\n", "\n## Scoring path\n"))
+    assert _berturk_lines_with_recipe(_part(readme, "\n## BERTurk baseline\n", "\n## Confidence"))
+    search = _part(readme, "\n## Exploratory hyperparameter search (Ray Tune)\n", "\n## Demo UI\n")
+    for phrase in ("pilot/defaults.py", "new training runs", "frozen recipe"):
+        assert phrase in search, phrase
+    assert "<!-- " not in search
+    assert len(re.findall(r"<!-- [a-z-]+:start -->", readme)) == len(rp.README_BLOCKS) == 11
+    claude = _text(os.path.join(REPO_ROOT, "CLAUDE.md"))
+    for name in ("pilot/defaults.py", "recipe_context", "resolve_recipe", "results/tune/", RECIPE_TEXT):
+        assert name in claude, name
+    dot = _text(os.path.join(REPO_ROOT, ".claude", "CLAUDE.md"))
+    for name in ("pilot/defaults.py", "results/tune/"):
+        assert name in dot, name
