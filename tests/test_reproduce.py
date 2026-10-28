@@ -975,6 +975,50 @@ def test_berturk_selection_command_spells_out_the_frozen_recipe(bare: str) -> No
     assert seen == 9
 
 
+# sha256 of json.dumps([[name, [list(c) for c in rp.commands(name)]] for name in rp.STEP_NAMES], ensure_ascii=False,
+# separators=(",", ":")).encode("utf-8"), captured from a worktree of commit c311b6199c08 (the last commit before the
+# BERTurk selection command spelled out its recipe): every reproduction command as make reproduce printed it then
+COMMANDS_SHA256 = "8906b5bb23d44c471e151bf1ec36dcd8dee9d9a3d81aa97fea47345e648325d2"
+# per step, sha256(json.dumps([list(c) for c in rp.commands(name)], same options))[:12] at the same commit: names the
+# step that differs when COMMANDS_SHA256 does not match
+STEP_SHA256 = {"data": "947872fa3d71", "baselines": "43b476353610", "laya-selection": "5cf28fc5ee81",
+               "laya-postfit": "c060ee426047", "laya-final": "08682bfe2d45", "berturk-selection": "23b3e7c71351",
+               "berturk-postfit": "628828de1a78", "berturk-reference": "3a9fa569f2ac", "berturk-final": "149a0ba59a97",
+               "confidence": "526f4b213b68", "latency": "4516933f3d25", "final-scoring": "a7c1b2b3f641",
+               "final-reports": "393e7bcfba66", "fewshot-projection": "0d716feb767d", "fewshot-bases": "c78ec9eb47ba",
+               "fewshot-continued": "96f409b76119", "fewshot-scoring": "63a7274e9a5a", "fewshot-reports": "ce63d118c4e6",
+               "report": "1ed27aa74758"}
+SELECTION_RECIPE = ("--batch", "32", "--warmup-ratio", "0.1", "--weight-decay", "0.01")
+
+
+def test_commands_are_unchanged_but_the_berturk_selection_recipe() -> None:
+    """Every reproduction command is byte-identical to its c311b6199c08 text but the six tokens of the BERTurk
+    selection recipe, which sit exactly once right after --head-lr 0.0001 in both berturk-selection training lines."""
+    import hashlib
+    import json
+    snapshot, stripped = [], 0
+    for name in rp.STEP_NAMES:
+        cmds = [list(c) for c in rp.commands(name)]
+        if name == "berturk-selection":
+            for c in cmds:
+                if c[0] != "berturk_train.py":
+                    continue
+                n = len(SELECTION_RECIPE)
+                at = [i for i in range(len(c) - n + 1) if tuple(c[i:i + n]) == SELECTION_RECIPE]
+                assert len(at) == 1 and c[at[0] - 2:at[0]] == ["--head-lr", "0.0001"], c
+                del c[at[0]:at[0] + n]
+                stripped += 1
+        snapshot.append([name, cmds])
+    assert stripped == 2
+    def sha(x: Any) -> str:
+        return hashlib.sha256(json.dumps(x, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+    differ = [name for name, cmds in snapshot if sha(cmds)[:12] != STEP_SHA256.get(name)]
+    assert [name for name, _ in snapshot] == list(STEP_SHA256)
+    assert not differ, "these steps' commands differ from their c311b6199c08 text: %s" % ", ".join(differ)
+    assert sha(snapshot) == COMMANDS_SHA256
+
+
 def test_final_seed_commands_are_the_records(bare: str) -> None:
     from pilot import berturk, postfit
     for kind, prefix, storage in (("laya", "ckpt-final", "ray_results"), ("berturk", "ckpt-berturk-final",
