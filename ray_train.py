@@ -39,7 +39,11 @@ runs) used the frozen recipe of pilot.postfit (encoder LR 2e-05, head LR 1e-4, n
 for a continued few-shot run) and its command passes --epochs, --encoder-lr, --head-lr and --neg explicitly
 (postfit.final_command, pilot.reproduce), so its run id is unchanged. A hand-typed final-seed or few-shot command that
 omits one of them is refused by the existing bindings (pilot.postfit.check_final, pilot.fewshot.check_base,
-check_continued), never trained under another recipe.
+check_continued), never trained under another recipe. Resume across the change: the run id hashes the resolved recipe,
+so a plain run started before the defaults changed (the former defaults: the spike's LRs, mps_spike.HPARAMS, neg 8, 4
+epochs) resumes only with its old recipe flags spelled out, --epochs 4 --encoder-lr 2.5e-05 --head-lr 0.0001 --neg 8;
+rerun without them, it names another run id and starts a fresh run under the tuned recipe in its own storage/<run_id>/,
+leaving the old run's storage in place (never mislabelled: check_state keys on the run id).
 
 Items (data_neg16 by default, data_neg8 in every committed run): the split files label all 48 tags. Every message the
 --max-messages subsample selects (all of them without it) trains: there is no calibration holdout (the temperature

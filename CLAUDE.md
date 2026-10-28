@@ -25,7 +25,8 @@ python ray_train.py --data data/splits/selection_train.jsonl --base multilingual
 python ray_train.py --data data/splits/selection_train.jsonl --base multilingual --out ckpt \
     --workers 2 --freeze-encoder --max-messages 100 --epochs 2
 python ray_train.py ... --print-run-id         # the run id (= ray_results/<run_id>/) without starting Ray
-# Resume after a kill or crash: rerun the identical command (it resumes from the last epoch-NNN checkpoint)
+# Resume after a kill or crash: rerun the identical command (it resumes from the last epoch-NNN checkpoint); a plain run
+# killed before the tuned defaults resumes only with --epochs 4 --encoder-lr 2.5e-05 --head-lr 0.0001 --neg 8
 # live TensorBoard scalars from rank 0 into tensorboard/RUN_ID/ (gitignored); not part of the run id
 python ray_train.py ... --tensorboard tensorboard
 

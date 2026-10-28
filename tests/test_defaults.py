@@ -441,3 +441,25 @@ def test_docs_say_the_trial_fixed_settings_are_not_defaults() -> None:
         flat = " ".join(text.split())
         assert "pilot.tune.FIXED" in flat and flags in flat, name
     assert "command trains them" not in " ".join(search.split())
+
+
+OLD_LAYA_FLAGS = "--epochs 4 --encoder-lr 2.5e-05 --head-lr 0.0001 --neg 8"
+
+
+def test_docs_name_the_old_flags_a_pre_change_plain_run_resumes_with() -> None:
+    """A plain Laya run killed under the former defaults resumes only with them spelled out: the flags the ray_train.py
+    docstring and CLAUDE.md name are the former defaults (the spike's LRs, mps_spike.HPARAMS, compute_checkpoint.NEG
+    and the 4 epochs), and without them the same plain command names another run id (the tuned recipe)."""
+    ray_train = pytest.importorskip("ray_train")
+    import compute_checkpoint
+    import mps_spike
+    from pilot import runs
+    for name, text in (("ray_train.py", ray_train.__doc__ or ""), ("CLAUDE.md", _text(os.path.join(REPO_ROOT,
+                                                                                                    "CLAUDE.md")))):
+        assert OLD_LAYA_FLAGS in " ".join(text.split()), name
+    base = ["--data", "d.jsonl", "--out", "o"]
+    old = _laya_canon(*(base + OLD_LAYA_FLAGS.split()))
+    assert {k: old[k] for k in defaults.LAYA} == {"encoder_lr": mps_spike.HPARAMS["encoder_lr"],
+                                                 "head_lr": mps_spike.HPARAMS["head_lr"],
+                                                 "neg": compute_checkpoint.NEG, "epochs": 4}
+    assert runs.run_id(old) != runs.run_id(_laya_canon(*base))
