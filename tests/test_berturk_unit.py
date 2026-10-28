@@ -17,7 +17,7 @@ import pytest
 import berturk_train
 import score
 from intents import INTENTS
-from pilot import berturk, dumps
+from pilot import berturk, defaults, dumps
 from pilot.data import REPO_ROOT, sha256_file
 
 pytestmark = pytest.mark.unit
@@ -235,9 +235,12 @@ def test_identity_resolves_lr_to_the_encoder_only() -> None:
     """The first reference-check fix: --lr is the encoder LR only; the head LR is its own flag and IDENTITY key, so two
     runs that differ only in it never share a run dir."""
     assert berturk.RESOLVED == {"lr": ("encoder_lr",)}
+    assert dict(berturk_train.RECIPE_FLAGS)["lr"] == "encoder_lr"
     dests = {act.dest: act for act in berturk_train.parser()._actions}
-    assert "head_lr" in dests and "head_lr" in berturk.IDENTITY and dests["head_lr"].default == berturk.HEAD_LR
-    assert dests["lr"].default == berturk.LR
+    assert "head_lr" in dests and "head_lr" in berturk.IDENTITY and dests["head_lr"].default is None
+    assert dests["lr"].default is None                    # resolved from the run's context
+    v = _identity(_parsed())                              # a plain command: the tuned defaults
+    assert (v["encoder_lr"], v["head_lr"]) == (defaults.BERTURK["encoder_lr"], defaults.BERTURK["head_lr"])
     ids = {berturk.run_id(berturk.canonical(_values(head_lr=h))) for h in (berturk.HEAD_LR, 2e-05)}
     assert len(ids) == 2
 
@@ -297,7 +300,8 @@ def test_epochs_is_the_only_change_from_the_head_lr_run() -> None:
     assert {k: old[k] for k in RECIPE_KEYS} == _recipe()                # the LRs and the recipe stay
     assert old["head_lr"] == berturk.HEAD_LR == 0.0001
     dests = {act.dest: act for act in berturk_train.parser()._actions}
-    assert dests["epochs"].default == berturk.EPOCHS
+    assert dests["epochs"].default is None                # resolved: a plain command gets the tuned epochs
+    assert _identity(_parsed())["epochs"] == defaults.BERTURK["epochs"] == 20
 
 
 def test_identity_canonical_refuses_missing_and_unexpected_keys() -> None:
@@ -427,8 +431,12 @@ def test_committed_berturk_run_ids_are_unchanged_by_the_tune_key() -> None:
 
 
 def _parsed(*extra: str) -> Any:
-    """berturk_train.py's parsed default selection command on the pinned base, `extra` appended."""
-    return berturk_train.parser().parse_args(["--data", "data/splits/selection_train.jsonl", *extra])
+    """berturk_train.py's parsed plain selection command on the pinned base, `extra` appended, its omitted recipe
+    flags resolved exactly as main resolves a command with no --postfit record, few-shot mode or base: from the tuned
+    defaults (pilot.defaults.BERTURK)."""
+    a = berturk_train.parser().parse_args(["--data", "data/splits/selection_train.jsonl", *extra])
+    berturk_train.resolve_recipe(a, *berturk_train.recipe_context(a, None, None, None))
+    return a
 
 
 def _identity(a: Any) -> dict[str, Any]:
@@ -438,14 +446,24 @@ def _identity(a: Any) -> dict[str, Any]:
     return berturk_train.identity_values(a, entry, digests, (), None, None)
 
 
-def test_warmup_ratio_and_weight_decay_flags_default_to_the_recipe(capsys: pytest.CaptureFixture[str]) -> None:
-    """--warmup-ratio and --weight-decay default to the recipe's WARMUP_RATIO and WEIGHT_DECAY, so the default
-    command's identity values are the former literal's (the recipe constants); another value is another run id; a
-    ratio outside [0, 1) or a negative weight decay is an argument error."""
+FROZEN_RECIPE = ("--epochs", "30", "--lr", "2e-05", "--head-lr", "0.0001", "--batch", "32", "--warmup-ratio", "0.1",
+                 "--weight-decay", "0.01")
+
+
+def test_recipe_flags_resolve_to_the_tuned_defaults_without_context(capsys: pytest.CaptureFixture[str]) -> None:
+    """The six recipe flags default to None; a plain command (no --postfit, few-shot mode or masked base) resolves
+    them to the tuned defaults (pilot.defaults.BERTURK, by JSON text: weight_decay is the float 0.0), while the frozen
+    recipe spelled out gives exactly the identity values the former default command gave (the recipe constants), so
+    its run id is the committed one's; --warmup-ratio 0.06 or --weight-decay 0.0 alone each name another run than the
+    frozen one; a ratio outside [0, 1) or a negative weight decay is an argument error before anything is read."""
     dests = {act.dest: act for act in berturk_train.parser()._actions}
-    assert dests["warmup_ratio"].default == berturk.WARMUP_RATIO == 0.1
-    assert dests["weight_decay"].default == berturk.WEIGHT_DECAY == 0.01
-    a = _parsed()
+    assert all(dests[d].default is None for d, _ in berturk_train.RECIPE_FLAGS)
+    assert dests["max_len"].default == berturk.MAX_LEN
+    plain = _identity(_parsed())
+    got = {key: plain[key] for _, key in berturk_train.RECIPE_FLAGS}
+    assert json.dumps(got, sort_keys=True) == json.dumps(defaults.BERTURK, sort_keys=True)
+    assert repr(plain["weight_decay"]) == "0.0"
+    a = _parsed(*FROZEN_RECIPE)
     v = _identity(a)
     assert list(v) == list(berturk.IDENTITY)
     digests = {f: "%x" % i * 64 for i, f in enumerate(berturk.BASE_FILES, start=1)}
@@ -459,16 +477,78 @@ def test_warmup_ratio_and_weight_decay_flags_default_to_the_recipe(capsys: pytes
            "loss": berturk.LOSS, "max_len": berturk.MAX_LEN, "max_messages": None, "mask_tags": None, "seed": 0,
            "stop_after_epoch": None, "postfit_sha256": None, "fewshot": None, "tune": None}
     assert v == old
+    assert json.dumps(v, sort_keys=True) == json.dumps(old, sort_keys=True)
     rid = berturk.run_id(berturk.canonical(v))
+    assert berturk.run_id(berturk.canonical(plain)) != rid
     for extra in (("--warmup-ratio", "0.06"), ("--weight-decay", "0.0")):
-        assert berturk.run_id(berturk.canonical(_identity(_parsed(*extra)))) != rid, extra
-    assert berturk.run_id(berturk.canonical(_identity(_parsed("--warmup-ratio", "0.1", "--weight-decay", "0.01")))) \
-        == rid                                              # the recipe's values spelled out: the same run
+        frozen = [x for i, x in enumerate(FROZEN_RECIPE) if FROZEN_RECIPE[i - (i % 2)] != extra[0]]
+        assert berturk.run_id(berturk.canonical(_identity(_parsed(*frozen, *extra)))) != rid, extra
     for extra, flag in ((("--warmup-ratio", "1.0"), "--warmup-ratio"), (("--warmup-ratio", "-0.1"), "--warmup-ratio"),
                         (("--weight-decay", "-0.1"), "--weight-decay")):
         with pytest.raises(SystemExit) as e:
             berturk_train.main(["--data", "data/splits/selection_train.jsonl", *extra])
         assert e.value.code == 2 and flag in capsys.readouterr().err, extra
+
+
+FAKE_CHOSEN = {"epochs": 30, "encoder_lr": 2e-05, "head_lr": 0.0001, "batch": 32, "warmup_ratio": 0.1,
+               "weight_decay": 0.01, "seed": 0}
+EXPLICIT = {"epochs": ("--epochs", "7", 7), "lr": ("--lr", "3e-05", 3e-05), "head_lr": ("--head-lr", "0.0003", 0.0003),
+            "batch": ("--batch", "8", 8), "warmup_ratio": ("--warmup-ratio", "0.2", 0.2),
+            "weight_decay": ("--weight-decay", "0.05", 0.05)}
+
+
+def test_an_explicit_recipe_flag_wins_over_the_context() -> None:
+    """Each recipe flag given on the command line survives the resolution, against the tuned defaults and against a
+    chosen canonical config; every other flag takes the context's value."""
+    for context in (defaults.BERTURK, FAKE_CHOSEN):
+        for dest, (flag, text, want) in EXPLICIT.items():
+            a = berturk_train.parser().parse_args(["--data", "d", flag, text])
+            berturk_train.resolve_recipe(a, context, "the test context")
+            assert getattr(a, dest) == want and type(getattr(a, dest)) is type(want), (dest, context)
+            for other, key in berturk_train.RECIPE_FLAGS:
+                if other != dest:
+                    assert getattr(a, other) == context[key], (other, context)
+
+
+def test_recipe_context_follows_the_command() -> None:
+    """recipe_context picks the --postfit record's chosen canonical, then (--fewshot-base) the frozen selection run's,
+    then a masked base's canonical, else the tuned defaults; a context without a key refuses naming the key and the
+    flag."""
+    def parsed(*extra: str) -> Any:
+        return berturk_train.parser().parse_args(["--data", "d", *extra])
+
+    record = {"chosen": {"canonical": dict(FAKE_CHOSEN, epochs=29)}}
+    base_info = {"run_id": "berturk-selection_train-s0-00000000", "canonical": dict(FAKE_CHOSEN, epochs=28)}
+    chosen = dict(FAKE_CHOSEN, epochs=27)
+    ctx, what = berturk_train.recipe_context(parsed(), record, None, None)
+    assert ctx is record["chosen"]["canonical"] and "--postfit" in what
+    ctx, what = berturk_train.recipe_context(parsed("--fewshot-base"), None, chosen, None)
+    assert ctx is chosen and "frozen selection run" in what
+    ctx, what = berturk_train.recipe_context(parsed("--fewshot-draw", "0", "--fewshot-k", "5"), None, None, base_info)
+    assert ctx is base_info["canonical"] and "masked base" in what
+    ctx, what = berturk_train.recipe_context(parsed(), None, None, None)
+    assert ctx is defaults.BERTURK and "pilot/defaults.py" in what
+    with pytest.raises(ValueError, match="--fewshot-base"):
+        berturk_train.recipe_context(parsed("--fewshot-base"), None, None, None)
+    for dest, key in berturk_train.RECIPE_FLAGS:
+        lacking = {k: v for k, v in FAKE_CHOSEN.items() if k != key}
+        flag = "--" + dest.replace("_", "-")
+        with pytest.raises(SystemExit, match="the test context has no %s to resolve %s from; pass %s"
+                                             % (key, flag, flag)):
+            berturk_train.resolve_recipe(parsed(), lacking, "the test context")
+
+
+def test_identity_values_refuses_an_unresolved_recipe() -> None:
+    """identity_values and fit refuse a recipe flag still None, naming it: no direct caller hashes a null."""
+    a = berturk_train.parser().parse_args(["--data", "data/splits/selection_train.jsonl"])
+    with pytest.raises(ValueError, match="--epochs, --lr, --head-lr, --batch, --warmup-ratio, --weight-decay"):
+        _identity(a)
+    a = _parsed()
+    a.warmup_ratio = None
+    with pytest.raises(ValueError, match="unresolved recipe flag\\(s\\) --warmup-ratio: call resolve_recipe"):
+        _identity(a)
+    with pytest.raises(ValueError, match="--warmup-ratio"):
+        berturk_train.fit(a, [], [], "", {}, {}, {}, "rid", "run_dir", cpus=1)
 
 
 OG_NAMES = ["bert.embeddings.word_embeddings.weight", "bert.embeddings.LayerNorm.weight",

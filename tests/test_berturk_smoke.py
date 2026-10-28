@@ -57,8 +57,9 @@ def test_berturk_train_score_postfit_chain(tmp_path: Path, synthetic_raw: Synthe
     base = tiny_base(tmp_path / "base")
     storage = tmp_path / "runs"
     argv = ["berturk_train.py", "--data", os.path.join(splits, "selection_train.jsonl"), "--manifest", manifest,
-            "--base", base, "--device", "cpu", "--epochs", "2", "--batch", "4", "--max-len", "32", "--seed", "0",
-            "--storage", storage]
+            "--base", base, "--device", "cpu", "--epochs", "2", "--batch", "4", "--max-len", "32", "--lr", "2e-05",
+            "--head-lr", "0.0001", "--warmup-ratio", "0.1", "--weight-decay", "0.01", "--seed", "0",
+            "--storage", storage]                            # the frozen recipe spelled out (no tuned defaults)
     rid = _run(*(argv + ["--print-run-id"])).stdout.strip()
     assert re.match(r"^berturk-selection_train-s0-[0-9a-f]{8}$", rid), rid
     assert not storage.exists()                              # --print-run-id creates nothing
@@ -132,8 +133,9 @@ def test_berturk_final_seed_chain(tmp_path: Path, synthetic_raw: SyntheticRaw,
     base = tiny_base(tmp_path / "base")
     storage = tmp_path / "runs"
     argv = ["berturk_train.py", "--data", os.path.join(splits, "selection_train.jsonl"), "--manifest", manifest,
-            "--base", base, "--device", "cpu", "--epochs", "2", "--batch", "4", "--max-len", "32", "--seed", "0",
-            "--storage", storage]
+            "--base", base, "--device", "cpu", "--epochs", "2", "--batch", "4", "--max-len", "32", "--lr", "2e-05",
+            "--head-lr", "0.0001", "--warmup-ratio", "0.1", "--weight-decay", "0.01", "--seed", "0",
+            "--storage", storage]                            # the frozen recipe spelled out (no tuned defaults)
     rid = _run(*(argv + ["--print-run-id"])).stdout.strip()
     _run(*argv)                                              # the tiny selection run
     dump_root = str(tmp_path / "dumps")

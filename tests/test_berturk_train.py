@@ -76,10 +76,17 @@ def _json(path: str) -> Any:
         return json.load(f)
 
 
+# the frozen recipe's LRs, warm-up and weight decay, spelled out: berturk_train.py resolves an omitted recipe flag of a
+# plain command to the tuned defaults of new runs (pilot.defaults.BERTURK), and the smoke recipe means the frozen one
+FROZEN = ["--lr", "2e-05", "--head-lr", "0.0001", "--warmup-ratio", "0.1", "--weight-decay", "0.01"]
+
+
 def train_argv(data: str, manifest: str, base: str, storage: str | Path, *extra: Any) -> list[Any]:
-    """berturk_train.py arguments of the smoke recipe on the synthetic split and the tiny base."""
-    return ["--data", data, "--manifest", manifest, "--base", base, "--device", "cpu", "--epochs", str(EPOCHS),
-            "--batch", str(BATCH), "--max-len", str(MAX_LEN), "--seed", "0", "--storage", str(storage)] + list(extra)
+    """berturk_train.py arguments of the smoke recipe on the synthetic split and the tiny base (the frozen recipe's
+    LRs, warm-up and weight decay spelled out; a flag in extra comes later, so it wins)."""
+    return (["--data", data, "--manifest", manifest, "--base", base, "--device", "cpu", "--epochs", str(EPOCHS),
+             "--batch", str(BATCH), "--max-len", str(MAX_LEN)] + FROZEN + ["--seed", "0", "--storage", str(storage)]
+            + list(extra))
 
 
 def run_train(argv: list[Any]) -> subprocess.CompletedProcess[str]:
@@ -382,6 +389,28 @@ def test_stop_after_epoch_boundaries_refused(inputs: Inputs, tmp_path: Path, cap
     code, err = exit_code(argv + ["--stop-after-epoch", str(k)], capsys)
     assert code == 2 and "--stop-after-epoch must be at least 1 and below --epochs (3)" in err, err
     assert not os.path.exists(str(tmp_path / "runs"))
+
+
+def test_stop_after_epoch_is_checked_against_the_resolved_epochs(inputs: Inputs, tmp_path: Path,
+                                                                  capsys: pytest.CaptureFixture[str],
+                                                                  no_load: None) -> None:
+    """A plain command (no recipe flag, no context) resolves --epochs to the tuned 20, and --stop-after-epoch 20 is
+    then refused against that resolved value, naming it, before anything is created; the recipe's argument errors
+    still exit 2 before anything is read."""
+    from pilot import defaults
+    data, manifest, base = inputs
+    storage = tmp_path / "runs"
+    plain = ["--data", data, "--manifest", manifest, "--base", base, "--device", "cpu", "--storage", str(storage),
+             "--print-run-id"]
+    assert defaults.BERTURK["epochs"] == 20
+    code, err = exit_code(plain + ["--stop-after-epoch", "20"], capsys)
+    assert code == 2 and "--stop-after-epoch must be at least 1 and below --epochs (20)" in err, err
+    assert not os.path.exists(str(storage))
+    for extra, msg in ((("--lr", "0"), "--lr must be positive"), (("--head-lr", "-1"), "--head-lr must be positive"),
+                       (("--epochs", "0"), "--epochs must be at least 1"),
+                       (("--batch", "0"), "--batch must be at least 1")):
+        code, err = exit_code(["--data", str(tmp_path / "absent.jsonl"), *extra], capsys)
+        assert code == 2 and msg in err, (extra, err)
 
 
 @pytest.mark.parametrize("k", [1, 2])

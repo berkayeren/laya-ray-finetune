@@ -2,14 +2,15 @@
 multi-label intent classifier: the BERTurk baseline that Laya is compared against.
 
 One process, no Ray (BERTurk is trained with the HF Trainer, not the Ray harness): --device cpu, mps or cuda. The
-recipe is the one the user confirmed before the first BERTurk run (pilot.berturk holds the values):
-- LRs: the encoder LR, --lr (default 2e-05, Laya's single encoder LR), and the classifier head's LR, --head-lr (default
-  1e-4, pilot.berturk.HEAD_LR = Laya's head LR): the first fix after the BERTurk reference check (2026-10-21), which
+frozen recipe, the one the user confirmed before the first BERTurk run and the one every committed BERTurk run used
+(pilot.berturk holds the values, unchanged; new runs default to the tuned recipe, see "Recipe resolution" below):
+- LRs: the encoder LR, --lr (2e-05, Laya's single encoder LR), and the classifier head's LR, --head-lr (1e-4,
+  pilot.berturk.HEAD_LR = Laya's head LR): the first fix after the BERTurk reference check (2026-10-21), which
   replaced one LR for encoder and head. The head is exactly the parameters from_pretrained newly initialised
   (classifier.weight, classifier.bias; refused otherwise, before the run dir). The canonical config records encoder_lr
   and head_lr, so pilot.postfit selects BERTurk candidates with the same code as Laya's.
-- Schedule: --epochs (default pilot.berturk.EPOCHS = 30, the second reference-check fix; the linear schedule and its
-  10% warm-up span all epochs); every epoch writes an export, every export is a val selection candidate.
+- Schedule: --epochs (pilot.berturk.EPOCHS = 30, the second reference-check fix; the linear schedule and its 10%
+  warm-up span all epochs); every epoch writes an export, every export is a val selection candidate.
 - Optimizer and precision: batch 32 messages (--batch), a linear schedule with a 10% warm-up, AdamW (optim adamw_torch,
   weight decay 0.01) in four param groups (build_optimizer: encoder and head, each split by the Trainer's own
   weight-decay rule, with the Trainer's own AdamW class and kwargs), passed as Trainer(optimizers=(optimizer, None)) so
@@ -103,10 +104,25 @@ so timings are compared from flag-off runs. DIR is refused under results/, data/
 --out, before any load, fetch or run dir, also with --print-run-id; an unwritable DIR/RUN_ID is refused when the writer
 opens, after the load and before the run dir is created, so the same command can be rerun once the DIR is fixed.
 
---warmup-ratio and --weight-decay default to the recipe's values (pilot.berturk.WARMUP_RATIO 0.1 and WEIGHT_DECAY
-0.01); they reach the TrainingArguments (warmup_steps below 1 is read as a ratio of the training steps) and the
-optimizer's decaying groups. Both were IDENTITY keys before the flags existed (warmup_ratio, weight_decay), so every
-committed run id is unchanged; tune.py's search varies them.
+Recipe resolution: --epochs, --lr, --head-lr, --batch, --warmup-ratio and --weight-decay (RECIPE_FLAGS) default to
+None. Each omitted one is filled from the run's context (recipe_context, resolve_recipe), in main after the split, the
+postfit record and the base are read and before the identity, the run id, --print-run-id and every binding: a
+--postfit record gives its chosen selection run's canonical config; --fewshot-base gives
+pilot.fewshot.chosen_canonical, the frozen selection run's config through the protocol-pinned postfit record (the
+value check_base compares with); --fewshot-draw/--fewshot-k give the masked base's canonical config (its
+berturk_train.json); a plain command gets the tuned defaults of new runs, pilot.defaults.BERTURK (the best
+configuration of the exploratory search, results/tune/berturk.json: the tuned encoder and head LRs, batch 16, warm-up
+0.06, weight decay 0.0, 20 epochs). A flag given on the command line always wins and is still bound: check_final,
+check_base and check_continued see the resolved command exactly as an explicit one, so a departure from the frozen
+recipe is refused, naming the key (a continued run that omits --epochs resolves its base's epochs and is refused
+naming the frozen continued epochs). The committed final-seed and few-shot commands (which pass --epochs, --lr and
+--head-lr, the final seeds also --batch) keep their text, acceptance and run ids, and the committed selection run's
+reproduce command spells out batch, warm-up and weight decay. The range checks run on the given values before anything
+is read and on every resolved value after the resolution (--stop-after-epoch against the resolved --epochs);
+identity_values and fit refuse an unresolved flag (ValueError), so no direct caller hashes a null into a run id
+(tune.py passes all six). --warmup-ratio and --weight-decay reach the TrainingArguments (warmup_steps below 1 is read as
+a ratio of the training steps) and the optimizer's decaying groups; both were IDENTITY keys before the flags existed
+(warmup_ratio, weight_decay), so every committed run id is unchanged; tune.py's search varies them.
 
 main runs every refusal, then calls fit(...), the training itself (the TrainingArguments, the optimizer, the callbacks,
 the Trainer, the exports, --out and done.json). fit's on_epoch hook, called with the live model and tokenizer after
@@ -127,7 +143,10 @@ torch-free: torch, transformers and the ray_train helpers are imported in main a
 PYTORCH_ENABLE_MPS_FALLBACK once, at import).
 
 usage:
-  python berturk_train.py --data data/splits/selection_train.jsonl --device mps        # the selection run (30 epochs)
+  python berturk_train.py --data data/splits/selection_train.jsonl --device mps        # a new run (the tuned recipe)
+  python berturk_train.py --data data/splits/selection_train.jsonl --base berturk --device mps --epochs 30 \
+      --lr 2e-05 --head-lr 0.0001 --batch 32 --warmup-ratio 0.1 --weight-decay 0.01 --seed 0 \
+      --storage berturk_runs                        # the committed selection run (the frozen recipe, 30 epochs)
   python berturk_train.py --data data/splits/selection_train.jsonl --print-run-id      # its run id, nothing created
   python berturk_train.py --data data/splits/selection_train.jsonl --device mps --tensorboard tensorboard
                                                     # the same run, live scalars in tensorboard/RUN_ID/
@@ -136,9 +155,11 @@ usage:
       --postfit results/postfit/berturk.json --reference results/postfit/berturk-reference.json --no-export-epochs \
       --out ckpt/berturk-final-sS                   # a final seed (postfit.py --print-final-commands prints it)
   python berturk_train.py --data data/splits/selection_train.jsonl --device mps --epochs 30 --stop-after-epoch 29 \
-      --seed 0 --fewshot-base --no-export-epochs --out ckpt-berturk-fewshot-base-s0     # a few-shot masked base
+      --lr 2e-05 --head-lr 0.0001 --seed 0 --fewshot-base --no-export-epochs \
+      --out ckpt-berturk-fewshot-base-s0            # a few-shot masked base (batch, warm-up, decay: the frozen run's)
   python berturk_train.py --data data/splits/selection_train.jsonl --base ckpt-berturk-fewshot-base-s0 --device mps \
-      --epochs 10 --seed 0 --fewshot-draw 0 --fewshot-k 10 --no-export-epochs --out ckpt-berturk-fewshot-d0-k10
+      --epochs 10 --lr 2e-05 --head-lr 0.0001 --seed 0 --fewshot-draw 0 --fewshot-k 10 --no-export-epochs \
+      --out ckpt-berturk-fewshot-d0-k10
                                                     # a few-shot continued run from it
 """
 import argparse
@@ -150,7 +171,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from pilot import berturk, fewshot, pins, postfit, protocol, runs, spike, tensorboard
+from pilot import berturk, defaults, fewshot, pins, postfit, protocol, runs, spike, tensorboard
 from pilot.data import (DEFAULT_MANIFEST, manifest_is_committed, parse_jsonl, refuse_held_out, repo_relpath,
                         sha256_file, write_atomic, verify_split_file)
 from pilot import dumps
@@ -203,6 +224,81 @@ def build_optimizer(model: Any, args: Any, head_lr: float, new_names: list[str],
     return optimizer, groups
 
 
+# the recipe flags resolved from the run's context when omitted: (argparse dest, canonical config key), in the order
+# of the canonical keys; lr is the encoder LR (pilot.berturk.RESOLVED)
+RECIPE_FLAGS: tuple[tuple[str, str], ...] = (("epochs", "epochs"), ("lr", "encoder_lr"), ("head_lr", "head_lr"),
+                                             ("batch", "batch"), ("warmup_ratio", "warmup_ratio"),
+                                             ("weight_decay", "weight_decay"))
+RESOLVED_HELP = ("; when omitted, resolved from the run's context: the --postfit record's chosen run, the frozen "
+                 "selection run for --fewshot-base, the masked base for --fewshot-draw, else the tuned default of new "
+                 "runs (pilot/defaults.py, from results/tune/berturk.json)")
+
+
+def _flag(dest: str) -> str:
+    """The command-line flag of an argparse dest ("head_lr" -> "--head-lr")."""
+    return "--" + dest.replace("_", "-")
+
+
+def recipe_context(a: argparse.Namespace, pf_record: dict[str, Any] | None, chosen: dict[str, Any] | None,
+                   base_info: dict[str, Any] | None) -> tuple[dict[str, Any], str]:
+    """(context, what): the canonical-config-like dict an omitted recipe flag is resolved from, and its name for a
+    refusal. In order: a --postfit record (pf_record) gives its chosen selection run's canonical config; --fewshot-base
+    gives `chosen` (pilot.fewshot.chosen_canonical of the frozen protocol, the value check_base receives); a continued
+    run gives its masked base's canonical config (base_info, fewshot_base_of); a plain command gets the tuned defaults
+    of new runs, pilot.defaults.BERTURK. A context-bound command never falls back to the tuned defaults."""
+    if pf_record is not None:
+        return pf_record["chosen"]["canonical"], "the --postfit record's chosen run"
+    if a.fewshot_base:
+        if chosen is None:
+            raise ValueError("--fewshot-base resolves from the frozen selection run: pass chosen")
+        return chosen, "the frozen selection run"
+    if base_info is not None:
+        return base_info["canonical"], "the masked base's berturk_train.json"
+    return defaults.BERTURK, "the tuned defaults (pilot/defaults.py)"
+
+
+def resolve_recipe(a: argparse.Namespace, context: dict[str, Any], what: str) -> None:
+    """Fill every RECIPE_FLAGS attribute of `a` that is None from context[key] (lr from encoder_lr); a flag given on
+    the command line is never replaced, so the bindings (check_final, check_base, check_continued) still see it.
+    SystemExit naming the key and the flag when the context lacks the key. Mutates `a`; returns None."""
+    for dest, key in RECIPE_FLAGS:
+        if getattr(a, dest) is None:
+            if key not in context:
+                raise SystemExit("%s has no %s to resolve %s from; pass %s" % (what, key, _flag(dest), _flag(dest)))
+            setattr(a, dest, context[key])
+
+
+def require_resolved(a: argparse.Namespace) -> None:
+    """ValueError naming every recipe flag of `a` that is still None: identity_values and fit never hash or train an
+    unresolved recipe (main calls resolve_recipe first; tune.py passes all six explicitly)."""
+    missing = [_flag(dest) for dest, _ in RECIPE_FLAGS if getattr(a, dest) is None]
+    if missing:
+        raise ValueError("unresolved recipe flag(s) %s: call resolve_recipe (recipe_context) first, as main does"
+                         % ", ".join(missing))
+
+
+def check_recipe(ap: argparse.ArgumentParser, a: argparse.Namespace) -> None:
+    """ap.error (exit 2) on an out-of-range recipe value of `a`, checking only the values that are set: before the
+    resolution the given flags, after it every one (a context value too). --epochs and --batch at least 1, --lr and
+    --head-lr positive, --warmup-ratio in [0, 1), --weight-decay at least 0, and --stop-after-epoch in
+    1..--epochs - 1 once --epochs is known (naming that --epochs)."""
+    for flag, v in (("--epochs", a.epochs), ("--batch", a.batch)):
+        if v is not None and v < 1:
+            ap.error("%s must be at least 1" % flag)
+    if a.lr is not None and not a.lr > 0:
+        ap.error("--lr must be positive")
+    if a.head_lr is not None and not a.head_lr > 0:
+        ap.error("--head-lr must be positive")
+    if a.warmup_ratio is not None and not 0 <= a.warmup_ratio < 1:
+        ap.error("--warmup-ratio must be at least 0 and below 1 (a fraction of the training steps)")
+    if a.weight_decay is not None and not a.weight_decay >= 0:
+        ap.error("--weight-decay must be at least 0")
+    # K = --epochs has one spelling, the omitted flag (one run id per trajectory)
+    if a.stop_after_epoch is not None and a.epochs is not None and not 1 <= a.stop_after_epoch < a.epochs:
+        ap.error("--stop-after-epoch must be at least 1 and below --epochs (%d); omit it to train every epoch"
+                 % a.epochs)
+
+
 def parser() -> argparse.ArgumentParser:
     """The berturk_train.py argument parser."""
     ap = argparse.ArgumentParser(description="fine-tune BERTurk with the HF Trainer (48-label multi-label, masked BCE)")
@@ -211,15 +307,14 @@ def parser() -> argparse.ArgumentParser:
                     help="berturk (the pinned, digest-verified weights; default) or a local base dir holding %s"
                          % ", ".join(berturk.BASE_FILES))
     ap.add_argument("--device", choices=("cpu", "mps", "cuda"), default="cpu")
-    ap.add_argument("--epochs", type=int, default=berturk.EPOCHS)
-    ap.add_argument("--lr", type=float, default=berturk.LR, help="the encoder LR (Laya's single encoder LR)")
-    ap.add_argument("--head-lr", type=float, default=berturk.HEAD_LR,
-                    help="the classifier head's LR (Laya's head LR, the first reference-check fix)")
-    ap.add_argument("--batch", type=int, default=berturk.BATCH, help="messages per optimizer step")
-    ap.add_argument("--warmup-ratio", type=float, default=berturk.WARMUP_RATIO,
-                    help="the linear schedule's warm-up as a fraction of the training steps (default 0.1, the recipe)")
-    ap.add_argument("--weight-decay", type=float, default=berturk.WEIGHT_DECAY,
-                    help="AdamW weight decay of the decaying param groups (default 0.01, the recipe)")
+    ap.add_argument("--epochs", type=int, default=None, help="epochs of the schedule" + RESOLVED_HELP)
+    ap.add_argument("--lr", type=float, default=None, help="the encoder LR" + RESOLVED_HELP)
+    ap.add_argument("--head-lr", type=float, default=None, help="the classifier head's LR" + RESOLVED_HELP)
+    ap.add_argument("--batch", type=int, default=None, help="messages per optimizer step" + RESOLVED_HELP)
+    ap.add_argument("--warmup-ratio", type=float, default=None,
+                    help="the linear schedule's warm-up as a fraction of the training steps" + RESOLVED_HELP)
+    ap.add_argument("--weight-decay", type=float, default=None,
+                    help="AdamW weight decay of the decaying param groups" + RESOLVED_HELP)
     ap.add_argument("--max-len", type=int, default=berturk.MAX_LEN,
                     help="WordPiece tokens per message with [CLS] and [SEP]; longer ones are truncated and counted")
     ap.add_argument("--seed", type=int, default=0)
@@ -371,7 +466,9 @@ def identity_values(a: argparse.Namespace, entry: dict[str, Any], digests: dict[
     """Every pilot.berturk.IDENTITY value of a parsed berturk_train.py command (pilot.berturk.canonical keeps them and
     drops a DROPPED_WHEN_NONE key whose value is None): entry is --data's manifest entry, digests the base files' sha256s,
     mask the masked tags, record_sha the --postfit record's sha256, fs_binding the few-shot binding and tune the tuning
-    partition block of a tune.py search trial (None for every berturk_train.py command, so its run id is unchanged)."""
+    partition block of a tune.py search trial (None for every berturk_train.py command, so its run id is unchanged).
+    ValueError when a recipe flag is still None (require_resolved)."""
+    require_resolved(a)
     return {
         "split": os.path.splitext(os.path.basename(entry["path"]))[0], "data_sha256": entry["sha256"],
         "data_role": entry["role"], "base_model_sha256": digests["model.safetensors"],
@@ -398,7 +495,8 @@ def fit(a: argparse.Namespace, rows: list[dict[str, Any]], labels: list[list[flo
     few-shot masking proof, pf_block the --postfit final block, continued a continued few-shot run, tb_dir the
     --tensorboard event dir. on_epoch(model, tok, epoch, row) runs after each epoch's row is appended and before any
     export (tune.py's per-epoch dev scoring; it must leave the model in train mode); None for every berturk_train.py
-    command, so nothing else runs. Returns run_dir."""
+    command, so nothing else runs. ValueError when a recipe flag is still None (require_resolved). Returns run_dir."""
+    require_resolved(a)
     stop = a.stop_after_epoch or a.epochs                    # the last epoch this run trains
     if a.device == "mps":
         os.environ.update(spike.spike_env("0", cpus))       # strict MPS before torch is imported
@@ -630,22 +728,10 @@ def main(argv: list[str] | None = None) -> str | None:
     """Train one BERTurk run (see the module docstring); returns its run dir, or None after --print-run-id."""
     ap = parser()
     a = ap.parse_args(argv)
-    for flag, v in (("--epochs", a.epochs), ("--batch", a.batch), ("--max-len", a.max_len),
-                    ("--max-messages", a.max_messages), ("--cpus", a.cpus)):
+    for flag, v in (("--max-len", a.max_len), ("--max-messages", a.max_messages), ("--cpus", a.cpus)):
         if v is not None and v < 1:
             ap.error("%s must be at least 1" % flag)
-    if not a.lr > 0:
-        ap.error("--lr must be positive")
-    if not a.head_lr > 0:
-        ap.error("--head-lr must be positive")
-    if not 0 <= a.warmup_ratio < 1:
-        ap.error("--warmup-ratio must be at least 0 and below 1 (a fraction of the training steps)")
-    if not a.weight_decay >= 0:
-        ap.error("--weight-decay must be at least 0")
-    # K = --epochs has one spelling, the omitted flag (one run id per trajectory)
-    if a.stop_after_epoch is not None and not 1 <= a.stop_after_epoch < a.epochs:
-        ap.error("--stop-after-epoch must be at least 1 and below --epochs (%d); omit it to train every epoch"
-                 % a.epochs)
+    check_recipe(ap, a)                                     # the given recipe values; again after the resolution
     # a few-shot mode is one frozen-protocol command; every other combination is an argument error
     continued = a.fewshot_draw is not None or a.fewshot_k is not None
     fs_flags = [f for f, on in (("--fewshot-base", a.fewshot_base), ("--fewshot-draw", a.fewshot_draw is not None),
@@ -775,13 +861,17 @@ def main(argv: list[str] | None = None) -> str | None:
         fs_binding = fewshot.binding(pin, "continued", a.fewshot_draw, a.fewshot_k,
                                      block["draws"][a.fewshot_draw].get("digest"), base_info["run_id"])
         fs_proof["base"] = base_info
+    # the omitted recipe flags from the run's context, before the identity and every binding (an explicit flag wins)
+    chosen = fewshot.chosen_canonical(proto, "berturk") if a.fewshot_base else None
+    resolve_recipe(a, *recipe_context(a, pf_record, chosen, base_info))
+    check_recipe(ap, a)                                     # every resolved value, the stop bound on --epochs
     canon = berturk.canonical(identity_values(a, entry, digests, mask, record_sha, fs_binding))
     pf_block = None
     if pf_record is not None:                               # bound by refusal, never by transcription
         postfit.check_final(pf_record, canon)
         pf_block = postfit.final_block(pf_record, record_sha, a.postfit)   # refuses a T outside laya's band here
     if a.fewshot_base:                                      # bound by refusal to the frozen protocol
-        fewshot.check_base(proto, pin, "berturk", canon, fewshot.chosen_canonical(proto, "berturk"), mode)
+        fewshot.check_base(proto, pin, "berturk", canon, chosen, mode)
     elif continued:                                         # the frozen draw, k, epochs, LRs and base
         fewshot.check_continued(proto, pin, "berturk", canon, base_info["canonical"], base_info["run_id"],
                                 a.fewshot_draw, a.fewshot_k, mode)
