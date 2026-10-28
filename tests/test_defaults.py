@@ -179,3 +179,110 @@ def test_committed_laya_run_ids_recompute_offline() -> None:
         del bare[i:i + 2]
     other = runs.run_id(_committed_laya_canon(bare, ident)[0])
     assert other != chosen and other.startswith("laya-selection_train-neg%d-s0-" % defaults.LAYA["neg"])
+
+
+# ---- BERTurk and the Laya masked bases: every printable committed command resolves to its committed run id ----
+
+def _training_lines(step: str, script: str) -> list[list[str]]:
+    """The argv (script name dropped) of every `script` training line pilot.reproduce prints for `step`."""
+    from pilot import reproduce as rp
+    return [list(c[1:]) for c in rp.commands(step) if c[0] == script]
+
+
+def _entry_of(data: str) -> dict[str, Any]:
+    """The committed data/splits.json entry named by a --data file's stem."""
+    return _read_json("data", "splits.json")["splits"][os.path.splitext(os.path.basename(data))[0]]
+
+
+def _berturk_canon(argv: list[str]) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    """(parsed args, canonical config, context) of a committed berturk_train.py command on the pinned base, built
+    exactly as berturk_train.main builds it: the frozen protocol, mask and binding of a masked base, the --postfit
+    record and its sha256 of a final seed, then recipe_context and resolve_recipe before identity_values. context holds
+    proto, pin, chosen and record for the bindings."""
+    import berturk_train
+    from pilot import berturk, fewshot, pins, postfit, protocol
+    a = berturk_train.parser().parse_args(argv)
+    assert a.base == "berturk", argv
+    proto = pin = chosen = record = sha = fs_binding = None
+    mask: Any = ()
+    if a.fewshot_base:
+        proto, pin = protocol.require_frozen()
+        mask = berturk.check_mask_tags(proto["fewshot"]["tags"])
+        fs_binding = fewshot.binding(pin, "base")
+        chosen = fewshot.chosen_canonical(proto, "berturk")
+    if a.postfit is not None:
+        record, sha = postfit.read_record(os.path.join(REPO_ROOT, a.postfit))
+    berturk_train.resolve_recipe(a, *berturk_train.recipe_context(a, record, chosen, None))
+    canon = berturk.canonical(berturk_train.identity_values(a, _entry_of(a.data), dict(pins.BERTURK["sha256"]), mask,
+                                                            sha, fs_binding))
+    return a, canon, {"proto": proto, "pin": pin, "chosen": chosen, "record": record}
+
+
+def _base_entries(kind: str) -> dict[int, dict[str, Any]]:
+    """{seed: runs.json entry} of the committed masked bases of `kind`."""
+    entries = _read_json("results", "fewshot", "runs.json")["entries"]
+    return {e["seed"]: e for e in entries if e["kind"] == kind and e["stage"] == "base"}
+
+
+def test_committed_berturk_run_ids_resolve_offline() -> None:
+    pytest.importorskip("berturk_train")
+    from pilot import berturk, fewshot, postfit
+    chosen_rid = _read_json("results", "postfit", "berturk.json")["chosen"]["train_run_id"]
+    assert chosen_rid == "berturk-selection_train-s0-4f36ae05"
+    sel = _training_lines("berturk-selection", "berturk_train.py")
+    assert len(sel) == 2 and sel[0] == sel[1] + ["--print-run-id"]
+    _, canon, _ = _berturk_canon(sel[1])
+    assert berturk.run_id(canon) == chosen_rid
+    # negative control: without its three recipe pairs the selection command resolves them to the tuned defaults
+    # (its explicit epochs and LRs stay the frozen ones) and names another run
+    bare = list(sel[1])
+    for flag in ("--batch", "--warmup-ratio", "--weight-decay"):
+        i = bare.index(flag)
+        del bare[i:i + 2]
+    _, plain, _ = _berturk_canon(bare)
+    dropped = ("batch", "warmup_ratio", "weight_decay")
+    assert json.dumps({k: plain[k] for k in dropped}) == json.dumps({k: defaults.BERTURK[k] for k in dropped})
+    assert {k: plain[k] for k in ("epochs", "encoder_lr", "head_lr")} == {k: canon[k] for k in
+                                                                          ("epochs", "encoder_lr", "head_lr")}
+    assert berturk.run_id(plain) != chosen_rid
+    # and the whole command without any recipe flag resolves every value to the tuned defaults
+    for flag in ("--epochs", "--lr", "--head-lr"):
+        i = bare.index(flag)
+        del bare[i:i + 2]
+    _, plain, _ = _berturk_canon(bare)
+    got = {key: plain[key] for key in defaults.BERTURK}
+    assert json.dumps(got, sort_keys=True) == json.dumps(defaults.BERTURK, sort_keys=True)
+    finals = _training_lines("berturk-final", "berturk_train.py")
+    final_ids = {s["seed"]: s["train_run_id"] for s in _read_json("results", "postfit", "berturk-final.json")["seeds"]}
+    assert len(finals) == 3 and sorted(final_ids) == [0, 1, 2]
+    for argv in finals:
+        a, canon, ctx = _berturk_canon(argv)
+        assert ctx["record"] is not None
+        postfit.check_final(ctx["record"], canon)
+        assert berturk.run_id(canon) == final_ids[a.seed]
+    bases, entries = _training_lines("fewshot-bases", "berturk_train.py"), _base_entries("berturk")
+    assert len(bases) == 3 and sorted(entries) == [0, 1, 2]
+    for argv in bases:
+        a, canon, ctx = _berturk_canon(argv)
+        fewshot.check_base(ctx["proto"], ctx["pin"], "berturk", canon, ctx["chosen"], fewshot.read_mode(ctx["pin"]))
+        assert berturk.run_id(canon) == entries[a.seed]["train_run_id"]
+
+
+def test_committed_laya_bases_recompute_offline() -> None:
+    ray_train = pytest.importorskip("ray_train")
+    from pilot import fewshot, protocol, runs
+    from pilot.weights import identity
+    proto, pin = protocol.require_frozen()
+    mode, chosen = fewshot.read_mode(pin), fewshot.chosen_canonical(proto, "laya")
+    ident = identity("multilingual")
+    bases, entries = _training_lines("fewshot-bases", "ray_train.py"), _base_entries("laya")
+    assert len(bases) == 3 and sorted(entries) == [0, 1, 2]
+    for argv in bases:
+        a = ray_train.parser().parse_args(argv)
+        assert a.fewshot_base and a.base == "multilingual", argv
+        vals = ray_train.identity_values(a, ray_train.resolve(a), _entry_of(a.data), "multilingual", ident, None,
+                                         mask_tags=sorted(proto["fewshot"]["tags"]),
+                                         fewshot=fewshot.binding(pin, "base"))
+        canon = runs.canonical(vals)
+        fewshot.check_base(proto, pin, "laya", canon, chosen, mode)
+        assert runs.run_id(canon) == entries[a.seed]["train_run_id"]
