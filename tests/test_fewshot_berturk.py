@@ -76,6 +76,16 @@ def read(ckpt: str | Path) -> tuple[str, dict[str, Any]]:
     return raw, json.loads(raw)
 
 
+def without(argv: list[Any], flag: str) -> list[Any]:
+    """argv with `flag` and its value removed (the flag must be there once)."""
+    assert argv.count(flag) == 1, flag
+    i = argv.index(flag)
+    return argv[:i] + argv[i + 2:]
+
+
+RESOLVED_KEYS = ("batch", "warmup_ratio", "weight_decay")   # passed by no committed few-shot command: resolved
+
+
 def groups(rec: dict[str, Any]) -> list[tuple[str, bool, float]]:
     return [(g["group"], g["decay"], g["lr"]) for g in rec["record"]["optimizer_groups"]]
 
@@ -109,6 +119,8 @@ def test_berturk_masked_base_then_continued_run(tmp_path: Path, synthetic_raw: S
                  "--epochs", "2", "--stop-after-epoch", "1", "--fewshot-base"] + COMMON
     base_rid = print_run_id(base_argv, capsys)
     assert not storage.exists() and not base_out.exists()           # --print-run-id creates nothing
+    # --batch omitted: resolved from the frozen selection run (the tuned 16 would be refused by check_base)
+    assert print_run_id(without(base_argv, "--batch"), capsys) == base_rid
     train(base_argv)
     raw, rec = read(base_out)
     assert rec["run_id"] == base_rid == berturk.run_id(rec["canonical"]) and rec["epoch"] == 1
@@ -120,6 +132,7 @@ def test_berturk_masked_base_then_continued_run(tmp_path: Path, synthetic_raw: S
                                         "unmasked_held_out_labels": {"card": 0}}
     assert groups(rec) == GROUPS                                     # the fresh head at the head LR
     assert "bank_" not in raw                                        # counts and digests only, never a uid
+    assert {k: canon[k] for k in RESOLVED_KEYS} == {k: chosen[k] for k in RESOLVED_KEYS}
 
     # ---- the continued run from that base's own head, on support plus replay ----
     seen = {}
@@ -136,6 +149,14 @@ def test_berturk_masked_base_then_continued_run(tmp_path: Path, synthetic_raw: S
                  "--epochs", "1", "--fewshot-draw", "0", "--fewshot-k", "2"] + COMMON
     cont_rid = print_run_id(cont_argv, capsys)
     assert not storage.exists() and not seen                        # nothing created, nothing loaded
+    # the omitted recipe flags resolve from the masked base: --batch omitted gives the same run; --epochs omitted
+    # resolves the base's 2 and is refused naming the frozen continued 1; an explicit departure is refused
+    assert print_run_id(without(cont_argv, "--batch"), capsys) == cont_rid
+    with pytest.raises(SystemExit, match="epochs is 2 here but 1"):
+        train(without(cont_argv, "--epochs") + ["--print-run-id"])
+    with pytest.raises(SystemExit, match="weight_decay"):
+        train(cont_argv + ["--weight-decay", "0.01", "--print-run-id"])
+    assert not storage.exists() and not seen
     train(cont_argv)
     head = load_file(os.path.join(str(base_out), "model.safetensors"))
     assert all(not seen["info"][k] for k in ("missing_keys", "unexpected_keys", "mismatched_keys"))
@@ -157,6 +178,8 @@ def test_berturk_masked_base_then_continued_run(tmp_path: Path, synthetic_raw: S
         "support_rows": n_sup, "replay_rows": n_rep, "new_tag_labels": {"card": n_sup},
         "replay_unmasked_held_out_labels": 0, "base": {"run_id": base_rid, "canonical": read(base_out)[1]["canonical"]}}
     assert groups(rec) == GROUPS                                     # the loaded head, in its own groups
+    base_canon = read(base_out)[1]["canonical"]
+    assert {k: canon[k] for k in RESOLVED_KEYS} == {k: base_canon[k] for k in RESOLVED_KEYS}
     trained = load_file(os.path.join(str(cont_out), "model.safetensors"))
     assert not torch.equal(trained["classifier.weight"], head["classifier.weight"])   # the head trained on
     assert "bank_" not in raw

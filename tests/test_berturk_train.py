@@ -531,6 +531,8 @@ BINDING = [  # (edit of the printed final command, the refusal that names the ke
     ("batch", lambda v, d: set_flag(v, "--batch", 8), "batch is 8"),
     ("max_len", lambda v, d: set_flag(v, "--max-len", 16), "max_len is 16"),
     ("epochs", lambda v, d: set_flag(v, "--epochs", 3), "epochs is 3"),
+    ("warmup_ratio", lambda v, d: set_flag(v, "--warmup-ratio", "0.06"), "warmup_ratio is 0.06"),
+    ("weight_decay", lambda v, d: set_flag(v, "--weight-decay", "0.0"), "weight_decay is 0.0"),
     ("seed", lambda v, d: set_flag(v, "--seed", 5), "--seed 5 is not one of the record's final seeds"),
     ("data", lambda v, d: set_flag(v, "--data", d), "trains the final seeds on final_train; --data is selection_train"),
     ("stop_missing", lambda v, d: set_flag(v, "--stop-after-epoch"), "pass --stop-after-epoch 1"),
@@ -559,6 +561,28 @@ def test_final_command_prints_the_head_lr(inputs: Inputs, final_setup: dict[str,
     argv = final_argv(inputs, final_setup, tmp_path / "runs")
     assert argv.count("--head-lr") == 1 and argv[argv.index("--head-lr") + 1] == repr(head_lr) == "0.0001"
     assert argv[argv.index("--lr") + 1] == repr(rec["chosen"]["canonical"]["encoder_lr"])
+
+
+def test_postfit_context_resolves_the_records_recipe(inputs: Inputs, final_setup: dict[str, str], tmp_path: Path,
+                                                     capsys: pytest.CaptureFixture[str], no_load: None) -> None:
+    """The printed final command passes no --warmup-ratio or --weight-decay: berturk_train.py resolves them from the
+    --postfit record's chosen run, so it prints the same run id as the command with the record's values spelled
+    out. The record's values differ from the tuned defaults, so a plain-context resolution would be told apart."""
+    import berturk_train
+    from pilot import defaults
+    rec, _ = postfit.read_record(final_setup["record"])
+    chosen = rec["chosen"]["canonical"]
+    assert chosen["warmup_ratio"] != defaults.BERTURK["warmup_ratio"]
+    assert chosen["weight_decay"] != defaults.BERTURK["weight_decay"]
+    storage = tmp_path / "runs"
+    argv = final_argv(inputs, final_setup, storage)
+    assert "--warmup-ratio" not in argv and "--weight-decay" not in argv
+    ids = []
+    for extra in ([], ["--warmup-ratio", repr(chosen["warmup_ratio"]), "--weight-decay", repr(chosen["weight_decay"])]):
+        assert berturk_train.main(argv + extra + ["--print-run-id"]) is None
+        ids.append(capsys.readouterr().out.strip())
+    assert ids[0] == ids[1] and ids[0].startswith("berturk-final_train-s0-"), ids
+    assert not os.path.exists(str(storage))
 
 
 def test_postfit_binding_accepts_the_printed_command(inputs: Inputs, final_setup: dict[str, str], tmp_path: Path,
