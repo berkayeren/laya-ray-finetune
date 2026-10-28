@@ -479,7 +479,7 @@ def test_readme_laya_final_seed_example_is_the_printed_command() -> None:
         assert lines[0].count(flag) == 1, flag
 
 
-# D-03: the constants the committed records, protocol.json and make report hold, each group's JSON (sort_keys,
+# The constants the committed records, protocol.json and make report hold, each group's JSON (sort_keys,
 # default=repr) sha256 as at c311b6199c08, the commit before the tuned defaults; the phase moves none of them
 FROZEN_CONSTANTS_SHA256 = {
     "postfit": "025e1f5b3fe97e9dc47176602f2bd46d7df59a8eeb802e4d398ed28af83afc7d",
@@ -492,7 +492,7 @@ FROZEN_CONSTANTS_SHA256 = {
 
 
 def test_the_tuned_defaults_move_no_frozen_constant() -> None:
-    """Every recipe constant D-03 names keeps its pre-change value: the postfit protocol, the BERTurk recipe and its
+    """Every frozen recipe constant keeps its pre-change value: the postfit protocol, the BERTurk recipe and its
     superseded chain, the few-shot base runs and rules, the compute matrix, the probe's neg and BERTurk block, the
     spike's HPARAMS and rules and ray_train's weight decay."""
     import hashlib
