@@ -107,24 +107,24 @@ so timings are compared from flag-off runs. DIR is refused under results/, data/
 --out, before any load, fetch or run dir, also with --print-run-id; an unwritable DIR/RUN_ID is refused when the writer
 opens, after the load and before the run dir is created, so the same command can be rerun once the DIR is fixed.
 
-Recipe resolution: --epochs, --lr, --head-lr, --batch, --warmup-ratio and --weight-decay (RECIPE_FLAGS) default to
-None. Each omitted one is filled from the run's context (recipe_context, resolve_recipe), in main after the split, the
-postfit record and the base are read and before the identity, the run id, --print-run-id and every binding: a
---postfit record gives its chosen selection run's canonical config; --fewshot-base gives
-pilot.fewshot.chosen_canonical, the frozen selection run's config through the protocol-pinned postfit record (the
-value check_base compares with); --fewshot-draw/--fewshot-k give the masked base's canonical config (its
-berturk_train.json); a plain command gets the tuned defaults of new runs, pilot.defaults.BERTURK (the best
-configuration of the exploratory search, results/tune/berturk.json: the tuned encoder and head LRs, batch 16, warm-up
-0.06, weight decay 0.0, 20 epochs). A flag given on the command line always wins and is still bound: check_final,
-check_base and check_continued see the resolved command exactly as an explicit one, so a departure from the frozen
-recipe is refused, naming the key (a continued run that omits --epochs resolves its base's epochs and is refused
-naming the frozen continued epochs). The committed final-seed and few-shot commands (which pass --epochs, --lr and
---head-lr, the final seeds also --batch) keep their text, acceptance and run ids, and the committed selection run's
-reproduce command spells out batch, warm-up and weight decay. The range checks run on the given values before anything
-is read and on every resolved value after the resolution (--stop-after-epoch against the resolved --epochs);
-identity_values and fit refuse an unresolved flag (ValueError), so no direct caller hashes a null into a run id
-(tune.py passes all six). --warmup-ratio and --weight-decay reach the TrainingArguments (warmup_steps below 1 is read as
-a ratio of the training steps) and the optimizer's decaying groups; both were IDENTITY keys before the flags existed
+Recipe resolution: --epochs, --lr, --head-lr, --batch, --warmup-ratio and --weight-decay (RECIPE_FLAGS) default to None.
+Each omitted one is filled from the run's context (recipe_context, resolve_recipe, inside recipe_identity, the one
+resolution and identity step main calls and tests/test_defaults.py shares), in main after the split, the postfit record
+and the base are read and before the identity, the run id, --print-run-id and every binding: a --postfit record gives
+its chosen selection run's canonical config; --fewshot-base gives pilot.fewshot.chosen_canonical, the frozen selection
+run's config through the protocol-pinned postfit record (the value check_base compares with); --fewshot-draw/--fewshot-k
+give the masked base's canonical config (its berturk_train.json); a plain command gets the tuned defaults of new runs,
+pilot.defaults.BERTURK (the best configuration of the exploratory search, results/tune/berturk.json: the tuned encoder
+and head LRs, batch 16, warm-up 0.06, weight decay 0.0, 20 epochs). A flag given on the command line always wins and is
+still bound: check_final, check_base and check_continued see the resolved command exactly as an explicit one, so a
+departure from the frozen recipe is refused, naming the key (a continued run that omits --epochs resolves its base's
+epochs and is refused naming the frozen continued epochs). The committed final-seed and few-shot commands (which pass
+--epochs, --lr and --head-lr, the final seeds also --batch) keep their text, acceptance and run ids, and the committed
+selection run's reproduce command spells out batch, warm-up and weight decay. The range checks run on the given values
+before anything is read and on every resolved value after the resolution (--stop-after-epoch against the resolved
+--epochs); identity_values and fit refuse an unresolved flag (ValueError), so no direct caller hashes a null into a run
+id (tune.py passes all six). --warmup-ratio and --weight-decay reach the TrainingArguments (warmup_steps below 1 is read
+as a ratio of the training steps) and the optimizer's decaying groups; both were IDENTITY keys before the flags existed
 (warmup_ratio, weight_decay), so every committed run id is unchanged; tune.py's search varies them.
 
 main runs every refusal, then calls fit(...), the training itself (the TrainingArguments, the optimizer, the callbacks,
@@ -286,6 +286,22 @@ def require_resolved(a: argparse.Namespace) -> None:
     if missing:
         raise ValueError("unresolved recipe flag(s) %s: call resolve_recipe (recipe_context) first, as main does"
                          % ", ".join(missing))
+
+
+def recipe_identity(ap: argparse.ArgumentParser, a: argparse.Namespace, proto: Any, entry: dict[str, Any],
+                    digests: dict[str, str], mask: Sequence[str], pf_record: dict[str, Any] | None,
+                    record_sha: str | None, fs_binding: dict[str, Any] | None,
+                    base_info: dict[str, Any] | None) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """(canonical config, chosen): main's one resolution and identity step, shared with the offline committed-run-id
+    proof (tests/test_defaults.py), so the two cannot drift apart. In order: chosen = pilot.fewshot.chosen_canonical of
+    the frozen protocol for --fewshot-base (else None; check_base compares with it), the omitted recipe flags from
+    recipe_context (the --postfit record, chosen, the masked base's base_info or the tuned defaults) by resolve_recipe,
+    check_recipe on every resolved value, then pilot.berturk.canonical of identity_values. Mutates `a`; SystemExit or
+    ap.error as those helpers refuse."""
+    chosen = fewshot.chosen_canonical(proto, "berturk") if a.fewshot_base else None
+    resolve_recipe(a, *recipe_context(a, pf_record, chosen, base_info))
+    check_recipe(ap, a)                                     # every resolved value, the stop bound on --epochs
+    return berturk.canonical(identity_values(a, entry, digests, mask, record_sha, fs_binding)), chosen
 
 
 def check_recipe(ap: argparse.ArgumentParser, a: argparse.Namespace) -> None:
@@ -878,10 +894,7 @@ def main(argv: list[str] | None = None) -> str | None:
                                      block["draws"][a.fewshot_draw].get("digest"), base_info["run_id"])
         fs_proof["base"] = base_info
     # the omitted recipe flags from the run's context, before the identity and every binding (an explicit flag wins)
-    chosen = fewshot.chosen_canonical(proto, "berturk") if a.fewshot_base else None
-    resolve_recipe(a, *recipe_context(a, pf_record, chosen, base_info))
-    check_recipe(ap, a)                                     # every resolved value, the stop bound on --epochs
-    canon = berturk.canonical(identity_values(a, entry, digests, mask, record_sha, fs_binding))
+    canon, chosen = recipe_identity(ap, a, proto, entry, digests, mask, pf_record, record_sha, fs_binding, base_info)
     pf_block = None
     if pf_record is not None:                               # bound by refusal, never by transcription
         postfit.check_final(pf_record, canon)

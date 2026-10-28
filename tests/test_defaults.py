@@ -203,26 +203,26 @@ def _entry_of(data: str) -> dict[str, Any]:
 
 
 def _berturk_canon(argv: list[str]) -> tuple[Any, dict[str, Any], dict[str, Any]]:
-    """(parsed args, canonical config, context) of a committed berturk_train.py command on the pinned base, built
-    exactly as berturk_train.main builds it: the frozen protocol, mask and binding of a masked base, the --postfit
-    record and its sha256 of a final seed, then recipe_context and resolve_recipe before identity_values. context holds
-    proto, pin, chosen and record for the bindings."""
+    """(parsed args, canonical config, context) of a committed berturk_train.py command on the pinned base, through
+    berturk_train.recipe_identity, the one resolution and identity step main itself calls (so a reordering inside it,
+    e.g. the resolution after identity_values, moves both): its inputs are main's, the frozen protocol, mask and
+    binding of a masked base and the --postfit record and its sha256 of a final seed. context holds proto, pin, chosen
+    and record for the bindings."""
     import berturk_train
     from pilot import berturk, fewshot, pins, postfit, protocol
-    a = berturk_train.parser().parse_args(argv)
+    ap = berturk_train.parser()
+    a = ap.parse_args(argv)
     assert a.base == "berturk", argv
-    proto = pin = chosen = record = sha = fs_binding = None
+    proto = pin = record = sha = fs_binding = None
     mask: Any = ()
     if a.fewshot_base:
         proto, pin = protocol.require_frozen()
         mask = berturk.check_mask_tags(proto["fewshot"]["tags"])
         fs_binding = fewshot.binding(pin, "base")
-        chosen = fewshot.chosen_canonical(proto, "berturk")
     if a.postfit is not None:
         record, sha = postfit.read_record(os.path.join(REPO_ROOT, a.postfit))
-    berturk_train.resolve_recipe(a, *berturk_train.recipe_context(a, record, chosen, None))
-    canon = berturk.canonical(berturk_train.identity_values(a, _entry_of(a.data), dict(pins.BERTURK["sha256"]), mask,
-                                                            sha, fs_binding))
+    canon, chosen = berturk_train.recipe_identity(ap, a, proto, _entry_of(a.data), dict(pins.BERTURK["sha256"]), mask,
+                                                  record, sha, fs_binding, None)
     return a, canon, {"proto": proto, "pin": pin, "chosen": chosen, "record": record}
 
 
@@ -351,10 +351,10 @@ def test_committed_continued_runs_rebuild_their_run_ids_from_the_command() -> No
             digests = _base_digests(kind, base_side["system"]["checkpoint_identity"])
             fsb = fewshot.binding(pin, "continued", a.fewshot_draw, a.fewshot_k,
                                   proto["fewshot"]["draws"][a.fewshot_draw]["digest"], base["train_run_id"])
-            if kind == "berturk":
+            if kind == "berturk":                           # main's own step, the base as fewshot_base_of gives it
                 context = {"run_id": base["train_run_id"], "canonical": base_canon}
-                berturk_train.resolve_recipe(a, *berturk_train.recipe_context(a, None, None, context))
-                built = berturk.canonical(berturk_train.identity_values(a, _entry_of(a.data), digests, (), None, fsb))
+                built, _ = berturk_train.recipe_identity(p, a, proto, _entry_of(a.data), digests, (), None, None, fsb,
+                                                         context)
                 rid = berturk.run_id(built)
             else:
                 vals = ray_train.identity_values(a, ray_train.resolve(a), _entry_of(a.data), a.base, digests, None,

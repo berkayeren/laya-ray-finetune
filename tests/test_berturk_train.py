@@ -630,6 +630,33 @@ def test_postfit_record_without_a_chosen_recipe_is_a_clean_refusal(
     assert not os.path.exists(str(storage) + "-ckpt")
 
 
+def test_main_resolves_through_recipe_identity(inputs: Inputs, final_setup: dict[str, str], tmp_path: Path,
+                                               monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+                                               no_load: None) -> None:
+    """main resolves the recipe and builds the identity through recipe_identity, exactly once, and prints the run id
+    of the canonical config it returns: the offline committed-run-id proof (tests/test_defaults.py) calls the same
+    helper, so it cannot drift from main's order. Checked on a plain selection command and on a final seed."""
+    import berturk_train
+    calls = []
+    real = berturk_train.recipe_identity
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        """berturk_train.recipe_identity, recording its result."""
+        out = real(*args, **kwargs)
+        calls.append(out)
+        return out
+    monkeypatch.setattr(berturk_train, "recipe_identity", spy)
+    data, manifest, base = inputs
+    storage = tmp_path / "runs"
+    plain = ["--data", data, "--manifest", manifest, "--base", base, "--storage", str(storage)]
+    for argv in (plain, final_argv(inputs, final_setup, storage)):
+        calls.clear()
+        assert berturk_train.main(argv + ["--print-run-id"]) is None
+        assert len(calls) == 1, argv
+        assert capsys.readouterr().out.strip() == berturk.run_id(calls[0][0])
+    assert not os.path.exists(str(storage))
+
+
 def test_postfit_binding_accepts_the_printed_command(inputs: Inputs, final_setup: dict[str, str], tmp_path: Path,
                                                      capsys: pytest.CaptureFixture[str], no_load: None) -> None:
     import berturk_train
