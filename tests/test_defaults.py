@@ -477,3 +477,36 @@ def test_readme_laya_final_seed_example_is_the_printed_command() -> None:
     assert len(want) == 1 and lines[0] == ["python", *want[0]]
     for flag in LAYA_RECIPE_FLAGS:
         assert lines[0].count(flag) == 1, flag
+
+
+# D-03: the constants the committed records, protocol.json and make report hold, each group's JSON (sort_keys,
+# default=repr) sha256 as at c311b6199c08, the commit before the tuned defaults; the phase moves none of them
+FROZEN_CONSTANTS_SHA256 = {
+    "postfit": "025e1f5b3fe97e9dc47176602f2bd46d7df59a8eeb802e4d398ed28af83afc7d",
+    "berturk": "2e61c4ef5877f296fb1cc6f9aa7136d4d69a6ef537ddbe723290a515fd614393",
+    "fewshot": "b1a25fcbdb0979aceb36577de131eb599abc71940fe9042df200ba25f3982fc3",
+    "compute": "600037f740344e774688c22891a19b3c9abd7038554a55c9894e62dbd032d1c0",
+    "compute_checkpoint": "b89a9214d69168b9249c12de7cbd4de517798264f81da9cc42f2f8f7e6079e4f",
+    "spike": "9df389ce2e5994868aa0ea6b94bd6c384362cbb98741ade3d46fe3249bf7e6ae",
+}
+
+
+def test_the_tuned_defaults_move_no_frozen_constant() -> None:
+    """Every recipe constant D-03 names keeps its pre-change value: the postfit protocol, the BERTurk recipe and its
+    superseded chain, the few-shot base runs and rules, the compute matrix, the probe's neg and BERTurk block, the
+    spike's HPARAMS and rules and ray_train's weight decay."""
+    import hashlib
+    import compute_checkpoint as cc
+    import mps_spike
+    import ray_train
+    from pilot import berturk as b, compute as c, fewshot as f, postfit as p, spike as s
+    groups = {"postfit": [p.LR_GRID, p.HEAD_LR, p.EPOCHS, p.EPOCH_TRANSFER],
+              "berturk": [b.LR, b.HEAD_LR, b.EPOCHS, b.BATCH, b.WARMUP_RATIO, b.WEIGHT_DECAY, b.LR_GRID, b.PROTOCOL,
+                          b.SUPERSEDED],
+              "fewshot": [f.BASE_RUNS, f.RULES],
+              "compute": [c.MATRIX, c.MATRIX_SOURCES],
+              "compute_checkpoint": [cc.NEG, cc.BERTURK],
+              "spike": [mps_spike.HPARAMS, s.RULES, ray_train.WEIGHT_DECAY]}
+    got = {k: hashlib.sha256(json.dumps(v, sort_keys=True, default=repr).encode("utf-8")).hexdigest()
+           for k, v in groups.items()}
+    assert got == FROZEN_CONSTANTS_SHA256
