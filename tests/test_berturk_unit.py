@@ -512,8 +512,8 @@ def test_an_explicit_recipe_flag_wins_over_the_context() -> None:
 
 def test_recipe_context_follows_the_command() -> None:
     """recipe_context picks the --postfit record's chosen canonical, then (--fewshot-base) the frozen selection run's,
-    then a masked base's canonical, else the tuned defaults; a context without a key refuses naming the key and the
-    flag."""
+    then a masked base's canonical, else the tuned defaults; a context without a key, or holding it as None, refuses
+    naming the key and the flag; a --postfit record without a chosen canonical dict is a one-line refusal."""
     def parsed(*extra: str) -> Any:
         return berturk_train.parser().parse_args(["--data", "d", *extra])
 
@@ -536,6 +536,13 @@ def test_recipe_context_follows_the_command() -> None:
         with pytest.raises(SystemExit, match="the test context has no %s to resolve %s from; pass %s"
                                              % (key, flag, flag)):
             berturk_train.resolve_recipe(parsed(), lacking, "the test context")
+        with pytest.raises(SystemExit, match="the test context has no %s to resolve %s from; pass %s"
+                                             % (key, flag, flag)):
+            berturk_train.resolve_recipe(parsed(), dict(FAKE_CHOSEN, **{key: None}), "the test context")
+    for chosen_block in ({}, {"canonical": None}, {"canonical": [1]}):
+        with pytest.raises(SystemExit, match="^the postfit record's chosen run has no canonical config; rebuild it "
+                                             "with this postfit.py$"):
+            berturk_train.recipe_context(parsed(), {"chosen": chosen_block}, None, None)
 
 
 def test_identity_values_refuses_an_unresolved_recipe() -> None:

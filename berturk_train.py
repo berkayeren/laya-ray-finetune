@@ -245,9 +245,14 @@ def recipe_context(a: argparse.Namespace, pf_record: dict[str, Any] | None, chos
     refusal. In order: a --postfit record (pf_record) gives its chosen selection run's canonical config; --fewshot-base
     gives `chosen` (pilot.fewshot.chosen_canonical of the frozen protocol, the value check_base receives); a continued
     run gives its masked base's canonical config (base_info, fewshot_base_of); a plain command gets the tuned defaults
-    of new runs, pilot.defaults.BERTURK. A context-bound command never falls back to the tuned defaults."""
+    of new runs, pilot.defaults.BERTURK. A context-bound command never falls back to the tuned defaults. SystemExit,
+    before any load, for a --postfit record whose chosen run has no canonical config (missing or not a dict: the
+    refusal pilot.postfit.check_final gives, which this resolution now precedes)."""
     if pf_record is not None:
-        return pf_record["chosen"]["canonical"], "the --postfit record's chosen run"
+        canon = (pf_record.get("chosen") or {}).get("canonical")
+        if not isinstance(canon, dict):
+            raise SystemExit("the postfit record's chosen run has no canonical config; rebuild it with this postfit.py")
+        return canon, "the --postfit record's chosen run"
     if a.fewshot_base:
         if chosen is None:
             raise ValueError("--fewshot-base resolves from the frozen selection run: pass chosen")
@@ -260,10 +265,11 @@ def recipe_context(a: argparse.Namespace, pf_record: dict[str, Any] | None, chos
 def resolve_recipe(a: argparse.Namespace, context: dict[str, Any], what: str) -> None:
     """Fill every RECIPE_FLAGS attribute of `a` that is None from context[key] (lr from encoder_lr); a flag given on
     the command line is never replaced, so the bindings (check_final, check_base, check_continued) still see it.
-    SystemExit naming the key and the flag when the context lacks the key. Mutates `a`; returns None."""
+    SystemExit naming the key and the flag when the context lacks the key or holds it as None (JSON null), so a null
+    never reaches identity_values. Mutates `a`; returns None."""
     for dest, key in RECIPE_FLAGS:
         if getattr(a, dest) is None:
-            if key not in context:
+            if context.get(key) is None:
                 raise SystemExit("%s has no %s to resolve %s from; pass %s" % (what, key, _flag(dest), _flag(dest)))
             setattr(a, dest, context[key])
 

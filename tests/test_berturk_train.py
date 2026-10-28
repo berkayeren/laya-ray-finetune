@@ -585,6 +585,47 @@ def test_postfit_context_resolves_the_records_recipe(inputs: Inputs, final_setup
     assert not os.path.exists(str(storage))
 
 
+BROKEN_CHOSEN = [  # (edit of the record's chosen block, the one-line refusal it gets)
+    ("canonical_missing", lambda c: {k: v for k, v in c.items() if k != "canonical"},
+     "the postfit record's chosen run has no canonical config; rebuild it with this postfit.py"),
+    ("canonical_null", lambda c: dict(c, canonical=None),
+     "the postfit record's chosen run has no canonical config; rebuild it with this postfit.py"),
+    ("warmup_ratio_null", lambda c: dict(c, canonical=dict(c["canonical"], warmup_ratio=None)),
+     "the --postfit record's chosen run has no warmup_ratio to resolve --warmup-ratio from; pass --warmup-ratio"),
+    ("weight_decay_missing",
+     lambda c: dict(c, canonical={k: v for k, v in c["canonical"].items() if k != "weight_decay"}),
+     "the --postfit record's chosen run has no weight_decay to resolve --weight-decay from; pass --weight-decay"),
+]
+
+
+@pytest.mark.parametrize("name,edit,match", BROKEN_CHOSEN, ids=[b[0] for b in BROKEN_CHOSEN])
+def test_postfit_record_without_a_chosen_recipe_is_a_clean_refusal(
+        inputs: Inputs, final_setup: dict[str, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_load: None,
+        name: str, edit: Callable[[dict[str, Any]], dict[str, Any]], match: str) -> None:
+    """The recipe resolution reads the --postfit record's chosen canonical config before pilot.postfit.check_final,
+    so a record whose chosen run has no canonical config (missing or null), or whose context value the printed command
+    omits is missing or null, gets a one-line SystemExit naming what is wrong and the fix (never a KeyError or
+    TypeError traceback, never a ValueError from require_resolved), before any fetch, load or run dir, also with
+    --print-run-id. The record's reference check is rebuilt for the edited record, so the refusal is the recipe's."""
+    import pilot.weights
+
+    def no_fetch(*args: Any, **kwargs: Any) -> None:
+        """Fail the test: the pinned fetch was reached."""
+        raise AssertionError("the pinned base was fetched before the recipe refusal")
+    monkeypatch.setattr(pilot.weights, "fetch", no_fetch)
+    rec = _json(final_setup["record"])
+    path = write_json(tmp_path / "postfit" / "broken.json", dict(rec, chosen=edit(rec["chosen"])))
+    broken, sha = postfit.read_record(path)
+    ref = write_json(tmp_path / "postfit" / "broken-reference.json",
+                     berturk.reference_check(broken, path, sha, "tiny offline model"))
+    storage = tmp_path / "runs"
+    argv = set_flag(set_flag(set_flag(final_argv(inputs, final_setup, storage), "--postfit", path), "--reference",
+                             ref), "--base", "berturk")     # the pinned base: its fetch fails the test
+    for extra in ([], ["--print-run-id"]):
+        refused(argv + extra, storage, "^%s$" % re.escape(match))
+    assert not os.path.exists(str(storage) + "-ckpt")
+
+
 def test_postfit_binding_accepts_the_printed_command(inputs: Inputs, final_setup: dict[str, str], tmp_path: Path,
                                                      capsys: pytest.CaptureFixture[str], no_load: None) -> None:
     import berturk_train
