@@ -7,12 +7,12 @@ memory, swap growth while idle), verifies the training split, reads the start co
 `ray_train.py --device mps --workers 1` with the spike's micro-batch, max_len and grad-accum, --neg 8, the spike's
 encoder and head LRs (mps_spike.HPARAMS, passed explicitly, never ray_train.py's defaults) and the spike's MPS env
 (strict fallback 0, HIGH and LOW watermarks 1.0). A fresh process, because torch reads PYTORCH_ENABLE_MPS_FALLBACK once
-at import and the MPS allocator keeps a process-wide high-water mark. The child's checkpoint carries the per-epoch run record (pilot.runs.read_record); pilot.compute turns it into the projection of
-the whole experiment matrix (s_per_step = the largest train_s / optimizer_steps over the measured epochs; item counts
-of all five verified splits; the fixed per-run overhead = the measuring child's wall clock minus its record's terms,
-compute.run_overhead), a what-if table, a disk budget and the assumptions to confirm, and writes
-compute_checkpoint.json and compute_checkpoint.md. The probe's checkpoint and Ray storage are deleted afterwards
-unless --keep-run.
+at import and the MPS allocator keeps a process-wide high-water mark. The child's checkpoint carries the per-epoch run
+record (pilot.runs.read_record); pilot.compute turns it into the projection of the whole experiment matrix (s_per_step =
+the largest train_s / optimizer_steps over the measured epochs; item counts of all five verified splits; the fixed
+per-run overhead = the measuring child's wall clock minus its record's terms, compute.run_overhead), a what-if table, a
+disk budget and the assumptions to confirm, and writes compute_checkpoint.json and compute_checkpoint.md. The probe's
+checkpoint and Ray storage are deleted afterwards unless --keep-run.
 
 Probe protocol: a 2-epoch probe that is interrupted and resumed (ray_train.py's per-epoch resume, shown on the real
 hardware). The orchestrator learns the run_id from `ray_train.py ... --print-run-id`, starts the child in its own

@@ -46,12 +46,13 @@ rerun without them, it names another run id and starts a fresh run under the tun
 leaving the old run's storage in place (never mislabelled: check_state keys on the run id).
 
 Items (data_neg16 by default, data_neg8 in every committed run): the split files label all 48 tags. Every message the
---max-messages subsample selects (all of them without it) trains: there is no calibration holdout (the temperature
-comes only from val). Every message keeps all its positives plus --neg K random negatives (pilot.spike.neg8_rows, one
-random.Random(--neg-seed) draw per run, --neg-seed defaulting to --seed); --neg 0 trains on all 48 labels (data_full). The record carries the
-items laya built and the torch-free count pilot.runs.neg_items gives, so the compute projection can count any split
-without a tokenizer. Every export and the final checkpoint carry temperature UNCALIBRATED_TEMPERATURE and an empty
-temperature_by_options, reset explicitly, never inherited from the base (a base with a fitted T must not leak it).
+--max-messages subsample selects (all of them without it) trains: there is no calibration holdout (the temperature comes
+only from val). Every message keeps all its positives plus --neg K random negatives (pilot.spike.neg8_rows, one
+random.Random(--neg-seed) draw per run, --neg-seed defaulting to --seed); --neg 0 trains on all 48 labels (data_full).
+The record carries the items laya built and the torch-free count pilot.runs.neg_items gives, so the compute projection
+can count any split without a tokenizer. Every export and the final checkpoint carry temperature
+UNCALIBRATED_TEMPERATURE and an empty temperature_by_options, reset explicitly, never inherited from the base (a base
+with a fitted T must not leak it).
 
 Fallback ladder: every run starts from the MPS feasibility spike's measured config (pilot.runs.SPIKE_START: micro-batch
 8, max_len 128, grad-accum 4, full encoder). The fallbacks are flags, never an in-process retry (the MPS allocator keeps
