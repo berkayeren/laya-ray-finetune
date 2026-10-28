@@ -146,8 +146,10 @@ python ray_train.py ... --print-run-id     # the run id: its Ray dir ray_results
 # Laya final seeds: print the commands from the val-selected record, then run each one (one at a time on MPS);
 # each is ray_train.py on final_train with --stop-after-epoch at the chosen epoch and --postfit, which serves the val T
 python postfit.py --print-final-commands results/postfit/laya.json --storage ray_results --out-prefix ckpt-final
-python ray_train.py --data data/splits/final_train.jsonl ... --epochs 4 --stop-after-epoch 3 --seed 0 \
-    --postfit results/postfit/laya.json --no-export-epochs --storage ray_results --out ckpt-final-s0
+python ray_train.py --data data/splits/final_train.jsonl --base multilingual --device mps --workers 1 --epochs 4 \
+    --micro-batch 8 --grad-accum 4 --encoder-lr 2e-05 --head-lr 0.0001 --loss rlcd --neg 8 --max-len 128 \
+    --stop-after-epoch 3 --seed 0 --postfit results/postfit/laya.json --no-export-epochs --storage ray_results \
+    --out ckpt-final-s0                          # seed 0 as printed: its recipe flags are bound by check_final
 
 # BERTurk baseline: the 30-epoch selection run, val scoring of each export, postfit and the published reference check
 python berturk_train.py --data data/splits/selection_train.jsonl --device mps --epochs 30 --lr 2e-05 --head-lr 0.0001 \

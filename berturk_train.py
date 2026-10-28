@@ -150,7 +150,8 @@ usage:
   python berturk_train.py --data data/splits/selection_train.jsonl --base berturk --device mps --epochs 30 \
       --lr 2e-05 --head-lr 0.0001 --batch 32 --warmup-ratio 0.1 --weight-decay 0.01 --seed 0 \
       --storage berturk_runs                        # the committed selection run (the frozen recipe, 30 epochs)
-  python berturk_train.py --data data/splits/selection_train.jsonl --print-run-id      # its run id, nothing created
+  python berturk_train.py --data data/splits/selection_train.jsonl --print-run-id      # a plain run's id (the tuned
+                                                    # recipe on cpu, not the committed run's), nothing created
   python berturk_train.py --data data/splits/selection_train.jsonl --device mps --tensorboard tensorboard
                                                     # the same run, live scalars in tensorboard/RUN_ID/
   python berturk_train.py --data ... --base DIR --device cpu --epochs 2 --batch 4 --max-len 32 --storage DIR  # smoke

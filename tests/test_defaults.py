@@ -463,3 +463,17 @@ def test_docs_name_the_old_flags_a_pre_change_plain_run_resumes_with() -> None:
                                                  "head_lr": mps_spike.HPARAMS["head_lr"],
                                                  "neg": compute_checkpoint.NEG, "epochs": 4}
     assert runs.run_id(old) != runs.run_id(_laya_canon(*base))
+
+
+def test_readme_laya_final_seed_example_is_the_printed_command() -> None:
+    """The README Run block's Laya final-seed example is spelled out, not elided: joined, it is exactly seed 0's command
+    as pilot.reproduce prints it (postfit.final_command), so typed as shown it passes check_final instead of being
+    refused for a recipe flag left to the tuned defaults; every recipe flag appears once."""
+    from pilot import reproduce as rp
+    run = _part(_text(README), "\n## Run\n", "\n## Scoring path\n").replace("\\\n", " ")
+    lines = [l.split("#")[0].split() for l in run.splitlines() if "ray_train.py --data data/splits/final_train" in l]
+    assert len(lines) == 1, lines
+    want = [c for c in rp.commands("laya-final") if c[0] == "ray_train.py" and "ckpt-final-s0" in c]
+    assert len(want) == 1 and lines[0] == ["python", *want[0]]
+    for flag in LAYA_RECIPE_FLAGS:
+        assert lines[0].count(flag) == 1, flag
